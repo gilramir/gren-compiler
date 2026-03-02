@@ -12,6 +12,7 @@ import Task exposing (Task)
 import Bytes exposing (Bytes)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
+import Formatter.PrettyPrinter as PPrint
 import Compiler.Outline as Outline exposing (Outline)
 import Terminal.Report as Report exposing (Report)
 import Cli.PrettyPrinter as PP
@@ -33,6 +34,7 @@ type Error
     = FailedToFindSources FileSystem.Error
     | NothingToFormat
     | ParseFailure { path : Path, error : String }
+    | PrettyPrintFailure { path : Path, error : String }
 
 
 run : Config -> Task Error String
@@ -48,17 +50,29 @@ run { fsPermission, pathToString, projectPath, outline } =
                                 let
                                     relPath =
                                         pathRelativeFrom projectPath path
+                                    parser = Parser.succeed (\ast payload -> { ast = ast , payload = payload })
+                                        |> Parser.keep PM.parser
+                                        |> Parser.keep Parser.getPayload
                                 in
-                                when Parser.run PM.parser Context.empty source is
-                                    Ok _ -> 
-                                        Task.succeed <|
-                                            Array.pushLast (pathToString relPath) previousFiles
+                                when Parser.run parser Context.empty source is
+                                    Ok { ast = ast, payload = payload } ->
+                                        when PPrint.prettyPrint ast payload is
+                                            Ok rendered ->
+                                                Task.succeed <|
+                                                    Array.pushLast (pathToString path) previousFiles
+
+                                            Err errorString ->
+                                                Task.fail <|
+                                                    PrettyPrintFailure
+                                                        { path = relPath
+                                                        , error = errorString
+                                                        }
 
                                     Err errs ->
                                         Task.fail <|
                                             ParseFailure
                                                 { path = relPath
-                                                , error = PM.errorsToString source errs 
+                                                , error = PM.errorsToString source errs
                                                 }
                             )
                             previous
@@ -133,3 +147,9 @@ prettifyError error =
                 (Just path)
                 ( PP.verticalBlock (Array.map PP.text (String.split "\n" message))
                 )
+
+        PrettyPrintFailure { path, error = message } ->
+            Report.create
+                ("Could not format this file. Please report this bug in 'gren format'")
+                (Just path)
+                (PP.words message)
