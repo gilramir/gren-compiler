@@ -47,33 +47,37 @@ run { fsPermission, pathToString, projectPath, outline } =
                     parseFn { path, source } previous =
                         Task.andThen
                             (\previousFiles ->
-                                let
-                                    relPath =
-                                        pathRelativeFrom projectPath path
-                                    parser = Parser.succeed (\ast payload -> { ast = ast , payload = payload })
-                                        |> Parser.keep PM.parser
-                                        |> Parser.keep Parser.getPayload
-                                in
-                                when Parser.run parser Context.empty source is
-                                    Ok { ast = ast, payload = payload } ->
-                                        when PPrint.prettyPrint ast payload is
-                                            Ok rendered ->
-                                                Task.succeed <|
-                                                    Array.pushLast (pathToString path) previousFiles
+                                if path.extension /= "gren" then
+                                    -- Probably kernel code
+                                    Task.succeed previousFiles
+                                else
+                                    let
+                                        relPath =
+                                            pathRelativeFrom projectPath path
+                                        parser = Parser.succeed (\ast payload -> { ast = ast , payload = payload })
+                                            |> Parser.keep PM.parser
+                                            |> Parser.keep Parser.getPayload
+                                    in
+                                    when Parser.run parser Context.empty source is
+                                        Ok { ast = ast, payload = payload } ->
+                                            when PPrint.prettyPrint ast payload is
+                                                Ok rendered ->
+                                                    Task.succeed <|
+                                                        Array.pushLast (pathToString path) previousFiles
 
-                                            Err errorString ->
-                                                Task.fail <|
-                                                    PrettyPrintFailure
-                                                        { path = relPath
-                                                        , error = errorString
-                                                        }
+                                                Err errorString ->
+                                                    Task.fail <|
+                                                        PrettyPrintFailure
+                                                            { path = relPath
+                                                            , error = errorString
+                                                            }
 
-                                    Err errs ->
-                                        Task.fail <|
-                                            ParseFailure
-                                                { path = relPath
-                                                , error = PM.errorsToString source errs
-                                                }
+                                        Err errs ->
+                                            Task.fail <|
+                                                ParseFailure
+                                                    { path = relPath
+                                                    , error = PM.errorsToString source errs
+                                                    }
                             )
                             previous
                 in
@@ -86,6 +90,7 @@ run { fsPermission, pathToString, projectPath, outline } =
             )
 
 
+-- TODO: add to gren-lang/node?
 pathRelativeFrom : Path -> Path -> Path
 pathRelativeFrom base absolute =
     let

@@ -22,7 +22,7 @@ module AST.Optimized
 where
 
 import AST.Canonical qualified as Can
-import Control.Monad (liftM, liftM2, liftM3, liftM4)
+import Control.Monad (liftM, liftM2, liftM3, liftM4, liftM5)
 import Data.Binary (Binary, get, getWord8, put, putWord8)
 import Data.Index qualified as Index
 import Data.Map qualified as Map
@@ -127,6 +127,7 @@ data Main
   | StaticVDom
   | Dynamic
       { _message :: Can.Type,
+        _isBytes :: Bool,
         _decoder :: Expr
       }
 
@@ -140,9 +141,9 @@ data Node
   | Cycle [Name] [(Name, Expr)] [Def] (Set.Set Global)
   | Manager EffectsType
   | Kernel [K.Chunk] (Set.Set Global)
-  | PortIncoming Expr (Set.Set Global)
-  | PortOutgoing Expr (Set.Set Global)
-  | PortTask (Maybe Expr) Expr (Set.Set Global)
+  | PortIncoming Bool Expr (Set.Set Global)
+  | PortOutgoing Bool Expr (Set.Set Global)
+  | PortTask Bool (Maybe Expr) Bool Expr (Set.Set Global)
 
 data EffectsType = Cmd | Sub | Fx
 
@@ -349,7 +350,7 @@ instance Binary Main where
     case main of
       StaticString -> putWord8 0
       StaticVDom -> putWord8 1
-      Dynamic a b -> putWord8 2 >> put a >> put b
+      Dynamic a b c -> putWord8 2 >> put a >> put b >> put c
 
   get =
     do
@@ -357,7 +358,7 @@ instance Binary Main where
       case word of
         0 -> return StaticString
         1 -> return StaticVDom
-        2 -> liftM2 Dynamic get get
+        2 -> liftM3 Dynamic get get get
         _ -> fail "problem getting Opt.Main binary"
 
 instance Binary Node where
@@ -372,9 +373,9 @@ instance Binary Node where
       Cycle a b c d -> putWord8 6 >> put a >> put b >> put c >> put d
       Manager a -> putWord8 7 >> put a
       Kernel a b -> putWord8 8 >> put a >> put b
-      PortIncoming a b -> putWord8 9 >> put a >> put b
-      PortOutgoing a b -> putWord8 10 >> put a >> put b
-      PortTask a b c -> putWord8 11 >> put a >> put b >> put c
+      PortIncoming a b c -> putWord8 9 >> put a >> put b >> put c
+      PortOutgoing a b c -> putWord8 10 >> put a >> put b >> put c
+      PortTask a b c d e -> putWord8 11 >> put a >> put b >> put c >> put d >> put e
 
   get =
     do
@@ -389,9 +390,9 @@ instance Binary Node where
         6 -> liftM4 Cycle get get get get
         7 -> liftM Manager get
         8 -> liftM2 Kernel get get
-        9 -> liftM2 PortIncoming get get
-        10 -> liftM2 PortOutgoing get get
-        11 -> liftM3 PortTask get get get
+        9 -> liftM3 PortIncoming get get get
+        10 -> liftM3 PortOutgoing get get get
+        11 -> liftM5 PortTask get get get get get
         _ -> fail "problem getting Opt.Node binary"
 
 instance Binary EffectsType where
