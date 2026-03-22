@@ -155,6 +155,6 @@ prettifyError error =
 
         PrettyPrintFailure { path, error = message } ->
             Report.create
-                ("Could not format this file. Please report this bug in 'gren format'")
+                ("Could not format this file. Please report this 'gren format' bug.")
                 (Just path)
                 (PP.words message)
