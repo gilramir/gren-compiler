@@ -52,6 +52,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
 
     steps:
+      - uses: laverdet/alpine-arm64@v1
+        if: runner.arch == 'ARM64'
+
       - name: Install deps
         run: apk add alpine-sdk autoconf gcc gmp gmp-dev libffi libffi-dev llvm15 make musl-dev ncurses-dev ncurses-static tree wget zlib-dev zlib-static curl
 
