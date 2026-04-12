@@ -41,5 +41,8 @@
     "gren-lang": "0.6.3",
     "prettier": "^3.4.2",
     "terser": "^5.38.1"
+  },
+  "engines": {
+    "node": ">= 22"
   }
 }

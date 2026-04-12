@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.14.0/.schema/devbox.schema.json",
   "packages": [
-    "nodejs@20",
+    "nodejs@22",
     "ormolu@0.8",
     "ghc@9.10",
     "cabal-install@3.12"
