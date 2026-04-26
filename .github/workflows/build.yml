@@ -5,6 +5,8 @@ on:
     branches: [main]
   push:
     branches: [main]
+  release:
+    types: [published]
 
 env:
   ghc: "9.10.3"
@@ -37,24 +39,37 @@ jobs:
         run: devbox run -- npm run build
 
   linux:
-    runs-on: ubuntu-latest
     container: alpine:3.18
     needs: validate-code-formatting
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            artifact: gren_linux
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            artifact: gren_linux_aarch64
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
+      - uses: laverdet/alpine-arm64@v1
+        if: runner.arch == 'ARM64'
+
       - name: Install deps
         run: apk add alpine-sdk autoconf gcc gmp gmp-dev libffi libffi-dev llvm15 make musl-dev ncurses-dev ncurses-static tree wget zlib-dev zlib-static curl
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install GHCup
-        run: curl https://downloads.haskell.org/~ghcup/0.1.50.2/x86_64-linux-ghcup-0.1.50.2 -o /usr/local/bin/ghcup && chmod a+x /usr/local/bin/ghcup
+        run: curl https://downloads.haskell.org/~ghcup/0.1.50.2/${{ matrix.arch }}-linux-ghcup-0.1.50.2 -o /usr/local/bin/ghcup && chmod a+x /usr/local/bin/ghcup
 
       - name: Cache ghcup
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.ghcup
-          key: ghcup-linux-${{ env.ghc }}
+          key: ghcup-linux-${{ matrix.arch }}-${{ env.ghc }}
 
       - name: Install Haskell
         run: ghcup install ghc ${{ env.ghc }} --set && ghcup install cabal ${{ env.cabal }} --set
@@ -74,17 +89,17 @@ jobs:
           sed -i '$ d' cabal.project.freeze
 
       - name: Cache cabal store
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.local/state/cabal/store
-          key: deps-linux-${{ env.ghc }}-${{ hashFiles('cabal.project.freeze') }}
+          key: deps-linux-${{ matrix.arch }}-${{ env.ghc }}-${{ hashFiles('cabal.project.freeze') }}
 
       - name: Cache build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: dist-newstyle
-          key: dist-linux-${{ env.ghc }}-${{ github.sha }}
-          restore-keys: dist-linux-${{ env.ghc }}-
+          key: dist-linux-${{ matrix.arch }}-${{ env.ghc }}-${{ github.sha }}
+          restore-keys: dist-linux-${{ matrix.arch }}-${{ env.ghc }}-
 
       - name: Build
         run: cabal build
@@ -98,9 +113,9 @@ jobs:
       - name: Strip
         run: strip gren
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: gren_linux
+          name: ${{ matrix.artifact }}
           path: gren
           retention-days: 14
 
@@ -108,7 +123,11 @@ jobs:
     needs: validate-code-formatting
     strategy:
       matrix:
-        os: [macos-15, macos-15-intel]
+        include:
+          - os: macos-15
+            artifact: gren_mac_aarch64
+          - os: macos-15-intel
+            artifact: gren_mac
 
     runs-on: ${{ matrix.os }}
 
@@ -162,7 +181,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: gren-${{ matrix.os }}
+          name: ${{ matrix.artifact }}
           path: gren
           retention-days: 14
 
@@ -221,3 +240,35 @@ jobs:
           name: gren.exe
           path: gren
           retention-days: 14
+
+  publish-release:
+    needs: [linux, mac, windows]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage release assets
+        run: |
+          set -eux
+          mkdir release-assets
+          for name in gren_linux gren_linux_aarch64 gren_mac gren_mac_aarch64 gren.exe; do
+            cp "artifacts/$name/gren" "release-assets/$name"
+          done
+
+      - name: Upload assets to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          cd release-assets
+          gh release upload "$TAG" \
+            gren_linux gren_linux_aarch64 gren_mac gren_mac_aarch64 gren.exe \
+            --clobber
