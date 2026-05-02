@@ -17,6 +17,7 @@ import Terminal.Help
 import Terminal.Repl
 import Terminal.Report exposing (Report)
 import Terminal.Format
+import Terminal.Parse
 import Compiler.Backend
 import Compiler.PackageName as PackageName exposing (PackageName)
 import Compiler.Paths
@@ -847,13 +848,39 @@ parseUserArgs model compilerPath =
                                 Terminal.Format.run
                                     { stdout = model.stdout
                                     , fsPermission = model.fsPermission
-                                    , pathToString = model.pathToString                        
+                                    , pathToString = model.pathToString
                                     , projectPath = projectPath
                                     , outline = outline
                                     }
                                     |> Task.mapError Terminal.Format.prettifyError
                             )
                         |> Task.andThen (Stream.Log.line model.stdout)
+                        |> Task.map (\_ -> Cmd.none)
+                        |> Task.onError (endWithErrorReport (Terminal.Report.Terminal printOpts))
+                        |> Task.perform RunCmd
+
+                CliParser.Parse flags ->
+                    Node.getPlatform
+                        |> Task.andThen
+                            (\platform ->
+                                let
+                                    stringToPath str =
+                                        when platform is
+                                            Node.Win32 ->
+                                                Path.fromWin32String str
+
+                                            _ ->
+                                                Path.fromPosixString str
+                                in
+                                Terminal.Parse.run
+                                    { stdout = model.stdout
+                                    , fsPermission = model.fsPermission
+                                    , filename = flags.filename
+                                    , path = stringToPath flags.filename
+                                    , output = Maybe.map stringToPath flags.output
+                                    }
+                                    |> Task.mapError Terminal.Parse.prettifyError
+                            )
                         |> Task.map (\_ -> Cmd.none)
                         |> Task.onError (endWithErrorReport (Terminal.Report.Terminal printOpts))
                         |> Task.perform RunCmd

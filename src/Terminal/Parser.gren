@@ -1,6 +1,7 @@
 module Terminal.Parser exposing
     ( Command (..)
     , MakeFlags
+    , ParseFlags
     , DiffArgs (..)
     , parser
     )
@@ -32,6 +33,7 @@ type Command
     | Paths Paths.Options
     | Run RunOptions
     | Format
+    | Parse ParseFlags
 
 
 type alias InitFlags =
@@ -63,6 +65,12 @@ type alias DocsFlags =
 type alias RunOptions =
     { moduleName : ModuleName
     , package : Maybe PackageName
+    }
+
+
+type alias ParseFlags =
+    { filename : String
+    , output : Maybe String
     }
 
 
@@ -331,6 +339,40 @@ parser =
                         ]
                 , builder =
                     \_args flags -> Docs flags
+                }
+            |> Cli.Parser.withCommand
+                { word = "parse"
+                , arguments =
+                    Cli.Parser.oneArg parseFilenameParser
+                , flags =
+                    Cli.Parser.initFlags
+                        (\output -> { output = output })
+                        |> Cli.Parser.flag "output" parseOutputParser "Write the JSON output to a file instead of stdout"
+                , commonDescription =
+                    Nothing
+                , summary =
+                    "The `parse` command parses a Gren source file and outputs its AST as JSON:"
+                , example =
+                    PP.verticalBlock
+                        [ PP.words "For example:"
+                        , PP.empty
+                        , PP.words "gren parse src/Main.gren"
+                            |> PP.indent
+                            |> PP.color PP.Green
+                        , PP.empty
+                        , PP.words
+                            """
+                            This parses src/Main.gren and writes a JSON object containing
+                            the filename, the AST (\"ast\" field), and all comments (\"context\" field)
+                            to stdout. Use --output=file.json to write to a file instead.
+                            """
+                        ]
+                , builder =
+                    \filename flags ->
+                        Parse
+                            { filename = filename
+                            , output = flags.output
+                            }
                 }
             |> Cli.Parser.withPrefix "package" packageCommands
     }
@@ -668,5 +710,27 @@ moduleNameParser =
     , examples =
         [ "Main"
         , "My.Module"
+        ]
+    }
+
+
+parseFilenameParser : Cli.Parser.ValueParser String
+parseFilenameParser =
+    { singular = "filename"
+    , plural = "filenames"
+    , fn = Just
+    , examples =
+        [ "src/Main.gren"
+        ]
+    }
+
+
+parseOutputParser : Cli.Parser.ValueParser String
+parseOutputParser =
+    { singular = "output-file"
+    , plural = "output-files"
+    , fn = Just
+    , examples =
+        [ "ast.json"
         ]
     }

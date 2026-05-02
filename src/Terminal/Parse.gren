@@ -1,0 +1,738 @@
+module Terminal.Parse exposing
+    ( Config
+    , Error(..)
+    , run
+    , prettifyError
+    )
+
+
+import Stream
+import Stream.Log
+import Task exposing (Task)
+import Bytes exposing (Bytes)
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Json.Encode as Json
+import Array.Builder
+import String.Parser.Advanced as Parser
+import Compiler.Ast.Source as AST
+import Compiler.Parse.Module as PM
+import Compiler.Parse.Context as Context
+import Compiler.Parse.Number as Number
+import Compiler.SourcePosition as SourcePosition
+import Terminal.Report as Report exposing (Report)
+import Cli.PrettyPrinter as PP
+
+
+type alias Config =
+    { stdout : Stream.Writable Bytes
+    , fsPermission : FileSystem.Permission
+    , filename : String
+    , path : Path
+    , output : Maybe Path
+    }
+
+
+type Error
+    = CannotReadFile FileSystem.Error
+    | CannotDecodeFileContents
+    | ParseFailure String
+    | CannotWriteOutput FileSystem.Error
+
+
+run : Config -> Task Error {}
+run config =
+    FileSystem.readFile config.fsPermission config.path
+        |> Task.mapError CannotReadFile
+        |> Task.andThen
+            (\bytes ->
+                when Bytes.toString bytes is
+                    Nothing ->
+                        Task.fail CannotDecodeFileContents
+
+                    Just source ->
+                        when Parser.run parseModuleWithContext Context.empty source is
+                            Err errs ->
+                                Task.fail (ParseFailure (PM.errorsToString source errs))
+
+                            Ok { module_, context } ->
+                                let
+                                    json =
+                                        Json.object
+                                            [ { key = "filename", value = Json.string config.filename }
+                                            , { key = "ast", value = encodeModule module_ }
+                                            , { key = "context", value = encodeContext context }
+                                            ]
+                                            |> Json.encode 2
+                                in
+                                when config.output is
+                                    Nothing ->
+                                        Stream.Log.line config.stdout json
+
+                                    Just outputPath ->
+                                        FileSystem.writeFile config.fsPermission (Bytes.fromString json) outputPath
+                                            |> Task.mapError CannotWriteOutput
+                                            |> Task.map (\_ -> {})
+            )
+
+
+parseModuleWithContext : Parser.Parser Context.Context PM.Error { module_ : AST.Module, context : Context.Context }
+parseModuleWithContext =
+    Parser.succeed (\mod ctx -> { module_ = mod, context = ctx })
+        |> Parser.keep PM.parser
+        |> Parser.keep Parser.getPayload
+
+
+prettifyError : Error -> Report
+prettifyError error =
+    when error is
+        CannotReadFile fsError ->
+            Report.create
+                "CANNOT READ FILE"
+                Nothing
+                (PP.words ("I failed to read the file: " ++ FileSystem.errorToString fsError))
+
+        CannotDecodeFileContents ->
+            Report.create
+                "CANNOT DECODE FILE"
+                Nothing
+                (PP.words "The file does not appear to contain valid UTF-8 text.")
+
+        ParseFailure message ->
+            Report.create
+                "PARSE FAILURE"
+                Nothing
+                (PP.verticalBlock (Array.map PP.text (String.split "\n" message)))
+
+        CannotWriteOutput fsError ->
+            Report.create
+                "CANNOT WRITE OUTPUT"
+                Nothing
+                (PP.words ("I failed to write the output file: " ++ FileSystem.errorToString fsError))
+
+
+-- SOURCE POSITION ENCODERS
+
+encodePosition : SourcePosition.Position -> Json.Value
+encodePosition pos =
+    Json.object
+        [ { key = "row", value = Json.int pos.row }
+        , { key = "col", value = Json.int pos.col }
+        ]
+
+
+encodeRegion : SourcePosition.Region -> Json.Value
+encodeRegion region =
+    Json.object
+        [ { key = "start", value = encodePosition region.start }
+        , { key = "end", value = encodePosition region.end }
+        ]
+
+
+encodeLocated : (a -> Json.Value) -> SourcePosition.Located a -> Json.Value
+encodeLocated encodeA located =
+    Json.object
+        [ { key = "start", value = encodePosition located.start }
+        , { key = "end", value = encodePosition located.end }
+        , { key = "value", value = encodeA located.value }
+        ]
+
+
+encodeMaybe : (a -> Json.Value) -> Maybe a -> Json.Value
+encodeMaybe encoder maybe =
+    when maybe is
+        Nothing ->
+            Json.null
+
+        Just a ->
+            encoder a
+
+
+-- MODULE ENCODER
+
+encodeModule : AST.Module -> Json.Value
+encodeModule mod =
+    Json.object
+        [ { key = "name", value = encodeLocated Json.string mod.name }
+        , { key = "exports", value = encodeExposing mod.exports }
+        , { key = "docs", value = encodeMaybe (encodeLocated Json.string) mod.docs }
+        , { key = "imports", value = Json.array (encodeLocated encodeImport) mod.imports }
+        , { key = "values", value = Json.array (encodeModuleDeclaration encodeValue) mod.values }
+        , { key = "unions", value = Json.array (encodeModuleDeclaration encodeUnion) mod.unions }
+        , { key = "aliases", value = Json.array (encodeModuleDeclaration encodeAlias) mod.aliases }
+        , { key = "binops", value = Json.array (encodeLocated encodeInfix) mod.binops }
+        , { key = "effects", value = encodeEffects mod.effects }
+        ]
+
+
+encodeExposing : AST.Exposing -> Json.Value
+encodeExposing exp =
+    when exp is
+        AST.Open ->
+            Json.object [ { key = "tag", value = Json.string "Open" } ]
+
+        AST.Explicit exposed ->
+            Json.object
+                [ { key = "tag", value = Json.string "Explicit" }
+                , { key = "value", value = Json.array encodeExposed exposed }
+                ]
+
+
+encodeExposed : AST.Exposed -> Json.Value
+encodeExposed exposed =
+    when exposed is
+        AST.ExposedLower located ->
+            Json.object
+                [ { key = "tag", value = Json.string "ExposedLower" }
+                , { key = "value", value = encodeLocated Json.string located }
+                ]
+
+        AST.ExposedUpper { name, privacy } ->
+            Json.object
+                [ { key = "tag", value = Json.string "ExposedUpper" }
+                , { key = "name", value = encodeLocated Json.string name }
+                , { key = "privacy", value = encodePrivacy privacy }
+                ]
+
+        AST.ExposedOperator located ->
+            Json.object
+                [ { key = "tag", value = Json.string "ExposedOperator" }
+                , { key = "value", value = encodeLocated Json.string located }
+                ]
+
+
+encodePrivacy : AST.Privacy -> Json.Value
+encodePrivacy privacy =
+    when privacy is
+        AST.Public ->
+            Json.string "Public"
+
+        AST.Private ->
+            Json.string "Private"
+
+
+encodeImport : AST.Import -> Json.Value
+encodeImport imp =
+    Json.object
+        [ { key = "module_", value = encodeLocated Json.string imp.module_ }
+        , { key = "alias", value = encodeMaybe Json.string imp.alias }
+        , { key = "expose", value = encodeExposing imp.expose }
+        ]
+
+
+encodeModuleDeclaration : (a -> Json.Value) -> AST.ModuleDeclaration a -> Json.Value
+encodeModuleDeclaration encodeA =
+    encodeLocated
+        (\{ docs, value } ->
+            Json.object
+                [ { key = "docs", value = encodeMaybe (encodeLocated Json.string) docs }
+                , { key = "value", value = encodeA value }
+                ]
+        )
+
+
+encodeValue : AST.Value -> Json.Value
+encodeValue v =
+    Json.object
+        [ { key = "name", value = encodeLocated Json.string v.name }
+        , { key = "signature", value = encodeMaybe encodeValueSignature v.signature }
+        , { key = "args", value = Json.array encodePattern v.args }
+        , { key = "body", value = encodeExpression v.body }
+        ]
+
+
+encodeValueSignature : { start : SourcePosition.Position, type_ : SourcePosition.Located AST.Type_ } -> Json.Value
+encodeValueSignature sig =
+    Json.object
+        [ { key = "start", value = encodePosition sig.start }
+        , { key = "type_", value = encodeType sig.type_ }
+        ]
+
+
+encodeUnion : AST.Union -> Json.Value
+encodeUnion u =
+    Json.object
+        [ { key = "name", value = encodeLocated Json.string u.name }
+        , { key = "vars", value = Json.array (encodeLocated Json.string) u.vars }
+        , { key = "variants", value = Json.array (encodeLocated encodeUnionVariant) u.variants }
+        ]
+
+
+encodeUnionVariant : AST.UnionVariant -> Json.Value
+encodeUnionVariant uv =
+    Json.object
+        [ { key = "name", value = encodeLocated Json.string uv.name }
+        , { key = "payload", value = encodeMaybe encodeType uv.payload }
+        ]
+
+
+encodeAlias : AST.Alias -> Json.Value
+encodeAlias a =
+    Json.object
+        [ { key = "name", value = encodeLocated Json.string a.name }
+        , { key = "vars", value = Json.array (encodeLocated Json.string) a.vars }
+        , { key = "type_", value = encodeType a.type_ }
+        ]
+
+
+encodeInfix : AST.Infix -> Json.Value
+encodeInfix inf =
+    Json.object
+        [ { key = "fn", value = Json.string inf.fn }
+        , { key = "symbol", value = Json.string inf.symbol }
+        , { key = "associativity", value = encodeBinopAssociativity inf.associativity }
+        , { key = "precedence", value = Json.int inf.precedence }
+        ]
+
+
+encodeBinopAssociativity : AST.BinopAssociativity -> Json.Value
+encodeBinopAssociativity assoc =
+    when assoc is
+        AST.OpALeft ->
+            Json.string "Left"
+
+        AST.OpANone ->
+            Json.string "None"
+
+        AST.OpARight ->
+            Json.string "Right"
+
+
+encodeEffects : AST.Effects -> Json.Value
+encodeEffects effects =
+    when effects is
+        AST.NoEffects ->
+            Json.object [ { key = "tag", value = Json.string "NoEffects" } ]
+
+        AST.Ports ports ->
+            Json.object
+                [ { key = "tag", value = Json.string "Ports" }
+                , { key = "value", value = Json.array (encodeModuleDeclaration encodePort) ports }
+                ]
+
+        AST.Manager manager ->
+            Json.object
+                [ { key = "tag", value = Json.string "Manager" }
+                , { key = "value", value = encodeManager manager }
+                ]
+
+
+encodeManager : AST.Manager -> Json.Value
+encodeManager manager =
+    when manager is
+        AST.Cmd cmd ->
+            Json.object
+                [ { key = "tag", value = Json.string "Cmd" }
+                , { key = "value", value = encodeLocated Json.string cmd }
+                ]
+
+        AST.Sub sub ->
+            Json.object
+                [ { key = "tag", value = Json.string "Sub" }
+                , { key = "value", value = encodeLocated Json.string sub }
+                ]
+
+        AST.Fx { cmd, sub } ->
+            Json.object
+                [ { key = "tag", value = Json.string "Fx" }
+                , { key = "cmd", value = encodeLocated Json.string cmd }
+                , { key = "sub", value = encodeLocated Json.string sub }
+                ]
+
+
+encodePort : AST.Port -> Json.Value
+encodePort p =
+    Json.object
+        [ { key = "name", value = encodeLocated Json.string p.name }
+        , { key = "signature", value = encodeType p.signature }
+        ]
+
+
+-- EXPRESSION ENCODERS
+
+encodeExpression : AST.Expression -> Json.Value
+encodeExpression =
+    encodeLocated encodeExpression_
+
+
+encodeExpression_ : AST.Expression_ -> Json.Value
+encodeExpression_ expr =
+    when expr is
+        AST.CharLiteral char ->
+            Json.object
+                [ { key = "tag", value = Json.string "CharLiteral" }
+                , { key = "value", value = Json.string (String.fromChar char) }
+                ]
+
+        AST.StringLiteral str ->
+            Json.object
+                [ { key = "tag", value = Json.string "StringLiteral" }
+                , { key = "value", value = Json.string str }
+                ]
+
+        AST.NumberLiteral outcome ->
+            Json.object
+                [ { key = "tag", value = Json.string "NumberLiteral" }
+                , { key = "value", value = encodeNumberOutcome outcome }
+                ]
+
+        AST.Var { varType, name } ->
+            Json.object
+                [ { key = "tag", value = Json.string "Var" }
+                , { key = "varType", value = encodeVarType varType }
+                , { key = "name", value = Json.string name }
+                ]
+
+        AST.VarQual { varType, qualifier, name } ->
+            Json.object
+                [ { key = "tag", value = Json.string "VarQual" }
+                , { key = "varType", value = encodeVarType varType }
+                , { key = "qualifier", value = Json.string qualifier }
+                , { key = "name", value = Json.string name }
+                ]
+
+        AST.ArrayLiteral elements ->
+            Json.object
+                [ { key = "tag", value = Json.string "ArrayLiteral" }
+                , { key = "value", value = Json.array encodeExpression elements }
+                ]
+
+        AST.Record fields ->
+            Json.object
+                [ { key = "tag", value = Json.string "Record" }
+                , { key = "value", value = Json.array encodeRecordField fields }
+                ]
+
+        AST.Update { record, newValues } ->
+            Json.object
+                [ { key = "tag", value = Json.string "Update" }
+                , { key = "record", value = encodeExpression record }
+                , { key = "newValues", value = Json.array encodeRecordField newValues }
+                ]
+
+        AST.Operator sym ->
+            Json.object
+                [ { key = "tag", value = Json.string "Operator" }
+                , { key = "value", value = Json.string sym }
+                ]
+
+        AST.Negate e ->
+            Json.object
+                [ { key = "tag", value = Json.string "Negate" }
+                , { key = "value", value = encodeExpression e }
+                ]
+
+        AST.Binops { left, operator, right } ->
+            Json.object
+                [ { key = "tag", value = Json.string "Binops" }
+                , { key = "left", value = encodeExpression left }
+                , { key = "operator", value = encodeLocated Json.string operator }
+                , { key = "right", value = encodeExpression right }
+                ]
+
+        AST.Lambda { patterns, body } ->
+            Json.object
+                [ { key = "tag", value = Json.string "Lambda" }
+                , { key = "patterns", value = Json.array encodePattern patterns }
+                , { key = "body", value = encodeExpression body }
+                ]
+
+        AST.Call { fn, args } ->
+            Json.object
+                [ { key = "tag", value = Json.string "Call" }
+                , { key = "fn", value = encodeExpression fn }
+                , { key = "args", value = Json.array encodeExpression args }
+                ]
+
+        AST.Let { defs, body } ->
+            Json.object
+                [ { key = "tag", value = Json.string "Let" }
+                , { key = "defs", value = Json.array (encodeLocated encodeDef) defs }
+                , { key = "body", value = encodeExpression body }
+                ]
+
+        AST.If { branches, elseBranch } ->
+            Json.object
+                [ { key = "tag", value = Json.string "If" }
+                , { key = "branches", value = Json.array encodeIfBranch branches }
+                , { key = "elseBranch", value = encodeExpression elseBranch }
+                ]
+
+        AST.When { expression, branches } ->
+            Json.object
+                [ { key = "tag", value = Json.string "When" }
+                , { key = "expression", value = encodeExpression expression }
+                , { key = "branches", value = Json.array encodeWhenBranch branches }
+                ]
+
+        AST.Accessor field ->
+            Json.object
+                [ { key = "tag", value = Json.string "Accessor" }
+                , { key = "value", value = Json.string field }
+                ]
+
+        AST.Access { expression, accessor } ->
+            Json.object
+                [ { key = "tag", value = Json.string "Access" }
+                , { key = "expression", value = encodeExpression expression }
+                , { key = "accessor", value = Json.string accessor }
+                ]
+
+        AST.Parens e ->
+            Json.object
+                [ { key = "tag", value = Json.string "Parens" }
+                , { key = "value", value = encodeExpression e }
+                ]
+
+
+encodeVarType : AST.VarType -> Json.Value
+encodeVarType varType =
+    when varType is
+        AST.LowVar ->
+            Json.string "LowVar"
+
+        AST.CapVar ->
+            Json.string "CapVar"
+
+
+encodeNumberOutcome : Number.Outcome -> Json.Value
+encodeNumberOutcome outcome =
+    when outcome is
+        Number.Integer n ->
+            Json.object
+                [ { key = "tag", value = Json.string "Integer" }
+                , { key = "value", value = Json.int n }
+                ]
+
+        Number.FloatingPoint f ->
+            Json.object
+                [ { key = "tag", value = Json.string "FloatingPoint" }
+                , { key = "value", value = Json.float f }
+                ]
+
+        Number.Hex n ->
+            Json.object
+                [ { key = "tag", value = Json.string "Hex" }
+                , { key = "value", value = Json.int n }
+                ]
+
+
+encodeRecordField : AST.RecordField -> Json.Value
+encodeRecordField rf =
+    Json.object
+        [ { key = "field", value = encodeLocated Json.string rf.field }
+        , { key = "value", value = encodeExpression rf.value }
+        ]
+
+
+encodeDef : AST.Def -> Json.Value
+encodeDef def =
+    when def is
+        AST.Define dr ->
+            Json.object
+                [ { key = "tag", value = Json.string "Define" }
+                , { key = "value", value = encodeDefineRecord dr }
+                ]
+
+        AST.Destruct { pattern, body } ->
+            Json.object
+                [ { key = "tag", value = Json.string "Destruct" }
+                , { key = "pattern", value = encodePattern pattern }
+                , { key = "body", value = encodeExpression body }
+                ]
+
+
+encodeDefineRecord : AST.DefineRecord -> Json.Value
+encodeDefineRecord dr =
+    Json.object
+        [ { key = "name", value = encodeLocated Json.string dr.name }
+        , { key = "args", value = Json.array encodePattern dr.args }
+        , { key = "body", value = encodeExpression dr.body }
+        , { key = "typeSignature", value = encodeMaybe encodeType dr.typeSignature }
+        ]
+
+
+encodeIfBranch : AST.IfBranch -> Json.Value
+encodeIfBranch branch =
+    Json.object
+        [ { key = "test", value = encodeExpression branch.test }
+        , { key = "body", value = encodeExpression branch.body }
+        ]
+
+
+encodeWhenBranch : AST.WhenBranch -> Json.Value
+encodeWhenBranch branch =
+    Json.object
+        [ { key = "pattern", value = encodePattern branch.pattern }
+        , { key = "body", value = encodeExpression branch.body }
+        ]
+
+
+-- PATTERN ENCODERS
+
+encodePattern : AST.Pattern -> Json.Value
+encodePattern =
+    encodeLocated encodePattern_
+
+
+encodePattern_ : AST.Pattern_ -> Json.Value
+encodePattern_ pat =
+    when pat is
+        AST.PAnything name ->
+            Json.object
+                [ { key = "tag", value = Json.string "PAnything" }
+                , { key = "value", value = Json.string name }
+                ]
+
+        AST.PVar name ->
+            Json.object
+                [ { key = "tag", value = Json.string "PVar" }
+                , { key = "value", value = Json.string name }
+                ]
+
+        AST.PRecord fields ->
+            Json.object
+                [ { key = "tag", value = Json.string "PRecord" }
+                , { key = "value", value = Json.array encodePRecordField fields }
+                ]
+
+        AST.PAlias { pattern = aliasPat, name } ->
+            Json.object
+                [ { key = "tag", value = Json.string "PAlias" }
+                , { key = "pattern", value = encodePattern aliasPat }
+                , { key = "name", value = encodeLocated Json.string name }
+                ]
+
+        AST.PCtor { name, arg } ->
+            Json.object
+                [ { key = "tag", value = Json.string "PCtor" }
+                , { key = "name", value = encodeLocated Json.string name }
+                , { key = "arg", value = encodeMaybe encodePattern arg }
+                ]
+
+        AST.PCtorQual { varRegion, module_, name, arg } ->
+            Json.object
+                [ { key = "tag", value = Json.string "PCtorQual" }
+                , { key = "varRegion", value = encodeRegion varRegion }
+                , { key = "module_", value = Json.string module_ }
+                , { key = "name", value = Json.string name }
+                , { key = "arg", value = encodeMaybe encodePattern arg }
+                ]
+
+        AST.PArray patterns ->
+            Json.object
+                [ { key = "tag", value = Json.string "PArray" }
+                , { key = "value", value = Json.array encodePattern patterns }
+                ]
+
+        AST.PChr char ->
+            Json.object
+                [ { key = "tag", value = Json.string "PChr" }
+                , { key = "value", value = Json.string (String.fromChar char) }
+                ]
+
+        AST.PStr str ->
+            Json.object
+                [ { key = "tag", value = Json.string "PStr" }
+                , { key = "value", value = Json.string str }
+                ]
+
+        AST.PInt { value, isHex } ->
+            Json.object
+                [ { key = "tag", value = Json.string "PInt" }
+                , { key = "value", value = Json.int value }
+                , { key = "isHex", value = Json.bool isHex }
+                ]
+
+
+encodePRecordField : AST.PRecordField -> Json.Value
+encodePRecordField prf =
+    Json.object
+        [ { key = "field", value = encodeLocated Json.string prf.field }
+        , { key = "pattern", value = encodeMaybe encodePattern prf.pattern }
+        ]
+
+
+-- TYPE ENCODERS
+
+encodeType : AST.Type -> Json.Value
+encodeType =
+    encodeLocated encodeType_
+
+
+encodeType_ : AST.Type_ -> Json.Value
+encodeType_ type_ =
+    when type_ is
+        AST.TLambda { from, to } ->
+            Json.object
+                [ { key = "tag", value = Json.string "TLambda" }
+                , { key = "from", value = encodeType from }
+                , { key = "to", value = encodeType to }
+                ]
+
+        AST.TVar name ->
+            Json.object
+                [ { key = "tag", value = Json.string "TVar" }
+                , { key = "value", value = Json.string name }
+                ]
+
+        AST.TType { name, args } ->
+            Json.object
+                [ { key = "tag", value = Json.string "TType" }
+                , { key = "name", value = encodeLocated Json.string name }
+                , { key = "args", value = Json.array encodeType args }
+                ]
+
+        AST.TTypeQual { varRegion, qualifier, name, args } ->
+            Json.object
+                [ { key = "tag", value = Json.string "TTypeQual" }
+                , { key = "varRegion", value = encodeRegion varRegion }
+                , { key = "qualifier", value = Json.string qualifier }
+                , { key = "name", value = Json.string name }
+                , { key = "args", value = Json.array encodeType args }
+                ]
+
+        AST.TRecord { fields, extending } ->
+            Json.object
+                [ { key = "tag", value = Json.string "TRecord" }
+                , { key = "fields", value = Json.array encodeTRecordField fields }
+                , { key = "extending", value = encodeMaybe (encodeLocated Json.string) extending }
+                ]
+
+        AST.TParens t ->
+            Json.object
+                [ { key = "tag", value = Json.string "TParens" }
+                , { key = "value", value = encodeType t }
+                ]
+
+
+encodeTRecordField : AST.TRecordField -> Json.Value
+encodeTRecordField trf =
+    Json.object
+        [ { key = "field", value = encodeLocated Json.string trf.field }
+        , { key = "signature", value = encodeType trf.signature }
+        ]
+
+
+-- CONTEXT ENCODER
+
+encodeContext : Context.Context -> Json.Value
+encodeContext ctx =
+    Array.Builder.toArray ctx.comments
+        |> Json.array (encodeLocated encodeComment)
+
+
+encodeComment : Context.Comment -> Json.Value
+encodeComment comment =
+    when comment is
+        Context.Line str ->
+            Json.object
+                [ { key = "tag", value = Json.string "Line" }
+                , { key = "value", value = Json.string str }
+                ]
+
+        Context.Block str ->
+            Json.object
+                [ { key = "tag", value = Json.string "Block" }
+                , { key = "value", value = Json.string str }
+                ]
