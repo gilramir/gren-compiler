@@ -12,7 +12,9 @@ import Task exposing (Task)
 import Bytes exposing (Bytes)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
-import Formatter.PrettyPrinter as PPrint
+import Formatter.LPTCreate exposing (makeLogicalPrintingTree)
+import Formatter.LPTPretty exposing (makePrettyResult)
+import Formatter.LPTJson as LPTJson
 import Compiler.Outline as Outline exposing (Outline)
 import Terminal.Report as Report exposing (Report)
 import Terminal.PackageInstall as PackageInstall
@@ -28,6 +30,7 @@ type alias Config =
     , pathToString : Path -> String
     , projectPath : Path
     , outline : Outline
+    , ir : Bool
     }
 
 
@@ -36,10 +39,11 @@ type Error
     | NothingToFormat
     | ParseFailure { path : Path, error : String }
     | PrettyPrintFailure { path : Path, error : String }
+    | IrWriteFailure { path : Path, error : String }
 
 
 run : Config -> Task Error String
-run { fsPermission, pathToString, projectPath, outline } =
+run { fsPermission, pathToString, projectPath, outline, ir } =
     Outline.findSourceFiles fsPermission outline projectPath
         |> Task.mapError FailedToFindSources
         |> Task.andThen
@@ -61,17 +65,39 @@ run { fsPermission, pathToString, projectPath, outline } =
                                     in
                                     when Parser.run parser Context.empty source is
                                         Ok { ast = ast, payload = payload } ->
-                                            when PPrint.prettyPrint ast payload is
-                                                Ok rendered ->
-                                                    Task.succeed <|
-                                                        Array.pushLast (pathToString path) previousFiles
+                                            when makeLogicalPrintingTree ast payload is
+                                                Err errString ->
+                                                    Task.fail (PrettyPrintFailure { path = relPath, error = errString })
 
-                                                Err errorString ->
-                                                    Task.fail <|
-                                                        PrettyPrintFailure
-                                                            { path = relPath
-                                                            , error = errorString
-                                                            }
+                                                Ok lpt ->
+                                                    let
+                                                        writeIrTask =
+                                                            if ir then
+                                                                let
+                                                                    irFilePath = { path | filename = path.filename ++ ".ir", extension = "json" }
+                                                                    json = LPTJson.lptToJson lpt
+                                                                in
+                                                                FileSystem.writeFile fsPermission (Bytes.fromString json) irFilePath
+                                                                    |> Task.mapError (\fsErr -> IrWriteFailure { path = irFilePath, error = FileSystem.errorToString fsErr })
+                                                                    |> Task.map (\_ -> {})
+                                                            else
+                                                                Task.succeed {}
+                                                    in
+                                                    writeIrTask
+                                                        |> Task.andThen
+                                                            (\_ ->
+                                                                when makePrettyResult lpt is
+                                                                    Ok _ ->
+                                                                        Task.succeed <|
+                                                                            Array.pushLast (pathToString path) previousFiles
+
+                                                                    Err errString ->
+                                                                        Task.fail <|
+                                                                            PrettyPrintFailure
+                                                                                { path = relPath
+                                                                                , error = errString
+                                                                                }
+                                                            )
 
                                         Err errs ->
                                             Task.fail <|
@@ -157,5 +183,11 @@ prettifyError error =
         PrettyPrintFailure { path, error = message } ->
             Report.create
                 ("Could not format this file. Please report this 'gren format' bug.")
+                (Just path)
+                (PP.words message)
+
+        IrWriteFailure { path, error = message } ->
+            Report.create
+                "COULD NOT WRITE IR FILE"
                 (Just path)
                 (PP.words message)

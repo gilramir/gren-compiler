@@ -7,11 +7,10 @@
     "gren-version": "0.6.5",
     "dependencies": {
         "direct": {
-            "gren-lang/core": "7.4.0",
+            "gren-lang/core": "local:../core",
             "gren-lang/node": "6.1.0",
-            "gren-lang/compiler-node": "4.0.0",
             "gren-lang/compiler-node": "local:../compiler-node",
-            "gren-lang/compiler-common": "1.0.0"
+            "gren-lang/compiler-common": "local:../compiler-common"
         },
         "indirect": {
             "gilramir/gren-collections": "1.0.0",

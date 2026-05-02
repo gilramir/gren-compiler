@@ -839,7 +839,7 @@ parseUserArgs model compilerPath =
                         |> Task.onError endWithErrorString
                         |> Task.perform RunCmd
 
-                CliParser.Format ->
+                CliParser.Format flags ->
                     Terminal.PackageInstall.readProjectOutline model.fsPermission
                         |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
                         |> Task.andThen
@@ -847,9 +847,10 @@ parseUserArgs model compilerPath =
                                 Terminal.Format.run
                                     { stdout = model.stdout
                                     , fsPermission = model.fsPermission
-                                    , pathToString = model.pathToString                        
+                                    , pathToString = model.pathToString
                                     , projectPath = projectPath
                                     , outline = outline
+                                    , ir = flags.ir
                                     }
                                     |> Task.mapError Terminal.Format.prettifyError
                             )

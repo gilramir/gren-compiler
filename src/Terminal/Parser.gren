@@ -1,5 +1,6 @@
 module Terminal.Parser exposing
     ( Command (..)
+    , FormatFlags
     , MakeFlags
     , DiffArgs (..)
     , parser
@@ -31,7 +32,7 @@ type Command
     | PackageDiff DiffArgs
     | Paths Paths.Options
     | Run RunOptions
-    | Format
+    | Format FormatFlags
 
 
 type alias InitFlags =
@@ -57,6 +58,11 @@ type alias MakeFlags =
 type alias DocsFlags =
     { output : Maybe Compiler.Backend.DocsOutput
     , report : Maybe {}
+    }
+
+
+type alias FormatFlags =
+    { ir : Bool
     }
 
 
@@ -209,14 +215,16 @@ parser =
                 , arguments =
                     Cli.Parser.noArgs
                 , flags =
-                    Cli.Parser.noFlags
+                    Cli.Parser.initFlags
+                        (\ir -> { ir = ir })
+                        |> Cli.Parser.toggle "ir" "Write the logical printing tree as <filename>.ir.json next to each source file"
                 , commonDescription = Nothing
                 , summary =
                     "Format Gren source code."
                 , example =
                     PP.empty
                 , builder =
-                    \_args _flags -> Format
+                    \_args flags -> Format flags
                 }
             |> Cli.Parser.withCommand
                 { word = "make"
