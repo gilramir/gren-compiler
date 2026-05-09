@@ -62,10 +62,10 @@ type alias DocsFlags =
 
 
 type alias FormatFlags =
-    { ir : Bool
-    , fmt : Bool
+    { fmt : Bool
     , show : Maybe Path
     , json : Maybe Path
+    , lpt : Maybe Path
     }
 
 
@@ -219,11 +219,11 @@ parser =
                     Cli.Parser.noArgs
                 , flags =
                     Cli.Parser.initFlags
-                        (\ir fmt show json -> { ir = ir, fmt = fmt, show = show, json = json })
-                        |> Cli.Parser.toggle "ir" "Write the logical printing tree as <filename>.ir.json next to each source file"
+                        (\fmt show json lpt -> { fmt = fmt, show = show, json = json, lpt = lpt })
                         |> Cli.Parser.toggle "fmt" "Write the formatted output to <filename>.fmt.gren next to each source file"
                         |> Cli.Parser.flag "show" Cli.Parser.pathParser "Parse and pretty-print a single file to stdout without modifying it"
                         |> Cli.Parser.flag "json" Cli.Parser.pathParser "Parse a single file and print its AST as JSON to stdout"
+                        |> Cli.Parser.flag "lpt" Cli.Parser.pathParser "Parse a single file and print its Logical Printing Tree as JSON to stdout"
                 , commonDescription = Nothing
                 , summary =
                     "Format Gren source code."

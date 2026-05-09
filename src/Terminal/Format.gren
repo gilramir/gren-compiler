@@ -4,6 +4,7 @@ module Terminal.Format exposing
     , run
     , showFile
     , jsonFile
+    , lptFile
     , prettifyError
     )
 
@@ -35,7 +36,6 @@ type alias Config =
     , pathToString : Path -> String
     , projectPath : Path
     , outline : Outline
-    , ir : Bool
     , fmt : Bool
     }
 
@@ -45,13 +45,12 @@ type Error
     | NothingToFormat
     | ParseFailure { path : Path, error : String }
     | PrettyPrintFailure { path : Path, error : String }
-    | IrWriteFailure { path : Path, error : String }
     | FmtWriteFailure { path : Path, error : String }
     | ShowReadFailure { path : Path, error : String }
 
 
 run : Config -> Task Error String
-run { fsPermission, pathToString, projectPath, outline, ir, fmt } =
+run { fsPermission, pathToString, projectPath, outline, fmt } =
     Outline.findSourceFiles fsPermission outline projectPath
         |> Task.mapError FailedToFindSources
         |> Task.andThen
@@ -78,48 +77,31 @@ run { fsPermission, pathToString, projectPath, outline, ir, fmt } =
                                                     Task.fail (PrettyPrintFailure { path = relPath, error = errString })
 
                                                 Ok lpt ->
-                                                    let
-                                                        writeIrTask =
-                                                            if ir then
-                                                                let
-                                                                    irFilePath = { path | filename = path.filename ++ ".ir", extension = "json" }
-                                                                    json = LPTJson.lptToJson lpt
-                                                                in
-                                                                FileSystem.writeFile fsPermission (Bytes.fromString json) irFilePath
-                                                                    |> Task.mapError (\fsErr -> IrWriteFailure { path = irFilePath, error = FileSystem.errorToString fsErr })
-                                                                    |> Task.map (\_ -> {})
-                                                            else
-                                                                Task.succeed {}
-                                                    in
-                                                    writeIrTask
-                                                        |> Task.andThen
-                                                            (\_ ->
-                                                                when makePrettyResult lpt is
-                                                                    Err errString ->
-                                                                        Task.fail <|
-                                                                            PrettyPrintFailure
-                                                                                { path = relPath
-                                                                                , error = errString
-                                                                                }
+                                                    when makePrettyResult lpt is
+                                                        Err errString ->
+                                                            Task.fail <|
+                                                                PrettyPrintFailure
+                                                                    { path = relPath
+                                                                    , error = errString
+                                                                    }
 
-                                                                    Ok formatted ->
+                                                        Ok formatted ->
+                                                            let
+                                                                writeFmtTask =
+                                                                    if fmt then
                                                                         let
-                                                                            writeFmtTask =
-                                                                                if fmt then
-                                                                                    let
-                                                                                        fmtFilePath = { path | filename = path.filename ++ "." ++ path.extension, extension = "fmt" }
-                                                                                    in
-                                                                                    FileSystem.writeFile fsPermission (Bytes.fromString formatted) fmtFilePath
-                                                                                        |> Task.mapError (\fsErr -> FmtWriteFailure { path = fmtFilePath, error = FileSystem.errorToString fsErr })
-                                                                                        |> Task.map (\_ -> {})
-                                                                                else
-                                                                                    Task.succeed {}
+                                                                            fmtFilePath = { path | filename = path.filename ++ "." ++ path.extension, extension = "fmt" }
                                                                         in
-                                                                        writeFmtTask
-                                                                            |> Task.map (\_ ->
-                                                                                Array.pushLast (pathToString path) previousFiles
-                                                                            )
-                                                            )
+                                                                        FileSystem.writeFile fsPermission (Bytes.fromString formatted) fmtFilePath
+                                                                            |> Task.mapError (\fsErr -> FmtWriteFailure { path = fmtFilePath, error = FileSystem.errorToString fsErr })
+                                                                            |> Task.map (\_ -> {})
+                                                                    else
+                                                                        Task.succeed {}
+                                                            in
+                                                            writeFmtTask
+                                                                |> Task.map (\_ ->
+                                                                    Array.pushLast (pathToString path) previousFiles
+                                                                )
 
                                         Err errs ->
                                             Task.fail <|
@@ -208,6 +190,37 @@ jsonFile { stdout, fsPermission } path =
             )
 
 
+lptFile : { stdout : Stream.Writable Bytes, fsPermission : FileSystem.Permission } -> Path -> Task Error {}
+lptFile { stdout, fsPermission } path =
+    FileSystem.readFile fsPermission path
+        |> Task.mapError (\fsErr -> ShowReadFailure { path = path, error = FileSystem.errorToString fsErr })
+        |> Task.andThen
+            (\bytes ->
+                when Bytes.toString bytes is
+                    Nothing ->
+                        Task.fail (ShowReadFailure { path = path, error = "File content is not valid UTF-8" })
+
+                    Just source ->
+                        let
+                            parser =
+                                Parser.succeed (\ast payload -> { ast = ast, payload = payload })
+                                    |> Parser.keep PM.parser
+                                    |> Parser.keep Parser.getPayload
+                        in
+                        when Parser.run parser Context.empty source is
+                            Err errs ->
+                                Task.fail (ParseFailure { path = path, error = PM.errorsToString source errs })
+
+                            Ok { ast, payload } ->
+                                when makeLogicalPrintingTree ast payload is
+                                    Err errString ->
+                                        Task.fail (PrettyPrintFailure { path = path, error = errString })
+
+                                    Ok lpt ->
+                                        Stream.Log.string stdout (LPTJson.lptToJson lpt)
+            )
+
+
 -- TODO: add to gren-lang/node?
 pathRelativeFrom : Path -> Path -> Path
 pathRelativeFrom base absolute =
@@ -274,12 +287,6 @@ prettifyError error =
         PrettyPrintFailure { path, error = message } ->
             Report.create
                 ("Could not format this file. Please report this 'gren format' bug.")
-                (Just path)
-                (PP.words message)
-
-        IrWriteFailure { path, error = message } ->
-            Report.create
-                "COULD NOT WRITE IR FILE"
                 (Just path)
                 (PP.words message)
 
