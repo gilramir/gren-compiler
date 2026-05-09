@@ -840,25 +840,38 @@ parseUserArgs model compilerPath =
                         |> Task.perform RunCmd
 
                 CliParser.Format flags ->
-                    Terminal.PackageInstall.readProjectOutline model.fsPermission
-                        |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
-                        |> Task.andThen
-                            (\{ projectPath, outline } ->
-                                Terminal.Format.run
-                                    { stdout = model.stdout
-                                    , fsPermission = model.fsPermission
-                                    , pathToString = model.pathToString
-                                    , projectPath = projectPath
-                                    , outline = outline
-                                    , ir = flags.ir
-                                    , fmt = flags.fmt
-                                    }
-                                    |> Task.mapError Terminal.Format.prettifyError
-                            )
-                        |> Task.andThen (Stream.Log.line model.stdout)
-                        |> Task.map (\_ -> Cmd.none)
-                        |> Task.onError (endWithErrorReport (Terminal.Report.Terminal printOpts))
-                        |> Task.perform RunCmd
+                    when flags.show is
+                        Just showPath ->
+                            Terminal.Format.showFile
+                                { stdout = model.stdout
+                                , fsPermission = model.fsPermission
+                                }
+                                showPath
+                                |> Task.mapError Terminal.Format.prettifyError
+                                |> Task.map (\_ -> Cmd.none)
+                                |> Task.onError (endWithErrorReport (Terminal.Report.Terminal printOpts))
+                                |> Task.perform RunCmd
+
+                        Nothing ->
+                            Terminal.PackageInstall.readProjectOutline model.fsPermission
+                                |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
+                                |> Task.andThen
+                                    (\{ projectPath, outline } ->
+                                        Terminal.Format.run
+                                            { stdout = model.stdout
+                                            , fsPermission = model.fsPermission
+                                            , pathToString = model.pathToString
+                                            , projectPath = projectPath
+                                            , outline = outline
+                                            , ir = flags.ir
+                                            , fmt = flags.fmt
+                                            }
+                                            |> Task.mapError Terminal.Format.prettifyError
+                                    )
+                                |> Task.andThen (Stream.Log.line model.stdout)
+                                |> Task.map (\_ -> Cmd.none)
+                                |> Task.onError (endWithErrorReport (Terminal.Report.Terminal printOpts))
+                                |> Task.perform RunCmd
 
 
 resolveProject : Model -> Task Report Terminal.PackageInstall.PackageResolution
