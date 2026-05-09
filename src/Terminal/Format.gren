@@ -31,6 +31,7 @@ type alias Config =
     , projectPath : Path
     , outline : Outline
     , ir : Bool
+    , fmt : Bool
     }
 
 
@@ -40,10 +41,11 @@ type Error
     | ParseFailure { path : Path, error : String }
     | PrettyPrintFailure { path : Path, error : String }
     | IrWriteFailure { path : Path, error : String }
+    | FmtWriteFailure { path : Path, error : String }
 
 
 run : Config -> Task Error String
-run { fsPermission, pathToString, projectPath, outline, ir } =
+run { fsPermission, pathToString, projectPath, outline, ir, fmt } =
     Outline.findSourceFiles fsPermission outline projectPath
         |> Task.mapError FailedToFindSources
         |> Task.andThen
@@ -87,16 +89,30 @@ run { fsPermission, pathToString, projectPath, outline, ir } =
                                                         |> Task.andThen
                                                             (\_ ->
                                                                 when makePrettyResult lpt is
-                                                                    Ok _ ->
-                                                                        Task.succeed <|
-                                                                            Array.pushLast (pathToString path) previousFiles
-
                                                                     Err errString ->
                                                                         Task.fail <|
                                                                             PrettyPrintFailure
                                                                                 { path = relPath
                                                                                 , error = errString
                                                                                 }
+
+                                                                    Ok formatted ->
+                                                                        let
+                                                                            writeFmtTask =
+                                                                                if fmt then
+                                                                                    let
+                                                                                        fmtFilePath = { path | filename = path.filename ++ "." ++ path.extension, extension = "fmt" }
+                                                                                    in
+                                                                                    FileSystem.writeFile fsPermission (Bytes.fromString formatted) fmtFilePath
+                                                                                        |> Task.mapError (\fsErr -> FmtWriteFailure { path = fmtFilePath, error = FileSystem.errorToString fsErr })
+                                                                                        |> Task.map (\_ -> {})
+                                                                                else
+                                                                                    Task.succeed {}
+                                                                        in
+                                                                        writeFmtTask
+                                                                            |> Task.map (\_ ->
+                                                                                Array.pushLast (pathToString path) previousFiles
+                                                                            )
                                                             )
 
                                         Err errs ->
@@ -189,5 +205,11 @@ prettifyError error =
         IrWriteFailure { path, error = message } ->
             Report.create
                 "COULD NOT WRITE IR FILE"
+                (Just path)
+                (PP.words message)
+
+        FmtWriteFailure { path, error = message } ->
+            Report.create
+                "COULD NOT WRITE FMT FILE"
                 (Just path)
                 (PP.words message)

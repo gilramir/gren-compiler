@@ -851,6 +851,7 @@ parseUserArgs model compilerPath =
                                     , projectPath = projectPath
                                     , outline = outline
                                     , ir = flags.ir
+                                    , fmt = flags.fmt
                                     }
                                     |> Task.mapError Terminal.Format.prettifyError
                             )
