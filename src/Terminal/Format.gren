@@ -3,6 +3,7 @@ module Terminal.Format exposing
     , Error(..)
     , run
     , showFile
+    , jsonFile
     , prettifyError
     )
 
@@ -22,6 +23,9 @@ import Terminal.PackageInstall as PackageInstall
 import Cli.PrettyPrinter as PP
 import Compiler.Parse.Module as PM
 import Compiler.Parse.Context as Context
+import Compiler.Ast.Source.Json as SourceJson
+import Compiler.Parse.Context.Json as ContextJson
+import Json.Encode as Json
 import String.Parser.Advanced as Parser
 
 
@@ -168,6 +172,39 @@ showFile { stdout, fsPermission } path =
 
                                             Ok formatted ->
                                                 Stream.Log.string stdout formatted
+            )
+
+
+jsonFile : { stdout : Stream.Writable Bytes, fsPermission : FileSystem.Permission } -> Path -> Task Error {}
+jsonFile { stdout, fsPermission } path =
+    FileSystem.readFile fsPermission path
+        |> Task.mapError (\fsErr -> ShowReadFailure { path = path, error = FileSystem.errorToString fsErr })
+        |> Task.andThen
+            (\bytes ->
+                when Bytes.toString bytes is
+                    Nothing ->
+                        Task.fail (ShowReadFailure { path = path, error = "File content is not valid UTF-8" })
+
+                    Just source ->
+                        let
+                            parser =
+                                Parser.succeed (\ast payload -> { ast = ast, payload = payload })
+                                    |> Parser.keep PM.parser
+                                    |> Parser.keep Parser.getPayload
+                        in
+                        when Parser.run parser Context.empty source is
+                            Err errs ->
+                                Task.fail (ParseFailure { path = path, error = PM.errorsToString source errs })
+
+                            Ok { ast, payload } ->
+                                let
+                                    jsonValue =
+                                        Json.object
+                                            [ { key = "module", value = SourceJson.encodeModule ast }
+                                            , { key = "context", value = ContextJson.encodeContext payload }
+                                            ]
+                                in
+                                Stream.Log.string stdout (Json.encode 2 jsonValue)
             )
 
 
