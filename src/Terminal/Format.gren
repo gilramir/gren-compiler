@@ -13,7 +13,7 @@ import Bytes exposing (Bytes)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Formatter.LPTCreate exposing (makeLogicalPrintingTree)
-import Formatter.LPTPretty exposing (makePrettyResult)
+import Formatter.MakePretty exposing (makePrettyResult)
 import Formatter.LPTJson as LPTJson
 import Compiler.Outline as Outline exposing (Outline)
 import Terminal.Report as Report exposing (Report)
