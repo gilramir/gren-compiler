@@ -902,7 +902,7 @@ parseUserArgs model compilerPath =
                                                                     , pathToString = model.pathToString
                                                                     , projectPath = projectPath
                                                                     , outline = outline
-                                                                    , fmt = flags.fmt
+                                                                    , rename = flags.rename
                                                                     }
                                                                     |> Task.mapError Terminal.Format.prettifyError
                                                             )

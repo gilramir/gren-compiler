@@ -38,7 +38,7 @@ type alias Config =
     , pathToString : Path -> String
     , projectPath : Path
     , outline : Outline
-    , fmt : Bool
+    , rename : Bool
     }
 
 
@@ -55,7 +55,7 @@ type Error
 
 
 run : Config -> Task Error String
-run { fsPermission, pathToString, projectPath, outline, fmt } =
+run { fsPermission, pathToString, projectPath, outline, rename } =
     Outline.findSourceFiles fsPermission outline projectPath
         |> Task.mapError FailedToFindSources
         |> Task.andThen
@@ -103,7 +103,7 @@ run { fsPermission, pathToString, projectPath, outline, fmt } =
                                                                         Ok {} ->
                                                                             let
                                                                                 writeTask =
-                                                                                    if fmt then
+                                                                                    if rename then
                                                                                         let
                                                                                             fmtFilePath = { path | filename = path.filename ++ "." ++ path.extension, extension = "fmt" }
                                                                                         in
