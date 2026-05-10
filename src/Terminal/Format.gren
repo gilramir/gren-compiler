@@ -107,11 +107,11 @@ run { fsPermission, pathToString, projectPath, outline, rename } =
                                                                                         let
                                                                                             fmtFilePath = { path | filename = path.filename ++ "." ++ path.extension, extension = "fmt" }
                                                                                         in
-                                                                                        FileSystem.writeFile fsPermission (Bytes.fromString formatted) fmtFilePath
+                                                                                        FileSystem.writeFile fsPermission (Bytes.fromString (formatted ++ "\n")) fmtFilePath
                                                                                             |> Task.mapError (\fsErr -> FmtWriteFailure { path = fmtFilePath, error = FileSystem.errorToString fsErr })
                                                                                             |> Task.map (\_ -> {})
                                                                                     else
-                                                                                        FileSystem.writeFile fsPermission (Bytes.fromString formatted) path
+                                                                                        FileSystem.writeFile fsPermission (Bytes.fromString (formatted ++ "\n")) path
                                                                                             |> Task.mapError (\fsErr -> OverwriteFailure { path = path, error = FileSystem.errorToString fsErr })
                                                                                             |> Task.map (\_ -> {})
                                                                             in
