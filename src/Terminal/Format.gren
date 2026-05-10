@@ -48,8 +48,10 @@ type Error
     | ParseFailure { path : Path, error : String }
     | PrettyPrintFailure { path : Path, error : String }
     | FmtWriteFailure { path : Path, error : String }
+    | OverwriteFailure { path : Path, error : String }
     | ShowReadFailure { path : Path, error : String }
     | CheckReparseFailed { path : Path, error : String }
+    | AstMismatchAfterFormat { path : Path, explanation : String }
 
 
 run : Config -> Task Error String
@@ -89,22 +91,34 @@ run { fsPermission, pathToString, projectPath, outline, fmt } =
                                                                     }
 
                                                         Ok formatted ->
-                                                            let
-                                                                writeFmtTask =
-                                                                    if fmt then
-                                                                        let
-                                                                            fmtFilePath = { path | filename = path.filename ++ "." ++ path.extension, extension = "fmt" }
-                                                                        in
-                                                                        FileSystem.writeFile fsPermission (Bytes.fromString formatted) fmtFilePath
-                                                                            |> Task.mapError (\fsErr -> FmtWriteFailure { path = fmtFilePath, error = FileSystem.errorToString fsErr })
-                                                                            |> Task.map (\_ -> {})
-                                                                    else
-                                                                        Task.succeed {}
-                                                            in
-                                                            writeFmtTask
-                                                                |> Task.map (\_ ->
-                                                                    Array.pushLast (pathToString path) previousFiles
-                                                                )
+                                                            when Parser.run parser Context.empty formatted is
+                                                                Err errs ->
+                                                                    Task.fail (CheckReparseFailed { path = relPath, error = PM.errorsToString formatted errs })
+
+                                                                Ok { ast = ast2, payload = _ } ->
+                                                                    when AstCompare.compareModules ast ast2 is
+                                                                        Err explanation ->
+                                                                            Task.fail (AstMismatchAfterFormat { path = relPath, explanation = explanation })
+
+                                                                        Ok {} ->
+                                                                            let
+                                                                                writeTask =
+                                                                                    if fmt then
+                                                                                        let
+                                                                                            fmtFilePath = { path | filename = path.filename ++ "." ++ path.extension, extension = "fmt" }
+                                                                                        in
+                                                                                        FileSystem.writeFile fsPermission (Bytes.fromString formatted) fmtFilePath
+                                                                                            |> Task.mapError (\fsErr -> FmtWriteFailure { path = fmtFilePath, error = FileSystem.errorToString fsErr })
+                                                                                            |> Task.map (\_ -> {})
+                                                                                    else
+                                                                                        FileSystem.writeFile fsPermission (Bytes.fromString formatted) path
+                                                                                            |> Task.mapError (\fsErr -> OverwriteFailure { path = path, error = FileSystem.errorToString fsErr })
+                                                                                            |> Task.map (\_ -> {})
+                                                                            in
+                                                                            writeTask
+                                                                                |> Task.map (\_ ->
+                                                                                    Array.pushLast (pathToString path) previousFiles
+                                                                                )
 
                                         Err errs ->
                                             Task.fail <|
@@ -347,6 +361,23 @@ prettifyError error =
                 "COULD NOT WRITE FMT FILE"
                 (Just path)
                 (PP.words message)
+
+        OverwriteFailure { path, error = message } ->
+            Report.create
+                "COULD NOT OVERWRITE FILE"
+                (Just path)
+                (PP.words message)
+
+        AstMismatchAfterFormat { path, explanation } ->
+            Report.create
+                "AST MISMATCH AFTER FORMATTING"
+                (Just path)
+                ( PP.verticalBlock
+                    [ PP.words "The formatter produced output that does not have the same AST as the original. This is a bug in 'gren format'."
+                    , PP.empty
+                    , PP.words explanation
+                    ]
+                )
 
         ShowReadFailure { path, error = message } ->
             Report.create
