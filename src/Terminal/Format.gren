@@ -153,7 +153,7 @@ showFile { stdout, fsPermission } path =
                                                 Task.fail (PrettyPrintFailure { path = path, error = errString })
 
                                             Ok formatted ->
-                                                Stream.Log.string stdout formatted
+                                                Stream.Log.line stdout formatted
             )
 
 
@@ -186,7 +186,7 @@ jsonFile { stdout, fsPermission } path =
                                             , { key = "context", value = ContextJson.encodeContext payload }
                                             ]
                                 in
-                                Stream.Log.string stdout (Json.encode 2 jsonValue)
+                                Stream.Log.line stdout (Json.encode 2 jsonValue)
             )
 
 
@@ -217,7 +217,7 @@ lptFile { stdout, fsPermission } path =
                                         Task.fail (PrettyPrintFailure { path = path, error = errString })
 
                                     Ok lpt ->
-                                        Stream.Log.string stdout (LPTJson.lptToJson lpt)
+                                        Stream.Log.line stdout (LPTJson.lptToJson lpt)
             )
 
 
