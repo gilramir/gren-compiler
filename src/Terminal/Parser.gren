@@ -63,6 +63,7 @@ type alias DocsFlags =
 
 type alias FormatFlags =
     { rename : Bool
+    , dangerous : Bool
     , show : Maybe Path
     , json : Maybe Path
     , lpt : Maybe Path
@@ -220,8 +221,9 @@ parser =
                     Cli.Parser.noArgs
                 , flags =
                     Cli.Parser.initFlags
-                        (\rename show json lpt check -> { rename = rename, show = show, json = json, lpt = lpt, check = check })
+                        (\rename dangerous show json lpt check -> { rename = rename, dangerous = dangerous, show = show, json = json, lpt = lpt, check = check })
                         |> Cli.Parser.toggle "rename" "Write the formatted output to <filename>.gren.fmt next to each source file, leaving originals untouched"
+                        |> Cli.Parser.toggle "dangerous" "Format all source files in the project, overwriting them in place"
                         |> Cli.Parser.flag "show" Cli.Parser.pathParser "Parse and pretty-print a single file to stdout without modifying it"
                         |> Cli.Parser.flag "json" Cli.Parser.pathParser "Parse a single file and print its AST as JSON to stdout"
                         |> Cli.Parser.flag "lpt" Cli.Parser.pathParser "Parse a single file and print its Logical Printing Tree as JSON to stdout"
