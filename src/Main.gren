@@ -892,7 +892,7 @@ parseUserArgs model compilerPath =
                                                         |> Task.perform RunCmd
 
                                                 Nothing ->
-                                                    if not flags.dangerous then
+                                                    if not flags.dangerous && not flags.rename then
                                                         Stream.Log.line model.stdout "The default action is disabled. Use --dangerous to actually overwrite your files. Or --help for other options."
                                                             |> Task.map (\_ -> Cmd.none)
                                                             |> Task.onError (\_ -> Task.succeed Cmd.none)
