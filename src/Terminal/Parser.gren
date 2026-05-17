@@ -68,6 +68,7 @@ type alias FormatFlags =
     , json : Maybe Path
     , lpt : Maybe Path
     , check : Maybe Path
+    , pex : Maybe Path
     }
 
 
@@ -221,13 +222,14 @@ parser =
                     Cli.Parser.noArgs
                 , flags =
                     Cli.Parser.initFlags
-                        (\rename dangerous show json lpt check -> { rename = rename, dangerous = dangerous, show = show, json = json, lpt = lpt, check = check })
+                        (\rename dangerous show json lpt check pex -> { rename = rename, dangerous = dangerous, show = show, json = json, lpt = lpt, check = check, pex = pex })
                         |> Cli.Parser.toggle "rename" "Write the formatted output to <filename>.gren.fmt next to each source file, leaving originals untouched"
                         |> Cli.Parser.toggle "dangerous" "Format all source files in the project, overwriting them in place"
                         |> Cli.Parser.flag "show" Cli.Parser.pathParser "Parse and pretty-print a single file to stdout without modifying it"
                         |> Cli.Parser.flag "json" Cli.Parser.pathParser "Parse a single file and print its AST as JSON to stdout"
                         |> Cli.Parser.flag "lpt" Cli.Parser.pathParser "Parse a single file and print its Logical Printing Tree as JSON to stdout"
                         |> Cli.Parser.flag "check" Cli.Parser.pathParser "Parse and format a file, then compare original and formatted ASTs; prints Success or Failure"
+                        |> Cli.Parser.flag "pex" Cli.Parser.pathParser "Parse and format a single file, then print the PrettyExpressive Doc as JSON to stdout"
                 , commonDescription = Nothing
                 , summary =
                     "Format Gren source code."
