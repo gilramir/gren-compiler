@@ -13,7 +13,7 @@
             "gren-lang/compiler-common": "local:../compiler-common"
         },
         "indirect": {
-            "gilramir/gren-pretty-expressive": "2.0.0",
+            "gilramir/gren-pretty-expressive": "2.0.1",
             "gren-lang/url": "6.0.0"
         }
     }
