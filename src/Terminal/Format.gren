@@ -18,7 +18,7 @@ import Task exposing (Task)
 import Bytes exposing (Bytes)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
-import Formatter.AstCompare as AstCompare
+import Compiler.Ast.Compare as AstCompare
 import Formatter.MakeLogical exposing (makeLogicalPrintingTree)
 import Formatter.MakePretty exposing (makePrettyResult)
 import Formatter.LPTJson as LPTJson
