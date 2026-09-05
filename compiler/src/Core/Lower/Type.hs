@@ -1,0 +1,98 @@
+{-# OPTIONS_GHC -Wall #-}
+
+-- | Lower canonical types and datatype declarations to Core.
+--
+-- The type half of the lowering, separated from the expression half because it
+-- is where three of C2's decisions actually bite, and because it is testable on
+-- its own — which the expression half is not until a whole module can be built.
+--
+-- The three:
+--
+--   * __Functions are n-ary__ (C3). @a -> b -> c@ becomes @TFun [a, b] c@,
+--     collapsed maximally. Nothing is lost: Gren's arrow is right-associative
+--     with no way to write a distinction between @a -> (b -> c)@ and
+--     @a -> b -> c@, so the collapsed form is canonical and two types that are
+--     equal are equal on the nose.
+--   * __Aliases do not survive__. C2's `Type` has no alias node, so every
+--     alias is expanded here. A backend never has to chase one, and structural
+--     record types compare without first deciding how deeply to dealias.
+--   * __Record fields are alphabetical__ (C2), which is what makes those
+--     comparisons canonical and what @classes.md@ §2.2's derived `Ord` agrees
+--     with. Canonical stores a source-order index alongside each field; it is
+--     dropped, because two modules that write the same record type in a
+--     different field order have the same type and must lower to the same Core.
+module Core.Lower.Type
+  ( lowerType,
+    lowerAnnotation,
+    lowerUnion,
+  )
+where
+
+import AST.Canonical qualified as Can
+import AST.Utils.Type qualified as Type
+import Core.AST qualified as Core
+import Data.Index qualified as Index
+import Data.Map qualified as Map
+import Data.Name (Name)
+import Gren.ModuleName qualified as ModuleName
+
+lowerType :: Can.Type -> Core.Type
+lowerType tipe =
+  case tipe of
+    Can.TVar name ->
+      Core.TVar name
+    Can.TType home name args ->
+      Core.TCon (Core.QualName home name) (map lowerType args)
+    Can.TLambda arg result ->
+      case lowerType result of
+        -- Maximal collapse: a function whose result is itself a function has
+        -- one argument list, not two. See C3.
+        Core.TFun moreArgs finalResult ->
+          Core.TFun (lowerType arg : moreArgs) finalResult
+        loweredResult ->
+          Core.TFun [lowerType arg] loweredResult
+    Can.TRecord fields ext ->
+      -- `Map.toAscList` is the alphabetical order C2 asks for, and the
+      -- `Word16` source-order index Canonical carries is deliberately dropped.
+      Core.TRecord
+        [(name, lowerType fieldType) | (name, Can.FieldType _ fieldType) <- Map.toAscList fields]
+        ext
+    Can.TAlias _ _ args aliasType ->
+      lowerType (Type.dealias args aliasType)
+
+-- | A top-level definition's generalized type.
+--
+-- The constraint list is empty and stays empty until M1b: D10's constraints do
+-- not exist in the language yet, and Gren's @number@, @comparable@ and
+-- @appendable@ arrive here as ordinary type variables whose names happen to
+-- be special. Turning those into `Core.CClass` is M1b's `SuperType` work, not
+-- something to guess at now.
+lowerAnnotation :: Can.Annotation -> Core.Type
+lowerAnnotation (Can.Forall freeVars tipe) =
+  case Map.keys freeVars of
+    [] -> lowerType tipe
+    vars -> Core.TForall vars [] (lowerType tipe)
+
+-- | A custom type declaration.
+--
+-- Everything is `Core.Transparent` and every class set is empty at M1a.
+-- Abstract types and published class sets are @classes.md@ §2.5, which lands
+-- with the classes themselves at M1b; recording a guess here would be a
+-- fabricated answer in a field a backend reads for layout.
+lowerUnion :: ModuleName.Canonical -> Name -> Can.Union -> Core.DataDecl
+lowerUnion home name (Can.Union vars ctors _ _) =
+  Core.DataDecl
+    { Core._dataName = Core.QualName home name,
+      Core._dataParams = vars,
+      Core._dataTransparency = Core.Transparent,
+      Core._dataCtors = map (lowerCtor home) ctors,
+      Core._dataClasses = []
+    }
+
+lowerCtor :: ModuleName.Canonical -> Can.Ctor -> Core.Ctor
+lowerCtor home (Can.Ctor name index _ argTypes) =
+  Core.Ctor
+    { Core._ctorName = Core.QualName home name,
+      Core._ctorTag = Index.toMachine index,
+      Core._ctorFields = map lowerType argTypes
+    }

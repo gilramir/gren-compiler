@@ -115,6 +115,7 @@ Library common
         Canonicalize.Type
         Compile
         Core.AST
+        Core.Lower.Type
         Core.Prim
         Core.Pretty
         Generate.Html
@@ -253,6 +254,7 @@ Test-Suite gren-tests
 
         -- tests
         Canonicalize.NodeIdSpec
+        Core.LowerTypeSpec
         Core.PrimSpec
         Generate.VLQSpec
         Nitpick.PatternMatchesSpec
