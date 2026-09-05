@@ -337,9 +337,10 @@ pattern env tipe (A.At region p) =
           -- Alphabetical, like every other field list in Core (C2). Canonical
           -- keeps them in source order.
           Core.PRecord $
-            List.sortOn fst
+            List.sortOn
+              fst
               [ (name, pattern env (fieldType tipe name) sub)
-                | A.At _ (Can.PRFieldPattern name sub) <- fields
+              | A.At _ (Can.PRFieldPattern name sub) <- fields
               ]
         Can.PArray entries ->
           -- No tail binder: Canonical has no array pattern that binds one.
@@ -354,11 +355,46 @@ pattern env tipe (A.At region p) =
           Core.PLit (Literal.str s)
         Can.PInt n ->
           Core.PLit (Literal.int n)
-        Can.PCtor home _ _ name index args ->
-          Core.PCtor
-            (Core.QualName home name)
-            (Index.toMachine index)
-            [pattern env (lowerType argType) arg | Can.PatternCtorArg _ argType arg <- args]
+        Can.PCtor home _ union name index args ->
+          -- The type Canonical caches on a constructor argument is the one the
+          -- constructor was *declared* with, so `Just`'s argument is `a` and
+          -- not the `Int` this pattern is matching. The pattern's own type
+          -- carries the arguments the datatype was applied to, so instantiating
+          -- is a substitution of the union's parameters.
+          let instantiate = substitution (Can._u_vars union) tipe
+           in Core.PCtor
+                (Core.QualName home name)
+                (Index.toMachine index)
+                [ pattern env (instantiate (lowerType argType)) arg
+                | Can.PatternCtorArg _ argType arg <- args
+                ]
+
+-- | Instantiate a datatype's parameters from the type a pattern is matching.
+substitution :: [Name] -> Core.Type -> (Core.Type -> Core.Type)
+substitution params tipe =
+  case tipe of
+    Core.TCon _ args
+      | length args == length params ->
+          substitute (Map.fromList (zip params args))
+    _ ->
+      error ("Core.Lower.Expression: a constructor pattern on " ++ show tipe)
+
+substitute :: Map.Map Name Core.Type -> Core.Type -> Core.Type
+substitute bindings tipe =
+  case tipe of
+    Core.TVar name ->
+      Map.findWithDefault tipe name bindings
+    Core.TCon name args ->
+      Core.TCon name (map (substitute bindings) args)
+    Core.TFun args result ->
+      Core.TFun (map (substitute bindings) args) (substitute bindings result)
+    Core.TRecord fields ext ->
+      Core.TRecord [(name, substitute bindings t) | (name, t) <- fields] ext
+    Core.TForall vars constraints body ->
+      -- Not produced by this pass, but a substitution that ignored shadowing
+      -- would be a trap for whoever adds one.
+      let inner = foldr Map.delete bindings vars
+       in Core.TForall vars constraints (substitute inner body)
 
 fieldType :: Core.Type -> Name -> Core.Type
 fieldType tipe name =

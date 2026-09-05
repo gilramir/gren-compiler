@@ -120,8 +120,16 @@ type Text = Utf8.Utf8 CORE_TEXT
 newtype FileId = FileId Int
   deriving (Eq, Ord, Show)
 
--- | The interned file table a module's spans index into.
-type FileTable = Map.Map FileId FilePath
+-- | The interned table a module's spans index into.
+--
+-- C2 writes this as @FileId -> FilePath@, and it is a module name instead. A
+-- path is where a machine happened to keep the source — absolute on one
+-- machine, package-relative on another, different again from a tarball — and
+-- C10's gate is that two frontends produce byte-identical Core, which a path
+-- cannot survive. A canonical module name is stable, identifies the source
+-- exactly as precisely, and resolving one to a path for an error message is
+-- the build system's job. See "Core.Lower.Module".
+type FileTable = Map.Map FileId ModuleName.Canonical
 
 -- | Where a node came from. C5: __every__ node carries one, not only the ones
 -- that can fail, because spans feed error messages, D12's constraint

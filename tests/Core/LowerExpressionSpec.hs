@@ -139,12 +139,27 @@ spec = do
         other ->
           expectationFailure ("unexpected shape: " ++ show other)
 
-    it "gives a constructor pattern's binder the argument's cached type" $
+    it "instantiates a constructor pattern's cached argument type" $
+      -- The type Canonical caches on a constructor argument is the declared
+      -- one, so `Just`'s is `a` and not the `Int` being matched. Getting this
+      -- wrong is not a wrong type on a binder nobody reads — it is an `error`
+      -- the moment the argument is itself a record or array pattern, which is
+      -- how it was found.
       let p =
-            Can.PCtor home "Maybe" maybeUnion "Just" Index.second [Can.PatternCtorArg Index.first intT (A.At here' (Can.PVar "n"))]
+            Can.PCtor home "Maybe" maybeUnion "Just" Index.second [Can.PatternCtorArg Index.first (Can.TVar "a") (A.At here' (Can.PVar "n"))]
        in case Lower.pattern (env []) (core (Can.TType home "Maybe" [intT])) (A.At here' p) of
             Core.PCtor name 1 [Core.PVar (Core.Binder "n" tipe _)] -> do
               name `shouldBe` qual "Just"
+              tipe `shouldBe` core intT
+            other ->
+              expectationFailure ("unexpected shape: " ++ show other)
+
+    it "instantiates through a nested pattern" $
+      let inner = Can.PRecord [recordField "a" (Can.PVar "x")]
+          p =
+            Can.PCtor home "Maybe" maybeUnion "Just" Index.second [Can.PatternCtorArg Index.first (Can.TVar "a") (A.At here' inner)]
+       in case Lower.pattern (env []) (core (Can.TType home "Maybe" [recordAB])) (A.At here' p) of
+            Core.PCtor _ 1 [Core.PRecord [("a", Core.PVar (Core.Binder "x" tipe _))]] ->
               tipe `shouldBe` core intT
             other ->
               expectationFailure ("unexpected shape: " ++ show other)

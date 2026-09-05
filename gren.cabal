@@ -117,6 +117,7 @@ Library common
         Core.AST
         Core.Lower.Expression
         Core.Lower.Literal
+        Core.Lower.Module
         Core.Lower.Type
         Core.Prim
         Core.Pretty

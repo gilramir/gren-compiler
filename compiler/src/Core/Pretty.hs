@@ -65,8 +65,8 @@ moduleToBuilder opts m =
 recNames :: Module -> [QualName]
 recNames = concat . _moduleDefsRec
 
-fileEntry :: (FileId, FilePath) -> B.Builder
-fileEntry (FileId i, path) = B.intDec i <> " " <> B.stringUtf8 path
+fileEntry :: (FileId, ModuleName.Canonical) -> B.Builder
+fileEntry (FileId i, home) = B.intDec i <> " " <> canonical home
 
 section :: B.Builder -> [B.Builder] -> B.Builder
 section _ [] = ""

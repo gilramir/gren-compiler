@@ -9,6 +9,11 @@ import AST.Optimized qualified as Opt
 import AST.Source qualified as Src
 import Canonicalize.Module qualified as Canonicalize
 import Canonicalize.NodeId qualified as NodeId
+import Core.AST qualified as Core
+import Core.Lower.Module qualified as Lower
+import Core.Pretty qualified as Pretty
+import Data.ByteString.Builder qualified as B
+import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Gren.Interface qualified as I
@@ -20,7 +25,9 @@ import Optimize.Module qualified as Optimize
 import Reporting.Error qualified as E
 import Reporting.Render.Type.Localizer qualified as Localizer
 import Reporting.Result qualified as R
+import System.Directory qualified as Dir
 import System.Environment qualified as Env
+import System.FilePath ((<.>), (</>))
 import System.IO.Unsafe (unsafePerformIO)
 import Type.Constrain.Module qualified as Type
 import Type.Solve qualified as Type
@@ -35,6 +42,10 @@ data Artifacts = Artifacts
     -- (`docs/m1a-node-types.md`); nothing before Core needed it, so nothing
     -- before Core computed it.
     _nodeTypes :: Map.Map Can.NodeId Can.Type,
+    -- | The module's Core (@docs/core.md@). Lazy, and nothing forces it yet:
+    -- the JS backend still reads `AST.Optimized`, and re-targeting it onto
+    -- Core is the rest of M1a. `GENG_DUMP_CORE` is what forces it today.
+    _core :: Core.Module,
     _graph :: Opt.LocalGraph
   }
 
@@ -49,7 +60,9 @@ compile platform pkg ifaces modul =
     () <- checkNodeTypes canonical nodeTypes
     () <- nitpick canonical
     objects <- optimize platform modul annotations canonical
-    return (Artifacts canonical annotations nodeTypes objects)
+    let core = Lower.lower nodeTypes canonical
+    () <- dumpCore canonical core
+    return (Artifacts canonical annotations nodeTypes core objects)
 
 -- PHASES
 
@@ -137,6 +150,46 @@ nodeTypeCheckEnabled :: Bool
 nodeTypeCheckEnabled =
   unsafePerformIO (maybe False (/= "") <$> Env.lookupEnv "GENG_CHECK_NODE_TYPES")
 {-# NOINLINE nodeTypeCheckEnabled #-}
+
+-- | Write every module's Core to a directory, if @GENG_DUMP_CORE@ names one.
+--
+-- The only thing that forces the lowering today, so it is also the test that
+-- the lowering survives real code: nothing consumes Core until the JS backend
+-- is re-targeted onto it, and an unforced thunk proves nothing. A module that
+-- still declares ports or an effect manager says so in the dump, because Core
+-- does not carry those yet (`Core.Lower.Module`) and a quietly shorter list of
+-- definitions is the wrong way to find that out.
+dumpCore :: Can.Module -> Core.Module -> Either E.Error ()
+dumpCore canonical core =
+  case coreDumpDir of
+    Nothing ->
+      Right ()
+    Just dir ->
+      unsafePerformIO $
+        do
+          let ModuleName.Canonical pkg raw = Can._name canonical
+          -- One flat directory, one file per module, named so that two
+          -- packages with the same module name do not collide. A package name
+          -- has a slash in it.
+          let package = map (\c -> if c == '/' then '-' else c) (Pkg.toChars pkg)
+          let path = dir </> package ++ "." ++ ModuleName.toChars raw <.> "core"
+          Dir.createDirectoryIfMissing True dir
+          B.writeFile path $
+            mconcat
+              [ Pretty.moduleToBuilder Pretty.defaultOptions core,
+                case Lower.unloweredEffects canonical of
+                  [] -> mempty
+                  names ->
+                    B.stringUtf8 ("\n-- not lowered: " ++ List.intercalate ", " (map Name.toChars names) ++ "\n")
+              ]
+          return (Right ())
+
+coreDumpDir :: Maybe FilePath
+coreDumpDir =
+  unsafePerformIO (fmap nonEmpty <$> Env.lookupEnv "GENG_DUMP_CORE")
+  where
+    nonEmpty dir = if null dir then "." else dir
+{-# NOINLINE coreDumpDir #-}
 
 nitpick :: Can.Module -> Either E.Error ()
 nitpick canonical =
