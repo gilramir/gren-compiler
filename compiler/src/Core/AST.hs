@@ -1,0 +1,372 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wall #-}
+
+-- | The Core IR: the compiler's waist.
+--
+-- @docs/core.md@ §C2 is the specification and this module is meant to be read
+-- beside it. Core is a typed, explicit-datatype IR lowered from 'AST.Canonical'
+-- plus the solved type annotations — GHC Core / OCaml Lambda shaped, not STG
+-- shaped. Every binder and every node carries a type and a source span, and
+-- datatype declarations and patterns are preserved.
+--
+-- @
+-- source ─▶ parse ─▶ canonicalize ─▶ typecheck ─▶ CORE ─▶ passes ─▶ CORE' ─▶ backends
+--                                                  ▲                   ▲
+--                                     golden test compares this    backends read this
+-- @
+--
+-- Three properties this module exists to hold, each of which a backend depends
+-- on:
+--
+--   * __Arity is explicit__ (C3). Lambdas and applications are n-ary, because
+--     every backend has fixed-arity functions. Partial application is an
+--     'ELam' in Core rather than something a backend has to infer.
+--   * __Patterns are preserved__ (C4). Decision trees are an optional
+--     Core→Core pass whose output is still Core, so the BEAM backend — which
+--     has real multi-clause dispatch — can skip it and lose nothing.
+--   * __Type and witness abstraction are separate nodes__ (C2). Specialization
+--     erases exactly 'ETyLam', 'ETyApp', 'EWitLam' and 'EWitApp' and nothing
+--     else, so "has this module been specialized?" is a syntactic question.
+module Core.AST
+  ( -- * Modules
+    Module (..),
+    DataDecl (..),
+    Ctor (..),
+    Transparency (..),
+    ClassDecl (..),
+    Openness (..),
+    InstanceDecl (..),
+    Origin (..),
+
+    -- * Names
+    QualName (..),
+    Field,
+
+    -- * Types
+    Type (..),
+    Constraint (..),
+
+    -- * Expressions
+    Expr (..),
+    Expr_ (..),
+    Binder (..),
+    Bind (..),
+    Alt (..),
+    Pattern (..),
+    Literal (..),
+    CrashKind (..),
+
+    -- * Spans
+    Span (..),
+    FileId (..),
+    FileTable,
+
+    -- * Helpers
+    typeOf,
+    spanOf,
+    isSpecialized,
+  )
+where
+
+import Core.Prim (PrimOp)
+import Data.Int (Int32, Int64)
+import Data.Map qualified as Map
+import Data.Name (Name)
+import Data.Word (Word32, Word64)
+import Gren.ModuleName qualified as ModuleName
+import Gren.String qualified as ES
+
+-- NAMES
+
+-- | A name that has a home. Core has no unqualified globals: 'EVar' is always
+-- a local binder and 'EGlobal' always carries the module it came from.
+data QualName = QualName
+  { _qnHome :: !ModuleName.Canonical,
+    _qnName :: !Name
+  }
+  deriving (Eq, Ord, Show)
+
+-- | A record field name. Fields are stored __alphabetically__ everywhere they
+-- appear — in 'TRecord', 'ERecord', 'EUpdate' and 'PRecord' — which is what
+-- makes structural record types compare canonically, and what @classes.md@
+-- §2.2's derived 'Ord' agrees with.
+type Field = Name
+
+-- SPANS
+
+-- | An index into a module's 'FileTable'.
+--
+-- A span names a file rather than assuming the enclosing module's, because a
+-- Core→Core pass may inline an expression across a module boundary and the
+-- span has to survive it. In the wire format this is a varint (C5).
+newtype FileId = FileId Int
+  deriving (Eq, Ord, Show)
+
+-- | The interned file table a module's spans index into.
+type FileTable = Map.Map FileId FilePath
+
+-- | Where a node came from. C5: __every__ node carries one, not only the ones
+-- that can fail, because spans feed error messages, D12's constraint
+-- provenance, @Debug.todo@, D19's stack-exhaustion report and future debug
+-- info. Three varints per node is the whole cost.
+data Span = Span
+  { _spanFile :: !FileId,
+    _spanStartRow :: !Word32,
+    _spanStartCol :: !Word32,
+    _spanEndRow :: !Word32,
+    _spanEndCol :: !Word32
+  }
+  deriving (Eq, Ord, Show)
+
+-- TYPES
+
+data Type
+  = TVar !Name
+  | -- | @Int@, @Array a@, @Dict k v@, @MyType a b@
+    TCon !QualName ![Type]
+  | -- | n-ary, per C3: the argument list is the function's real arity, not a
+    -- chain of one-argument arrows to be recovered by analysis.
+    TFun ![Type] !Type
+  | -- | Closed (@Nothing@) or open with a row variable (@Just r@):
+    -- @{ x : Int }@ is @TRecord [("x", Int)] Nothing@ and @{ r | x : Int }@ is
+    -- @TRecord [("x", Int)] (Just "r")@. Fields alphabetical.
+    TRecord ![(Field, Type)] !(Maybe Name)
+  | -- | Quantification and its constraints, together. D11 keeps constraints
+    -- single-parameter, which is what keeps resolution decidable.
+    TForall ![Name] ![Constraint] !Type
+  deriving (Eq, Ord, Show)
+
+-- | Single-parameter only (D11).
+data Constraint = CClass !QualName !Type
+  deriving (Eq, Ord, Show)
+
+-- DECLARATIONS
+
+-- | A datatype declaration, preserved into Core because backends need layout
+-- and because the class set is a published, semver-relevant property
+-- (@classes.md@ §2.4).
+data DataDecl = DataDecl
+  { _dataName :: !QualName,
+    _dataParams :: ![Name],
+    _dataTransparency :: !Transparency,
+    _dataCtors :: ![Ctor],
+    -- | The published class set.
+    _dataClasses :: ![QualName]
+  }
+  deriving (Eq, Show)
+
+data Ctor = Ctor
+  { _ctorName :: !QualName,
+    _ctorTag :: !Int,
+    _ctorFields :: ![Type]
+  }
+  deriving (Eq, Show)
+
+-- | @classes.md@ §2.5. An abstract type derives nothing implicitly.
+data Transparency
+  = Transparent
+  | Abstract
+  deriving (Eq, Show)
+
+data ClassDecl = ClassDecl
+  { _classNameC :: !QualName,
+    _classParam :: !Name,
+    _classOpenness :: !Openness,
+    _classMethods :: ![(Name, Type)]
+  }
+  deriving (Eq, Show)
+
+-- | @Eq@, @Ord@ and @Inspect@ are 'Open'; @Num@, @Integral@, @Fractional@ and
+-- @Bits@ are 'Closed', and their membership is a table lookup with no solver
+-- cost and no superclass entailment (@classes.md@ §1.2).
+data Openness
+  = Open
+  | Closed
+  deriving (Eq, Show)
+
+data InstanceDecl = InstanceDecl
+  { _instClass :: !QualName,
+    _instHead :: !Type,
+    _instOrigin :: !Origin,
+    _instMethods :: ![(Name, Expr)]
+  }
+  deriving (Eq, Show)
+
+data Origin
+  = Derived
+  | Written
+  deriving (Eq, Show)
+
+-- | One compiled module's Core.
+data Module = Module
+  { _moduleName :: !ModuleName.Canonical,
+    -- | The interned table this module's spans index into (C5).
+    _moduleFiles :: !FileTable,
+    _moduleData :: ![DataDecl],
+    _moduleClasses :: ![ClassDecl],
+    _moduleInstances :: ![InstanceDecl],
+    -- | Top-level bindings, in a deterministic order (C6). Mutual recursion
+    -- among them is expressed by the group being a single 'ELetRec'-shaped
+    -- unit; see '_moduleDefsRec'.
+    _moduleDefs :: ![Bind],
+    -- | The names of top-level bindings that are part of a recursive group,
+    -- so a backend that needs to emit them together can.
+    _moduleDefsRec :: ![[QualName]],
+    _moduleExports :: ![QualName]
+  }
+  deriving (Eq, Show)
+
+-- EXPRESSIONS
+
+-- | Every node carries its type and its span (C2).
+data Expr = Expr
+  { _exprValue :: !Expr_,
+    _exprType :: !Type,
+    _exprSpan :: !Span
+  }
+  deriving (Eq, Show)
+
+data Expr_
+  = -- | A local binder.
+    EVar !Name
+  | -- | Top-level or imported.
+    EGlobal !QualName
+  | ELit !Literal
+  | -- | n-ary (C3).
+    ELam ![Binder] !Expr
+  | -- | n-ary (C3). A known function of arity /n/ applied to /n/ arguments is
+    -- one 'EApp' and compiles to a direct @f\/N@ call; a partial application is
+    -- an 'ELam' closing over the supplied arguments, so it is visible in Core
+    -- rather than inferred by a backend.
+    EApp !Expr ![Expr]
+  | ELet ![Bind] !Expr
+  | ELetRec ![Bind] !Expr
+  | -- | Patterns are preserved (C4). The fallback is the incomplete-match
+    -- crash, present only where the frontend could not prove exhaustiveness of
+    -- a literal or array pattern set.
+    ECase !Expr ![Alt] !(Maybe Expr)
+  | -- | Saturated; the 'Int' is the constructor tag.
+    ECtor !QualName !Int ![Expr]
+  | -- | Fields alphabetical.
+    ERecord ![(Field, Expr)]
+  | EUpdate !Expr ![(Field, Expr)]
+  | EAccess !Expr !Field
+  | -- | An array literal. Primitive because array literals are surface syntax
+    -- (C7).
+    EArray ![Expr]
+  | -- | Saturated. The set is enumerated in "Core.Prim" (C13).
+    EPrim !PrimOp ![Expr]
+  | -- | Type abstraction.    ⎫
+    ETyLam ![Name] !Expr
+  | -- | Type application.    ⎬ erased by specialization (R1)
+    ETyApp !Expr ![Type]
+  | -- | Witness abstraction. ⎪
+    EWitLam ![Binder] !Expr
+  | -- | Witness application. ⎭
+    EWitApp !Expr ![Expr]
+  | ECrash !CrashKind
+  deriving (Eq, Show)
+
+data Binder = Binder
+  { _binderName :: !Name,
+    _binderType :: !Type,
+    _binderSpan :: !Span
+  }
+  deriving (Eq, Show)
+
+data Bind = Bind
+  { _bindBinder :: !Binder,
+    _bindValue :: !Expr
+  }
+  deriving (Eq, Show)
+
+data Alt = Alt
+  { _altPattern :: !Pattern,
+    _altBody :: !Expr
+  }
+  deriving (Eq, Show)
+
+data Pattern
+  = PVar !Binder
+  | PWild
+  | PLit !Literal
+  | PCtor !QualName !Int ![Pattern]
+  | PRecord ![(Field, Pattern)]
+  | -- | The optional 'Binder' is the tail: @[ a, b, ..rest ]@.
+    PArray ![Pattern] !(Maybe Binder)
+  | PAs !Binder !Pattern
+  deriving (Eq, Show)
+
+data Literal
+  = LInt !Int32
+  | LInt64 !Int64
+  | LUInt32 !Word32
+  | LUInt64 !Word64
+  | LFloat !Double
+  | LFloat32 !Float
+  | -- | A codepoint (C8). @Char@ is a Unicode scalar value, @Int32@-sized, on
+    -- every backend — surrogates are not valid @Char@ values.
+    LChar !Int32
+  | -- | UTF-8 in the wire format.
+    LString !ES.String
+  | -- | __Transitional; removed at M1b.__
+    --
+    -- D2 makes @Int@ 32-bit, but that lands at M1b and M1a's gate is that the
+    -- existing JS test suite passes with the JS backend reading Core. Until
+    -- then @Int@ is a JS double, exact to 2^53, and real programs hold literals
+    -- past 'Int32' — every millisecond timestamp since 1970, for one. Those
+    -- cannot be an 'LInt' without changing the program.
+    --
+    -- So the pre-D2 @Int@ gets its own constructor rather than being quietly
+    -- widened into one of the specified ones. Deleting it is then a visible
+    -- event with a compiler error at every site, which is what M1b wants; a
+    -- widened 'LInt64' would have compiled silently and left D2 half-applied.
+    LIntLegacy !Integer
+  deriving (Eq, Ord, Show)
+
+data CrashKind
+  = Todo !ES.String
+  | IncompleteMatch
+  | StackExhausted
+  | Unreachable
+  deriving (Eq, Ord, Show)
+
+-- HELPERS
+
+typeOf :: Expr -> Type
+typeOf = _exprType
+
+spanOf :: Expr -> Span
+spanOf = _exprSpan
+
+-- | Whether an expression is free of the four nodes specialization erases.
+--
+-- After specialization a well-formed Core module contains no 'ETyLam',
+-- 'ETyApp', 'EWitLam' or 'EWitApp', so this is the check a backend can make
+-- before assuming monomorphic code — and it is a syntactic check precisely
+-- because C2 kept those four as their own nodes.
+isSpecialized :: Expr -> Bool
+isSpecialized (Expr e _ _) =
+  case e of
+    ETyLam _ _ -> False
+    ETyApp _ _ -> False
+    EWitLam _ _ -> False
+    EWitApp _ _ -> False
+    EVar _ -> True
+    EGlobal _ -> True
+    ELit _ -> True
+    ECrash _ -> True
+    ELam _ body -> isSpecialized body
+    EApp fn args -> all isSpecialized (fn : args)
+    ELet binds body -> all (isSpecialized . _bindValue) binds && isSpecialized body
+    ELetRec binds body -> all (isSpecialized . _bindValue) binds && isSpecialized body
+    ECase scrut alts fallback ->
+      isSpecialized scrut
+        && all (isSpecialized . _altBody) alts
+        && all isSpecialized fallback
+    ECtor _ _ args -> all isSpecialized args
+    ERecord fields -> all (isSpecialized . snd) fields
+    EUpdate base fields -> isSpecialized base && all (isSpecialized . snd) fields
+    EAccess base _ -> isSpecialized base
+    EArray elems -> all isSpecialized elems
+    EPrim _ args -> all isSpecialized args

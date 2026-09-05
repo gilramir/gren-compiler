@@ -113,6 +113,9 @@ Library common
         Canonicalize.Pattern
         Canonicalize.Type
         Compile
+        Core.AST
+        Core.Prim
+        Core.Pretty
         Generate.Html
         Generate.Node
         Generate.JavaScript
@@ -247,6 +250,7 @@ Test-Suite gren-tests
         Helpers.Parse
 
         -- tests
+        Core.PrimSpec
         Generate.VLQSpec
         Nitpick.PatternMatchesSpec
         Parse.AliasSpec
