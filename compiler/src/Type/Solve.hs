@@ -3,6 +3,7 @@
 
 module Type.Solve
   ( run,
+    Solved (..),
   )
 where
 
@@ -26,23 +27,37 @@ import Type.UnionFind qualified as UF
 
 -- RUN SOLVER
 
-run :: Constraint -> IO (Either (NE.List Error.Error) (Map.Map Name.Name Can.Annotation))
+run :: Constraint -> IO (Either (NE.List Error.Error) Solved)
 run constraint =
   do
     pools <- MVector.replicate 8 []
 
-    (State env _ errors) <-
+    (State env _ errors nodes) <-
       solve Map.empty outermostRank pools emptyState constraint
 
     case errors of
       [] ->
-        Right <$> traverse Type.toAnnotation env
+        do
+          annotations <- traverse Type.toAnnotation env
+          nodeTypes <- Type.toNodeTypes nodes
+          return (Right (Solved annotations nodeTypes))
       e : es ->
         return $ Left (NE.List e es)
 
+-- | What a successful solve produces.
+--
+-- The annotations are the generalized types of the module's top-level
+-- definitions, which is all anything before Core wanted. The node types are
+-- one entry per expression node, which is what a typed Core needs and what
+-- nothing used to compute (`docs/m1a-node-types.md`).
+data Solved = Solved
+  { _annotations :: Map.Map Name.Name Can.Annotation,
+    _nodeTypes :: Map.Map Can.NodeId Can.Type
+  }
+
 emptyState :: State
 emptyState =
-  State Map.empty (nextMark noMark) []
+  State Map.empty (nextMark noMark) [] Map.empty
 
 -- SOLVER
 
@@ -55,7 +70,11 @@ type Pools =
 data State = State
   { _env :: Env,
     _mark :: Mark,
-    _errors :: [Error.Error]
+    _errors :: [Error.Error],
+    -- | The constraint-level type recorded for each expression node, zonked
+    -- once at the end of the solve rather than as it is recorded — a node's
+    -- type is not final until everything that can unify with it has run.
+    _nodes :: Map.Map Can.NodeId Type
   }
 
 solve :: Env -> Int -> Pools -> State -> Constraint -> IO State
@@ -136,6 +155,10 @@ solve env rank pools state constraint =
                     category
                     actualType
                     (Error.ptypeReplace expectation expectedType)
+    CNode nid tipe ->
+      -- Recording only. Nothing is unified and no variable is allocated, so a
+      -- CNode cannot change what typechecks or what generalizes.
+      return state {_nodes = Map.insert nid tipe (_nodes state)}
     CAnd constraints ->
       foldM (solve env rank pools) state constraints
     CLet [] flexs _ headerCon CTrue ->
@@ -168,7 +191,7 @@ solve env rank pools state constraint =
 
         -- run solver in next pool
         locals <- traverse (A.traverse (typeToVariable nextRank nextPools)) header
-        (State savedEnv mark errors) <-
+        (State savedEnv mark errors nodes) <-
           solve env nextRank nextPools state headerCon
 
         let youngMark = mark
@@ -183,7 +206,7 @@ solve env rank pools state constraint =
         mapM_ isGeneric rigids
 
         let newEnv = Map.union env (Map.map A.toValue locals)
-        let tempState = State savedEnv finalMark errors
+        let tempState = State savedEnv finalMark errors nodes
         newState <- solve newEnv rank nextPools tempState subCon
 
         foldM occurs newState (Map.toList locals)
@@ -232,8 +255,8 @@ patternExpectationToVariable rank pools expectation =
 -- ERROR HELPERS
 
 addError :: State -> Error.Error -> State
-addError (State savedEnv rank errors) err =
-  State savedEnv rank (err : errors)
+addError (State savedEnv rank errors nodes) err =
+  State savedEnv rank (err : errors) nodes
 
 -- OCCURS CHECK
 

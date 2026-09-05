@@ -410,7 +410,7 @@ compile platform pkg mvar status =
             case Compile.compile platform pkg (Map.mapMaybe getInterface results) modul of
               Left _ ->
                 return Nothing
-              Right (Compile.Artifacts canonical annotations objects) ->
+              Right (Compile.Artifacts canonical annotations _nodeTypes objects) ->
                 let ifaces = I.fromModule pkg canonical annotations
                     docs = makeDocs docsStatus canonical
                  in return (Just (RLocal ifaces objects docs))

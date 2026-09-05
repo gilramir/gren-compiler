@@ -23,6 +23,7 @@
 module Canonicalize.NodeId
   ( number,
     numberExpr,
+    allIds,
   )
 where
 
@@ -31,6 +32,52 @@ import Control.Monad.Trans.State.Strict (State, runState, state)
 import Data.Map qualified as Map
 
 type Numbering a = State Int a
+
+-- | Every expression node id in a module, in numbering order.
+--
+-- Used to check that the type checker recorded a type for all of them
+-- (`docs/m1a-node-types.md` §N7). A typed Core cannot be lowered from a
+-- partially typed module, and "mostly typed" is exactly the state that would
+-- pass unnoticed until a backend hit the gap.
+allIds :: Can.Module -> [Can.NodeId]
+allIds modul = declIds (Can._decls modul)
+
+declIds :: Can.Decls -> [Can.NodeId]
+declIds ds =
+  case ds of
+    Can.Declare d rest -> defIds d ++ declIds rest
+    Can.DeclareRec d others rest -> defIds d ++ concatMap defIds others ++ declIds rest
+    Can.SaveTheEnvironment -> []
+
+defIds :: Can.Def -> [Can.NodeId]
+defIds d =
+  case d of
+    Can.Def _ _ body -> exprIds body
+    Can.TypedDef _ _ _ body _ -> exprIds body
+
+exprIds :: Can.Expr -> [Can.NodeId]
+exprIds (Can.Expr nid _ value) = nid : childIds value
+
+childIds :: Can.Expr_ -> [Can.NodeId]
+childIds e =
+  case e of
+    Can.Array items -> concatMap exprIds items
+    Can.Negate inner -> exprIds inner
+    Can.Binop _ _ _ _ left right -> exprIds left ++ exprIds right
+    Can.Lambda _ body -> exprIds body
+    Can.Call func args -> concatMap exprIds (func : args)
+    Can.If branches final ->
+      concatMap (\(c, b) -> exprIds c ++ exprIds b) branches ++ exprIds final
+    Can.Let d body -> defIds d ++ exprIds body
+    Can.LetRec ds body -> concatMap defIds ds ++ exprIds body
+    Can.LetDestruct _ value body -> exprIds value ++ exprIds body
+    Can.Case scrutinee branches ->
+      exprIds scrutinee ++ concatMap (\(Can.CaseBranch _ b) -> exprIds b) branches
+    Can.Access record _ -> exprIds record
+    Can.Update record fields ->
+      exprIds record ++ concatMap (\(Can.FieldUpdate _ v) -> exprIds v) (Map.elems fields)
+    Can.Record fields -> concatMap exprIds (Map.elems fields)
+    _ -> []
 
 fresh :: Numbering Can.NodeId
 fresh = state (\n -> (Can.NodeId (n + 1), n + 1))
@@ -128,10 +175,9 @@ expr_ e =
 -- 'Map' traversal that can affect Core output to say so out loud rather than
 -- inherit it.
 --
--- The key is @A.Located Name@, whose 'Ord' includes the region, so two frontends
--- agree only because they agree on regions too. That holds — both parse the
--- same bytes — but it is why this is a named function rather than an inline
--- 'traverse'.
+-- The key is @A.Located Name@, whose 'Ord' compares the name and ignores the
+-- region, so the order is the field names' — which is what a second frontend
+-- can reproduce without agreeing about source positions.
 traverseOrdered ::
   (a -> Numbering b) ->
   Map.Map k a ->

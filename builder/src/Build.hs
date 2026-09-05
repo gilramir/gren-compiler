@@ -640,7 +640,7 @@ compile :: Env -> DocsNeed -> Details.Local -> B.ByteString -> Map.Map ModuleNam
 compile (Env key root projectType platform _ _ _) docsNeed (Details.Local path deps main) source ifaces modul =
   let pkg = projectTypeToPkg projectType
    in case Compile.compile platform pkg ifaces modul of
-        Right (Compile.Artifacts canonical annotations objects) ->
+        Right (Compile.Artifacts canonical annotations _nodeTypes objects) ->
           case makeDocs docsNeed canonical of
             Left err ->
               return $
@@ -830,7 +830,7 @@ finalizeReplArtifacts env@(Env _ root projectType platform _ _ _) source modul@(
 
       compileInput ifaces =
         case Compile.compile platform pkg ifaces modul of
-          Right (Compile.Artifacts canonical annotations objects) ->
+          Right (Compile.Artifacts canonical annotations _nodeTypes objects) ->
             let h = Can._name canonical
                 m = Fresh (Src.getName modul) (I.fromModule pkg canonical annotations) objects
                 ms = Map.foldrWithKey addInside [] results

@@ -20,6 +20,7 @@ import Optimize.Module qualified as Optimize
 import Reporting.Error qualified as E
 import Reporting.Render.Type.Localizer qualified as Localizer
 import Reporting.Result qualified as R
+import System.Environment qualified as Env
 import System.IO.Unsafe (unsafePerformIO)
 import Type.Constrain.Module qualified as Type
 import Type.Solve qualified as Type
@@ -29,6 +30,11 @@ import Type.Solve qualified as Type
 data Artifacts = Artifacts
   { _modul :: Can.Module,
     _types :: Map.Map Name.Name Can.Annotation,
+    -- | One entry per expression node, keyed by the id `Canonicalize.NodeId`
+    -- assigned. This is what a typed Core is lowered from
+    -- (`docs/m1a-node-types.md`); nothing before Core needed it, so nothing
+    -- before Core computed it.
+    _nodeTypes :: Map.Map Can.NodeId Can.Type,
     _graph :: Opt.LocalGraph
   }
 
@@ -39,10 +45,11 @@ compile platform pkg ifaces modul =
     -- the checker records a type per node id (`docs/m1a-node-types.md`) and
     -- everything downstream of it must see the same ids.
     canonical <- NodeId.number <$> canonicalize pkg ifaces modul
-    annotations <- typeCheck modul canonical
+    Type.Solved annotations nodeTypes <- typeCheck modul canonical
+    () <- checkNodeTypes canonical nodeTypes
     () <- nitpick canonical
     objects <- optimize platform modul annotations canonical
-    return (Artifacts canonical annotations objects)
+    return (Artifacts canonical annotations nodeTypes objects)
 
 -- PHASES
 
@@ -54,13 +61,48 @@ canonicalize pkg ifaces modul =
     Left errors ->
       Left $ E.BadNames errors
 
-typeCheck :: Src.Module -> Can.Module -> Either E.Error (Map.Map Name.Name Can.Annotation)
+typeCheck :: Src.Module -> Can.Module -> Either E.Error Type.Solved
 typeCheck modul canonical =
   case unsafePerformIO (Type.run =<< Type.constrain canonical) of
-    Right annotations ->
-      Right annotations
+    Right solved ->
+      Right solved
     Left errors ->
       Left (E.BadTypes (Localizer.fromModule modul) errors)
+
+-- | Assert that the type checker recorded a type for every expression node.
+--
+-- Off unless @GENG_CHECK_NODE_TYPES@ is set, because it walks the module a
+-- second time and the invariant it checks is structural: `constrain` records
+-- at the one place every node passes through, so a gap means a new expression
+-- form bypassed it, not that a particular program is unusual.
+--
+-- It is a hard failure rather than a warning. A typed Core cannot be lowered
+-- from a partially typed module, and "mostly typed" is exactly the state that
+-- would go unnoticed until a backend hit the gap (`docs/m1a-node-types.md`
+-- §N7).
+checkNodeTypes :: Can.Module -> Map.Map Can.NodeId Can.Type -> Either E.Error ()
+checkNodeTypes canonical nodeTypes
+  | not nodeTypeCheckEnabled = Right ()
+  | otherwise =
+      let ids = NodeId.allIds canonical
+          missing = filter (\nid -> not (Map.member nid nodeTypes)) ids
+       in if null missing
+            then Right ()
+            else
+              error $
+                "GENG_CHECK_NODE_TYPES: "
+                  ++ show (length missing)
+                  ++ " of "
+                  ++ show (length ids)
+                  ++ " expression nodes in "
+                  ++ show (Can._name canonical)
+                  ++ " have no recorded type: "
+                  ++ show (take 10 missing)
+
+nodeTypeCheckEnabled :: Bool
+nodeTypeCheckEnabled =
+  unsafePerformIO (maybe False (/= "") <$> Env.lookupEnv "GENG_CHECK_NODE_TYPES")
+{-# NOINLINE nodeTypeCheckEnabled #-}
 
 nitpick :: Can.Module -> Either E.Error ()
 nitpick canonical =

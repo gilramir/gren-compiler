@@ -29,6 +29,7 @@ module Type.Type
     nameToFlex,
     nameToRigid,
     toAnnotation,
+    toNodeTypes,
     toErrorType,
   )
 where
@@ -56,6 +57,14 @@ data Constraint
   | CLocal A.Region Name.Name (E.Expected Type)
   | CForeign A.Region Name.Name Can.Annotation (E.Expected Type)
   | CPattern A.Region E.PCategory Type (E.PExpected Type)
+  | -- | Record the type of one expression node, for the Core lowering.
+    --
+    -- It carries no obligation: the solver reads it and unifies nothing, so
+    -- adding one cannot change what typechecks. That is deliberate — a
+    -- constraint that recorded by allocating a variable at the current rank
+    -- could change what generalization sees, and this pass has to be
+    -- observationally invisible to inference (`docs/m1a-node-types.md`).
+    CNode Can.NodeId Type
   | CAnd [Constraint]
   | CLet
       { _rigidVars :: [Variable],
@@ -243,6 +252,70 @@ toAnnotation variable =
     (tipe, NameState freeVars _ _ _ _ _) <-
       State.runStateT (variableToCanType variable) (makeNameState userNames)
     return $ Can.Forall freeVars tipe
+
+-- | Zonk a whole map of recorded node types at once.
+--
+-- One shared 'NameState', not one per entry: 'variableToCanType' writes the
+-- name it picks back into the variable, so a variable shared between two nodes
+-- already comes out with the same name — but two *different* variables zonked
+-- against two fresh name states would both be handed "a". Core needs a
+-- lambda's binder type and its body's occurrence of it to agree, so the naming
+-- has to be module-wide.
+toNodeTypes :: Map.Map Can.NodeId Type -> IO (Map.Map Can.NodeId Can.Type)
+toNodeTypes types =
+  do
+    userNames <- foldrM collectTypeVarNames Map.empty (Map.elems types)
+    State.evalStateT (traverse typeToCanType types) (makeNameState userNames)
+
+collectTypeVarNames :: Type -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
+collectTypeVarNames tipe taken =
+  case tipe of
+    PlaceHolder _ -> return taken
+    VarN var -> getVarNames var taken
+    AliasN _ _ args real ->
+      collectTypeVarNames real =<< foldrM collectTypeVarNames taken (map snd args)
+    AppN _ _ args -> foldrM collectTypeVarNames taken args
+    FunN a b -> collectTypeVarNames b =<< collectTypeVarNames a taken
+    EmptyRecordN -> return taken
+    RecordN fields ext ->
+      collectTypeVarNames ext =<< foldrM collectTypeVarNames taken (Map.elems fields)
+
+-- | Convert a constraint-level 'Type' without going through
+-- 'Type.Solve.typeToVariable'.
+--
+-- The round trip through a 'Variable' would allocate into a rank's pool, and
+-- 'CNode' exists on the promise that recording a type cannot perturb
+-- inference. Walking the structure directly keeps that promise: the only
+-- variables touched are the ones the type already refers to.
+typeToCanType :: Type -> StateT NameState IO Can.Type
+typeToCanType tipe =
+  case tipe of
+    PlaceHolder name ->
+      return (Can.TVar name)
+    VarN var ->
+      variableToCanType var
+    AliasN home name args real ->
+      Can.TAlias home name
+        <$> traverse (traverse typeToCanType) args
+        <*> (Can.Filled <$> typeToCanType real)
+    AppN home name args ->
+      Can.TType home name <$> traverse typeToCanType args
+    FunN a b ->
+      Can.TLambda <$> typeToCanType a <*> typeToCanType b
+    EmptyRecordN ->
+      return (Can.TRecord Map.empty Nothing)
+    RecordN fields ext ->
+      do
+        canFields <- traverse (fmap (Can.FieldType 0) . typeToCanType) fields
+        canExt <- Type.iteratedDealias <$> typeToCanType ext
+        return $
+          case canExt of
+            Can.TRecord subFields subExt ->
+              Can.TRecord (Map.union subFields canFields) subExt
+            Can.TVar name ->
+              Can.TRecord canFields (Just name)
+            _ ->
+              error "Used toNodeTypes on a record type that is not well-formed"
 
 variableToCanType :: Variable -> StateT NameState IO Can.Type
 variableToCanType variable =

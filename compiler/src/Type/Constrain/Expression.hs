@@ -32,7 +32,31 @@ type RTV =
   Map.Map Name.Name Type
 
 constrain :: RTV -> Can.Expr -> Expected Type -> IO Constraint
-constrain rtv (Can.Expr _ region expression) expected =
+constrain rtv (Can.Expr nid region expression) expected =
+  recordNodeType nid expected <$> constrainHelp rtv region expression expected
+
+-- | Attach the node's type to the constraint it generates.
+--
+-- The expected type is the node's type: `constrain` is given what the node is
+-- being checked against and generates constraints forcing the two to be equal,
+-- so once the solver is done they are the same type. Recording it here rather
+-- than in each of the twenty-odd cases below means a new expression form
+-- cannot be added without its type being recorded, which is the property that
+-- lets the Core lowering demand a type for every node instead of tolerating a
+-- `Maybe`.
+recordNodeType :: Can.NodeId -> Expected Type -> Constraint -> Constraint
+recordNodeType nid expected constraint =
+  CAnd [CNode nid (expectedType expected), constraint]
+
+expectedType :: Expected Type -> Type
+expectedType expected =
+  case expected of
+    NoExpectation tipe -> tipe
+    FromContext _ _ tipe -> tipe
+    FromAnnotation _ _ _ tipe -> tipe
+
+constrainHelp :: RTV -> A.Region -> Can.Expr_ -> Expected Type -> IO Constraint
+constrainHelp rtv region expression expected =
   case expression of
     Can.VarLocal name ->
       return (CLocal region name expected)
