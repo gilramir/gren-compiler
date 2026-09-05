@@ -41,6 +41,7 @@ module Core.AST
     -- * Names
     QualName (..),
     Field,
+    Text,
 
     -- * Types
     Type (..),
@@ -72,9 +73,9 @@ import Core.Prim (PrimOp)
 import Data.Int (Int32, Int64)
 import Data.Map qualified as Map
 import Data.Name (Name)
+import Data.Utf8 qualified as Utf8
 import Data.Word (Word32, Word64)
 import Gren.ModuleName qualified as ModuleName
-import Gren.String qualified as ES
 
 -- NAMES
 
@@ -91,6 +92,23 @@ data QualName = QualName
 -- makes structural record types compare canonically, and what @classes.md@
 -- §2.2's derived 'Ord' agrees with.
 type Field = Name
+
+-- | Text: the characters themselves, UTF-8 encoded.
+--
+-- Deliberately __not__ 'Gren.String', which is not text. That type holds
+-- JavaScript string-literal /source/ — escapes left as the backslash-u
+-- sequences they were written as, because the JS backend pastes them straight
+-- into its output — so @\"A\"@ and @\"\\u{41}\"@ are two different values
+-- standing for one string. C10's byte-identical Core cannot rest on a
+-- representation where that is true, and neither can a second frontend, which
+-- would have no reason to invent the same escaping.
+--
+-- "Core.Lower.Literal" is the decoder. The phantom type is the point of
+-- declaring this at all: it makes putting the undecoded form here a type
+-- error rather than a thing to remember.
+data CORE_TEXT
+
+type Text = Utf8.Utf8 CORE_TEXT
 
 -- SPANS
 
@@ -308,7 +326,7 @@ data Literal
     -- every backend — surrogates are not valid @Char@ values.
     LChar !Int32
   | -- | UTF-8 in the wire format.
-    LString !ES.String
+    LString !Text
   | -- | __Transitional; removed at M1b.__
     --
     -- D2 makes @Int@ 32-bit, but that lands at M1b and M1a's gate is that the
@@ -325,7 +343,7 @@ data Literal
   deriving (Eq, Ord, Show)
 
 data CrashKind
-  = Todo !ES.String
+  = Todo !Text
   | IncompleteMatch
   | StackExhausted
   | Unreachable

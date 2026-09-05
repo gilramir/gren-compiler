@@ -115,6 +115,8 @@ Library common
         Canonicalize.Type
         Compile
         Core.AST
+        Core.Lower.Expression
+        Core.Lower.Literal
         Core.Lower.Type
         Core.Prim
         Core.Pretty
@@ -254,6 +256,7 @@ Test-Suite gren-tests
 
         -- tests
         Canonicalize.NodeIdSpec
+        Core.LowerExpressionSpec
         Core.LowerTypeSpec
         Core.PrimSpec
         Generate.VLQSpec

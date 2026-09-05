@@ -31,8 +31,8 @@ import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
+import Data.Utf8 qualified as Utf8
 import Gren.ModuleName qualified as ModuleName
-import Gren.String qualified as ES
 
 data Options = Options
   { -- | Annotate each expression with its type. Off by default: every node
@@ -335,13 +335,13 @@ literal l =
     LFloat d -> B.doubleDec d <> "f64"
     LFloat32 f -> B.floatDec f <> "f32"
     LChar c -> "char#" <> B.int32Dec c
-    LString s -> "\"" <> B.stringUtf8 (ES.toChars s) <> "\""
+    LString s -> "\"" <> B.stringUtf8 (Utf8.toChars s) <> "\""
     LIntLegacy n -> B.stringUtf8 (show n) <> "int"
 
 crash :: CrashKind -> B.Builder
 crash k =
   case k of
-    Todo msg -> "crash todo \"" <> B.stringUtf8 (ES.toChars msg) <> "\""
+    Todo msg -> "crash todo \"" <> B.stringUtf8 (Utf8.toChars msg) <> "\""
     IncompleteMatch -> "crash incomplete-match"
     StackExhausted -> "crash stack-exhausted"
     Unreachable -> "crash unreachable"
