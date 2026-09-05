@@ -75,7 +75,11 @@ chunkToWidth chunk =
   case chunk of
     Slice _ len -> len
     Escape _ -> 2
-    CodePoint c -> if c < 0xFFFF then 6 else 12
+    -- The surrogate-pair path is for astral code points, which begin at
+    -- U+10000. `0xFFFF` here would send the last code point of the BMP down it
+    -- as well, and the pair arithmetic on a negative number produces two
+    -- unrelated characters. See docs/upstream/ in the geng-lang repository.
+    CodePoint c -> if c < 0x10000 then 6 else 12
 
 writeChunks :: MBA RealWorld -> Int -> [Chunk] -> ST RealWorld ()
 writeChunks mba offset chunks =
@@ -96,7 +100,7 @@ writeChunks mba offset chunks =
             let !newOffset = offset + 2
             writeChunks mba newOffset chunks
         CodePoint code ->
-          if code < 0xFFFF
+          if code < 0x10000
             then do
               writeCode mba offset code
               let !newOffset = offset + 6
