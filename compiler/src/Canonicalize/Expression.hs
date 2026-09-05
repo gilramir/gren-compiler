@@ -47,7 +47,7 @@ data Uses = Uses
 
 canonicalize :: Env.Env -> Src.Expr -> Result FreeLocals [W.Warning] Can.Expr
 canonicalize env (A.At region expression) =
-  A.At region
+  Can.at region
     <$> case expression of
       Src.Str string _ ->
         Result.ok (Can.Str string)
@@ -74,7 +74,7 @@ canonicalize env (A.At region expression) =
       Src.Negate expr ->
         Can.Negate <$> canonicalize env expr
       Src.Binops ops final ->
-        A.toValue <$> canonicalizeBinops region env ops final
+        Can.exprValue <$> canonicalizeBinops region env ops final
       Src.Lambda srcArgs body _ ->
         delayedUsage $
           do
@@ -98,7 +98,7 @@ canonicalize env (A.At region expression) =
           <$> traverse (canonicalizeIfBranch env) branches
           <*> canonicalize env finally
       Src.Let defs expr _ ->
-        A.toValue <$> canonicalizeLet region env (fmap snd defs) expr
+        Can.exprValue <$> canonicalizeLet region env (fmap snd defs) expr
       Src.Case expr branches _ ->
         Can.Case
           <$> canonicalize env expr
@@ -120,7 +120,7 @@ canonicalize env (A.At region expression) =
           fieldDict <- Dups.checkLocatedFields fields
           Can.Record <$> traverse (canonicalize env) fieldDict
       Src.Parens _ expr _ ->
-        A.toValue <$> canonicalize env expr
+        Can.exprValue <$> canonicalize env expr
 
 -- CANONICALIZE IF BRANCH
 
@@ -205,7 +205,9 @@ toBinopStep makeBinop rootOp@(Env.Binop _ _ _ _ rootAssociativity rootPrecedence
 
 toBinop :: Env.Binop -> Can.Expr -> Can.Expr -> Can.Expr
 toBinop (Env.Binop op home name annotation _ _) left right =
-  A.merge left right (Can.Binop op home name annotation left right)
+  Can.at
+    (A.mergeRegions (Can.exprRegion left) (Can.exprRegion right))
+    (Can.Binop op home name annotation left right)
 
 -- CANONICALIZE LET
 
@@ -403,13 +405,13 @@ detectCycles letRegion sccs body =
         Graph.AcyclicSCC binding ->
           case binding of
             Define def ->
-              A.At letRegion . Can.Let def <$> detectCycles letRegion subSccs body
+              Can.at letRegion . Can.Let def <$> detectCycles letRegion subSccs body
             Edge _ ->
               detectCycles letRegion subSccs body
             Destruct pattern expr ->
-              A.At letRegion . Can.LetDestruct pattern expr <$> detectCycles letRegion subSccs body
+              Can.at letRegion . Can.LetDestruct pattern expr <$> detectCycles letRegion subSccs body
         Graph.CyclicSCC bindings ->
-          A.At letRegion
+          Can.at letRegion
             <$> ( Can.LetRec
                     <$> checkCycle bindings []
                     <*> detectCycles letRegion subSccs body

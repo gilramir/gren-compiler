@@ -8,6 +8,7 @@ import AST.Canonical qualified as Can
 import AST.Optimized qualified as Opt
 import AST.Source qualified as Src
 import Canonicalize.Module qualified as Canonicalize
+import Canonicalize.NodeId qualified as NodeId
 import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Gren.Interface qualified as I
@@ -34,7 +35,10 @@ data Artifacts = Artifacts
 compile :: P.Platform -> Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Either E.Error Artifacts
 compile platform pkg ifaces modul =
   do
-    canonical <- canonicalize pkg ifaces modul
+    -- Numbering happens between canonicalization and type checking, because
+    -- the checker records a type per node id (`docs/m1a-node-types.md`) and
+    -- everything downstream of it must see the same ids.
+    canonical <- NodeId.number <$> canonicalize pkg ifaces modul
     annotations <- typeCheck modul canonical
     () <- nitpick canonical
     objects <- optimize platform modul annotations canonical

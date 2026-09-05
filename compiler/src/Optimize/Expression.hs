@@ -24,7 +24,7 @@ type Cycle =
   Set.Set Name.Name
 
 optimize :: Cycle -> Can.Expr -> Names.Tracker Opt.Expr
-optimize cycle (A.At region expression) =
+optimize cycle (Can.Expr _ region expression) =
   case expression of
     Can.VarLocal name ->
       pure (Opt.VarLocal region name)
@@ -284,14 +284,14 @@ optimizePotentialTailCall cycle region name args expr =
       <$> optimizeTail cycle name argNames expr
 
 optimizeTail :: Cycle -> Name.Name -> [A.Located Name.Name] -> Can.Expr -> Names.Tracker Opt.Expr
-optimizeTail cycle rootName argNames locExpr@(A.At region expression) =
+optimizeTail cycle rootName argNames locExpr@(Can.Expr _ region expression) =
   case expression of
     Can.Call func args ->
       do
         oargs <- traverse (optimize cycle) args
 
         let isMatchingName =
-              case A.toValue func of
+              case Can.exprValue func of
                 Can.VarLocal name -> rootName == name
                 Can.VarTopLevel _ name -> rootName == name
                 _ -> False

@@ -130,7 +130,7 @@ checkTypedArg (pattern@(A.At region _), _) errors =
 -- CHECK EXPRESSIONS
 
 checkExpr :: Can.Expr -> [Error] -> [Error]
-checkExpr (A.At region expression) errors =
+checkExpr (Can.Expr _ region expression) errors =
   case expression of
     Can.VarLocal _ ->
       errors

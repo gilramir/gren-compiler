@@ -32,7 +32,7 @@ type RTV =
   Map.Map Name.Name Type
 
 constrain :: RTV -> Can.Expr -> Expected Type -> IO Constraint
-constrain rtv (A.At region expression) expected =
+constrain rtv (Can.Expr _ region expression) expected =
   case expression of
     Can.VarLocal name ->
       return (CLocal region name expected)
@@ -104,7 +104,7 @@ constrain rtv (A.At region expression) expected =
         let fieldType = VarN fieldVar
         let recordType = RecordN (Map.singleton field fieldType) extType
 
-        let context = RecordAccess (A.toRegion expr) (getAccessName expr) accessRegion field
+        let context = RecordAccess (Can.exprRegion expr) (getAccessName expr) accessRegion field
         recordCon <- constrain rtv expr (FromContext region context recordType)
 
         return $
@@ -145,7 +145,7 @@ constrainLambda rtv region args body expected =
 -- CONSTRAIN CALL
 
 constrainCall :: RTV -> A.Region -> Can.Expr -> [Can.Expr] -> Expected Type -> IO Constraint
-constrainCall rtv region func@(A.At funcRegion _) args expected =
+constrainCall rtv region func@(Can.Expr _ funcRegion _) args expected =
   do
     let maybeName = getName func
 
@@ -180,7 +180,7 @@ constrainArg rtv region maybeName index arg =
     return (argVar, argType, argCon)
 
 getName :: Can.Expr -> MaybeName
-getName (A.At _ expr) =
+getName (Can.Expr _ _ expr) =
   case expr of
     Can.VarLocal name -> FuncName name
     Can.VarTopLevel _ name -> FuncName name
@@ -191,7 +191,7 @@ getName (A.At _ expr) =
     _ -> NoName
 
 getAccessName :: Can.Expr -> Maybe Name.Name
-getAccessName (A.At _ expr) =
+getAccessName (Can.Expr _ _ expr) =
   case expr of
     Can.VarLocal name -> Just name
     Can.VarTopLevel _ name -> Just name

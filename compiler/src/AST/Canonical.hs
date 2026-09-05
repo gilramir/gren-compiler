@@ -2,8 +2,14 @@
 {-# OPTIONS_GHC -Wall #-}
 
 module AST.Canonical
-  ( Expr,
+  ( Expr (..),
     Expr_ (..),
+    NodeId (..),
+    unnumbered,
+    at,
+    exprId,
+    exprRegion,
+    exprValue,
     CaseBranch (..),
     FieldUpdate (..),
     CtorOpts (..),
@@ -70,8 +76,41 @@ import Reporting.Annotation qualified as A
 
 -- EXPRESSIONS
 
-type Expr =
-  A.Located Expr_
+-- | A node's identity, distinct from its region.
+--
+-- A region cannot serve as one: `detectCycles` in `Canonicalize.Expression`
+-- gives every nested `Let` of a `let` block the same `letRegion`, and `Parens`
+-- hands the outer region to the inner expression. Both are correct for
+-- reporting and useless for identity.
+--
+-- Types are recorded per node during solving and joined back on afterwards
+-- (`docs/m1a-node-types.md`), which is what Core needs and what nothing before
+-- Core did.
+newtype NodeId = NodeId Int
+  deriving (Eq, Ord, Show)
+
+-- | What canonicalization builds every node with. `Canonicalize.NodeId.number`
+-- replaces them all in one fixed traversal, so numbering is deterministic by
+-- construction rather than by discipline (C6).
+unnumbered :: NodeId
+unnumbered = NodeId 0
+
+data Expr = Expr !NodeId !A.Region Expr_
+  deriving (Show)
+
+-- | Build an unnumbered node. The counterpart of `A.At`, which `Expr` no
+-- longer is.
+at :: A.Region -> Expr_ -> Expr
+at = Expr unnumbered
+
+exprId :: Expr -> NodeId
+exprId (Expr nid _ _) = nid
+
+exprRegion :: Expr -> A.Region
+exprRegion (Expr _ region _) = region
+
+exprValue :: Expr -> Expr_
+exprValue (Expr _ _ value) = value
 
 -- CACHE Annotations for type inference
 data Expr_
