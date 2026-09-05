@@ -141,7 +141,7 @@ optimizeUpdate cycle (Can.FieldUpdate _ expr) =
 optimizeDef :: Cycle -> Can.Def -> Opt.Expr -> Names.Tracker Opt.Expr
 optimizeDef cycle def body =
   case def of
-    Can.Def (A.At region name) args expr ->
+    Can.Def _ (A.At region name) args expr ->
       optimizeDefHelp cycle region name args expr body
     Can.TypedDef (A.At region name) _ typedArgs expr _ ->
       optimizeDefHelp cycle region name (map fst typedArgs) expr body
@@ -271,7 +271,7 @@ destructCtorArg path revDs (Can.PatternCtorArg index _ arg) =
 optimizePotentialTailCallDef :: Cycle -> Can.Def -> Names.Tracker Opt.Def
 optimizePotentialTailCallDef cycle def =
   case def of
-    Can.Def (A.At region name) args expr ->
+    Can.Def _ (A.At region name) args expr ->
       optimizePotentialTailCall cycle region name args expr
     Can.TypedDef (A.At region name) _ typedArgs expr _ ->
       optimizePotentialTailCall cycle region name (map fst typedArgs) expr

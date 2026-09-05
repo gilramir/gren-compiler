@@ -48,6 +48,24 @@ recordNodeType :: Can.NodeId -> Expected Type -> Constraint -> Constraint
 recordNodeType nid expected constraint =
   CAnd [CNode nid (expectedType expected), constraint]
 
+-- | Attach an untyped definition's type to the constraints it generates.
+--
+-- The counterpart of 'recordNodeType' one level down, and the whole of
+-- `docs/m1a-node-types.md` §N9's fix. Core's binders carry types and binders
+-- come from patterns; a pattern's type is derivable from the type of the thing
+-- it destructures, which every use site has — except an unannotated `let`
+-- definition, whose argument patterns have no root to push from. The solver
+-- builds that root here as `tipe` and used to put it only in the `CLet` header,
+-- where nothing downstream could see it.
+--
+-- Recording it does not generalize it: 'CNode' is read at the end of the solve,
+-- by which time the enclosing `CLet` has generalized whatever it generalizes,
+-- so the arrows peel off to the same types the argument patterns were checked
+-- against.
+recordDefType :: Can.NodeId -> Type -> Constraint -> Constraint
+recordDefType nid tipe constraint =
+  CAnd [CNode nid tipe, constraint]
+
 expectedType :: Expected Type -> Type
 expectedType expected =
   case expected of
@@ -435,7 +453,7 @@ constrainDestruct rtv region pattern expr bodyCon =
 constrainDef :: RTV -> Can.Def -> Constraint -> IO Constraint
 constrainDef rtv def bodyCon =
   case def of
-    Can.Def (A.At region name) args expr ->
+    Can.Def nid (A.At region name) args expr ->
       do
         (Args vars tipe resultType (Pattern.State headers pvars revCons)) <-
           constrainArgs args
@@ -444,20 +462,21 @@ constrainDef rtv def bodyCon =
           constrain rtv expr (NoExpectation resultType)
 
         return $
-          CLet
-            { _rigidVars = [],
-              _flexVars = vars,
-              _header = Map.singleton name (A.At region tipe),
-              _headerCon =
-                CLet
-                  { _rigidVars = [],
-                    _flexVars = pvars,
-                    _header = headers,
-                    _headerCon = CAnd (reverse revCons),
-                    _bodyCon = exprCon
-                  },
-              _bodyCon = bodyCon
-            }
+          recordDefType nid tipe $
+            CLet
+              { _rigidVars = [],
+                _flexVars = vars,
+                _header = Map.singleton name (A.At region tipe),
+                _headerCon =
+                  CLet
+                    { _rigidVars = [],
+                      _flexVars = pvars,
+                      _header = headers,
+                      _headerCon = CAnd (reverse revCons),
+                      _bodyCon = exprCon
+                    },
+                _bodyCon = bodyCon
+              }
     Can.TypedDef (A.At region name) freeVars typedArgs expr srcResultType ->
       do
         let newNames = Map.difference freeVars rtv
@@ -516,7 +535,7 @@ recDefsHelp rtv defs bodyCon rigidInfo flexInfo =
               CAnd [CAnd rigidCons, bodyCon]
     def : otherDefs ->
       case def of
-        Can.Def (A.At region name) args expr ->
+        Can.Def nid (A.At region name) args expr ->
           do
             let (Info flexVars flexCons flexHeaders) = flexInfo
 
@@ -538,7 +557,7 @@ recDefsHelp rtv defs bodyCon rigidInfo flexInfo =
             recDefsHelp rtv otherDefs bodyCon rigidInfo $
               Info
                 { _vars = newFlexVars,
-                  _cons = defCon : flexCons,
+                  _cons = recordDefType nid tipe defCon : flexCons,
                   _headers = Map.insert name (A.At region tipe) flexHeaders
                 }
         Can.TypedDef (A.At region name) freeVars typedArgs expr srcResultType ->

@@ -494,7 +494,7 @@ gatherTypes decls types =
 addDef :: Types -> Can.Def -> Types
 addDef types def =
   case def of
-    Can.Def (A.At region name) _ _ ->
+    Can.Def _ (A.At region name) _ _ ->
       Map.insert name (Left region) types
     Can.TypedDef (A.At _ name) _ typedArgs _ resultType ->
       let tipe = foldr Can.TLambda resultType (map snd typedArgs)

@@ -114,7 +114,7 @@ checkDecls decls errors =
 checkDef :: Can.Def -> [Error] -> [Error]
 checkDef def errors =
   case def of
-    Can.Def _ args body ->
+    Can.Def _ _ args body ->
       foldr checkArg (checkExpr body errors) args
     Can.TypedDef _ _ args body _ ->
       foldr checkTypedArg (checkExpr body errors) args

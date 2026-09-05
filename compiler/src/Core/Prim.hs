@@ -285,9 +285,9 @@ isSignedInt U64 = False
 allPrims :: [PrimOp]
 allPrims =
   [ IntOp t p
-    | t <- [minBound .. maxBound],
-      p <- [minBound .. maxBound],
-      p /= IShr || isSignedInt t
+  | t <- [minBound .. maxBound],
+    p <- [minBound .. maxBound],
+    p /= IShr || isSignedInt t
   ]
     ++ [FloatOp t p | t <- [minBound .. maxBound], p <- [minBound .. maxBound]]
     ++ map ConvOp [minBound .. maxBound]

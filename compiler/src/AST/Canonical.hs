@@ -151,8 +151,14 @@ data FieldUpdate
 
 -- DEFS
 
+-- | The 'NodeId' on 'Def' is the *un*typed definition's type
+-- (`docs/m1a-node-types.md` §N9): its argument patterns bind names that Core
+-- needs types for, and a pattern's type is derivable top-down from the type of
+-- the thing it destructures — except here, where there is no signature and
+-- nothing recorded the function type the solver built. 'TypedDef' needs no id
+-- because it already caches a 'Type' per argument.
 data Def
-  = Def (A.Located Name) [Pattern] Expr
+  = Def NodeId (A.Located Name) [Pattern] Expr
   | TypedDef (A.Located Name) FreeVars [(Pattern, Type)] Expr Type
   deriving (Show)
 

@@ -102,7 +102,7 @@ detectBadCycles scc =
 extractDefName :: Can.Def -> A.Located Name.Name
 extractDefName def =
   case def of
-    Can.Def name _ _ -> name
+    Can.Def _ name _ _ -> name
     Can.TypedDef name _ _ _ _ -> name
 
 -- DECLARATIONS / CYCLE DETECTION SETUP
@@ -135,7 +135,7 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
         (cbody, freeLocals) <-
           Expr.verifyBindings W.Pattern argBindings (Expr.canonicalize newEnv body)
 
-        let def = Can.Def aname args cbody
+        let def = Can.Def Can.unnumbered aname args cbody
         return
           ( toNodeTwo name srcArgs def freeLocals,
             name,

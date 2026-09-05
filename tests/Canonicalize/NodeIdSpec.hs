@@ -56,6 +56,16 @@ spec = do
         other ->
           expectationFailure ("unexpected shape: " ++ show other)
 
+    it "numbers an untyped definition, before its body" $
+      -- §N9: an unannotated `let` definition is the one place a pattern has no
+      -- type to be derived from, so the def itself is a node the solver
+      -- records a type for.
+      case NodeId.numberExpr (letChain 1 (int 0)) of
+        Can.Expr outer _ (Can.Let (Can.Def d _ _ (Can.Expr body _ _)) _) ->
+          [outer, d, body] `shouldBe` map Can.NodeId [1, 2, 3]
+        other ->
+          expectationFailure ("unexpected shape: " ++ show other)
+
     it "numbers record fields in key order" $
       -- Field order in a record is a `Map` traversal, and C6 requires every
       -- one that can affect Core output to be ordered. Here the observable
@@ -100,7 +110,7 @@ letChain n body =
   Can.at
     region
     ( Can.Let
-        (Can.Def (name "x") [] (int n))
+        (Can.Def Can.unnumbered (name "x") [] (int n))
         (letChain (n - 1) body)
     )
 
@@ -125,5 +135,5 @@ walk (Can.Expr nid reg value) = (nid, reg) : children value
         _ -> []
     defWalk d =
       case d of
-        Can.Def _ _ body -> walk body
+        Can.Def nid (A.At defRegion _) _ body -> (nid, defRegion) : walk body
         Can.TypedDef _ _ _ body _ -> walk body

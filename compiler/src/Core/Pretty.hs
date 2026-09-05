@@ -109,7 +109,7 @@ classDecl opts c =
       "class " <> qual (_classNameC c) <> " " <> name (_classParam c) <> "\n",
       mconcat
         [ "  " <> name n <> " : " <> typeToBuilder opts t <> "\n"
-          | (n, t) <- _classMethods c
+        | (n, t) <- _classMethods c
         ]
     ]
   where
@@ -123,7 +123,7 @@ instanceDecl opts i =
       "instance " <> qual (_instClass i) <> " " <> atomicType opts (_instHead i) <> "\n",
       mconcat
         [ indent 1 <> name n <> " =\n" <> expr opts 2 e <> "\n"
-          | (n, e) <- _instMethods i
+        | (n, e) <- _instMethods i
         ]
     ]
   where
@@ -257,7 +257,7 @@ letLike opts depth keyword binds inner =
           <> " =\n"
           <> expr opts (depth + 2) (_bindValue b)
           <> "\n"
-        | b <- binds
+      | b <- binds
       ]
     <> indent depth
     <> "in\n"
@@ -267,7 +267,7 @@ fieldList :: Options -> Int -> [(Field, Expr)] -> B.Builder
 fieldList opts depth fields =
   mconcat
     [ "\n" <> indent (depth + 1) <> "." <> name f <> " =\n" <> expr opts (depth + 2) v
-      | (f, v) <- fields
+    | (f, v) <- fields
     ]
 
 alt :: Options -> Int -> Alt -> B.Builder

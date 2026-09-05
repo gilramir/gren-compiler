@@ -1,6 +1,7 @@
 {-# OPTIONS_GHC -Wall #-}
 
--- | Give every expression node in a module a distinct identity.
+-- | Give every expression node — and every untyped definition — in a module a
+-- distinct identity.
 --
 -- Canonicalization builds every node as 'Can.unnumbered'; this pass replaces
 -- them in one traversal, in a fixed order. Two reasons it is a separate pass
@@ -23,7 +24,9 @@
 module Canonicalize.NodeId
   ( number,
     numberExpr,
-    allIds,
+    Node (..),
+    nodeId,
+    nodes,
   )
 where
 
@@ -33,56 +36,72 @@ import Data.Map qualified as Map
 
 type Numbering a = State Int a
 
--- | Every expression node id in a module, in numbering order.
+-- | A node the type checker is expected to have recorded a type for.
+data Node
+  = ExprNode !Can.NodeId
+  | -- | An untyped definition and its argument count. The count is what makes
+    -- the recorded type checkable rather than merely present: the type is the
+    -- function type the solver built from the argument patterns and the body,
+    -- so it has at least that many arrows, and peeling them is how §N9 gets a
+    -- type onto each argument pattern.
+    DefNode !Can.NodeId !Int
+
+nodeId :: Node -> Can.NodeId
+nodeId n =
+  case n of
+    ExprNode nid -> nid
+    DefNode nid _ -> nid
+
+-- | Every node in a module, in numbering order.
 --
 -- Used to check that the type checker recorded a type for all of them
 -- (`docs/m1a-node-types.md` §N7). A typed Core cannot be lowered from a
 -- partially typed module, and "mostly typed" is exactly the state that would
 -- pass unnoticed until a backend hit the gap.
-allIds :: Can.Module -> [Can.NodeId]
-allIds modul = declIds (Can._decls modul)
+nodes :: Can.Module -> [Node]
+nodes modul = declNodes (Can._decls modul)
 
-declIds :: Can.Decls -> [Can.NodeId]
-declIds ds =
+declNodes :: Can.Decls -> [Node]
+declNodes ds =
   case ds of
-    Can.Declare d rest -> defIds d ++ declIds rest
-    Can.DeclareRec d others rest -> defIds d ++ concatMap defIds others ++ declIds rest
+    Can.Declare d rest -> defNodes d ++ declNodes rest
+    Can.DeclareRec d others rest -> defNodes d ++ concatMap defNodes others ++ declNodes rest
     Can.SaveTheEnvironment -> []
 
-defIds :: Can.Def -> [Can.NodeId]
-defIds d =
+defNodes :: Can.Def -> [Node]
+defNodes d =
   case d of
-    Can.Def _ _ body -> exprIds body
-    Can.TypedDef _ _ _ body _ -> exprIds body
+    Can.Def nid _ args body -> DefNode nid (length args) : exprNodes body
+    Can.TypedDef _ _ _ body _ -> exprNodes body
 
-exprIds :: Can.Expr -> [Can.NodeId]
-exprIds (Can.Expr nid _ value) = nid : childIds value
+exprNodes :: Can.Expr -> [Node]
+exprNodes (Can.Expr nid _ value) = ExprNode nid : childNodes value
 
-childIds :: Can.Expr_ -> [Can.NodeId]
-childIds e =
+childNodes :: Can.Expr_ -> [Node]
+childNodes e =
   case e of
-    Can.Array items -> concatMap exprIds items
-    Can.Negate inner -> exprIds inner
-    Can.Binop _ _ _ _ left right -> exprIds left ++ exprIds right
-    Can.Lambda _ body -> exprIds body
-    Can.Call func args -> concatMap exprIds (func : args)
+    Can.Array items -> concatMap exprNodes items
+    Can.Negate inner -> exprNodes inner
+    Can.Binop _ _ _ _ left right -> exprNodes left ++ exprNodes right
+    Can.Lambda _ body -> exprNodes body
+    Can.Call func args -> concatMap exprNodes (func : args)
     Can.If branches final ->
-      concatMap (\(c, b) -> exprIds c ++ exprIds b) branches ++ exprIds final
-    Can.Let d body -> defIds d ++ exprIds body
-    Can.LetRec ds body -> concatMap defIds ds ++ exprIds body
-    Can.LetDestruct _ value body -> exprIds value ++ exprIds body
+      concatMap (\(c, b) -> exprNodes c ++ exprNodes b) branches ++ exprNodes final
+    Can.Let d body -> defNodes d ++ exprNodes body
+    Can.LetRec ds body -> concatMap defNodes ds ++ exprNodes body
+    Can.LetDestruct _ value body -> exprNodes value ++ exprNodes body
     Can.Case scrutinee branches ->
-      exprIds scrutinee ++ concatMap (\(Can.CaseBranch _ b) -> exprIds b) branches
-    Can.Access record _ -> exprIds record
+      exprNodes scrutinee ++ concatMap (\(Can.CaseBranch _ b) -> exprNodes b) branches
+    Can.Access record _ -> exprNodes record
     Can.Update record fields ->
-      exprIds record ++ concatMap (\(Can.FieldUpdate _ v) -> exprIds v) (Map.elems fields)
-    Can.Record fields -> concatMap exprIds (Map.elems fields)
+      exprNodes record ++ concatMap (\(Can.FieldUpdate _ v) -> exprNodes v) (Map.elems fields)
+    Can.Record fields -> concatMap exprNodes (Map.elems fields)
     _ -> []
 
 fresh :: Numbering Can.NodeId
 fresh = state (\n -> (Can.NodeId (n + 1), n + 1))
 
--- | Number every expression node in a module.
+-- | Number every node in a module.
 number :: Can.Module -> Can.Module
 number modul =
   modul {Can._decls = fst (runState (decls (Can._decls modul)) 0)}
@@ -102,11 +121,21 @@ decls ds =
     Can.SaveTheEnvironment ->
       pure Can.SaveTheEnvironment
 
+-- | An untyped `Def` is numbered like an expression node and for the same
+-- reason: its type — the function type the solver builds from its argument
+-- patterns and its body — is recorded nowhere else, and Core's binders need it
+-- (`docs/m1a-node-types.md` §N9). It is numbered before its body, the same
+-- parent-before-children rule the expression traversal follows.
+--
+-- A `TypedDef` gets no id. Its argument types are cached on it already, so
+-- there is nothing for the solver to tell us that the tree does not say.
 def :: Can.Def -> Numbering Can.Def
 def d =
   case d of
-    Can.Def name args body ->
-      Can.Def name args <$> expr body
+    Can.Def _ name args body ->
+      do
+        nid <- fresh
+        Can.Def nid name args <$> expr body
     Can.TypedDef name freeVars args body result ->
       (\b -> Can.TypedDef name freeVars args b result) <$> expr body
 

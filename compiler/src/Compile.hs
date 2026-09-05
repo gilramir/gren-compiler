@@ -69,7 +69,7 @@ typeCheck modul canonical =
     Left errors ->
       Left (E.BadTypes (Localizer.fromModule modul) errors)
 
--- | Assert that the type checker recorded a type for every expression node.
+-- | Assert that the type checker recorded a usable type for every node.
 --
 -- Off unless @GENG_CHECK_NODE_TYPES@ is set, because it walks the module a
 -- second time and the invariant it checks is structural: `constrain` records
@@ -80,24 +80,58 @@ typeCheck modul canonical =
 -- from a partially typed module, and "mostly typed" is exactly the state that
 -- would go unnoticed until a backend hit the gap (`docs/m1a-node-types.md`
 -- §N7).
+--
+-- Two things are checked, because for an untyped definition presence is not
+-- enough. Its recorded type is what §N9 peels argument types off of, so a
+-- definition of /n/ arguments whose type has fewer than /n/ arrows is a
+-- recorded type that is the wrong type — the body's, say, rather than the
+-- function's — and that is a silent gap of exactly the kind this check exists
+-- to make loud.
 checkNodeTypes :: Can.Module -> Map.Map Can.NodeId Can.Type -> Either E.Error ()
 checkNodeTypes canonical nodeTypes
   | not nodeTypeCheckEnabled = Right ()
   | otherwise =
-      let ids = NodeId.allIds canonical
-          missing = filter (\nid -> not (Map.member nid nodeTypes)) ids
-       in if null missing
-            then Right ()
-            else
-              error $
-                "GENG_CHECK_NODE_TYPES: "
-                  ++ show (length missing)
-                  ++ " of "
-                  ++ show (length ids)
-                  ++ " expression nodes in "
-                  ++ show (Can._name canonical)
-                  ++ " have no recorded type: "
-                  ++ show (take 10 missing)
+      case untyped ++ misshapen of
+        [] ->
+          Right ()
+        problem : _ ->
+          error $
+            "GENG_CHECK_NODE_TYPES: in "
+              ++ show (Can._name canonical)
+              ++ ", "
+              ++ problem
+  where
+    nodes = NodeId.nodes canonical
+
+    untyped =
+      case filter (\node -> not (Map.member (NodeId.nodeId node) nodeTypes)) nodes of
+        [] -> []
+        missing ->
+          [ show (length missing)
+              ++ " of "
+              ++ show (length nodes)
+              ++ " nodes have no recorded type: "
+              ++ show (map NodeId.nodeId (take 10 missing))
+          ]
+
+    misshapen =
+      case [ (nid, arity, recorded)
+           | NodeId.DefNode nid arity <- nodes,
+             Just recorded <- [Map.lookup nid nodeTypes],
+             arrowCount recorded < arity
+           ] of
+        [] -> []
+        bad ->
+          [ show (length bad)
+              ++ " definitions have a recorded type with too few arrows: "
+              ++ show (take 3 bad)
+          ]
+
+arrowCount :: Can.Type -> Int
+arrowCount tipe =
+  case tipe of
+    Can.TLambda _ result -> 1 + arrowCount result
+    _ -> 0
 
 nodeTypeCheckEnabled :: Bool
 nodeTypeCheckEnabled =

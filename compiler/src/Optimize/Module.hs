@@ -147,7 +147,7 @@ findMain defs =
       Nothing
     def : rest ->
       case def of
-        Can.Def (A.At region name) _ _ ->
+        Can.Def _ (A.At region name) _ _ ->
           if name == Name._main then Just region else findMain rest
         Can.TypedDef (A.At region name) _ _ _ _ ->
           if name == Name._main then Just region else findMain rest
@@ -155,7 +155,7 @@ findMain defs =
 defToName :: Can.Def -> Name.Name
 defToName def =
   case def of
-    Can.Def (A.At _ name) _ _ -> name
+    Can.Def _ (A.At _ name) _ _ -> name
     Can.TypedDef (A.At _ name) _ _ _ _ -> name
 
 -- ADD DEFS
@@ -163,7 +163,7 @@ defToName def =
 addDef :: P.Platform -> ModuleName.Canonical -> Annotations -> Can.Def -> Opt.LocalGraph -> Result i [W.Warning] Opt.LocalGraph
 addDef platform home annotations def graph =
   case def of
-    Can.Def (A.At region name) args body ->
+    Can.Def _ (A.At region name) args body ->
       do
         let (Can.Forall _ tipe) = annotations ! name
         Result.warn $ W.MissingTypeAnnotation region name tipe
@@ -250,19 +250,19 @@ addRecDefs home defs (Opt.LocalGraph main nodes fieldCounts) =
 toName :: Can.Def -> Name.Name
 toName def =
   case def of
-    Can.Def (A.At _ name) _ _ -> name
+    Can.Def _ (A.At _ name) _ _ -> name
     Can.TypedDef (A.At _ name) _ _ _ _ -> name
 
 addValueName :: Can.Def -> Set.Set Name.Name -> Set.Set Name.Name
 addValueName def names =
   case def of
-    Can.Def (A.At _ name) args _ -> if null args then Set.insert name names else names
+    Can.Def _ (A.At _ name) args _ -> if null args then Set.insert name names else names
     Can.TypedDef (A.At _ name) _ args _ _ -> if null args then Set.insert name names else names
 
 addLink :: ModuleName.Canonical -> Opt.Node -> Can.Def -> Map.Map Opt.Global Opt.Node -> Map.Map Opt.Global Opt.Node
 addLink home link def links =
   case def of
-    Can.Def (A.At _ name) _ _ ->
+    Can.Def _ (A.At _ name) _ _ ->
       Map.insert (Opt.Global home name) link links
     Can.TypedDef (A.At _ name) _ _ _ _ ->
       Map.insert (Opt.Global home name) link links
@@ -272,7 +272,7 @@ addLink home link def links =
 addRecDef :: Set.Set Name.Name -> State -> Can.Def -> Names.Tracker State
 addRecDef cycle state def =
   case def of
-    Can.Def (A.At region name) args body ->
+    Can.Def _ (A.At region name) args body ->
       addRecDefHelp cycle region state name args body
     Can.TypedDef (A.At region name) _ args body _ ->
       addRecDefHelp cycle region state name (map fst args) body
