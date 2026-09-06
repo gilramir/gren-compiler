@@ -12,6 +12,7 @@ import Control.Monad (liftM2)
 import Core.AST qualified as Core
 import Core.Dump qualified as Dump
 import Core.Pretty qualified as Pretty
+import Core.Program qualified as Program
 import Data.ByteString.Builder qualified as B
 import Data.Map ((!))
 import Data.Map qualified as Map
@@ -39,10 +40,10 @@ dev :: FilePath -> Details.Details -> Build.Artifacts -> Task JS.GeneratedResult
 dev root details artifacts@(Build.Artifacts pkg _ roots modules) =
   do
     objects <- finalizeObjects =<< loadObjects root details modules
-    dumpProgramCore details artifacts
     let mode = Mode.Dev
     let graph = objectsToGlobalGraph objects
     let mains = gatherMains pkg objects roots
+    dumpCore details artifacts mains
     return $ JS.generate mode graph mains
 
 prod :: FilePath -> Details.Details -> Build.Artifacts -> Task JS.GeneratedResult
@@ -50,10 +51,10 @@ prod root details artifacts@(Build.Artifacts pkg _ roots modules) =
   do
     objects <- finalizeObjects =<< loadObjects root details modules
     checkForDebugUses objects
-    dumpProgramCore details artifacts
     let graph = objectsToGlobalGraph objects
     let mode = Mode.Prod (Mode.shortenFieldNames graph)
     let mains = gatherMains pkg objects roots
+    dumpCore details artifacts mains
     return $ JS.generate mode graph mains
 
 -- PROGRAM CORE
@@ -91,21 +92,40 @@ programCore details (Build.Artifacts pkg _ roots modules) =
         Build.Inside _ -> Nothing
         Build.Outside name _ _ core -> Just (ModuleName.Canonical pkg name, core)
 
--- | Write the program's Core, if @GENG_DUMP_PROGRAM_CORE@ names a directory.
+-- | The program's roots, as Core names.
 --
--- Same file names as "Compile"'s per-module dump, so that the two directories
--- can be compared as directories. See "Core.Dump".
-dumpProgramCore :: Details.Details -> Build.Artifacts -> Task ()
-dumpProgramCore details artifacts =
-  case Dump.programDir of
-    Nothing -> return ()
-    Just dir ->
+-- The JS backend's roots are the @main@ of each root module, which is where
+-- 'gatherMains' stops; in Core each one is an ordinary top-level binding called
+-- @main@ in that module.
+coreRoots :: Map.Map ModuleName.Canonical Opt.Main -> [Core.QualName]
+coreRoots mains =
+  [Core.QualName home (N.fromChars "main") | home <- Map.keys mains]
+
+-- | Write what @GENG_DUMP_PROGRAM_CORE@ and @GENG_DUMP_LINK@ ask for, if either
+-- names a place to put it.
+--
+-- The first is the program's Core, module by module, with the same file names as
+-- "Compile"'s per-module dump so that the two are comparable as directories. The
+-- second is 'Core.Program.link''s summary: what the roots reach, in what order,
+-- and what they refer to that Core cannot supply yet.
+dumpCore :: Details.Details -> Build.Artifacts -> Map.Map ModuleName.Canonical Opt.Main -> Task ()
+dumpCore details artifacts mains =
+  case (Dump.programDir, Dump.linkFile) of
+    (Nothing, Nothing) -> return ()
+    (maybeDir, maybeFile) ->
       Task.io $
         do
           cores <- programCore details artifacts
-          mapM_
-            (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder Pretty.defaultOptions core))
-            (Map.toAscList cores)
+          case maybeDir of
+            Nothing -> return ()
+            Just dir ->
+              mapM_
+                (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder Pretty.defaultOptions core))
+                (Map.toAscList cores)
+          case maybeFile of
+            Nothing -> return ()
+            Just file ->
+              B.writeFile file (Program.render (Program.link cores (coreRoots mains)))
 
 repl :: FilePath -> Details.Details -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
 repl root details ansi (Build.ReplArtifacts home modules localizer annotations) name =

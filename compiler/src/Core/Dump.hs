@@ -21,6 +21,7 @@ module Core.Dump
     writeModule,
     moduleDir,
     programDir,
+    linkFile,
   )
 where
 
@@ -57,6 +58,13 @@ programDir :: Maybe FilePath
 programDir =
   unsafePerformIO (dirFromEnv "GENG_DUMP_PROGRAM_CORE")
 {-# NOINLINE programDir #-}
+
+-- | @GENG_DUMP_LINK@: a file, not a directory — one linked program per build, and
+-- @Core.Program.render@ writes a summary rather than the program itself.
+linkFile :: Maybe FilePath
+linkFile =
+  unsafePerformIO (Env.lookupEnv "GENG_DUMP_LINK")
+{-# NOINLINE linkFile #-}
 
 -- | An empty value means the current directory, so that @VAR=@ is not silently
 -- the same as unset.

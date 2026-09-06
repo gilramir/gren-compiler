@@ -121,6 +121,7 @@ Library common
         Core.Lower.Module
         Core.Lower.Type
         Core.Prim
+        Core.Program
         Core.Pretty
         Generate.Html
         Generate.Node
@@ -261,6 +262,7 @@ Test-Suite gren-tests
         Core.LowerExpressionSpec
         Core.LowerTypeSpec
         Core.PrimSpec
+        Core.ProgramSpec
         Generate.VLQSpec
         Nitpick.PatternMatchesSpec
         Parse.AliasSpec
