@@ -41,7 +41,7 @@ where
 
 import Core.AST qualified as Core
 import Core.Order qualified as Order
-import Core.Refs (Refs (..), refsIn)
+import Core.Refs (Refs (..), global, refsIn)
 import Data.ByteString.Builder qualified as B
 import Data.List qualified as List
 import Data.Map (Map)
@@ -67,6 +67,9 @@ data Program = Program
     _progData :: [Core.DataDecl],
     -- | Every record field named by reachable code.
     _progFields :: Set Name,
+    -- | The @effect module@ managers a runtime has to register, because an entry
+    -- binding of each is reachable. Empty once P3 lands.
+    _progManagers :: [(ModuleName.Canonical, Core.Manager)],
     -- | What reachable code refers to and Core does not define.
     _progMissing :: [Missing]
   }
@@ -97,7 +100,7 @@ link modules roots =
   let defs = Map.fromList (concatMap moduleBindings (Map.toAscList modules))
       ctorOwner = Map.fromList (concatMap moduleCtors (Map.toAscList modules))
       datas = Map.fromList (concatMap moduleDatas (Map.toAscList modules))
-      refs = Map.map (refsIn . Core._bindValue) defs
+      refs = Map.unionWith (<>) (managerRefs modules) (Map.map (refsIn . Core._bindValue) defs)
 
       reached = walk defs refs (Set.fromList roots) roots
       reachedDefs = Map.restrictKeys defs reached
@@ -115,8 +118,48 @@ link modules roots =
           _progRecursive = [group | group <- groups, length group > 1],
           _progData = reachedDatas,
           _progFields = Set.unions (map _refFields (Map.elems reachedRefs)),
+          _progManagers = reachedManagers reached modules,
           _progMissing = missing defs ctorOwner datas roots reachedRefs
         }
+
+-- | The extra edges an @effect module@'s manager puts in the graph: from each
+-- entry binding — @command@, @subscription@ — to the five functions the manager
+-- is assembled from.
+--
+-- They are edges rather than a separate root set for two reasons. Reaching
+-- @Task.command@ is exactly what makes the @Task@ manager live, which is the
+-- rule the old pipeline gets from its @Opt.Link@ to @$fx$@; and a runtime
+-- registers a manager at load time, reading those five names, so they have to be
+-- emitted before the entry is — which is what an edge says and a root set does
+-- not.
+managerRefs :: Map ModuleName.Canonical Core.Module -> Map Core.QualName Refs
+managerRefs modules =
+  Map.fromList
+    [ (entry, foldMap global (managerImpl m))
+    | modul <- Map.elems modules,
+      Just m <- [Core._moduleManager modul],
+      entry <- Core._managerEntries m
+    ]
+
+-- | The functions a manager is assembled from, in the order a runtime wants
+-- them.
+managerImpl :: Core.Manager -> [Core.QualName]
+managerImpl m =
+  [ Core._managerInit m,
+    Core._managerOnEffects m,
+    Core._managerOnSelfMsg m
+  ]
+    ++ Maybe.maybeToList (Core._managerCmdMap m)
+    ++ Maybe.maybeToList (Core._managerSubMap m)
+
+-- | The managers a program has to register: the ones an entry binding reached.
+reachedManagers :: Set Core.QualName -> Map ModuleName.Canonical Core.Module -> [(ModuleName.Canonical, Core.Manager)]
+reachedManagers reached modules =
+  [ (home, m)
+  | (home, modul) <- Map.toAscList modules,
+    Just m <- [Core._moduleManager modul],
+    any (`Set.member` reached) (Core._managerEntries m)
+  ]
 
 moduleBindings :: (ModuleName.Canonical, Core.Module) -> [(Core.QualName, Core.Bind)]
 moduleBindings (home, m) =
@@ -221,6 +264,11 @@ render p =
         ],
       "data " <> int (length (_progData p)) <> "\n",
       "fields " <> int (Set.size (_progFields p)) <> "\n",
+      "managers " <> int (length (_progManagers p)) <> "\n",
+      mconcat
+        [ "  " <> B.stringUtf8 (ModuleName.toChars raw) <> " " <> managerKind m <> " " <> B.stringUtf8 (List.intercalate ", " (map qualToChars (managerImpl m))) <> "\n"
+        | (ModuleName.Canonical _ raw, m) <- _progManagers p
+        ],
       "missing " <> int (length (_progMissing p)) <> "\n",
       mconcat
         [ "  " <> kind (_missingKind m) <> " " <> qualB (_missingName m) <> " <- " <> qualB (_missingUsedBy m) <> "\n"
@@ -234,6 +282,13 @@ render p =
         MissingKernel -> "kernel"
         MissingDebug -> "debug "
         MissingValue -> "value "
+
+managerKind :: Core.Manager -> B.Builder
+managerKind m =
+  case Core._managerKind m of
+    Core.ManagerCmd -> "cmd"
+    Core.ManagerSub -> "sub"
+    Core.ManagerFx -> "fx "
 
 qualB :: Core.QualName -> B.Builder
 qualB = B.stringUtf8 . qualToChars

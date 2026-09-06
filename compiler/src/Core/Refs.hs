@@ -11,6 +11,7 @@
 -- algorithm; this module is the input to it.
 module Core.Refs
   ( Refs (..),
+    global,
     refsIn,
     freeLocals,
     patternBinders,

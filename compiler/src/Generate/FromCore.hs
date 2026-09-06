@@ -310,8 +310,26 @@ ctorOpts d =
 
 moduleNodes :: Map Core.QualName Ctor -> (ModuleName.Canonical, Core.Module) -> [(Opt.Global, Opt.Node)]
 moduleNodes ctors (home, m) =
-  map (define (Env ctors Map.empty home)) (Core._moduleDefs m)
+  let entries = maybe Set.empty (Set.fromList . map short . Core._managerEntries) (Core._moduleManager m)
+      short (Core.QualName _ n) = n
+   in [ if Set.member (Core._binderName (Core._bindBinder b)) entries
+          then (Opt.Global home (Core._binderName (Core._bindBinder b)), Opt.Link (Opt.Global home "$fx$"))
+          else define (Env ctors Map.empty home) b
+      | b <- Core._moduleDefs m
+      ]
 
+-- | Why an entry binding is a link here and a definition in Core.
+--
+-- Core lowers @command@ to @Platform.leaf "<module>"@, which is what the value
+-- is. `Generate.JavaScript` emits exactly that @var@ already — as one of the
+-- statements of the manager node, next to the @_Platform_effectManagers@
+-- assignment — and reaches it through an @Opt.Link@ from this name. Emitting the
+-- Core body /as well/ would declare the same @var@ twice, and dropping the link
+-- would leave the manager registered nowhere, so the JS backend keeps the edge
+-- it has. A Core-native emitter has no manager node to link to and uses the
+-- body; both produce the same JavaScript.
+--
+-- @docs/m1a-js-on-core.md@ §J11.
 define :: Env -> Core.Bind -> (Opt.Global, Opt.Node)
 define env (Core.Bind binder value) =
   let name = Core._binderName binder

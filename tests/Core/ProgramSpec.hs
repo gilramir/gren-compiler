@@ -11,6 +11,7 @@ module Core.ProgramSpec where
 import Core.AST qualified as Core
 import Core.Program (Missing (..), MissingKind (..), Program (..))
 import Core.Program qualified as Program
+import Data.List (elemIndex)
 import Data.Map qualified as Map
 import Data.Name (Name)
 import Data.Set qualified as Set
@@ -145,7 +146,99 @@ spec = do
           p = link [m] [q "main"]
        in map Core._dataName (_progData p) `shouldBe` [q "Used"]
 
+  describe "effect managers" $ do
+    it "roots a manager's functions when an entry binding is reached" $
+      -- The rule the old pipeline gets from its `Opt.Link` to `$fx$`: using
+      -- `command` is what makes the manager live, and the manager is what needs
+      -- `init`, `onEffects`, `onSelfMsg` and `cmdMap`. None of them is
+      -- mentioned by any expression here.
+      let p = link (managerModules cmdManager) [qIn other "main"]
+       in map snd (map splitQ (names p))
+            `shouldBe` ["cmdMap", "init", "onEffects", "onSelfMsg", "command", "main"]
+
+    it "emits a manager's functions before the entry that reaches them" $
+      -- A runtime registers a manager at load time, reading those names, so
+      -- they have to be defined by then.
+      let p = link (managerModules cmdManager) [qIn other "main"]
+          order = map snd (map splitQ (names p))
+       in (elemIndex "init" order < elemIndex "command" order) `shouldBe` True
+
+    it "reports a manager the program reaches" $
+      let p = link (managerModules cmdManager) [qIn other "main"]
+       in map (fmap Core._managerKind) (_progManagers p)
+            `shouldBe` [(home, Core.ManagerCmd)]
+
+    it "reports no manager when no entry is reached" $
+      let p = link (managerModules cmdManager) [qIn other "unrelated"]
+       in _progManagers p `shouldBe` []
+
+    it "takes both entries of an `Fx` manager, and its two maps" $
+      -- No package in existence declares one — all eleven `effect module`s in
+      -- `core` and `node` are `command` or `subscription`, never both — so this
+      -- is the only thing that exercises the shape.
+      let p = link (managerModules fxManager) [qIn other "both"]
+          reached = map snd (map splitQ (names p))
+       in (all (`elem` reached) ["cmdMap", "subMap", "command", "subscription"], map (fmap Core._managerKind) (_progManagers p))
+            `shouldBe` (True, [(home, Core.ManagerFx)])
+
+    it "does not root the other entry's map when only one entry is reached" $
+      -- `command` and `subscription` are separate bindings, so reaching one
+      -- roots the manager and not the other way in.
+      let p = link (managerModules fxManager) [qIn other "main"]
+       in ("subscription" `elem` map snd (map splitQ (names p))) `shouldBe` False
+
 -- HELPERS
+
+-- | A module with a manager, and a second module that enters it.
+--
+-- Two modules rather than one because the entries are what the rule is about:
+-- a root inside the manager's own module would be free to reach everything by
+-- naming it. The entry bindings are @one@ here rather than
+-- @Platform.leaf "Main"@ — what matters to the linker is that they are ordinary
+-- bindings that name none of the five functions.
+managerModules :: Core.Manager -> [Core.Module]
+managerModules m =
+  [ (modul home defs) {Core._moduleManager = Just m},
+    modul
+      other
+      [ bind "main" (globalE (q "command")),
+        bind "both" (appE (globalE (q "command")) [globalE (q "subscription")]),
+        bind "unrelated" one
+      ]
+  ]
+  where
+    defs =
+      [ bind "command" one,
+        bind "subscription" one,
+        bind "init" one,
+        bind "onEffects" one,
+        bind "onSelfMsg" one,
+        bind "cmdMap" one,
+        bind "subMap" one
+      ]
+
+cmdManager :: Core.Manager
+cmdManager =
+  Core.Manager
+    { Core._managerKind = Core.ManagerCmd,
+      Core._managerEntries = [q "command"],
+      Core._managerInit = q "init",
+      Core._managerOnEffects = q "onEffects",
+      Core._managerOnSelfMsg = q "onSelfMsg",
+      Core._managerCmdMap = Just (q "cmdMap"),
+      Core._managerSubMap = Nothing
+    }
+
+fxManager :: Core.Manager
+fxManager =
+  cmdManager
+    { Core._managerKind = Core.ManagerFx,
+      Core._managerEntries = [q "command", q "subscription"],
+      Core._managerSubMap = Just (q "subMap")
+    }
+
+splitQ :: Core.QualName -> (ModuleName.Canonical, Name)
+splitQ (Core.QualName h n) = (h, n)
 
 link :: [Core.Module] -> [Core.QualName] -> Program
 link modules roots =
@@ -204,5 +297,6 @@ modul name defs =
       Core._moduleInstances = [],
       Core._moduleDefs = defs,
       Core._moduleDefsRec = [],
+      Core._moduleManager = Nothing,
       Core._moduleExports = []
     }

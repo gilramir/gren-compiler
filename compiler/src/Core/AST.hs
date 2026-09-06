@@ -37,6 +37,8 @@ module Core.AST
     Openness (..),
     InstanceDecl (..),
     Origin (..),
+    Manager (..),
+    ManagerKind (..),
 
     -- * Names
     QualName (..),
@@ -238,8 +240,45 @@ data Module = Module
     -- | The names of top-level bindings that are part of a recursive group,
     -- so a backend that needs to emit them together can.
     _moduleDefsRec :: ![[QualName]],
-    _moduleExports :: ![QualName]
+    _moduleExports :: ![QualName],
+    -- | The @effect module@ manager this module declares, if it declares one.
+    _moduleManager :: !(Maybe Manager)
   }
+  deriving (Eq, Show)
+
+-- | What an @effect module@ declares, as a declaration rather than as an
+-- expression (C17).
+--
+-- Registering a manager is a load-time effect on a runtime's own dictionary,
+-- and the record it registers has that runtime's field names. Neither is a
+-- value any Gren expression computes, so neither is written as one here: Core
+-- names the five functions and the kind, and each backend assembles what its
+-- runtime wants from them. The JS backend already has @_Platform_createManager@
+-- and uses it.
+--
+-- @portable-core.md@ P3 deletes the whole construct at M1b, and this with it.
+data Manager = Manager
+  { _managerKind :: !ManagerKind,
+    -- | The bindings a program enters the manager through: @command@,
+    -- @subscription@, or both. These are ordinary bindings in '_moduleDefs' —
+    -- @Platform.leaf "<module>"@ — and reaching one of them is what makes the
+    -- manager live, exactly as the @Opt.Link@ to @$fx$@ does in the old
+    -- pipeline.
+    _managerEntries :: ![QualName],
+    _managerInit :: !QualName,
+    _managerOnEffects :: !QualName,
+    _managerOnSelfMsg :: !QualName,
+    -- | Present for 'ManagerCmd' and 'ManagerFx'.
+    _managerCmdMap :: !(Maybe QualName),
+    -- | Present for 'ManagerSub' and 'ManagerFx'.
+    _managerSubMap :: !(Maybe QualName)
+  }
+  deriving (Eq, Show)
+
+data ManagerKind
+  = ManagerCmd
+  | ManagerSub
+  | ManagerFx
   deriving (Eq, Show)
 
 -- EXPRESSIONS

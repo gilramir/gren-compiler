@@ -59,8 +59,27 @@ moduleToBuilder opts m =
       block (map (dataDecl opts) (_moduleData m)),
       block (map (classDecl opts) (_moduleClasses m)),
       block (map (instanceDecl opts) (_moduleInstances m)),
+      block (maybe [] (pure . managerDecl) (_moduleManager m)),
       block (map (topBind opts (recNames m)) (_moduleDefs m))
     ]
+
+-- | An @effect module@'s manager. The entries are also ordinary bindings below,
+-- so what this adds is the kind and the four or five names a runtime needs.
+managerDecl :: Manager -> B.Builder
+managerDecl m =
+  mconcat
+    [ "manager " <> kind (_managerKind m) <> "\n",
+      "  entry " <> commas (map qual (_managerEntries m)) <> "\n",
+      "  init " <> qual (_managerInit m) <> "\n",
+      "  onEffects " <> qual (_managerOnEffects m) <> "\n",
+      "  onSelfMsg " <> qual (_managerOnSelfMsg m) <> "\n",
+      maybe "" (\q -> "  cmdMap " <> qual q <> "\n") (_managerCmdMap m),
+      maybe "" (\q -> "  subMap " <> qual q <> "\n") (_managerSubMap m)
+    ]
+  where
+    kind ManagerCmd = "cmd"
+    kind ManagerSub = "sub"
+    kind ManagerFx = "fx"
 
 recNames :: Module -> [QualName]
 recNames = concat . _moduleDefsRec

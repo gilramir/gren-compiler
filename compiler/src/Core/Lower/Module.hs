@@ -46,14 +46,19 @@ import Data.Map qualified as Map
 import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.Set qualified as Set
+import Data.Utf8 qualified as Utf8
 import Gren.ModuleName qualified as ModuleName
+import Gren.Package qualified as Pkg
 import Reporting.Annotation qualified as A
 
 lower :: Map.Map Can.NodeId Can.Type -> Can.Module -> Core.Module
 lower types modul =
   let home = Can._name modul
       env = Expr.Env selfFile types
-      defs = definitions home (map (Expr.def env) (concatMap group (declGroups (Can._decls modul))))
+      defs =
+        definitions home $
+          map (Expr.def env) (concatMap group (declGroups (Can._decls modul)))
+            ++ entries home (Can._effects modul)
    in Core.Module
         { Core._moduleName = home,
           Core._moduleFiles = Map.singleton selfFile home,
@@ -65,7 +70,8 @@ lower types modul =
           Core._moduleDefs = concat defs,
           Core._moduleDefsRec =
             [map (Core.QualName home . bindName) g | g <- defs, length g > 1],
-          Core._moduleExports = map (Core.QualName home) (exports modul)
+          Core._moduleExports = map (Core.QualName home) (exports modul),
+          Core._moduleManager = manager home (Can._effects modul)
         }
 
 -- | The module's definitions, grouped and ordered by C14.
@@ -150,13 +156,13 @@ exports modul =
       Can.ExportEverything _ ->
         concatMap (map defName . group) (declGroups (Can._decls modul))
           ++ map binopTarget (Map.elems (Can._binops modul))
-      Can.Export entries ->
+      Can.Export exposed ->
         concat
           [ case entry of
               Can.ExportValue -> [name]
               Can.ExportBinop -> maybe [] (pure . binopTarget) (Map.lookup name (Can._binops modul))
               _ -> []
-          | (name, A.At _ entry) <- Map.toAscList entries
+          | (name, A.At _ entry) <- Map.toAscList exposed
           ]
 
 binopTarget :: Can.Binop -> Name
@@ -165,9 +171,118 @@ binopTarget (Can.Binop_ _ _ name) = name
 -- EFFECTS
 
 -- | What a module declares that Core does not carry yet.
+--
+-- Ports only, since §J10a: a manager is lowered (see 'manager' and 'entries'),
+-- and no package M1a builds against declares a port. @Optimize/Port.hs@ turns
+-- one into a generated JSON encoder or decoder, which is a subsystem rather
+-- than a shape, and @portable-core.md@ P3 rebuilds the whole port mechanism on
+-- @ffi.md@ F4 at M1b. Lowering it now would be writing something to delete
+-- with nothing exercising it in between.
 unloweredEffects :: Can.Module -> [Name]
 unloweredEffects modul =
   case Can._effects modul of
     Can.NoEffects -> []
     Can.Ports ports -> Map.keys ports
-    Can.Manager _ _ _ _ -> [Name.fromChars "$fx$"]
+    Can.Manager {} -> []
+
+-- | An @effect module@'s manager, as a Core declaration.
+--
+-- The five functions are named rather than referred to: what a runtime does
+-- with them is the runtime's business, and the record @_Platform_createManager@
+-- builds has that runtime's field names rather than Gren's.
+manager :: ModuleName.Canonical -> Can.Effects -> Maybe Core.Manager
+manager home effects =
+  case effects of
+    Can.NoEffects -> Nothing
+    Can.Ports _ -> Nothing
+    Can.Manager _ _ _ m ->
+      let here = Core.QualName home
+          entry name = here (Name.fromChars name)
+       in Just $
+            Core.Manager
+              { Core._managerKind =
+                  case m of
+                    Can.Cmd _ -> Core.ManagerCmd
+                    Can.Sub _ -> Core.ManagerSub
+                    Can.Fx _ _ -> Core.ManagerFx,
+                Core._managerEntries = map entry (entryNames m),
+                Core._managerInit = here (Name.fromChars "init"),
+                Core._managerOnEffects = here (Name.fromChars "onEffects"),
+                Core._managerOnSelfMsg = here (Name.fromChars "onSelfMsg"),
+                Core._managerCmdMap =
+                  case m of
+                    Can.Sub _ -> Nothing
+                    _ -> Just (here (Name.fromChars "cmdMap")),
+                Core._managerSubMap =
+                  case m of
+                    Can.Cmd _ -> Nothing
+                    _ -> Just (here (Name.fromChars "subMap"))
+              }
+
+-- | Which of @command@ and @subscription@ a manager declares.
+entryNames :: Can.Manager -> [String]
+entryNames m =
+  case m of
+    Can.Cmd _ -> ["command"]
+    Can.Sub _ -> ["subscription"]
+    Can.Fx _ _ -> ["command", "subscription"]
+
+-- | @command@ and @subscription@ as ordinary bindings.
+--
+-- @_Platform_leaf(home)@ closes over the module name and reads nothing else, so
+-- this really is what the value is: a partial application of a kernel function
+-- to a string. `Optimize.Module` gets the same JavaScript from a graph edge —
+-- an @Opt.Link@ to the manager node, which emits the @var@ as one of its own
+-- statements — which is why the old pipeline needs no binding here and a
+-- Core-only program representation does.
+--
+-- The type is the one @Type.Constrain.Module.letCmd@ gives it, with @msg@ for
+-- the variable a fresh one stands for there: a manager's effect type applied to
+-- a message, to that runtime's @Cmd@ or @Sub@ of the same message.
+entries :: ModuleName.Canonical -> Can.Effects -> [Core.Bind]
+entries home effects =
+  case effects of
+    Can.NoEffects -> []
+    Can.Ports _ -> []
+    Can.Manager _ _ _ m ->
+      [ leaf home name (effectType home m name)
+      | name <- entryNames m
+      ]
+
+leaf :: ModuleName.Canonical -> String -> Core.Type -> Core.Bind
+leaf (ModuleName.Canonical _ raw) name tipe =
+  let sp = Core.Span selfFile 0 0 0 0
+      string = Core.TCon (Core.QualName ModuleName.string Name.string) []
+      platformLeaf =
+        Core.Expr
+          (Core.EGlobal (Core.QualName kernelPlatform (Name.fromChars "leaf")))
+          (Core.TFun [string] tipe)
+          sp
+      home_ = Core.Expr (Core.ELit (Core.LString (Utf8.fromChars (ModuleName.toChars raw)))) string sp
+   in Core.Bind
+        (Core.Binder (Name.fromChars name) (generalize tipe) sp)
+        (Core.Expr (Core.EApp platformLeaf [home_]) tipe sp)
+
+-- | @Foo.MyCmd msg -> Platform.Cmd.Cmd msg@, or the @Sub@ of the same shape.
+effectType :: ModuleName.Canonical -> Can.Manager -> String -> Core.Type
+effectType home m name =
+  let msg = Core.TVar msgVar
+      effect tipe = Core.TCon (Core.QualName home tipe) [msg]
+      wrapper modul tipe = Core.TCon (Core.QualName modul tipe) [msg]
+   in case (m, name) of
+        (Can.Cmd cmd, _) -> Core.TFun [effect cmd] (wrapper ModuleName.cmd Name.cmd)
+        (Can.Sub sub, _) -> Core.TFun [effect sub] (wrapper ModuleName.sub Name.sub)
+        (Can.Fx cmd _, "command") -> Core.TFun [effect cmd] (wrapper ModuleName.cmd Name.cmd)
+        (Can.Fx _ sub, _) -> Core.TFun [effect sub] (wrapper ModuleName.sub Name.sub)
+
+generalize :: Core.Type -> Core.Type
+generalize = Core.TForall [msgVar] []
+
+-- | The message variable's name. `Type.Constrain.Module` uses a fresh
+-- unification variable and never names it; Core needs a name and C6 needs it to
+-- be the same one every time.
+msgVar :: Name
+msgVar = Name.fromChars "msg"
+
+kernelPlatform :: ModuleName.Canonical
+kernelPlatform = ModuleName.Canonical Pkg.kernel Name.platform

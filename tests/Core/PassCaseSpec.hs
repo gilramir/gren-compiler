@@ -185,6 +185,7 @@ modul defs =
       Core._moduleInstances = [],
       Core._moduleDefs = defs,
       Core._moduleDefsRec = [],
+      Core._moduleManager = Nothing,
       Core._moduleExports = []
     }
 
