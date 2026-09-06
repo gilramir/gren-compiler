@@ -40,7 +40,7 @@ import AST.Canonical qualified as Can
 import AST.Optimized qualified as Opt
 import Control.Monad.Trans.State.Strict (State, runState, state)
 import Core.AST qualified as Core
-import Core.Program qualified as Program
+import Core.Refs qualified as Refs
 import Data.Index qualified as Index
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -141,19 +141,19 @@ define env (Core.Bind binder value) =
 
 -- | Which graph nodes a definition's body reaches.
 --
--- The globals and constructors "Core.Program" already collects for the linker,
+-- The globals and constructors "Core.Refs" already collects for the linker,
 -- mapped into the backend's namespace: a kernel reference is a dependency on the
 -- whole kernel module, because that is the granularity `Gren.Kernel` splices at,
 -- and a `Debug` reference is a dependency on the @Debug@ module the way
 -- @Optimize.Names@ records it.
 deps :: Core.Expr -> Set Opt.Global
 deps value =
-  let refs = Program.refsIn value
-      globals = Set.map toGlobal (Program._refGlobals refs)
+  let refs = Refs.refsIn value
+      globals = Set.map toGlobal (Refs._refGlobals refs)
       ctors =
         Set.fromList
           [ Opt.Global home name
-          | q@(Core.QualName home name) <- Set.toList (Program._refCtors refs),
+          | q@(Core.QualName home name) <- Set.toList (Refs._refCtors refs),
             not (isBool q)
           ]
    in Set.union globals ctors

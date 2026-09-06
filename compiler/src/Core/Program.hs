@@ -15,14 +15,11 @@
 --   * __One table, reachable only__ ('_progBindings'). Dead code is dropped
 --     here rather than by each backend, because "reachable" is a property of the
 --     program and every backend agrees about it.
---   * __A specified order__ ('_progBindings' again). Groups of mutually
---     recursive bindings come out ordered by the least name in the group,
---     subject to dependencies — Kahn's algorithm with the smallest name chosen
---     at each step. That is reproducible from this sentence, which is the
---     property @docs/m1a-determinism.md@ §T2 wants and which a library's
---     depth-first search does not have. The strongly-connected /grouping/ comes
---     from "Data.Graph", because a partition into groups is canonical however it
---     is computed; only the order of the groups is chosen here.
+--   * __A specified order__ ('_progBindings' again). C14's, which "Core.Order"
+--     implements and a module's own definitions are in as well: dependency
+--     order, the least-named ready group first. That is reproducible from that
+--     sentence, which is the property @docs/m1a-determinism.md@ §T2 wanted and
+--     which a library's depth-first search does not have.
 --   * __The field set__ ('_progFields'), which @--optimize@'s field shortening
 --     needs and which is only knowable program-wide.
 --
@@ -37,16 +34,15 @@ module Core.Program
     Missing (..),
     MissingKind (..),
     link,
-    Refs (..),
-    refsIn,
     qualToChars,
     render,
   )
 where
 
 import Core.AST qualified as Core
+import Core.Order qualified as Order
+import Core.Refs (Refs (..), refsIn)
 import Data.ByteString.Builder qualified as B
-import Data.Graph qualified as Graph
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -158,50 +154,13 @@ walk defs refs seen frontier =
 
 -- | Reachable bindings as groups, in link order.
 --
--- The groups are the strongly-connected components of the dependency graph — a
--- canonical partition, whatever computes it. The order is Kahn's algorithm over
--- the condensation, taking the group with the least name whenever more than one
--- is ready, so a definition follows everything it uses and the result is
+-- The order is C14's, which "Core.Order" implements and every other list of
+-- Core bindings is in as well: strongly connected components in dependency
+-- order, the least-named ready group first, each group's members by name. A
+-- definition therefore follows everything it uses, and the result is
 -- reproducible from that description alone.
 ordered :: Map Core.QualName Core.Bind -> Map Core.QualName (Set Core.QualName) -> [[Core.QualName]]
-ordered defs deps =
-  let components =
-        [ List.sort component
-        | component <-
-            map Graph.flattenSCC $
-              Graph.stronglyConnComp
-                [(q, q, Set.toAscList (Map.findWithDefault Set.empty q deps)) | q <- Map.keys defs]
-        ]
-
-      indexed = zip [0 :: Int ..] components
-      groupOf = Map.fromList [(q, i) | (i, group) <- indexed, q <- group]
-      groupDeps =
-        Map.fromList
-          [ ( i,
-              Set.delete i $
-                Set.fromList
-                  [ j
-                  | q <- group,
-                    d <- Set.toAscList (Map.findWithDefault Set.empty q deps),
-                    Just j <- [Map.lookup d groupOf]
-                  ]
-            )
-          | (i, group) <- indexed
-          ]
-      byIndex = Map.fromList indexed
-      -- The least name in the group is what orders it, so that "ready" is a
-      -- set the smallest element can be taken from.
-      key i = (minimum (byIndex Map.! i), i)
-
-      kahn ready waiting =
-        case Set.minView ready of
-          Nothing -> []
-          Just ((_, i), rest) ->
-            let (freed, stillWaiting) = Map.partition Set.null (Map.map (Set.delete i) waiting)
-             in (byIndex Map.! i) : kahn (Set.union rest (Set.fromList (map key (Map.keys freed)))) stillWaiting
-
-      (initial, blocked) = Map.partition Set.null groupDeps
-   in kahn (Set.fromList (map key (Map.keys initial))) blocked
+ordered defs deps = Order.groups (Map.keys defs) deps
 
 -- MISSING
 
@@ -239,73 +198,6 @@ classify (Core.QualName home@(ModuleName.Canonical pkg _) _)
   | pkg == Pkg.kernel = MissingKernel
   | home == ModuleName.debug = MissingDebug
   | otherwise = MissingValue
-
--- REFERENCES
-
--- | What one expression refers to. One traversal, three answers, because the
--- linker needs all three of them for every binding.
-data Refs = Refs
-  { _refGlobals :: Set Core.QualName,
-    _refCtors :: Set Core.QualName,
-    _refFields :: Set Name
-  }
-
-instance Semigroup Refs where
-  Refs a1 b1 c1 <> Refs a2 b2 c2 =
-    Refs (Set.union a1 a2) (Set.union b1 b2) (Set.union c1 c2)
-
-instance Monoid Refs where
-  mempty = Refs Set.empty Set.empty Set.empty
-
-global :: Core.QualName -> Refs
-global q = mempty {_refGlobals = Set.singleton q}
-
-ctor :: Core.QualName -> Refs
-ctor q = mempty {_refCtors = Set.singleton q}
-
-field :: Name -> Refs
-field f = mempty {_refFields = Set.singleton f}
-
-refsIn :: Core.Expr -> Refs
-refsIn (Core.Expr value _ _) =
-  case value of
-    Core.EVar _ -> mempty
-    Core.EGlobal q -> global q
-    Core.ELit _ -> mempty
-    Core.ECrash _ -> mempty
-    Core.ELam _ body -> refsIn body
-    Core.EApp fn args -> foldMap refsIn (fn : args)
-    Core.ELet binds body -> foldMap bindRefs binds <> refsIn body
-    Core.ELetRec binds body -> foldMap bindRefs binds <> refsIn body
-    Core.ECase scrut alts fallback ->
-      refsIn scrut <> foldMap altRefs alts <> foldMap refsIn fallback
-    Core.ECtor q _ args -> ctor q <> foldMap refsIn args
-    Core.ERecord fields -> foldMap (\(f, e) -> field f <> refsIn e) fields
-    Core.EUpdate base fields -> refsIn base <> foldMap (\(f, e) -> field f <> refsIn e) fields
-    Core.EAccess base f -> refsIn base <> field f
-    Core.EArray items -> foldMap refsIn items
-    Core.EPrim _ args -> foldMap refsIn args
-    Core.ETyLam _ body -> refsIn body
-    Core.ETyApp body _ -> refsIn body
-    Core.EWitLam _ body -> refsIn body
-    Core.EWitApp body args -> foldMap refsIn (body : args)
-
-bindRefs :: Core.Bind -> Refs
-bindRefs = refsIn . Core._bindValue
-
-altRefs :: Core.Alt -> Refs
-altRefs (Core.Alt pattern body) = patternRefs pattern <> refsIn body
-
-patternRefs :: Core.Pattern -> Refs
-patternRefs pattern =
-  case pattern of
-    Core.PVar _ -> mempty
-    Core.PWild -> mempty
-    Core.PLit _ -> mempty
-    Core.PCtor q _ args -> ctor q <> foldMap patternRefs args
-    Core.PRecord fields -> foldMap (\(f, p) -> field f <> patternRefs p) fields
-    Core.PArray items _ -> foldMap patternRefs items
-    Core.PAs _ inner -> patternRefs inner
 
 -- RENDER
 

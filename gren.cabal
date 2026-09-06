@@ -120,9 +120,11 @@ Library common
         Core.Lower.Literal
         Core.Lower.Module
         Core.Lower.Type
+        Core.Order
         Core.Prim
         Core.Program
         Core.Pretty
+        Core.Refs
         Generate.FromCore
         Generate.Html
         Generate.Node
@@ -262,6 +264,7 @@ Test-Suite gren-tests
         Canonicalize.NodeIdSpec
         Core.LowerExpressionSpec
         Core.LowerTypeSpec
+        Core.OrderSpec
         Core.PrimSpec
         Core.ProgramSpec
         Generate.VLQSpec

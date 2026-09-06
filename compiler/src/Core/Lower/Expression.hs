@@ -60,11 +60,16 @@ import AST.Canonical qualified as Can
 import Core.AST qualified as Core
 import Core.Lower.Literal qualified as Literal
 import Core.Lower.Type (lowerType)
+import Core.Order qualified as Order
+import Core.Refs qualified as Refs
 import Data.Index qualified as Index
 import Data.List qualified as List
 import Data.Map qualified as Map
+import Data.Maybe qualified as Maybe
 import Data.Name (Name)
 import Data.Name qualified as Name
+import Data.Set qualified as Set
+import Data.Word (Word32)
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Reporting.Annotation qualified as A
@@ -157,20 +162,12 @@ expr env (Can.Expr nid region value) =
           node (call env func args)
         Can.If branches final ->
           node (ifChain env tipe sp branches final)
-        Can.Let d body ->
-          node (Core.ELet [def env d] (expr env body))
-        Can.LetRec ds body ->
-          node (Core.ELetRec (map (def env) ds) (expr env body))
-        Can.LetDestruct p value' body ->
-          -- A destructuring `let` binds no single name, so it is an `ECase`
-          -- with one alternative. It is irrefutable: the frontend rejects a
-          -- destructuring that does not cover its type, which is why there is
-          -- no fallback.
-          node $
-            Core.ECase
-              (expr env value')
-              [Core.Alt (pattern env (typeOfExpr env value') p) (expr env body)]
-              Nothing
+        Can.Let _ _ ->
+          letRun env tipe sp value
+        Can.LetRec _ _ ->
+          letRun env tipe sp value
+        Can.LetDestruct _ _ _ ->
+          letRun env tipe sp value
         Can.Case scrutinee branches ->
           let scrutineeType = typeOfExpr env scrutinee
               branch (Can.CaseBranch p body) =
@@ -233,6 +230,148 @@ accessor tipe sp field =
             (Core.Expr (Core.EAccess (variable sp binder) field) result sp)
     _ ->
       error ("Core.Lower.Expression: an accessor is not a one-argument function: " ++ show tipe)
+
+-- LET RUNS
+
+-- | A run of @let@ bindings, lowered and put in C14's order.
+--
+-- Canonical hands the bindings over one at a time — @Can.Let@ for a plain one,
+-- @Can.LetRec@ for a mutually recursive group, @Can.LetDestruct@ for a
+-- destructuring — nested one inside the next, and the nesting is the order
+-- @Data.Graph.stronglyConnComp@ happened to produce. C14 replaces it: the run's
+-- items are grouped by mutual recursion and the groups come out in dependency
+-- order, least-named ready group first, exactly as a module's definitions and a
+-- linked program's bindings do.
+--
+-- __A destructuring is an item like any other__, rather than a wall the
+-- reordering stops at. It has to be: where Canonical put it in the chain is the
+-- same unspecified choice, so leaving it in place would leave the order half
+-- specified. It is named by the least name its pattern binds; one that binds
+-- nothing — @_ = Debug.log "here" x@ — has only its source position to be known
+-- by, and sorts before named items that are equally ready, which is where a
+-- reader writes it.
+--
+-- Every frame in a run carries the same type and the same span: @detectCycles@
+-- builds all of them with @Can.at letRegion@, so the whole run is one region and
+-- nothing moves when the items do.
+letRun :: Env -> Core.Type -> Core.Span -> Can.Expr_ -> Core.Expr
+letRun env tipe sp value =
+  let (items, body) = collect value
+   in List.foldr (frame tipe sp) body (arrange items)
+  where
+    collect v =
+      case v of
+        Can.Let d rest -> prepend (bindsItem [def env d]) (continue rest)
+        Can.LetRec ds rest -> prepend (bindsItem (map (def env) ds)) (continue rest)
+        Can.LetDestruct p scrutinee rest ->
+          -- A destructuring `let` binds no single name, so it is an `ECase` with
+          -- one alternative. It is irrefutable: the frontend rejects a
+          -- destructuring that does not cover its type, which is why there is no
+          -- fallback.
+          prepend
+            (destructItem env (pattern env (typeOfExpr env scrutinee) p) (A.toRegion p) (expr env scrutinee))
+            (continue rest)
+        _ -> ([], error "Core.Lower.Expression.letRun: not a let")
+
+    continue e@(Can.Expr _ _ v) =
+      case v of
+        Can.Let _ _ -> collect v
+        Can.LetRec _ _ -> collect v
+        Can.LetDestruct _ _ _ -> collect v
+        _ -> ([], expr env e)
+
+    prepend item (items, body) = (item : items, body)
+
+-- | One step of a @let@ run: a group of bindings, or a destructuring.
+data Item = Item
+  { -- | What orders it: the least name it binds, and where it is written. The
+    -- position only decides between two items that bind no names at all, since
+    -- shadowing is forbidden (D63) and a run's names are therefore distinct.
+    _itemKey :: !(Maybe Name, (Word32, Word32)),
+    _itemNames :: !(Set.Set Name),
+    _itemUses :: !(Set.Set Name),
+    _itemWhat :: !What
+  }
+
+data What
+  = Binds ![Core.Bind]
+  | Destructure !Core.Pattern !Core.Expr
+
+bindsItem :: [Core.Bind] -> Item
+bindsItem binds =
+  Item
+    { _itemKey = minimum [(Just (bindName b), position (Core._binderSpan (Core._bindBinder b))) | b <- binds],
+      _itemNames = Set.fromList (map bindName binds),
+      _itemUses = Set.unions (map (Refs.freeLocals . Core._bindValue) binds),
+      _itemWhat = Binds binds
+    }
+
+destructItem :: Env -> Core.Pattern -> A.Region -> Core.Expr -> Item
+destructItem env p region scrutinee =
+  let names = Refs.patternBinders p
+   in Item
+        { _itemKey = (fst <$> Set.minView names, position (span env region)),
+          _itemNames = names,
+          _itemUses = Refs.freeLocals scrutinee,
+          _itemWhat = Destructure p scrutinee
+        }
+
+position :: Core.Span -> (Word32, Word32)
+position s = (Core._spanStartRow s, Core._spanStartCol s)
+
+-- | The run's items, grouped and ordered by C14.
+--
+-- A group of more than one item is a mutual recursion Canonical did not see —
+-- its edges for a @let@ are each binding's free variables, which is this same
+-- relation, so the two only disagree if one of them is wrong. Bindings that end
+-- up together become one recursive frame; a destructuring cannot be part of a
+-- recursive group at all (@checkCycle@ rejects it before this pass runs), so if
+-- one ever arrives in a group the items are emitted separately, in the group's
+-- own order, rather than merged into a frame that could not hold them.
+arrange :: [Item] -> [[Item]]
+arrange items =
+  let byKey = Map.fromList [(_itemKey item, item) | item <- items]
+      owner = Map.fromList [(n, _itemKey item) | item <- items, n <- Set.toList (_itemNames item)]
+      deps =
+        Map.fromList
+          [ ( _itemKey item,
+              Set.fromList (Maybe.mapMaybe (`Map.lookup` owner) (Set.toList (_itemUses item)))
+            )
+          | item <- items
+          ]
+   in [ [byKey Map.! k | k <- group]
+      | group <- Order.groups (map _itemKey items) deps
+      ]
+
+-- | One group of items as one frame — or as several, when they cannot be one.
+frame :: Core.Type -> Core.Span -> [Item] -> Core.Expr -> Core.Expr
+frame tipe sp group inner =
+  case group of
+    [Item _ _ _ (Destructure p scrutinee)] ->
+      Core.Expr (Core.ECase scrutinee [Core.Alt p inner] Nothing) tipe sp
+    _
+      | Just binds <- allBinds group ->
+          let recursive =
+                length binds > 1
+                  || or [Set.member (bindName b) (Refs.freeLocals (Core._bindValue b)) | b <- binds]
+              node = if recursive then Core.ELetRec else Core.ELet
+           in Core.Expr (node (List.sortOn bindName binds) inner) tipe sp
+      | otherwise ->
+          List.foldr (\item acc -> frame tipe sp [item] acc) inner group
+
+allBinds :: [Item] -> Maybe [Core.Bind]
+allBinds group =
+  concat
+    <$> traverse
+      ( \item ->
+          case _itemWhat item of
+            Binds binds -> Just binds
+            Destructure _ _ -> Nothing
+      )
+      group
+
+bindName :: Core.Bind -> Name
+bindName = Core._binderName . Core._bindBinder
 
 -- LAMBDAS AND DEFINITIONS
 
