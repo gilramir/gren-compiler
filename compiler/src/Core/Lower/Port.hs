@@ -4,7 +4,7 @@
 -- | The converters a @port@ needs, as Core. @docs/core.md@ C18 (D84).
 --
 -- This is @Optimize.Port@ written against 'Core.AST' instead of
--- 'AST.Optimized', and it is the half of a port that really is a value: a JSON
+-- @AST.Optimized@, and it is the half of a port that really is a value: a JSON
 -- encoder or decoder derived from the payload type, out of @Json.Encode@,
 -- @Json.Decode@ and @Maybe@. Nothing in it is JavaScript. The other half —
 -- handing the converter to the runtime's port constructor — is not a value and

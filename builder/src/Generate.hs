@@ -72,8 +72,8 @@ prod details artifacts =
 -- project's own from the 'Build.Artifacts'. This is the plumbing the JS backend
 -- will read; nothing generates code from it yet.
 --
--- A 'Build.Cached' module contributes nothing, because @.greni@/@.greno@ hold an
--- interface and an 'Opt.LocalGraph' and no Core. That branch cannot be reached
+-- A 'Build.Cached' module contributes nothing, because @.greni@ holds an
+-- interface and no Core. That branch cannot be reached
 -- today — nothing reads @d.dat@ back, so every module is fresh
 -- (@docs/upstream/compiler-artifact-cache-is-write-only.md@) — and the day the
 -- cache is restored, Core needs a file beside those two and this function needs
@@ -97,11 +97,11 @@ programCore details artifacts@(Build.Artifacts pkg _ _ _) =
 --
 -- A 'Build.Cached' module contributes nothing, for the reason 'programCore'
 -- gives and with a second consequence: a cached module's @Debug@ use would go
--- unreported, where reading its @.greno@ would have found it. That branch is
+-- unreported, where reading its Core would have found it. That branch is
 -- unreachable today — @d.dat@ is never read back, so @Details._locals@ is empty
 -- and every module is 'Build.Fresh'
 -- (@docs/upstream/compiler-artifact-cache-is-write-only.md@) — and restoring the
--- cache means giving Core a file beside @.greni@ and @.greno@, which is the same
+-- cache means giving Core a file beside @.greni@, which is the same
 -- work 'programCore' is waiting on.
 ownCore :: Build.Artifacts -> Map.Map ModuleName.Raw Core.Module
 ownCore (Build.Artifacts _ _ roots modules) =
@@ -109,13 +109,13 @@ ownCore (Build.Artifacts _ _ roots modules) =
   where
     moduleCore modul =
       case modul of
-        Build.Fresh name _ _ core -> Just (name, core)
+        Build.Fresh name _ core -> Just (name, core)
         Build.Cached _ _ _ -> Nothing
 
     rootCore root =
       case root of
         Build.Inside _ -> Nothing
-        Build.Outside name _ _ core -> Just (name, core)
+        Build.Outside name _ core -> Just (name, core)
 
 -- | What the kernel JavaScript refers to, read off the chunks the builder
 -- already holds (C16, @docs\/m1a-js-on-core.md@ §J7's two caveats).
@@ -196,7 +196,9 @@ linkCore details artifacts kernels =
 -- 'Gren.Details' parses it and holds it; both consumers here read it from there.
 -- 'kernelInfo' takes the /names/ out of a module's chunks for the linker and
 -- 'Generate.CoreJS' splices the chunks themselves — two readings of one thing,
--- and neither of them is a reading of an 'AST.Optimized.GlobalGraph' any more.
+-- and neither of them is a reading of a graph. They were, until §J13: a chunk
+-- travelled inside an @Opt.Kernel@ node because the graph was the only thing
+-- that reached the backend.
 kernelChunks :: Details.Details -> Task (Map.Map N.Name [K.Chunk])
 kernelChunks details =
   Task.io (Maybe.fromMaybe Map.empty <$> (readMVar =<< Details.loadKernels details))
@@ -204,14 +206,13 @@ kernelChunks details =
 -- | The program's roots, as Core names.
 --
 -- A root module's @main@, when it has one. That question used to be put to the
--- old pipeline — 'gatherMains' reads the 'AST.Optimized.Main' that
--- @Optimize.Module@ attached — and C19 records the same fact in Core beside the
--- binding, so it is put to Core here. The two classifications are one
--- classification on purpose: 'Core.Lower.Module.mainOf' is
--- @Optimize.Module.addDefHelp@'s, case for case, and a disagreement between
--- them would be a compiler bug rather than a missing entry.
+-- old pipeline — @gatherMains@ read the @Opt.Main@ that @Optimize.Module@
+-- attached — and C19 records the same fact in Core beside the binding, so it is
+-- put to Core here. There were two classifications of @main@ and now there is
+-- one: 'Core.Lower.Module.mainOf' was @Optimize.Module.addDefHelp@'s case for
+-- case, agreeing by inspection, and `Nitpick.Main` reads the surviving one.
 --
--- The order is by module name, which is what 'gatherMains''s @Map.keys@ gave
+-- The order is by module name, which is what @gatherMains@' @Map.keys@ gave
 -- and what C6 wants; the order the roots were named on the command line is not
 -- a property of the program.
 --
@@ -230,7 +231,7 @@ coreRoots (Build.Artifacts pkg _ roots _) cores =
     rootName root =
       case root of
         Build.Inside name -> name
-        Build.Outside name _ _ _ -> name
+        Build.Outside name _ _ -> name
 
 -- | Write what @GENG_DUMP_PROGRAM_CORE@ and @GENG_DUMP_LINK@ ask for, if either
 -- names a place to put it.
@@ -285,7 +286,7 @@ linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels =
       let own =
             Map.fromList
               [ (ModuleName.Canonical (ModuleName._package home) raw, core)
-              | Build.Fresh raw _ _ core <- modules
+              | Build.Fresh raw _ core <- modules
               ]
       let cores = Pass.run (Map.union own deps)
       return (Program.link (backendFor kernels cores) cores (replRoots home name))

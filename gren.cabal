@@ -98,7 +98,6 @@ Library common
 
         -- from compiler/
         AST.Canonical
-        AST.Optimized
         AST.Source
         AST.SourceComments
         AST.Utils.Binop
@@ -143,12 +142,7 @@ Library common
         Nitpick.Debug
         Nitpick.Main
         Nitpick.PatternMatches
-        Optimize.Case
         Optimize.DecisionTree
-        Optimize.Expression
-        Optimize.Module
-        Optimize.Names
-        Optimize.Port
         Parse.Declaration
         Parse.Expression
         Parse.Keyword

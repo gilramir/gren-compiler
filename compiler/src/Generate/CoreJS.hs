@@ -5,7 +5,7 @@
 -- §J15).
 --
 -- The Core-native emitter: §J3 item 6's successor, and the end of the @Opt@ hop.
--- `Generate.FromCore` builds an 'AST.Optimized.GlobalGraph' out of Core and lets
+-- @Generate.FromCore@ built an @AST.Optimized.GlobalGraph@ out of Core and let
 -- @Generate.JavaScript@ walk it; this reads 'Core.Program.Program' and writes
 -- JavaScript, and the only thing it is handed besides Core is the kernel chunks,
 -- which C16 (D81) put in the build system on purpose.
@@ -412,7 +412,7 @@ ctorEntries d =
   ]
 
 -- | The representation choice, derived the way `Canonicalize.Environment.Local`
--- derives it from source and `Generate.FromCore.ctorOpts` derives it from Core.
+-- derives it from source and @Generate.FromCore.ctorOpts@ derived it from Core.
 shapeOf :: Core.DataDecl -> Expr.Shape
 shapeOf d =
   case Core._dataCtors d of

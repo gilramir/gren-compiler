@@ -5,7 +5,6 @@ module Compile
 where
 
 import AST.Canonical qualified as Can
-import AST.Optimized qualified as Opt
 import AST.Source qualified as Src
 import Canonicalize.Module qualified as Canonicalize
 import Canonicalize.NodeId qualified as NodeId
@@ -22,7 +21,6 @@ import Gren.Package qualified as Pkg
 import Gren.Platform qualified as P
 import Nitpick.Main qualified as NitpickMain
 import Nitpick.PatternMatches qualified as PatternMatches
-import Optimize.Module qualified as Optimize
 import Reporting.Error qualified as E
 import Reporting.Render.Type.Localizer qualified as Localizer
 import Reporting.Result qualified as R
@@ -41,11 +39,9 @@ data Artifacts = Artifacts
     -- (`docs/m1a-node-types.md`); nothing before Core needed it, so nothing
     -- before Core computed it.
     _nodeTypes :: Map.Map Can.NodeId Can.Type,
-    -- | The module's Core (@docs/core.md@). Lazy, and nothing forces it yet:
-    -- the JS backend still reads `AST.Optimized`, and re-targeting it onto
-    -- Core is the rest of M1a. `GENG_DUMP_CORE` is what forces it today.
-    _core :: Core.Module,
-    _graph :: Opt.LocalGraph
+    -- | The module's Core (@docs/core.md@), which is the only thing the
+    -- backend reads. Lazy: a build that generates no code never forces it.
+    _core :: Core.Module
   }
 
 compile :: P.Platform -> Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Either E.Error Artifacts
@@ -59,10 +55,9 @@ compile platform pkg ifaces modul =
     () <- checkNodeTypes canonical nodeTypes
     () <- nitpick canonical
     () <- checkMain platform modul annotations canonical
-    objects <- optimize platform modul annotations canonical
     let core = Lower.lower platform annotations nodeTypes canonical
     () <- dumpCore canonical core
-    return (Artifacts canonical annotations nodeTypes core objects)
+    return (Artifacts canonical annotations nodeTypes core)
 
 -- PHASES
 
@@ -178,12 +173,12 @@ nitpick canonical =
     Left errors ->
       Left (E.BadPatterns errors)
 
--- | The three rejections @Optimize.Module@ used to make on the way past.
+-- | The three rejections the old pipeline used to make on the way past.
 --
--- Ahead of 'optimize' rather than after it, so that while both are in the binary
--- it is this one the corpus is checking: @reject/main-bad-type@,
--- @reject/main-bad-flags@ and @reject/main-in-a-cycle@ pin the wording of all
--- three, and the old check is unreachable behind this one.
+-- @Optimize.Module@ made them while building a graph, and they were the only
+-- user-facing checks it owned; `Nitpick.Main` is where they went when it was
+-- retired. @reject\/main-bad-type@, @reject\/main-bad-flags@ and
+-- @reject\/main-in-a-cycle@ pin the wording of all three.
 checkMain :: P.Platform -> Src.Module -> Map.Map Name.Name Can.Annotation -> Can.Module -> Either E.Error ()
 checkMain platform modul annotations canonical =
   case NitpickMain.check platform annotations canonical of
@@ -191,11 +186,3 @@ checkMain platform modul annotations canonical =
       Right ()
     Left err ->
       Left (E.BadMains (Localizer.fromModule modul) (OneOrMore.one err))
-
-optimize :: P.Platform -> Src.Module -> Map.Map Name.Name Can.Annotation -> Can.Module -> Either E.Error Opt.LocalGraph
-optimize platform modul annotations canonical =
-  case snd $ R.run $ Optimize.optimize platform annotations canonical of
-    Right localGraph ->
-      Right localGraph
-    Left errors ->
-      Left (E.BadMains (Localizer.fromModule modul) errors)

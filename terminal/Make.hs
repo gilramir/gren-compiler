@@ -5,8 +5,8 @@ module Make
   )
 where
 
-import AST.Optimized qualified as Opt
 import Build qualified
+import Core.AST qualified as Core
 import Data.ByteString.Builder qualified as B
 import Data.ByteString.Char8 qualified as ByteString8
 import Data.Map (Map)
@@ -191,6 +191,12 @@ getMains :: Build.Artifacts -> [ModuleName.Raw]
 getMains (Build.Artifacts _ _ roots modules) =
   Maybe.mapMaybe (getMain modules) (NE.toList roots)
 
+-- | Does this root module declare a @main@?
+--
+-- Asked of Core (C19), which is where the answer is: @Core._moduleMain@ is the
+-- classification `Core.Lower.Module.mainOf` made, and it is the same one
+-- `Generate.coreRoots` links from. It used to be asked of the old pipeline's
+-- @Opt.LocalGraph@, whose @main@ field held the same fact.
 getMain :: [Build.Module] -> Build.Root -> Maybe ModuleName.Raw
 getMain modules root =
   case root of
@@ -198,16 +204,16 @@ getMain modules root =
       if any (isMain name) modules
         then Just name
         else Nothing
-    Build.Outside name _ (Opt.LocalGraph maybeMain _ _) _ ->
-      case maybeMain of
-        Just _ -> Just name
-        Nothing -> Nothing
+    Build.Outside name _ core ->
+      if Maybe.isJust (Core._moduleMain core)
+        then Just name
+        else Nothing
 
 isMain :: ModuleName.Raw -> Build.Module -> Bool
 isMain targetName modul =
   case modul of
-    Build.Fresh name _ (Opt.LocalGraph maybeMain _ _) _ ->
-      Maybe.isJust maybeMain && name == targetName
+    Build.Fresh name _ core ->
+      Maybe.isJust (Core._moduleMain core) && name == targetName
     Build.Cached name mainIsDefined _ ->
       mainIsDefined && name == targetName
 
@@ -232,10 +238,10 @@ getNoMain modules root =
       if any (isMain name) modules
         then Nothing
         else Just name
-    Build.Outside name _ (Opt.LocalGraph maybeMain _ _) _ ->
-      case maybeMain of
-        Just _ -> Nothing
-        Nothing -> Just name
+    Build.Outside name _ core ->
+      if Maybe.isJust (Core._moduleMain core)
+        then Nothing
+        else Just name
 
 -- WRITE TO DISK
 

@@ -4,7 +4,7 @@
 -- | Core expressions as JavaScript (@docs/m1a-js-on-core.md@ §J15).
 --
 -- This is @Generate.JavaScript.Expression@ written against 'Core.AST' instead of
--- 'AST.Optimized', and most of it is a translation with nothing to decide: the
+-- @AST.Optimized@, and most of it is a translation with nothing to decide: the
 -- calling convention, the currying helpers, the constructor representation and
 -- the operator table are the JS backend's and are unchanged, because a program
 -- has to answer the same.
@@ -13,7 +13,7 @@
 -- hop was worth doing rather than only tidy:
 --
 --   * __A join point is a jump__ (C15). @Opt@ has no general labelled block —
---     @Opt.Jump@ exists only inside a decider — so `Generate.FromCore` compiles
+--     @Opt.Jump@ existed only inside a decider — so @Generate.FromCore@ compiled
 --     a 'Core.AST.EJoin' to a function and an 'Core.AST.EJump' to a call, which
 --     costs a closure. Here a join is a labelled loop and a jump is a @break@ or
 --     a @continue@; see 'joins'.
@@ -85,7 +85,7 @@ data Env = Env
     -- with it before the other starts. Nesting is the only way they overlap —
     -- siblings in a chain each assign before they read — so the nesting depth is
     -- a sufficient and deterministic name. The old pipeline gets the same thing
-    -- from `Optimize.Names`' @_v0@ counter.
+    -- from @Optimize.Names@' @_v0@ counter.
     _depth :: Int
   }
 
@@ -282,8 +282,8 @@ generateField mode name =
 -- one is an @ELam@ around one of these.
 --
 -- __A constructor with arguments is built inline__ rather than called, which the
--- old pipeline cannot do: it reaches a constructor through @Opt.VarGlobal@ and
--- so must call the function it emitted. Saturation is on the Core node, so the
+-- old pipeline could not do: it reached a constructor through @Opt.VarGlobal@
+-- and so had to call the function it emitted. Saturation is on the Core node, so the
 -- record can be written where it is used.
 --
 -- __A nullary one is a reference__ to the @var@ 'ctorDefinition' emits, so that
@@ -805,7 +805,7 @@ caseOf :: Env -> Core.Expr -> [Core.Alt] -> Maybe Core.Expr -> [JS.Stmt]
 caseOf env scrutinee alts fallback =
   case Core._exprValue scrutinee of
     -- A scrutinee that is already a variable is tested where it stands, which is
-    -- the shortcut `Optimize.Expression` takes and `Core.Pass.Case` relies on.
+    -- the shortcut @Optimize.Expression@ took and `Core.Pass.Case` relies on.
     Core.EVar name ->
       chain env (JS.Ref (JsName.fromLocal name)) alts fallback
     _ ->

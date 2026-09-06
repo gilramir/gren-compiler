@@ -21,7 +21,6 @@ module Build
 where
 
 import AST.Canonical qualified as Can
-import AST.Optimized qualified as Opt
 import AST.Source qualified as Src
 import AbsoluteSrcDir (AbsoluteSrcDir (..))
 import AbsoluteSrcDir qualified
@@ -158,16 +157,16 @@ data Artifacts = Artifacts
 
 -- | A module of the project being built.
 --
--- 'Fresh' carries the module's Core beside its objects, on its way to
+-- 'Fresh' carries the module's Core, on its way to
 -- 'Generate': M1a re-targets the JS backend onto Core, and the backend is
 -- handed a whole program rather than a module at a time. 'Cached' has none —
--- a cached module's artifacts come from @.greni@/@.greno@, which hold an
--- interface and an 'Opt.LocalGraph' and no Core. That branch is unreachable
+-- a cached module's artifacts come from @.greni@, which holds an interface
+-- and no Core. That branch is unreachable
 -- today (@docs/upstream/compiler-artifact-cache-is-write-only.md@); when the
 -- cache is restored, Core needs a file of its own and this constructor needs
 -- the field.
 data Module
-  = Fresh ModuleName.Raw I.Interface Opt.LocalGraph Core.Module
+  = Fresh ModuleName.Raw I.Interface Core.Module
   | Cached ModuleName.Raw Bool (MVar CachedInterface)
 
 type Dependencies =
@@ -245,7 +244,7 @@ getRootName :: Root -> ModuleName.Raw
 getRootName root =
   case root of
     Inside name -> name
-    Outside name _ _ _ -> name
+    Outside name _ _ -> name
 
 -- CRAWL
 
@@ -345,8 +344,8 @@ type ResultDict =
 data Result
   = -- | The 'Core.Module' field carries no bang, so a build that generates no
     -- code never forces the lowering.
-    RNew !Details.Local !I.Interface !Opt.LocalGraph Core.Module !(Maybe Docs.Module)
-  | RSame !Details.Local !I.Interface !Opt.LocalGraph Core.Module !(Maybe Docs.Module)
+    RNew !Details.Local !I.Interface Core.Module !(Maybe Docs.Module)
+  | RSame !Details.Local !I.Interface Core.Module !(Maybe Docs.Module)
   | RCached Bool (MVar CachedInterface)
   | RNotFound Import.Problem
   | RProblem Error.Module
@@ -450,9 +449,9 @@ checkDepsHelp root results deps new same cached importProblems isBlocked =
       do
         result <- readMVar (results ! dep)
         case result of
-          RNew _ iface _ _ _ ->
+          RNew _ iface _ _ ->
             checkDepsHelp root results otherDeps ((dep, iface) : new) same cached importProblems isBlocked
-          RSame _ iface _ _ _ ->
+          RSame _ iface _ _ ->
             checkDepsHelp root results otherDeps new ((dep, iface) : same) cached importProblems isBlocked
           RCached _ mvar ->
             checkDepsHelp root results otherDeps new same ((dep, mvar) : cached) importProblems isBlocked
@@ -653,7 +652,7 @@ compile :: Env -> DocsNeed -> Details.Local -> B.ByteString -> Map.Map ModuleNam
 compile (Env key root projectType platform _ _ _) docsNeed (Details.Local path deps main) source ifaces modul =
   let pkg = projectTypeToPkg projectType
    in case Compile.compile platform pkg ifaces modul of
-        Right (Compile.Artifacts canonical annotations _nodeTypes core objects) ->
+        Right (Compile.Artifacts canonical annotations _nodeTypes core) ->
           case makeDocs docsNeed canonical of
             Left err ->
               return $
@@ -664,7 +663,6 @@ compile (Env key root projectType platform _ _ _) docsNeed (Details.Local path d
                 let name = Src.getName modul
                 let iface = I.fromModule pkg canonical annotations
                 let greni = Dirs.greni root name
-                File.writeBinary (Dirs.greno root name) objects
                 maybeOldi <- File.readBinary greni
                 case maybeOldi of
                   Just oldi | oldi == iface ->
@@ -672,14 +670,14 @@ compile (Env key root projectType platform _ _ _) docsNeed (Details.Local path d
                       -- iface should be fully forced by equality check
                       Reporting.report key Reporting.BDone
                       let local = Details.Local path deps main
-                      return (RSame local iface objects core docs)
+                      return (RSame local iface core docs)
                   _ ->
                     do
                       -- iface may be lazy still
                       File.writeBinary greni iface
                       Reporting.report key Reporting.BDone
                       let local = Details.Local path deps main
-                      return (RNew local iface objects core docs)
+                      return (RNew local iface core docs)
         Left err ->
           return $
             RProblem $
@@ -701,8 +699,8 @@ writeDetails root (Details.Details time outline buildID locals foreigns extras) 
 addNewLocal :: ModuleName.Raw -> Result -> Map.Map ModuleName.Raw Details.Local -> Map.Map ModuleName.Raw Details.Local
 addNewLocal name result locals =
   case result of
-    RNew local _ _ _ _ -> Map.insert name local locals
-    RSame local _ _ _ _ -> Map.insert name local locals
+    RNew local _ _ _ -> Map.insert name local locals
+    RSame local _ _ _ -> Map.insert name local locals
     RCached _ _ -> locals
     RNotFound _ -> locals
     RProblem _ -> locals
@@ -725,8 +723,8 @@ finalizeExposed root docsGoal exposed results =
 addErrors :: Result -> [Error.Module] -> [Error.Module]
 addErrors result errors =
   case result of
-    RNew _ _ _ _ _ -> errors
-    RSame _ _ _ _ _ -> errors
+    RNew _ _ _ _ -> errors
+    RSame _ _ _ _ -> errors
     RCached _ _ -> errors
     RNotFound _ -> errors
     RProblem e -> e : errors
@@ -737,8 +735,8 @@ addErrors result errors =
 addImportProblems :: Map.Map ModuleName.Raw Result -> ModuleName.Raw -> [(ModuleName.Raw, Import.Problem)] -> [(ModuleName.Raw, Import.Problem)]
 addImportProblems results name problems =
   case results ! name of
-    RNew _ _ _ _ _ -> problems
-    RSame _ _ _ _ _ -> problems
+    RNew _ _ _ _ -> problems
+    RSame _ _ _ _ -> problems
     RCached _ _ -> problems
     RNotFound p -> (name, p) : problems
     RProblem _ -> problems
@@ -783,8 +781,8 @@ finalizeDocs goal results =
 toDocs :: Result -> Maybe Docs.Module
 toDocs result =
   case result of
-    RNew _ _ _ _ d -> d
-    RSame _ _ _ _ d -> d
+    RNew _ _ _ d -> d
+    RSame _ _ _ d -> d
     RCached _ _ -> Nothing
     RNotFound _ -> Nothing
     RProblem _ -> Nothing
@@ -843,9 +841,9 @@ finalizeReplArtifacts env@(Env _ root projectType platform _ _ _) source modul@(
 
       compileInput ifaces =
         case Compile.compile platform pkg ifaces modul of
-          Right (Compile.Artifacts canonical annotations _nodeTypes core objects) ->
+          Right (Compile.Artifacts canonical annotations _nodeTypes core) ->
             let h = Can._name canonical
-                m = Fresh (Src.getName modul) (I.fromModule pkg canonical annotations) objects core
+                m = Fresh (Src.getName modul) (I.fromModule pkg canonical annotations) core
                 ms = Map.foldrWithKey addInside [] results
              in return $ Right $ ReplArtifacts h (m : ms) (L.fromModule modul) annotations
           Left errors ->
@@ -1018,7 +1016,7 @@ checkRoot rootStatus =
 
 data Root
   = Inside ModuleName.Raw
-  | Outside ModuleName.Raw I.Interface Opt.LocalGraph Core.Module
+  | Outside ModuleName.Raw I.Interface Core.Module
 
 toArtifacts :: Env -> Dependencies -> Map.Map ModuleName.Raw Result -> NE.List RootResult -> Either Exit.BuildProblem Artifacts
 toArtifacts (Env _ root projectType _ _ _ _) foreigns results rootResults =
@@ -1044,8 +1042,8 @@ gatherProblemsOrMains results (NE.List rootResult rootResults) =
 addInside :: ModuleName.Raw -> Result -> [Module] -> [Module]
 addInside name result modules =
   case result of
-    RNew _ iface objs core _ -> Fresh name iface objs core : modules
-    RSame _ iface objs core _ -> Fresh name iface objs core : modules
+    RNew _ iface core _ -> Fresh name iface core : modules
+    RSame _ iface core _ -> Fresh name iface core : modules
     RCached main mvar -> Cached name main mvar : modules
     RNotFound _ -> error (badInside name)
     RProblem _ -> error (badInside name)

@@ -320,9 +320,9 @@ entryNames m =
 --
 -- @_Platform_leaf(home)@ closes over the module name and reads nothing else, so
 -- this really is what the value is: a partial application of a kernel function
--- to a string. `Optimize.Module` gets the same JavaScript from a graph edge —
+-- to a string. @Optimize.Module@ got the same JavaScript from a graph edge —
 -- an @Opt.Link@ to the manager node, which emits the @var@ as one of its own
--- statements — which is why the old pipeline needs no binding here and a
+-- statements — which is why the old pipeline needed no binding here and a
 -- Core-only program representation does.
 --
 -- The type is the one @Type.Constrain.Module.letCmd@ gives it, with @msg@ for

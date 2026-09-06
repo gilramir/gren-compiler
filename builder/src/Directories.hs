@@ -1,9 +1,7 @@
 module Directories
   ( details,
     interfaces,
-    objects,
     greni,
-    greno,
     artifactKey,
     findRoot,
     PackageCache,
@@ -40,10 +38,6 @@ details root =
 interfaces :: FilePath -> FilePath
 interfaces root =
   projectCache root </> "i.dat"
-
-objects :: FilePath -> FilePath
-objects root =
-  projectCache root </> "o.dat"
 
 compilerVersion :: FilePath
 compilerVersion =
@@ -97,15 +91,18 @@ fingerprint =
     pad hex =
       replicate (16 - length hex) '0' ++ hex
 
--- GRENI and GRENO
+-- GRENI
 
+-- | A module's interface. There was a @.greno@ beside it holding that module's
+-- @Opt.LocalGraph@, and an @o.dat@ holding the dependencies' folded into one
+-- graph; both went with the pipeline that read them. Neither was ever read back
+-- (@docs\/upstream\/compiler-artifact-cache-is-write-only.md@), so nothing that
+-- worked stops working — but the day the cache is restored, what a module needs
+-- beside its interface is its Core, which is C10's wire format and has its own
+-- gate.
 greni :: FilePath -> ModuleName.Raw -> FilePath
 greni root name =
   toArtifactPath root name "greni"
-
-greno :: FilePath -> ModuleName.Raw -> FilePath
-greno root name =
-  toArtifactPath root name "greno"
 
 toArtifactPath :: FilePath -> ModuleName.Raw -> String -> FilePath
 toArtifactPath root name ext =

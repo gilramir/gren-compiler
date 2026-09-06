@@ -19,7 +19,7 @@
 --
 -- __Where the branch's own variables come from.__ Not from the tests: a leaf
 -- re-destructures the branch's original pattern against the scrutinee, with
--- every test in it replaced by a wildcard, exactly as @Optimize.Case@ emits
+-- every test in it replaced by a wildcard, exactly as @Optimize.Case@ emitted
 -- 'Opt.Destructor's rooted at the scrutinee. A pattern that binds nothing gets
 -- no wrapper at all.
 --

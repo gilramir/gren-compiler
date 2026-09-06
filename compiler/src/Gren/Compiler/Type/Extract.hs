@@ -13,8 +13,8 @@ module Gren.Compiler.Type.Extract
 where
 
 import AST.Canonical qualified as Can
-import AST.Optimized qualified as Opt
 import AST.Utils.Type qualified as Type
+import Core.AST qualified as Core
 import Data.Map ((!))
 import Data.Map qualified as Map
 import Data.Name qualified as Name
@@ -43,7 +43,7 @@ extract astType =
     Can.TVar x ->
       pure (T.Var x)
     Can.TType home name args ->
-      addUnion (Opt.Global home name) (T.Type (toPublicName home name))
+      addUnion (Core.QualName home name) (T.Type (toPublicName home name))
         <*> traverse extract args
     Can.TRecord fields ext ->
       do
@@ -51,7 +51,7 @@ extract astType =
         pure (T.Record efields ext)
     Can.TAlias home name args aliasType ->
       do
-        addAlias (Opt.Global home name) ()
+        addAlias (Core.QualName home name) ()
         _ <- extract (Type.dealias args aliasType)
         T.Type (toPublicName home name)
           <$> traverse (extract . snd) args
@@ -65,7 +65,7 @@ toPublicName (ModuleName.Canonical _ home) name =
 newtype Types
   = Types (Map.Map ModuleName.Canonical Types_)
 
--- PERF profile Opt.Global representation
+-- PERF profile Core.QualName representation
 -- current representation needs less allocation
 -- but maybe the lookup is much worse
 
@@ -131,13 +131,13 @@ extractTransitive types (Deps seenAliases seenUnions) (Deps nextAliases nextUnio
                 extractTransitive types oldDeps newDeps
            in mappend result remainingResult
 
-extractAlias :: Types -> Opt.Global -> Extractor T.Alias
-extractAlias (Types dict) (Opt.Global home name) =
+extractAlias :: Types -> Core.QualName -> Extractor T.Alias
+extractAlias (Types dict) (Core.QualName home name) =
   let (Can.Alias args aliasType) = _alias_info (dict ! home) ! name
    in T.Alias (toPublicName home name) args <$> extract aliasType
 
-extractUnion :: Types -> Opt.Global -> Extractor T.Union
-extractUnion (Types dict) (Opt.Global home name) =
+extractUnion :: Types -> Core.QualName -> Extractor T.Union
+extractUnion (Types dict) (Core.QualName home name) =
   let pname = toPublicName home name
       (Can.Union vars ctors _ _) = _union_info (dict ! home) ! name
    in T.Union pname vars <$> traverse extractCtor ctors
@@ -149,8 +149,8 @@ extractCtor (Can.Ctor ctor _ _ args) =
 -- DEPS
 
 data Deps = Deps
-  { _aliases :: Set.Set Opt.Global,
-    _unions :: Set.Set Opt.Global
+  { _aliases :: Set.Set Core.QualName,
+    _unions :: Set.Set Core.QualName
   }
 
 noDeps :: Deps
@@ -162,9 +162,9 @@ noDeps =
 newtype Extractor a
   = Extractor
       ( forall result.
-        Set.Set Opt.Global ->
-        Set.Set Opt.Global ->
-        (Set.Set Opt.Global -> Set.Set Opt.Global -> a -> result) ->
+        Set.Set Core.QualName ->
+        Set.Set Core.QualName ->
+        (Set.Set Core.QualName -> Set.Set Core.QualName -> a -> result) ->
         result
       )
 
@@ -173,12 +173,12 @@ run (Extractor k) =
   k Set.empty Set.empty $ \aliases unions value ->
     (Deps aliases unions, value)
 
-addAlias :: Opt.Global -> a -> Extractor a
+addAlias :: Core.QualName -> a -> Extractor a
 addAlias alias value =
   Extractor $ \aliases unions ok ->
     ok (Set.insert alias aliases) unions value
 
-addUnion :: Opt.Global -> a -> Extractor a
+addUnion :: Core.QualName -> a -> Extractor a
 addUnion union value =
   Extractor $ \aliases unions ok ->
     ok aliases (Set.insert union unions) value

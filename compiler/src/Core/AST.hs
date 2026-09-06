@@ -294,7 +294,7 @@ data Manager = Manager
     -- | The bindings a program enters the manager through: @command@,
     -- @subscription@, or both. These are ordinary bindings in '_moduleDefs' —
     -- @Platform.leaf "<module>"@ — and reaching one of them is what makes the
-    -- manager live, exactly as the @Opt.Link@ to @$fx$@ does in the old
+    -- manager live, exactly as the @Opt.Link@ to @$fx$@ did in the old
     -- pipeline.
     _managerEntries :: ![QualName],
     _managerInit :: !QualName,

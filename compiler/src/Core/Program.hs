@@ -3,7 +3,7 @@
 
 -- | Linking Core: many modules in, one reachable program out.
 --
--- The JS backend does not read an IR. It reads an 'AST.Optimized.GlobalGraph':
+-- The JS backend used not to read an IR. It read an @AST.Optimized.GlobalGraph@:
 -- a single flat table for the whole program, already reduced to what the roots
 -- can reach. @docs/m1a-js-on-core.md@ §J1 is the inventory of what that means,
 -- and its two hardest rows are that Core has no linker and no reachability.
@@ -152,7 +152,7 @@ data Kernel = Kernel
 
 -- | A kernel module's node in the graph.
 --
--- The same name @AST.Optimized.toKernelGlobal@ gives it, and for the same
+-- The same name @AST.Optimized.toKernelGlobal@ gave it, and for the same
 -- reason: a kernel module is reached as a whole — one chunk list, spliced or
 -- not — so its functions are not separate nodes and @$@ is the name no Gren
 -- module can collide with.
@@ -322,7 +322,7 @@ linkedItem binds ports q =
 --
 -- They are edges rather than a separate root set for two reasons. Reaching
 -- @Task.command@ is exactly what makes the @Task@ manager live, which is the
--- rule the old pipeline gets from its @Opt.Link@ to @$fx$@; and a runtime
+-- rule the old pipeline got from its @Opt.Link@ to @$fx$@; and a runtime
 -- registers a manager at load time, reading those five names, so they have to be
 -- emitted before the entry is — which is what an edge says and a root set does
 -- not.
@@ -417,7 +417,7 @@ walk defined refs seen frontier =
 -- A kernel module has no entry here and so no strict references, which says that
 -- kernel JavaScript calls back into Gren from inside its functions rather than
 -- while it loads. That is an assumption about @core@'s kernel files, and it is
--- the same one the old pipeline's depth-first traversal makes.
+-- the same one the old pipeline's depth-first traversal made.
 settle :: Map Core.QualName (Set Core.QualName) -> [Core.QualName] -> [Core.QualName]
 settle strict group =
   case group of

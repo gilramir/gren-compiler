@@ -1,12 +1,17 @@
+-- | Dev or @--optimize@, and the field table the second one needs.
+--
+-- The table itself is built by `Generate.CoreJS.shortenFieldNames`, from the
+-- linked program's field /set/. It was built here until the old pipeline was
+-- retired, out of an @Opt.GlobalGraph@'s frequency /map/ — shortest names to
+-- commonest fields. C6 wants a specified order and a set has one, so the
+-- assignment is alphabetical instead, at a measured 0.34%
+-- (@docs\/m1a-js-on-core.md@ §J15).
 module Generate.Mode
   ( Mode (..),
     ShortFieldNames,
-    shortenFieldNames,
   )
 where
 
-import AST.Optimized qualified as Opt
-import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Generate.JavaScript.Name qualified as JsName
@@ -21,21 +26,3 @@ data Mode
 
 type ShortFieldNames =
   Map.Map Name.Name JsName.Name
-
-shortenFieldNames :: Opt.GlobalGraph -> ShortFieldNames
-shortenFieldNames (Opt.GlobalGraph _ frequencies) =
-  Map.foldr addToShortNames Map.empty $
-    Map.foldrWithKey addToBuckets Map.empty frequencies
-
-addToBuckets :: Name.Name -> Int -> Map.Map Int [Name.Name] -> Map.Map Int [Name.Name]
-addToBuckets field frequency buckets =
-  Map.insertWith (++) frequency [field] buckets
-
-addToShortNames :: [Name.Name] -> ShortFieldNames -> ShortFieldNames
-addToShortNames fields shortNames =
-  List.foldl' addField shortNames fields
-
-addField :: ShortFieldNames -> Name.Name -> ShortFieldNames
-addField shortNames field =
-  let rename = JsName.fromInt (Map.size shortNames)
-   in Map.insert field rename shortNames

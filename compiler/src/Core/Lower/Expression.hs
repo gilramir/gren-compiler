@@ -124,7 +124,7 @@ expr env (Can.Expr nid region value) =
         Can.VarOperator _ home name _ ->
           node (Core.EGlobal (Core.QualName home name))
         Can.VarKernel home name ->
-          -- `AST.Optimized.toKernelGlobal` already gives a kernel function a
+          -- @AST.Optimized.toKernelGlobal@ already gave a kernel function a
           -- module: the `gren/kernel` pseudo-package, one module per kernel
           -- prefix. Core reuses it rather than inventing a second encoding.
           -- Kernel references stop existing when `ffi.md` F7 retires the
