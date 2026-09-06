@@ -225,6 +225,8 @@ spec = do
 
   kernelSpec
 
+  mainSpec
+
 -- HELPERS
 
 -- | A module declaring ports, and a second module that names one of them.
@@ -307,6 +309,46 @@ fxManager =
       Core._managerEntries = [q "command", q "subscription"],
       Core._managerSubMap = Just (q "subMap")
     }
+
+mainSpec :: Spec
+mainSpec = describe "main" $ do
+  it "keeps what a flags decoder names" $
+    -- The edge C19 adds. Nothing in the program's code refers to `decode`; the
+    -- `main` declaration does, and only because `main` is a root.
+    let p = linkWith Map.empty (mainModules (Core.MainProgram converterTo)) [q "main"]
+     in names p `shouldBe` [q "decode", q "main"]
+
+  it "says nothing when main is not a root" $
+    let p = linkWith Map.empty (mainModules (Core.MainProgram converterTo)) [q "other"]
+     in (names p, _progMains p) `shouldBe` ([q "other"], [])
+
+  it "keeps nothing for a static main" $
+    -- `MainString` and `MainHtml` carry no Core: which kernel module a runtime
+    -- enters through is the backend's, not the IR's (C16).
+    let p = linkWith Map.empty (mainModules Core.MainString) [q "main"]
+     in names p `shouldBe` [q "main"]
+
+  it "reports each root's main, and only a root's" $
+    let p = linkWith Map.empty (mainModules Core.MainHtml) [q "main"]
+     in map snd (_progMains p) `shouldBe` [Core.MainHtml]
+
+  it "orders the decoder's dependencies before main" $
+    -- The property a backend emitting `main` needs, stated for `main` the same
+    -- way the port tests state it for a port.
+    let p = linkWith Map.empty (mainModules (Core.MainProgram converterTo)) [q "main"]
+     in map linkedName (_progLinked p) `shouldBe` ["decode", "main"]
+
+-- | A module whose @main@ is the given declaration, and a second binding the
+-- decoder names and nothing else does.
+mainModules :: Core.Main -> [Core.Module]
+mainModules m =
+  [ (modul home [bind "main" one, bind "decode" one, bind "other" one])
+      { Core._moduleMain = Just m
+      }
+  ]
+
+converterTo :: Core.Converter
+converterTo = Core.Converter False (globalE (q "decode"))
 
 kernelSpec :: Spec
 kernelSpec = describe "kernel modules" $ do
@@ -480,5 +522,6 @@ modul name defs =
       Core._moduleDefsRec = [],
       Core._moduleManager = Nothing,
       Core._modulePorts = [],
+      Core._moduleMain = Nothing,
       Core._moduleExports = []
     }

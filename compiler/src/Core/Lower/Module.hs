@@ -23,19 +23,21 @@
 -- flat list and 'Core.AST._moduleDefsRec' names the groups of more than one, so
 -- a backend that has to emit a mutually recursive group together still can.
 --
--- __Effects are declarations.__ An @effect module@'s manager (C17) and a
--- @port@ (C18) are each a thing a runtime assembles rather than a value a Gren
--- expression computes, so Core names their pieces and a backend builds what its
--- runtime wants: 'manager' and 'entries' for the one, "Core.Lower.Port" for the
--- other. Nothing a module declares is dropped any more, which is why the
--- function that used to report what was — @unloweredEffects@ — is gone.
--- @portable-core.md@ P3 and @ffi.md@ F4 delete both constructs at M1b.
+-- __Effects are declarations.__ An @effect module@'s manager (C17), a @port@
+-- (C18) and a module's @main@ (C19) are each a thing a runtime assembles rather
+-- than a value a Gren expression computes, so Core names their pieces and a
+-- backend builds what its runtime wants: 'manager' and 'entries' for the first,
+-- "Core.Lower.Port" for the other two. Nothing a module declares is dropped any
+-- more, which is why the function that used to report what was —
+-- @unloweredEffects@ — is gone. @portable-core.md@ P3 and @ffi.md@ F4 delete
+-- the first two constructs at M1b; @main@ outlives them.
 module Core.Lower.Module
   ( lower,
   )
 where
 
 import AST.Canonical qualified as Can
+import AST.Utils.Type qualified as Type
 import Core.AST qualified as Core
 import Core.Lower.Expression qualified as Expr
 import Core.Lower.Port qualified as Port
@@ -50,10 +52,11 @@ import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
+import Gren.Platform qualified as P
 import Reporting.Annotation qualified as A
 
-lower :: Map.Map Can.NodeId Can.Type -> Can.Module -> Core.Module
-lower types modul =
+lower :: P.Platform -> Map.Map Name Can.Annotation -> Map.Map Can.NodeId Can.Type -> Can.Module -> Core.Module
+lower platform annotations types modul =
   let home = Can._name modul
       env = Expr.Env selfFile types
       defs =
@@ -73,8 +76,37 @@ lower types modul =
             [map (Core.QualName home . bindName) g | g <- defs, length g > 1],
           Core._moduleExports = map (Core.QualName home) (exports modul),
           Core._moduleManager = manager home (Can._effects modul),
-          Core._modulePorts = ports (Can._effects modul)
+          Core._modulePorts = ports (Can._effects modul),
+          Core._moduleMain = mainOf platform annotations
         }
+
+-- | What the module's @main@ is, by its type (C19).
+--
+-- The classification is @Optimize.Module.addDefHelp@'s, and it has to be the
+-- same one: that function has already run and already rejected every shape not
+-- listed here, so a @Nothing@ from a module that has a @main@ would be a
+-- disagreement between the two rather than a missing case. The platform is what
+-- distinguishes @main : String@ from @main : Html msg@, and it arrives from
+-- "Compile" for that reason alone.
+--
+-- The span is the module's own zero span, as a port's is: what is being
+-- recorded is a fact about a type, and the binding it belongs to has a real
+-- span already.
+mainOf :: P.Platform -> Map.Map Name Can.Annotation -> Maybe Core.Main
+mainOf platform annotations =
+  do
+    Can.Forall _ tipe <- Map.lookup Name._main annotations
+    case Type.deepDealias tipe of
+      Can.TType hm nm []
+        | platform == P.Node && hm == ModuleName.string && nm == Name.string ->
+            Just Core.MainString
+      Can.TType hm nm [_]
+        | platform == P.Browser && hm == ModuleName.virtualDom && nm == Name.node ->
+            Just Core.MainHtml
+      Can.TType hm nm [flags, _, _]
+        | hm == ModuleName.platform && nm == Name.program ->
+            Just (Core.MainProgram (Port.decoder zeroSpan flags))
+      _ -> Nothing
 
 -- | The module's definitions, grouped and ordered by C14.
 --

@@ -27,6 +27,7 @@
 -- @portable-core.md@ P3 deletes the port mechanism at M1b and this with it.
 module Core.Lower.Port
   ( lower,
+    decoder,
   )
 where
 
@@ -69,6 +70,10 @@ lower sp name port_ =
 encoder :: Core.Span -> Can.Type -> Core.Converter
 encoder sp tipe = Core.Converter (isBytes tipe) (toEncoder sp tipe)
 
+-- | Also a program's flags decoder (C19), which is the same function: flags
+-- arrive from the same JavaScript as an incoming port's payload and are checked
+-- by the same @Effects.checkPayload@, and @Optimize.Port.toFlagsDecoder@ is
+-- defined as @toDecoder@ for exactly that reason.
 decoder :: Core.Span -> Can.Type -> Core.Converter
 decoder sp tipe = Core.Converter (isBytes tipe) (toDecoder sp tipe)
 

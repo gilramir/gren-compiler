@@ -96,7 +96,8 @@ run tbl m =
         [ i {Core._instMethods = [(n, evalState (expr tbl e) 0) | (n, e) <- Core._instMethods i]}
         | i <- Core._moduleInstances m
         ],
-      Core._modulePorts = map (port tbl) (Core._modulePorts m)
+      Core._modulePorts = map (port tbl) (Core._modulePorts m),
+      Core._moduleMain = fmap (mainOf tbl) (Core._moduleMain m)
     }
 
 port :: Table -> Core.Port -> Core.Port
@@ -107,6 +108,14 @@ port tbl (Core.Port binder flow) =
       Core.PortIn c -> Core.PortIn (converter tbl c)
       Core.PortTask input output ->
         Core.PortTask (fmap (converter tbl) input) (converter tbl output)
+
+-- | A @main@'s flags decoder is Core the same way a port's converter is (C19).
+mainOf :: Table -> Core.Main -> Core.Main
+mainOf tbl m =
+  case m of
+    Core.MainString -> m
+    Core.MainHtml -> m
+    Core.MainProgram c -> Core.MainProgram (converter tbl c)
 
 converter :: Table -> Core.Converter -> Core.Converter
 converter tbl (Core.Converter bytes code) =

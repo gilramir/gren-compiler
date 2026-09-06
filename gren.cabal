@@ -136,6 +136,7 @@ Library common
         Generate.JavaScript.Builder
         Generate.JavaScript.Expression
         Generate.JavaScript.Functions
+        Generate.JavaScript.Literal
         Generate.JavaScript.Name
         Generate.Mode
         Generate.SourceMap
@@ -273,6 +274,7 @@ Test-Suite gren-tests
         Core.PassTailCallSpec
         Core.PrimSpec
         Core.ProgramSpec
+        Generate.JavaScript.LiteralSpec
         Generate.VLQSpec
         Nitpick.PatternMatchesSpec
         Parse.AliasSpec

@@ -15,6 +15,7 @@ module Core.Refs
     ctor,
     refsIn,
     portRefs,
+    mainRefs,
     freeLocals,
     patternBinders,
   )
@@ -88,6 +89,19 @@ portRefs (Core.Port _ flow) =
     Core.PortOut c -> converterRefs c
     Core.PortIn c -> converterRefs c
     Core.PortTask input output -> foldMap converterRefs input <> converterRefs output
+
+-- | What a module's @main@ declaration refers to: its flags decoder, and
+-- nothing else (C19).
+--
+-- The same shape as 'portRefs' and for the same reason. It is why @main@ needs
+-- no rule of its own either: @main@ is a root, and these are edges out of it, so
+-- the decoder is reachable exactly when the program has an entry point.
+mainRefs :: Core.Main -> Refs
+mainRefs m =
+  case m of
+    Core.MainString -> mempty
+    Core.MainHtml -> mempty
+    Core.MainProgram c -> converterRefs c
 
 converterRefs :: Core.Converter -> Refs
 converterRefs = refsIn . Core._convCode

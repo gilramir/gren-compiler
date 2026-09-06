@@ -42,6 +42,7 @@ module Core.AST
     Port (..),
     PortFlow (..),
     Converter (..),
+    Main (..),
 
     -- * Names
     QualName (..),
@@ -247,8 +248,34 @@ data Module = Module
     -- | The @effect module@ manager this module declares, if it declares one.
     _moduleManager :: !(Maybe Manager),
     -- | The @port@s this module declares, by name (C18).
-    _modulePorts :: ![Port]
+    _modulePorts :: ![Port],
+    -- | What this module's @main@ is, if it declares one (C19).
+    _moduleMain :: !(Maybe Main)
   }
+  deriving (Eq, Show)
+
+-- | A module's entry point, as a declaration (C19, D85).
+--
+-- @main@ is an ordinary binding and stays one; what is /not/ a value is the
+-- thing a runtime does with it, which depends on the binding's __type__ and not
+-- on its body. A @main : String@ is printed, a @main : Html msg@ is handed to
+-- the virtual DOM, and a @Program flags model msg@ is applied to a decoder
+-- derived from @flags@ — three different pieces of a runtime, chosen by a type
+-- the emitted code no longer has.
+--
+-- So the choice is recorded here, beside the binding, exactly as C17 records a
+-- manager's and C18 a port's. The frontend has already rejected every other
+-- shape by the time this is built (@Reporting.Error.Main@), so there is no
+-- fourth case and no error to report.
+data Main
+  = -- | @main : String@, on the @node@ platform.
+    MainString
+  | -- | @main : Html msg@, on the @browser@ platform.
+    MainHtml
+  | -- | @main : Program flags model msg@. The converter decodes the flags, and
+    -- is the same one a @port@'s payload gets — @Optimize.Port.toFlagsDecoder@
+    -- is literally @toDecoder@, and this is "Core.Lower.Port"'s.
+    MainProgram !Converter
   deriving (Eq, Show)
 
 -- | What an @effect module@ declares, as a declaration rather than as an

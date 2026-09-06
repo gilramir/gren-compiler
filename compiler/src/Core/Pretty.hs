@@ -61,6 +61,7 @@ moduleToBuilder opts m =
       block (map (instanceDecl opts) (_moduleInstances m)),
       block (maybe [] (pure . managerDecl) (_moduleManager m)),
       block (map (portDecl opts) (_modulePorts m)),
+      block (maybe [] (pure . mainDecl opts) (_moduleMain m)),
       block (map (topBind opts (recNames m)) (_moduleDefs m))
     ]
 
@@ -81,6 +82,15 @@ managerDecl m =
     kind ManagerCmd = "cmd"
     kind ManagerSub = "sub"
     kind ManagerFx = "fx"
+
+-- | A @main@ declaration (C19): what a runtime does with the @main@ binding
+-- below, and for a program the flags decoder as ordinary Core.
+mainDecl :: Options -> Main -> B.Builder
+mainDecl opts m =
+  case m of
+    MainString -> "main string\n"
+    MainHtml -> "main html\n"
+    MainProgram c -> "main program\n" <> converter opts "flags" c
 
 -- | A @port@ declaration (C18): which way the payload crosses, whether it
 -- crosses as bytes, and the converters as ordinary Core.

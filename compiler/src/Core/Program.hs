@@ -54,7 +54,7 @@ where
 
 import Core.AST qualified as Core
 import Core.Order qualified as Order
-import Core.Refs (Refs (..), ctor, global, portRefs, refsIn)
+import Core.Refs (Refs (..), ctor, global, mainRefs, portRefs, refsIn)
 import Data.ByteString.Builder qualified as B
 import Data.List qualified as List
 import Data.Map (Map)
@@ -97,6 +97,9 @@ data Program = Program
     -- | The kernel modules reachable code reaches, in link order among the
     -- rest. Empty once @ffi.md@ F7 retires the kernel.
     _progKernels :: [Name],
+    -- | What each root's @main@ is (C19), in root order. A root whose module
+    -- declares no @main@ is not here, and is a 'Missing' instead.
+    _progMains :: [(ModuleName.Canonical, Core.Main)],
     -- | What reachable code refers to and Core does not define.
     _progMissing :: [Missing]
   }
@@ -180,6 +183,7 @@ link kernels modules roots =
         Map.unionsWith
           (<>)
           [ managerRefs modules,
+            entryRefs modules,
             Map.map (refsIn . Core._bindValue) binds,
             Map.map (portRefs . snd) ports,
             Map.map (kernelRefs ctorOwner) kernelNodes
@@ -208,8 +212,37 @@ link kernels modules roots =
           _progManagers = reachedManagers reached modules,
           _progPorts = [(home, p) | LPort home p <- items],
           _progKernels = [short | LKernel short <- items],
+          _progMains = mains modules roots,
           _progMissing = missing defined ctorOwner datas roots reachedRefs
         }
+
+-- | The extra edges a module's @main@ declaration puts in the graph: from the
+-- @main@ binding to whatever its flags decoder names (C19).
+--
+-- Edges rather than roots, exactly as 'managerRefs' are: a @main@ that nothing
+-- links from is not an entry point, and a decoder is needed precisely when the
+-- @main@ it decodes for is emitted.
+entryRefs :: Map ModuleName.Canonical Core.Module -> Map Core.QualName Refs
+entryRefs modules =
+  Map.fromList
+    [ (Core.QualName home Name._main, mainRefs m)
+    | (home, modul) <- Map.toAscList modules,
+      Just m <- [Core._moduleMain modul]
+    ]
+
+-- | Each root's @main@, in root order.
+--
+-- Keyed by the root's module rather than collected from every module, because
+-- what a backend needs is the entry points of /this/ program: a library module
+-- in the dependency graph may well declare a @main@ nothing links to.
+mains :: Map ModuleName.Canonical Core.Module -> [Core.QualName] -> [(ModuleName.Canonical, Core.Main)]
+mains modules roots =
+  [ (home, m)
+  | Core.QualName home name <- roots,
+    name == Name._main,
+    Just modul <- [Map.lookup home modules],
+    Just m <- [Core._moduleMain modul]
+  ]
 
 -- | What one kernel module's JavaScript refers to, as a 'Refs'.
 --
@@ -408,6 +441,11 @@ render p =
         [ "  " <> B.stringUtf8 (ModuleName.toChars raw) <> " " <> managerKind m <> " " <> B.stringUtf8 (List.intercalate ", " (map qualToChars (managerImpl m))) <> "\n"
         | (ModuleName.Canonical _ raw, m) <- _progManagers p
         ],
+      "mains " <> int (length (_progMains p)) <> "\n",
+      mconcat
+        [ "  " <> B.stringUtf8 (ModuleName.toChars raw) <> " " <> mainKind m <> "\n"
+        | (ModuleName.Canonical _ raw, m) <- _progMains p
+        ],
       "kernels " <> int (length (_progKernels p)) <> "\n",
       mconcat ["  " <> B.stringUtf8 (Name.toChars short) <> "\n" | short <- _progKernels p],
       "ports " <> int (length (_progPorts p)) <> "\n",
@@ -441,6 +479,16 @@ portFlow (Core.Port _ flow) =
       "task " <> maybe "()" bytes input <> " -> " <> bytes output
   where
     bytes c = if Core._convBytes c then "bytes" else "json"
+
+-- | Which of the three things a runtime does with @main@, and for a program
+-- whether its flags cross as bytes: what a reader would otherwise open the Core
+-- to find, as with 'portFlow'.
+mainKind :: Core.Main -> B.Builder
+mainKind m =
+  case m of
+    Core.MainString -> "string"
+    Core.MainHtml -> "html"
+    Core.MainProgram c -> "program " <> if Core._convBytes c then "bytes" else "json"
 
 managerKind :: Core.Manager -> B.Builder
 managerKind m =

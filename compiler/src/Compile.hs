@@ -57,7 +57,7 @@ compile platform pkg ifaces modul =
     () <- checkNodeTypes canonical nodeTypes
     () <- nitpick canonical
     objects <- optimize platform modul annotations canonical
-    let core = Lower.lower nodeTypes canonical
+    let core = Lower.lower platform annotations nodeTypes canonical
     () <- dumpCore canonical core
     return (Artifacts canonical annotations nodeTypes core objects)
 

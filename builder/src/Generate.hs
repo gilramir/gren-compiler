@@ -154,9 +154,32 @@ kernelInfo (Opt.GlobalGraph nodes _) =
 -- The JS backend's roots are the @main@ of each root module, which is where
 -- 'gatherMains' stops; in Core each one is an ordinary top-level binding called
 -- @main@ in that module.
-coreRoots :: Map.Map ModuleName.Canonical Opt.Main -> [Core.QualName]
-coreRoots mains =
-  [Core.QualName home (N.fromChars "main") | home <- Map.keys mains]
+--
+-- And the kernel modules this backend's /runtime/ enters through, which are
+-- roots for the same reason a @main@ is: nothing in the program refers to them,
+-- and the program does not run without them. Which ones those are is the JS
+-- backend's knowledge and not Core's — C16 again, and the same division
+-- `Generate.FromCore.mainDeps` and @definePort@ make — so it is applied here,
+-- where the backend is already chosen, rather than inside the linker.
+--
+-- @Platform@ is named by any module that declares a @port@, reached or not. The
+-- over-approximation is deliberate and free: every program that has a port has
+-- a @Cmd@ or a @Sub@ too, so @Platform@ is reachable from Gren code anyway, and
+-- the alternative is asking the linker a question it cannot answer until it has
+-- already answered it.
+coreRoots :: Map.Map ModuleName.Canonical Opt.Main -> Map.Map ModuleName.Canonical Core.Module -> [Core.QualName]
+coreRoots mains cores =
+  [Core.QualName home N._main | home <- Map.keys mains]
+    ++ map Program.kernelName (Set.toAscList (Set.unions (map runtime (Map.elems cores))))
+  where
+    runtime modul =
+      Set.union
+        (if null (Core._modulePorts modul) then Set.empty else Set.singleton N.platform)
+        ( case Core._moduleMain modul of
+            Just Core.MainString -> Set.singleton N.node
+            Just Core.MainHtml -> Set.singleton N.virtualDom
+            _ -> Set.empty
+        )
 
 -- | Write what @GENG_DUMP_PROGRAM_CORE@ and @GENG_DUMP_LINK@ ask for, if either
 -- names a place to put it.
@@ -185,7 +208,7 @@ dumpCore details artifacts graph mains =
               let roots =
                     if Dump.linkEveryExport
                       then concatMap Core._moduleExports (Map.elems cores)
-                      else coreRoots mains
+                      else coreRoots mains cores
                in B.writeFile file (Program.render (Program.link (kernelInfo graph) cores roots))
 
 repl :: FilePath -> Details.Details -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder

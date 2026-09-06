@@ -55,10 +55,9 @@ import Data.Name qualified as Name
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
-import Gren.Float qualified as EF
+import Generate.JavaScript.Literal qualified as Literal
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
-import Gren.String qualified as ES
 import Optimize.DecisionTree qualified as DT
 import Reporting.Annotation qualified as A
 
@@ -72,48 +71,15 @@ import Reporting.Annotation qualified as A
 -- expression mentions (§J7), so a census taken from Core alone would be short.
 redefine :: Map ModuleName.Canonical Core.Module -> Opt.GlobalGraph -> Opt.GlobalGraph
 redefine cores (Opt.GlobalGraph nodes fields) =
-  let defined =
-        Map.fromList
-          [ (global, keepDeps nodes global node)
-          | (global, node) <- coreNodes cores
-          ]
-   in Opt.GlobalGraph (Map.union defined nodes) fields
+  Opt.GlobalGraph (Map.union (Map.fromList (coreNodes cores)) nodes) fields
 
--- | Every value definition Core supplies, as a backend node, before 'keepDeps'
--- widens anything. 'redefine' and 'gap' walk the same list, which is what makes
--- the measurement a measurement of what is shipped.
+-- | Every value definition Core supplies, as a backend node. 'redefine' and
+-- 'gap' walk the same list, which is what makes the measurement a measurement of
+-- what is shipped.
 coreNodes :: Map ModuleName.Canonical Core.Module -> [(Opt.Global, Opt.Node)]
 coreNodes cores =
   let ctors = Map.fromList (concatMap ctorEntries (Map.elems cores))
    in concatMap (moduleNodes ctors) (Map.toAscList cores)
-
--- | Keep the dependencies of the node being replaced, for @main@ and only for
--- @main@.
---
--- A @main@ whose type is a @Program@ has a generated flags decoder hanging off
--- its definition node — @Optimize.Module@ passes it in as @mainDeps@, and
--- @Node.SimpleProgram@ and a browser @main@ each register a kernel module the
--- same way. That is `Optimize.Port`'s work and Core does not carry it (§J3 item
--- 5), so the dependencies are attached to a definition whose body says nothing
--- about them, and dropping them emits a program that refers to a `Json.Decode`
--- function nobody defined.
---
--- It applied to every definition until §J10 measured what that was covering for:
--- two dependencies the Core path was missing — @Basics.identity@ behind an
--- unboxed constructor and the kernel @Utils@ module behind a character literal,
--- both now recorded by 'need' — and two the old pipeline records and does not
--- use. @harness\/deps-gap.py@ is the standing check that the list stays that
--- short. Outside @main@ the two walks now agree or the Core one is tighter, so
--- the union has nothing left to do there.
-keepDeps :: Map Opt.Global Opt.Node -> Opt.Global -> Opt.Node -> Opt.Node
-keepDeps nodes global@(Opt.Global _ name) node
-  | name /= Name._main = node
-  | otherwise =
-      case (node, Map.lookup global nodes) of
-        (Opt.Define r body ds, Just (Opt.Define _ _ old)) -> Opt.Define r body (Set.union ds old)
-        (Opt.Define r body ds, Just (Opt.Cycle _ _ _ old)) -> Opt.Define r body (Set.union ds old)
-        (Opt.Define r body ds, Just (Opt.DefineTailFunc _ _ _ old)) -> Opt.Define r body (Set.union ds old)
-        _ -> node
 
 -- MEASURING THE UNION
 
@@ -315,10 +281,38 @@ moduleNodes ctors (home, m) =
       short (Core.QualName _ n) = n
    in [ if Set.member (Core._binderName (Core._bindBinder b)) entries
           then (Opt.Global home (Core._binderName (Core._bindBinder b)), Opt.Link (Opt.Global home "$fx$"))
-          else define env b
+          else widen (Core._moduleMain m) (define env b)
       | b <- Core._moduleDefs m
       ]
         ++ map (definePort env) (Core._modulePorts m)
+
+-- | The edges out of @main@ that its /type/ puts there rather than its body
+-- (C19), and the one place a `Core.AST.Main` reaches the old pipeline.
+--
+-- @Optimize.Module@ hangs them off the @main@ node as @mainDeps@: the flags
+-- decoder's own references for a @Program@, and the kernel module a runtime
+-- enters through for the other two. This is the same set, from the Core
+-- declaration, and building it here is what let §J8's `keepDeps` go — that
+-- function existed only because Core had no @main@ to read them from, and
+-- @harness\/deps-gap.py@ is the check that the two sets now agree.
+--
+-- Which kernel module a runtime enters through is the backend's to know and not
+-- Core's, exactly as it is for a port: C16 keeps kernel JavaScript in the build
+-- system, and `Core.AST.Main` names no runtime function at all.
+widen :: Maybe Core.Main -> (Opt.Global, Opt.Node) -> (Opt.Global, Opt.Node)
+widen maybeMain entry@(global@(Opt.Global _ name), node) =
+  case (maybeMain, node) of
+    (Just m, Opt.Define r body ds)
+      | name == Name._main ->
+          (global, Opt.Define r body (Set.union ds (mainDeps m)))
+    _ -> entry
+
+mainDeps :: Core.Main -> Set Opt.Global
+mainDeps m =
+  case m of
+    Core.MainString -> Set.singleton (Opt.toKernelGlobal Name.node)
+    Core.MainHtml -> Set.singleton (Opt.toKernelGlobal Name.virtualDom)
+    Core.MainProgram c -> deps (Core._convCode c)
 
 -- | A @port@'s node, built from the Core declaration rather than from
 -- @Optimize.Module@'s.
@@ -632,65 +626,16 @@ literal r lit =
     Core.LInt64 n -> pure (Opt.Int r (fromIntegral n))
     Core.LUInt32 n -> pure (Opt.Int r (fromIntegral n))
     Core.LUInt64 n -> pure (Opt.Int r (fromIntegral n))
-    Core.LFloat d -> pure (Opt.Float r (float d))
-    Core.LFloat32 f -> pure (Opt.Float r (float (realToFrac f)))
+    Core.LFloat d -> pure (Opt.Float r (Literal.float d))
+    Core.LFloat32 f -> pure (Opt.Float r (Literal.float (realToFrac f)))
     -- A character is a one-character string wrapped by @_Utils_chr@ in dev mode,
     -- so it depends on the kernel @Utils@ module. `Optimize.Expression` records
     -- the same dependency, with @Names.registerKernel Name.utils@.
     Core.LChar code ->
       do
         need (Opt.toKernelGlobal Name.utils)
-        pure (Opt.Chr r (jsLiteral [toEnum (fromIntegral code)]))
-    Core.LString text -> pure (Opt.Str r (jsLiteral (Utf8.toChars text)))
-
--- | A `Gren.Float` is the digits as written, and Core holds a `Double`, so the
--- digits have to be written again. Haskell's `show` produces the shortest
--- decimal that reads back as the same `Double`, and every form it produces —
--- @1.0@, @1.0e-2@, @Infinity@, @NaN@ — is also valid JavaScript.
-float :: Double -> EF.Float
-float = Utf8.fromChars . show
-
--- | Text as the body of a JavaScript literal.
---
--- `Generate.JavaScript.Builder` writes a string between __single__ quotes, so
--- that is the quote to escape and the double quote goes out as itself — which is
--- also what `Parse.String` does when it builds one of these from source.
---
--- Core holds characters (C2's `Text`), not the escapes they were written with,
--- so this is where they are escaped again, and it escapes only what has to be:
--- the quote, the backslash, the C0 controls and DEL, and U+2028 and U+2029,
--- which older JavaScript treats as line terminators inside a string. Everything
--- else, astral characters included, goes out as itself, in UTF-8.
---
--- Deliberately __not__ `Gren.String`'s surrogate-pair encoder. That is the
--- function whose boundary was off by one — `docs/upstream/`
--- @compiler-u-ffff-becomes-a-surrogate-pair.md@ — and a literal character needs
--- no arithmetic to go wrong in.
-jsLiteral :: [Char] -> ES.String
-jsLiteral = Utf8.fromChars . concatMap escape
-  where
-    escape c =
-      case c of
-        '\'' -> "\\'"
-        '\\' -> "\\\\"
-        '\n' -> "\\n"
-        '\r' -> "\\r"
-        '\t' -> "\\t"
-        _
-          | code < 0x20 || code == 0x7F || code == 0x2028 || code == 0x2029 ->
-              "\\u" ++ pad (showHex code)
-          | otherwise -> [c]
-      where
-        code = fromEnum c
-
-    pad hex = replicate (4 - length hex) '0' ++ hex
-
-    showHex 0 = "0"
-    showHex n = go n ""
-      where
-        go 0 acc = acc
-        go m acc = go (m `div` 16) (digit (m `mod` 16) : acc)
-        digit d = if d < 10 then toEnum (fromEnum '0' + d) else toEnum (fromEnum 'a' + d - 10)
+        pure (Opt.Chr r (Literal.string [toEnum (fromIntegral code)]))
+    Core.LString text -> pure (Opt.Str r (Literal.string (Utf8.toChars text)))
 
 -- CONSTRUCTORS
 
@@ -835,8 +780,8 @@ litTest lit =
     Core.LInt64 n -> DT.IsInt (fromIntegral n)
     Core.LUInt32 n -> DT.IsInt (fromIntegral n)
     Core.LUInt64 n -> DT.IsInt (fromIntegral n)
-    Core.LChar code -> DT.IsChr (jsLiteral [toEnum (fromIntegral code)])
-    Core.LString text -> DT.IsStr (jsLiteral (Utf8.toChars text))
+    Core.LChar code -> DT.IsChr (Literal.string [toEnum (fromIntegral code)])
+    Core.LString text -> DT.IsStr (Literal.string (Utf8.toChars text))
     Core.LFloat _ -> error "Generate.FromCore: a float pattern — the frontend rejects one"
     Core.LFloat32 _ -> error "Generate.FromCore: a float pattern — the frontend rejects one"
 

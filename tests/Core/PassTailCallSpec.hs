@@ -138,5 +138,6 @@ modul defs =
       Core._moduleDefsRec = [],
       Core._moduleManager = Nothing,
       Core._modulePorts = [],
+      Core._moduleMain = Nothing,
       Core._moduleExports = []
     }
