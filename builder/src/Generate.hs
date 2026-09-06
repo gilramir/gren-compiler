@@ -45,36 +45,36 @@ type Task a =
 dev :: FilePath -> Details.Details -> Build.Artifacts -> Task JS.GeneratedResult
 dev root details artifacts@(Build.Artifacts pkg _ roots modules) =
   do
-    objects <- finalizeObjects =<< loadObjects root details modules
-    let mains = gatherMains pkg objects roots
-    let objectGraph = objectsToGlobalGraph objects
-    dumpCore details artifacts objectGraph mains
-    native <- linkCore details artifacts objectGraph mains
+    kernels <- kernelChunks details
+    dumpCore details artifacts kernels
+    native <- linkCore details artifacts kernels
     case native of
-      Just program -> return $ CoreJS.generate Mode.Dev program (kernelChunks objectGraph)
+      Just program -> return $ CoreJS.generate Mode.Dev program kernels
       Nothing ->
         do
+          objects <- finalizeObjects =<< loadObjects root details modules
+          let objectGraph = objectsToGlobalGraph objects
           graph <- fromCore details artifacts objectGraph
-          return $ JS.generate Mode.Dev graph mains
+          return $ JS.generate Mode.Dev graph (gatherMains pkg objects roots)
 
 prod :: FilePath -> Details.Details -> Build.Artifacts -> Task JS.GeneratedResult
 prod root details artifacts@(Build.Artifacts pkg _ roots modules) =
   do
-    objects <- finalizeObjects =<< loadObjects root details modules
-    checkForDebugUses objects
-    let mains = gatherMains pkg objects roots
-    let objectGraph = objectsToGlobalGraph objects
-    dumpCore details artifacts objectGraph mains
-    native <- linkCore details artifacts objectGraph mains
+    checkForDebugUses artifacts
+    kernels <- kernelChunks details
+    dumpCore details artifacts kernels
+    native <- linkCore details artifacts kernels
     case native of
       Just program ->
         let mode = Mode.Prod (CoreJS.shortenFieldNames (Program._progFields program))
-         in return $ CoreJS.generate mode program (kernelChunks objectGraph)
+         in return $ CoreJS.generate mode program kernels
       Nothing ->
         do
+          objects <- finalizeObjects =<< loadObjects root details modules
+          let objectGraph = objectsToGlobalGraph objects
           graph <- fromCore details artifacts objectGraph
           let mode = Mode.Prod (Mode.shortenFieldNames graph)
-          return $ JS.generate mode graph mains
+          return $ JS.generate mode graph (gatherMains pkg objects roots)
 
 -- PROGRAM CORE
 
@@ -94,22 +94,41 @@ prod root details artifacts@(Build.Artifacts pkg _ roots modules) =
 -- 'dumpProgramCore' reports the count and @harness/core-golden.py@ compares the
 -- module set against the frontend's own dump.
 programCore :: Details.Details -> Build.Artifacts -> IO (Map.Map ModuleName.Canonical Core.Module)
-programCore details (Build.Artifacts pkg _ roots modules) =
+programCore details artifacts@(Build.Artifacts pkg _ _ _) =
   do
     maybeDeps <- readMVar =<< Details.loadCores details
     let deps = Maybe.fromMaybe Map.empty maybeDeps
-    let own = Map.fromList (Maybe.mapMaybe moduleCore modules ++ Maybe.mapMaybe rootCore (NE.toList roots))
+    let own = Map.mapKeys (ModuleName.Canonical pkg) (ownCore artifacts)
     return (Map.union own deps)
+
+-- | The Core of the modules being built, by raw name.
+--
+-- 'programCore' is this plus the dependencies', keyed canonically. It is
+-- separate because 'checkForDebugUses' wants exactly this half — @--optimize@
+-- rejects a @Debug@ use in the project and not in a package it depends on — and
+-- wants the raw name, which is what the error prints.
+--
+-- A 'Build.Cached' module contributes nothing, for the reason 'programCore'
+-- gives and with a second consequence: a cached module's @Debug@ use would go
+-- unreported, where reading its @.greno@ would have found it. That branch is
+-- unreachable today — @d.dat@ is never read back, so @Details._locals@ is empty
+-- and every module is 'Build.Fresh'
+-- (@docs/upstream/compiler-artifact-cache-is-write-only.md@) — and restoring the
+-- cache means giving Core a file beside @.greni@ and @.greno@, which is the same
+-- work 'programCore' is waiting on.
+ownCore :: Build.Artifacts -> Map.Map ModuleName.Raw Core.Module
+ownCore (Build.Artifacts _ _ roots modules) =
+  Map.fromList (Maybe.mapMaybe moduleCore modules ++ Maybe.mapMaybe rootCore (NE.toList roots))
   where
     moduleCore modul =
       case modul of
-        Build.Fresh name _ _ core -> Just (ModuleName.Canonical pkg name, core)
+        Build.Fresh name _ _ core -> Just (name, core)
         Build.Cached _ _ _ -> Nothing
 
     rootCore root =
       case root of
         Build.Inside _ -> Nothing
-        Build.Outside name _ _ core -> Just (ModuleName.Canonical pkg name, core)
+        Build.Outside name _ _ core -> Just (name, core)
 
 -- | The backend's input, with every value definition rebuilt from Core if
 -- @GENG_JS_FROM_CORE=1@ asks for it.
@@ -147,27 +166,20 @@ fromCore details artifacts graph =
 -- The graph's own field census is not the answer to the second half: it is the
 -- whole program's, kernel and Gren at once, where the linker wants each kernel
 -- module's share attributed to it so that an unreached one contributes nothing.
-backendFor :: Opt.GlobalGraph -> Map.Map ModuleName.Canonical Core.Module -> Program.Backend
-backendFor graph cores =
+backendFor :: Map.Map N.Name [K.Chunk] -> Map.Map ModuleName.Canonical Core.Module -> Program.Backend
+backendFor kernels cores =
   Program.Backend
-    { Program._backendKernels = kernelInfo graph,
+    { Program._backendKernels = Map.map kernelInfo kernels,
       Program._backendEdges = runtimeEdges cores
     }
 
-kernelInfo :: Opt.GlobalGraph -> Map.Map N.Name Program.Kernel
-kernelInfo (Opt.GlobalGraph nodes _) =
-  Map.fromList
-    [ (short, kernel chunks)
-    | (Opt.Global (ModuleName.Canonical pkg short) _, Opt.Kernel chunks _) <- Map.toList nodes,
-      pkg == Pkg.kernel
-    ]
-  where
-    kernel chunks =
-      Program.Kernel
-        { Program._kernelGren = Set.fromList [Core.QualName home name | K.GrenVar home name <- chunks],
-          Program._kernelKernels = Set.fromList [short | K.JsVar short _ <- chunks],
-          Program._kernelFields = Map.keysSet (K.countFields chunks)
-        }
+kernelInfo :: [K.Chunk] -> Program.Kernel
+kernelInfo chunks =
+  Program.Kernel
+    { Program._kernelGren = Set.fromList [Core.QualName home name | K.GrenVar home name <- chunks],
+      Program._kernelKernels = Set.fromList [short | K.JsVar short _ <- chunks],
+      Program._kernelFields = Map.keysSet (K.countFields chunks)
+    }
 
 -- | The kernel module each declaration's runtime call lands in.
 --
@@ -208,43 +220,58 @@ runtimeEdges cores =
 --
 -- This is the whole of what the Core-native emitter is handed besides the kernel
 -- chunks: one call to `Core.Program.link`, with the roots 'coreRoots' names and
--- the kernel information 'kernelInfo' reads off the graph. Nothing downstream of
--- it looks at an `AST.Optimized.GlobalGraph` node.
-linkCore :: Details.Details -> Build.Artifacts -> Opt.GlobalGraph -> Map.Map ModuleName.Canonical Opt.Main -> Task (Maybe Program.Program)
-linkCore details artifacts graph mains
+-- the kernel information 'kernelInfo' reads off those same chunks. Nothing on
+-- this path looks at an `AST.Optimized.GlobalGraph` at all — 'Generate.dev' and
+-- 'Generate.prod' do not even load one (§J16).
+linkCore :: Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Task (Maybe Program.Program)
+linkCore details artifacts kernels
   | not Dump.jsNative = return Nothing
   | otherwise =
       Task.io $
         do
           cores <- Pass.run <$> programCore details artifacts
-          return (Just (Program.link (backendFor graph cores) cores (coreRoots mains)))
+          return (Just (Program.link (backendFor kernels cores) cores (coreRoots artifacts cores)))
 
--- | The kernel modules' chunks, which C16 keeps here rather than in Core.
+-- | The kernel modules' JavaScript, which C16 keeps in the build system.
 --
--- 'kernelInfo' takes the /names/ out of the same nodes for the linker; this
--- takes the JavaScript, for the emitter. Two readings of one thing, because the
--- two consumers want different halves of it and neither wants the graph.
-kernelChunks :: Opt.GlobalGraph -> Map.Map N.Name [K.Chunk]
-kernelChunks (Opt.GlobalGraph nodes _) =
-  Map.fromList
-    [ (short, chunks)
-    | (Opt.Global (ModuleName.Canonical pkg short) _, Opt.Kernel chunks _) <- Map.toList nodes,
-      pkg == Pkg.kernel
-    ]
+-- 'Gren.Details' parses it and holds it; both consumers here read it from there.
+-- 'kernelInfo' takes the /names/ out of a module's chunks for the linker and
+-- 'Generate.CoreJS' splices the chunks themselves — two readings of one thing,
+-- and neither of them is a reading of an 'AST.Optimized.GlobalGraph' any more.
+kernelChunks :: Details.Details -> Task (Map.Map N.Name [K.Chunk])
+kernelChunks details =
+  Task.io (Maybe.fromMaybe Map.empty <$> (readMVar =<< Details.loadKernels details))
 
 -- | The program's roots, as Core names.
 --
--- The JS backend's roots are the @main@ of each root module, which is where
--- 'gatherMains' stops; in Core each one is an ordinary top-level binding called
--- @main@ in that module.
+-- A root module's @main@, when it has one. That question used to be put to the
+-- old pipeline — 'gatherMains' reads the 'AST.Optimized.Main' that
+-- @Optimize.Module@ attached — and C19 records the same fact in Core beside the
+-- binding, so it is put to Core here. The two classifications are one
+-- classification on purpose: 'Core.Lower.Module.mainOf' is
+-- @Optimize.Module.addDefHelp@'s, case for case, and a disagreement between
+-- them would be a compiler bug rather than a missing entry.
+--
+-- The order is by module name, which is what 'gatherMains''s @Map.keys@ gave
+-- and what C6 wants; the order the roots were named on the command line is not
+-- a property of the program.
 --
 -- The kernel modules a runtime enters through are /not/ here. They were, and it
 -- was wrong: a root makes a kernel module reachable and says nothing about when
 -- it is emitted, so a port's @var@ could still land above the chunk it
 -- registers itself in. They are edges instead — 'runtimeEdges'.
-coreRoots :: Map.Map ModuleName.Canonical Opt.Main -> [Core.QualName]
-coreRoots mains =
-  [Core.QualName home N._main | home <- Map.keys mains]
+coreRoots :: Build.Artifacts -> Map.Map ModuleName.Canonical Core.Module -> [Core.QualName]
+coreRoots (Build.Artifacts pkg _ roots _) cores =
+  [ Core.QualName home N._main
+  | home <- Set.toAscList (Set.fromList (map (ModuleName.Canonical pkg . rootName) (NE.toList roots))),
+    Just modul <- [Map.lookup home cores],
+    Maybe.isJust (Core._moduleMain modul)
+  ]
+  where
+    rootName root =
+      case root of
+        Build.Inside name -> name
+        Build.Outside name _ _ _ -> name
 
 -- | Write what @GENG_DUMP_PROGRAM_CORE@ and @GENG_DUMP_LINK@ ask for, if either
 -- names a place to put it.
@@ -253,8 +280,8 @@ coreRoots mains =
 -- "Compile"'s per-module dump so that the two are comparable as directories. The
 -- second is 'Core.Program.link''s summary: what the roots reach, in what order,
 -- and what they refer to that Core cannot supply yet.
-dumpCore :: Details.Details -> Build.Artifacts -> Opt.GlobalGraph -> Map.Map ModuleName.Canonical Opt.Main -> Task ()
-dumpCore details artifacts graph mains =
+dumpCore :: Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Task ()
+dumpCore details artifacts kernels =
   case (Dump.programDir, Dump.linkFile) of
     (Nothing, Nothing) -> return ()
     (maybeDir, maybeFile) ->
@@ -273,8 +300,8 @@ dumpCore details artifacts graph mains =
               let roots =
                     if Dump.linkEveryExport
                       then concatMap Core._moduleExports (Map.elems cores)
-                      else coreRoots mains
-               in B.writeFile file (Program.render (Program.link (backendFor graph cores) cores roots))
+                      else coreRoots artifacts cores
+               in B.writeFile file (Program.render (Program.link (backendFor kernels cores) cores roots))
 
 repl :: FilePath -> Details.Details -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
 repl root details ansi (Build.ReplArtifacts home modules localizer annotations) name =
@@ -285,9 +312,16 @@ repl root details ansi (Build.ReplArtifacts home modules localizer annotations) 
 
 -- CHECK FOR DEBUG
 
-checkForDebugUses :: Objects -> Task ()
-checkForDebugUses (Objects _ locals) =
-  case Map.keys (Map.filter Nitpick.hasDebugUses locals) of
+-- | @--optimize@ rejects a program that still calls @Debug@ (@Nitpick.Debug@).
+--
+-- Asked of Core rather than of the old pipeline's graph, because the answer is
+-- in Core: canonicalization turns every reference to a value in the @Debug@
+-- module into @Can.VarDebug@, and "Core.Lower.Expression" lowers that to an
+-- @EGlobal@ whose home is 'ModuleName.debug'. One walk over the module's
+-- bindings finds them.
+checkForDebugUses :: Build.Artifacts -> Task ()
+checkForDebugUses artifacts =
+  case Map.keys (Map.filter Nitpick.hasDebugUses (ownCore artifacts)) of
     [] -> return ()
     m : ms -> Task.throw (Exit.GenerateCannotOptimizeDebugValues m ms)
 
