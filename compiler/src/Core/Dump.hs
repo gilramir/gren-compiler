@@ -25,6 +25,7 @@ module Core.Dump
     linkEveryExport,
     jsFromCore,
     corePasses,
+    depsGap,
   )
 where
 
@@ -91,6 +92,19 @@ jsFromCore :: Bool
 jsFromCore =
   unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_JS_FROM_CORE")
 {-# NOINLINE jsFromCore #-}
+
+-- | @GENG_DEPS_GAP@: a file to write the dependency-set measurement to.
+--
+-- `Generate.FromCore.keepDeps` unions the replaced node's dependencies into the
+-- ones the Core body reaches, so the sets the Core path ships are a superset and
+-- a passing corpus cannot show that the Core walk is complete. This asks for the
+-- difference instead, and it does not need @GENG_JS_FROM_CORE@: the measurement
+-- compares two dependency sets and changes neither, so it can be taken on a
+-- build that generates the old way (@docs\/m1a-js-on-core.md@ §J10).
+depsGap :: Maybe FilePath
+depsGap =
+  unsafePerformIO (Env.lookupEnv "GENG_DEPS_GAP")
+{-# NOINLINE depsGap #-}
 
 -- | @GENG_CORE_PASSES=case,tailcall@: which Core→Core passes to run before the
 -- backend reads the program.

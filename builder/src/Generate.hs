@@ -100,11 +100,23 @@ programCore details (Build.Artifacts pkg _ roots modules) =
 -- `Generate.FromCore` says what it does and does not rebuild. Off by default:
 -- both paths are in the binary so that the differential harness can run the
 -- corpus through each (`docs/m1a-js-on-core.md` §J3 items 6 and 7).
+--
+-- @GENG_DEPS_GAP@ asks for the other thing this function is in a position to
+-- know: how far `Generate.FromCore.keepDeps`'s union moves the dependency sets
+-- (§J10). It reads both the Core and the graph the old pipeline built, so it is
+-- measured here and it does not need the switch on.
 fromCore :: Details.Details -> Build.Artifacts -> Opt.GlobalGraph -> Task Opt.GlobalGraph
 fromCore details artifacts graph =
-  if not Dump.jsFromCore
-    then return graph
-    else Task.io (flip FromCore.redefine graph . Pass.run <$> programCore details artifacts)
+  case (Dump.jsFromCore, Dump.depsGap) of
+    (False, Nothing) -> return graph
+    (usingCore, maybeGapFile) ->
+      Task.io $
+        do
+          cores <- Pass.run <$> programCore details artifacts
+          case maybeGapFile of
+            Nothing -> return ()
+            Just file -> B.writeFile file (FromCore.renderGap (FromCore.gap cores graph))
+          return (if usingCore then FromCore.redefine cores graph else graph)
 
 -- | The program's roots, as Core names.
 --

@@ -33,6 +33,9 @@
 --     until it is called, so plain @var@ definitions in any order are correct.
 module Generate.FromCore
   ( redefine,
+    Gap,
+    gap,
+    renderGap,
   )
 where
 
@@ -41,9 +44,12 @@ import AST.Optimized qualified as Opt
 import Control.Monad.Trans.State.Strict (State, runState, state)
 import Core.AST qualified as Core
 import Core.Refs qualified as Refs
+import Data.ByteString.Builder qualified as B
 import Data.Index qualified as Index
+import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Maybe qualified as Maybe
 import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.Set (Set)
@@ -66,39 +72,214 @@ import Reporting.Annotation qualified as A
 -- expression mentions (§J7), so a census taken from Core alone would be short.
 redefine :: Map ModuleName.Canonical Core.Module -> Opt.GlobalGraph -> Opt.GlobalGraph
 redefine cores (Opt.GlobalGraph nodes fields) =
-  let ctors = Map.fromList (concatMap ctorEntries (Map.elems cores))
-      defined =
+  let defined =
         Map.fromList
           [ (global, keepDeps nodes global node)
-          | (global, node) <- concatMap (moduleNodes ctors) (Map.toAscList cores)
+          | (global, node) <- coreNodes cores
           ]
    in Opt.GlobalGraph (Map.union defined nodes) fields
 
--- | Keep the dependencies of the node being replaced, as well as the ones the
--- Core body reaches.
+-- | Every value definition Core supplies, as a backend node, before 'keepDeps'
+-- widens anything. 'redefine' and 'gap' walk the same list, which is what makes
+-- the measurement a measurement of what is shipped.
+coreNodes :: Map ModuleName.Canonical Core.Module -> [(Opt.Global, Opt.Node)]
+coreNodes cores =
+  let ctors = Map.fromList (concatMap ctorEntries (Map.elems cores))
+   in concatMap (moduleNodes ctors) (Map.toAscList cores)
+
+-- | Keep the dependencies of the node being replaced, for @main@ and only for
+-- @main@.
 --
--- Not belt and braces: a @main@ whose type is a @Program@ has a generated flags
--- decoder hanging off its definition node — @Optimize.Module@ passes it in as
--- @mainDeps@ — and the decoder is `Optimize.Port`'s work, which Core does not
--- carry (§J3 item 5). Its dependencies are therefore attached to a definition
--- whose body says nothing about them, and dropping them emits a program that
--- refers to a `Json.Decode` function nobody defined.
+-- A @main@ whose type is a @Program@ has a generated flags decoder hanging off
+-- its definition node — @Optimize.Module@ passes it in as @mainDeps@, and
+-- @Node.SimpleProgram@ and a browser @main@ each register a kernel module the
+-- same way. That is `Optimize.Port`'s work and Core does not carry it (§J3 item
+-- 5), so the dependencies are attached to a definition whose body says nothing
+-- about them, and dropping them emits a program that refers to a `Json.Decode`
+-- function nobody defined.
 --
--- The cost is that the Core path's dependency sets are a superset rather than
--- exactly what Core reaches, so this is not yet evidence that the Core walk is
--- complete. Measuring the difference is worth doing before the old path goes.
---
--- What /is/ established: deleting every value definition Core did not supply —
--- rather than letting the old one stand — leaves the whole corpus passing and a
--- 1201-module program answering correctly. So Core supplies every definition
--- these programs need; nothing is quietly falling back to an `Optimize.*` body.
+-- It applied to every definition until §J10 measured what that was covering for:
+-- two dependencies the Core path was missing — @Basics.identity@ behind an
+-- unboxed constructor and the kernel @Utils@ module behind a character literal,
+-- both now recorded by 'need' — and two the old pipeline records and does not
+-- use. @harness\/deps-gap.py@ is the standing check that the list stays that
+-- short. Outside @main@ the two walks now agree or the Core one is tighter, so
+-- the union has nothing left to do there.
 keepDeps :: Map Opt.Global Opt.Node -> Opt.Global -> Opt.Node -> Opt.Node
-keepDeps nodes global node =
-  case (node, Map.lookup global nodes) of
-    (Opt.Define r body ds, Just (Opt.Define _ _ old)) -> Opt.Define r body (Set.union ds old)
-    (Opt.Define r body ds, Just (Opt.Cycle _ _ _ old)) -> Opt.Define r body (Set.union ds old)
-    (Opt.Define r body ds, Just (Opt.DefineTailFunc _ _ _ old)) -> Opt.Define r body (Set.union ds old)
-    _ -> node
+keepDeps nodes global@(Opt.Global _ name) node
+  | name /= Name._main = node
+  | otherwise =
+      case (node, Map.lookup global nodes) of
+        (Opt.Define r body ds, Just (Opt.Define _ _ old)) -> Opt.Define r body (Set.union ds old)
+        (Opt.Define r body ds, Just (Opt.Cycle _ _ _ old)) -> Opt.Define r body (Set.union ds old)
+        (Opt.Define r body ds, Just (Opt.DefineTailFunc _ _ _ old)) -> Opt.Define r body (Set.union ds old)
+        _ -> node
+
+-- MEASURING THE UNION
+
+-- | What 'keepDeps' actually adds, definition by definition (§J10).
+--
+-- The union is a superset, so a passing corpus does not show that the Core walk
+-- is complete: a dependency Core failed to reach would be supplied by the old
+-- node and nothing would go wrong. This measures the difference instead, and the
+-- claim it can support is narrow but real — if the only definitions whose old
+-- dependency set is not a subset of the Core one are the roots' @main@, then
+-- outside @main@ the Core walk reaches everything @Optimize.Module@ reached, and
+-- 'keepDeps' can be narrowed to the case that needs it.
+data Gap = Gap
+  { -- | Definitions Core supplied, by the kind of node they replaced.
+    _gapDefs :: [(Opt.Global, Kind)],
+    -- | Those whose two dependency sets differ, either way round.
+    _gapDiffs :: [Diff]
+  }
+
+data Diff = Diff
+  { _diffDef :: Opt.Global,
+    -- | The kind of node being replaced. A @link@ is a cycle member, and the
+    -- group carries every member's dependencies together, so one is widened by
+    -- its siblings' as a matter of course.
+    _diffWas :: Kind,
+    -- | In the replaced node and not reached from Core: what the union adds, and
+    -- the whole reason 'keepDeps' exists.
+    _diffOnlyOld :: [(Opt.Global, Kind)],
+    -- | Reached from Core and not in the replaced node. Not a hazard — a
+    -- dependency too many keeps a node alive that nothing calls — but it says
+    -- where the two walks disagree in the other direction.
+    _diffOnlyCore :: [(Opt.Global, Kind)]
+  }
+
+-- | Which kind of node a name resolves to, so that a difference can be read
+-- without looking every name up by hand.
+data Kind
+  = KDefine
+  | KTailFunc
+  | KCycle
+  | KLink
+  | KCtor
+  | KKernel
+  | KManager
+  | KPort
+  | -- | Nothing in the graph defines it. For a definition, that means Core
+    -- supplied one @Optimize.Module@ did not; for a dependency, it is a
+    -- dangling reference and a bug in whichever walk produced it.
+    KAbsent
+  deriving (Eq, Ord)
+
+gap :: Map ModuleName.Canonical Core.Module -> Opt.GlobalGraph -> Gap
+gap cores (Opt.GlobalGraph nodes _) =
+  let kindOf global = maybe KAbsent nodeKind (Map.lookup global nodes)
+      classify = map (\g -> (g, kindOf g)) . Set.toList
+      entries = coreNodes cores
+      -- A cycle member's node is a `Link` to the group, and the group carries
+      -- every member's dependencies together. Following the link is what makes
+      -- the comparison meaningful: Core defines each member on its own, so its
+      -- set is the member's and the old one is the group's.
+      oldDeps global =
+        case Map.lookup global nodes of
+          Just (Opt.Link linked) -> maybe Set.empty nodeDeps (Map.lookup linked nodes)
+          Just old -> nodeDeps old
+          Nothing -> Set.empty
+      diff (global, node) =
+        let core = nodeDeps node
+            old = oldDeps global
+            onlyOld = Set.difference old core
+            onlyCore = Set.difference core old
+         in if Set.null onlyOld && Set.null onlyCore
+              then Nothing
+              else Just (Diff global (kindOf global) (classify onlyOld) (classify onlyCore))
+   in Gap
+        [(global, kindOf global) | (global, _) <- entries]
+        (Maybe.mapMaybe diff entries)
+
+nodeDeps :: Opt.Node -> Set Opt.Global
+nodeDeps node =
+  case node of
+    Opt.Define _ _ ds -> ds
+    Opt.DefineTailFunc _ _ _ ds -> ds
+    Opt.Cycle _ _ _ ds -> ds
+    Opt.Kernel _ ds -> ds
+    Opt.PortIncoming _ _ ds -> ds
+    Opt.PortOutgoing _ _ ds -> ds
+    Opt.PortTask _ _ _ _ ds -> ds
+    -- A `Link` carries none of its own; 'gap' follows it to the cycle.
+    Opt.Link _ -> Set.empty
+    Opt.Ctor _ _ -> Set.empty
+    Opt.Enum _ -> Set.empty
+    Opt.Box -> Set.empty
+    Opt.Manager _ -> Set.empty
+
+nodeKind :: Opt.Node -> Kind
+nodeKind node =
+  case node of
+    Opt.Define {} -> KDefine
+    Opt.DefineTailFunc {} -> KTailFunc
+    Opt.Cycle {} -> KCycle
+    Opt.Link _ -> KLink
+    Opt.Ctor _ _ -> KCtor
+    Opt.Enum _ -> KCtor
+    Opt.Box -> KCtor
+    Opt.Kernel _ _ -> KKernel
+    Opt.Manager _ -> KManager
+    Opt.PortIncoming {} -> KPort
+    Opt.PortOutgoing {} -> KPort
+    Opt.PortTask {} -> KPort
+
+renderGap :: Gap -> B.Builder
+renderGap (Gap defs diffs) =
+  mconcat
+    [ "definitions " <> int (length defs) <> "\n",
+      mconcat
+        [ "  replaced " <> kindB k <> " " <> int n <> "\n"
+        | (k, n) <- tally (map snd defs)
+        ],
+      "differing " <> int (length diffs) <> "\n",
+      "  widened " <> int (length [d | d <- diffs, not (null (_diffOnlyOld d))]) <> "\n",
+      "  core-only " <> int (length [d | d <- diffs, not (null (_diffOnlyCore d))]) <> "\n",
+      "only-old-by-kind\n",
+      mconcat
+        [ "  " <> kindB k <> " " <> int n <> "\n"
+        | (k, n) <- tally (map snd (concatMap _diffOnlyOld diffs))
+        ],
+      "only-core-by-kind\n",
+      mconcat
+        [ "  " <> kindB k <> " " <> int n <> "\n"
+        | (k, n) <- tally (map snd (concatMap _diffOnlyCore diffs))
+        ],
+      mconcat (map renderDiff diffs)
+    ]
+  where
+    int = B.stringUtf8 . show
+
+renderDiff :: Diff -> B.Builder
+renderDiff (Diff global was onlyOld onlyCore) =
+  mconcat
+    [ globalB global <> " was " <> kindB was <> "\n",
+      mconcat ["  only-old  " <> kindB k <> " " <> globalB g <> "\n" | (g, k) <- onlyOld],
+      mconcat ["  only-core " <> kindB k <> " " <> globalB g <> "\n" | (g, k) <- onlyCore]
+    ]
+
+-- | How many of each, most first, so the shape of a difference is the first
+-- thing in the file rather than something to be counted by eye.
+tally :: [Kind] -> [(Kind, Int)]
+tally ks =
+  List.sortOn (negate . snd) (Map.toList (Map.fromListWith (+) [(k, 1 :: Int) | k <- ks]))
+
+kindB :: Kind -> B.Builder
+kindB k =
+  case k of
+    KDefine -> "define  "
+    KTailFunc -> "tailfunc"
+    KCycle -> "cycle   "
+    KLink -> "link    "
+    KCtor -> "ctor    "
+    KKernel -> "kernel  "
+    KManager -> "manager "
+    KPort -> "port    "
+    KAbsent -> "absent  "
+
+globalB :: Opt.Global -> B.Builder
+globalB (Opt.Global (ModuleName.Canonical pkg raw) name) =
+  B.stringUtf8 (Pkg.toChars pkg ++ ":" ++ ModuleName.toChars raw ++ "." ++ Name.toChars name)
 
 -- | What a constructor needs to be built and to be tested for. The tag is on the
 -- Core node, so it is not here.
@@ -138,11 +319,11 @@ define env (Core.Bind binder value) =
       node =
         case tailShape value of
           Nothing ->
-            let (body, _) = runState (expr env value) 0
-             in Opt.Define r body (deps value)
+            let (body, needed) = runFresh (expr env value)
+             in Opt.Define r body (Set.union (deps value) needed)
           Just (params, join, loop) ->
-            let (body, _) = runState (expr (entering name params join env) loop) 0
-             in Opt.DefineTailFunc r [A.At r p | p <- params] body (deps value)
+            let (body, needed) = runFresh (expr (entering name params join env) loop)
+             in Opt.DefineTailFunc r [A.At r p | p <- params] body (Set.union (deps value) needed)
    in (Opt.Global (_home env) name, node)
 
 -- | A function whose body is a join over its own parameters, entered once with
@@ -175,13 +356,23 @@ entering :: Name -> [Name] -> Name -> Env -> Env
 entering label params join env =
   env {_tails = Map.insert join (Tail label params) (_tails env)}
 
--- | Which graph nodes a definition's body reaches.
+-- | Which graph nodes a definition's body /names/.
 --
 -- The globals and constructors "Core.Refs" already collects for the linker,
 -- mapped into the backend's namespace: a kernel reference is a dependency on the
 -- whole kernel module, because that is the granularity `Gren.Kernel` splices at,
 -- and a `Debug` reference is a dependency on the @Debug@ module the way
 -- @Optimize.Names@ records it.
+--
+-- This is half of a definition's dependency set. The other half is what the
+-- /translation/ names and Core does not — 'need' — and the two are kept apart
+-- because they answer different questions: this one is a fact about the Core,
+-- and belongs to the linker as much as to the backend; the other is a fact about
+-- the JavaScript, and would be a different set for a different backend.
+--
+-- @Basics.True@ and @Basics.False@ are excluded, and stay excluded: both paths
+-- compile them to JavaScript literals, so neither refers to the enum node
+-- @Optimize.Module@ made for them (§J10).
 deps :: Core.Expr -> Set Opt.Global
 deps value =
   let refs = Refs.refsIn value
@@ -220,12 +411,39 @@ data Tail = Tail
     _tailParams :: ![Name]
   }
 
--- | Fresh local names, in the same @_v0@, @_v1@ series `Optimize.Names` uses, so
--- that generated code reads the same way it did.
-type Fresh a = State Int a
+-- | Fresh local names, and the dependencies the /translation/ introduces.
+--
+-- The names are the same @_v0@, @_v1@ series `Optimize.Names` uses, so that
+-- generated code reads the same way it did. The dependency set is there for the
+-- same reason `Optimize.Names` has a @Tracker@: some of what a definition
+-- depends on is not in the code being translated but in the JavaScript chosen
+-- for it — see 'need'.
+type Fresh a = State Gen a
+
+data Gen = Gen !Int !(Set Opt.Global)
+
+runFresh :: Fresh a -> (a, Set Opt.Global)
+runFresh f =
+  let (a, Gen _ needed) = runState f (Gen 0 Set.empty)
+   in (a, needed)
 
 fresh :: Fresh Name
-fresh = state (\uid -> (Name.fromVarIndex uid, uid + 1))
+fresh = state (\(Gen uid needed) -> (Name.fromVarIndex uid, Gen (uid + 1) needed))
+
+-- | A name the emitted JavaScript will refer to that the Core expression does
+-- not mention.
+--
+-- Two of these, and both are `Generate.JavaScript.Expression`'s choices rather
+-- than Core's (§J10):
+--
+--   * an @Opt.VarBox@ is @Basics.identity@ under @--optimize@, because an
+--     unboxed constructor /is/ the identity function there;
+--   * an @Opt.Chr@ is a call to @_Utils_chr@ in dev mode.
+--
+-- Both are registered unconditionally, exactly as `Optimize.Names` registers
+-- them, because the graph is built once and the mode is chosen after it.
+need :: Opt.Global -> Fresh ()
+need global = state (\(Gen uid needed) -> ((), Gen uid (Set.insert global needed)))
 
 -- EXPRESSIONS
 
@@ -240,7 +458,7 @@ expr env (Core.Expr value _ sp) =
           | home == ModuleName.debug -> pure (Opt.VarDebug r name (_home env) Nothing)
           | otherwise -> pure (Opt.VarGlobal r (Opt.Global home name))
         Core.ELit lit ->
-          pure (literal r lit)
+          literal r lit
         Core.ELam binders body ->
           Opt.Function r (map (\b -> A.At r (Core._binderName b)) binders) <$> expr env body
         Core.EApp fn args ->
@@ -340,18 +558,24 @@ ignored = Name.fromChars "$jarg"
 
 -- LITERALS
 
-literal :: A.Region -> Core.Literal -> Opt.Expr
+literal :: A.Region -> Core.Literal -> Fresh Opt.Expr
 literal r lit =
   case lit of
-    Core.LIntLegacy n -> Opt.Int r (fromInteger n)
-    Core.LInt n -> Opt.Int r (fromIntegral n)
-    Core.LInt64 n -> Opt.Int r (fromIntegral n)
-    Core.LUInt32 n -> Opt.Int r (fromIntegral n)
-    Core.LUInt64 n -> Opt.Int r (fromIntegral n)
-    Core.LFloat d -> Opt.Float r (float d)
-    Core.LFloat32 f -> Opt.Float r (float (realToFrac f))
-    Core.LChar code -> Opt.Chr r (jsLiteral [toEnum (fromIntegral code)])
-    Core.LString text -> Opt.Str r (jsLiteral (Utf8.toChars text))
+    Core.LIntLegacy n -> pure (Opt.Int r (fromInteger n))
+    Core.LInt n -> pure (Opt.Int r (fromIntegral n))
+    Core.LInt64 n -> pure (Opt.Int r (fromIntegral n))
+    Core.LUInt32 n -> pure (Opt.Int r (fromIntegral n))
+    Core.LUInt64 n -> pure (Opt.Int r (fromIntegral n))
+    Core.LFloat d -> pure (Opt.Float r (float d))
+    Core.LFloat32 f -> pure (Opt.Float r (float (realToFrac f)))
+    -- A character is a one-character string wrapped by @_Utils_chr@ in dev mode,
+    -- so it depends on the kernel @Utils@ module. `Optimize.Expression` records
+    -- the same dependency, with @Names.registerKernel Name.utils@.
+    Core.LChar code ->
+      do
+        need (Opt.toKernelGlobal Name.utils)
+        pure (Opt.Chr r (jsLiteral [toEnum (fromIntegral code)]))
+    Core.LString text -> pure (Opt.Str r (jsLiteral (Utf8.toChars text)))
 
 -- | A `Gren.Float` is the digits as written, and Core holds a `Double`, so the
 -- digits have to be written again. Haskell's `show` produces the shortest
@@ -410,14 +634,25 @@ ctor :: Env -> A.Region -> Core.QualName -> Int -> [Core.Expr] -> Fresh Opt.Expr
 ctor env r name@(Core.QualName home short) tag args
   | isBool name = pure (Opt.Bool r (short == Name.true))
   | otherwise =
-      let reference =
-            case _opts (lookupCtor env name) of
-              Can.Normal -> Opt.VarGlobal r (Opt.Global home short)
-              Can.Enum -> Opt.VarEnum r (Opt.Global home short) (zeroBased tag)
-              Can.Unbox -> Opt.VarBox r (Opt.Global home short)
-       in case args of
-            [] -> pure reference
-            _ -> Opt.Call r reference <$> traverse (expr env) args
+      do
+        let opts = _opts (lookupCtor env name)
+        case opts of
+          Can.Unbox -> need identity
+          _ -> pure ()
+        let reference =
+              case opts of
+                Can.Normal -> Opt.VarGlobal r (Opt.Global home short)
+                Can.Enum -> Opt.VarEnum r (Opt.Global home short) (zeroBased tag)
+                Can.Unbox -> Opt.VarBox r (Opt.Global home short)
+        case args of
+          [] -> pure reference
+          _ -> Opt.Call r reference <$> traverse (expr env) args
+
+-- | What an @Opt.VarBox@ compiles to under @--optimize@, and so a dependency of
+-- every definition that mentions an unboxed constructor. `Optimize.Names`
+-- records it at the same place, in @registerCtor@.
+identity :: Opt.Global
+identity = Opt.Global ModuleName.basics Name.identity
 
 lookupCtor :: Env -> Core.QualName -> Ctor
 lookupCtor env name@(Core.QualName _ short) =
