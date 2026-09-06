@@ -33,11 +33,14 @@
 -- the first two constructs at M1b; @main@ outlives them.
 module Core.Lower.Module
   ( lower,
+    MainOf (..),
+    mainOf,
   )
 where
 
 import AST.Canonical qualified as Can
 import AST.Utils.Type qualified as Type
+import Canonicalize.Effects qualified as Effects
 import Core.AST qualified as Core
 import Core.Lower.Expression qualified as Expr
 import Core.Lower.Port qualified as Port
@@ -54,6 +57,7 @@ import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Gren.Platform qualified as P
 import Reporting.Annotation qualified as A
+import Reporting.Error.Canonicalize qualified as CE
 
 lower :: P.Platform -> Map.Map Name Can.Annotation -> Map.Map Can.NodeId Can.Type -> Can.Module -> Core.Module
 lower platform annotations types modul =
@@ -77,36 +81,74 @@ lower platform annotations types modul =
           Core._moduleExports = map (Core.QualName home) (exports modul),
           Core._moduleManager = manager home (Can._effects modul),
           Core._modulePorts = ports (Can._effects modul),
-          Core._moduleMain = mainOf platform annotations
+          Core._moduleMain = mainFrom (mainOf platform annotations)
         }
 
--- | What the module's @main@ is, by its type (C19).
+-- | What a module's @main@ is, or why it is not one (C19).
 --
--- The classification is @Optimize.Module.addDefHelp@'s, and it has to be the
--- same one: that function has already run and already rejected every shape not
--- listed here, so a @Nothing@ from a module that has a @main@ would be a
--- disagreement between the two rather than a missing case. The platform is what
--- distinguishes @main : String@ from @main : Html msg@, and it arrives from
--- "Compile" for that reason alone.
+-- Every answer, not just the good ones. `Nitpick.Main` turns the last two into
+-- the errors that reject the module, and 'lower' keeps only 'IsMain', so there
+-- is one classification of @main@ in the compiler and two readers of it. It was
+-- two classifications until the old pipeline was retired: this one and
+-- @Optimize.Module.addDefHelp@, agreeing case for case by inspection, which is
+-- an obligation nobody could check.
+data MainOf
+  = -- | The module declares no @main@.
+    NoMain
+  | -- | A @main@ this platform knows how to run.
+    IsMain Core.Main
+  | -- | A @main@ whose type this platform cannot run, with the type names it
+    -- can, for @Reporting.Error.Main.BadType@.
+    NotRunnable Can.Type [String]
+  | -- | A @Platform.Program@ whose flags cannot come from JavaScript, for
+    -- @Reporting.Error.Main.BadFlags@.
+    BadFlags Can.Type CE.InvalidPayload
+
+-- | The classification, from the module's annotations and the platform.
 --
--- The span is the module's own zero span, as a port's is: what is being
--- recorded is a fact about a type, and the binding it belongs to has a real
--- span already.
-mainOf :: P.Platform -> Map.Map Name Can.Annotation -> Maybe Core.Main
+-- The platform is what distinguishes @main : String@ from @main : Html msg@,
+-- and it arrives from "Compile" for that reason alone.
+--
+-- The span a decoder is given is the module's own zero span, as a port's is:
+-- what is being recorded is a fact about a type, and the binding it belongs to
+-- has a real span already. A 'BadFlags' answer never builds one — the decoder
+-- for a payload `Canonicalize.Effects.checkPayload` rejects is not a thing that
+-- exists, and the module does not reach Core anyway.
+mainOf :: P.Platform -> Map.Map Name Can.Annotation -> MainOf
 mainOf platform annotations =
-  do
-    Can.Forall _ tipe <- Map.lookup Name._main annotations
-    case Type.deepDealias tipe of
-      Can.TType hm nm []
-        | platform == P.Node && hm == ModuleName.string && nm == Name.string ->
-            Just Core.MainString
-      Can.TType hm nm [_]
-        | platform == P.Browser && hm == ModuleName.virtualDom && nm == Name.node ->
-            Just Core.MainHtml
-      Can.TType hm nm [flags, _, _]
-        | hm == ModuleName.platform && nm == Name.program ->
-            Just (Core.MainProgram (Port.decoder zeroSpan flags))
-      _ -> Nothing
+  case Map.lookup Name._main annotations of
+    Nothing -> NoMain
+    Just (Can.Forall _ tipe) ->
+      case Type.deepDealias tipe of
+        Can.TType hm nm []
+          | platform == P.Node && hm == ModuleName.string && nm == Name.string ->
+              IsMain Core.MainString
+        Can.TType hm nm [_]
+          | platform == P.Browser && hm == ModuleName.virtualDom && nm == Name.node ->
+              IsMain Core.MainHtml
+        Can.TType hm nm [flags, _, _]
+          | hm == ModuleName.platform && nm == Name.program ->
+              case Effects.checkPayload flags of
+                Right () -> IsMain (Core.MainProgram (Port.decoder zeroSpan flags))
+                Left (subType, invalidPayload) -> BadFlags subType invalidPayload
+        _ -> NotRunnable tipe (runnableOn platform)
+
+-- | The type names a platform's @main@ may have, as the error prints them.
+runnableOn :: P.Platform -> [String]
+runnableOn platform =
+  case platform of
+    P.Browser -> ["Html", "Svg", "Program"]
+    P.Node -> ["String", "Program"]
+    P.Common -> []
+
+-- | What 'lower' keeps. A module that is not rejected has no other answer.
+mainFrom :: MainOf -> Maybe Core.Main
+mainFrom m =
+  case m of
+    IsMain main -> Just main
+    NoMain -> Nothing
+    NotRunnable _ _ -> Nothing
+    BadFlags _ _ -> Nothing
 
 -- | The module's definitions, grouped and ordered by C14.
 --

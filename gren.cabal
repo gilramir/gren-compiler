@@ -144,6 +144,7 @@ Library common
         Generate.SourceMap
         Generate.VLQ
         Nitpick.Debug
+        Nitpick.Main
         Nitpick.PatternMatches
         Optimize.Case
         Optimize.DecisionTree

@@ -15,10 +15,12 @@ import Core.Lower.Module qualified as Lower
 import Core.Pretty qualified as Pretty
 import Data.Map qualified as Map
 import Data.Name qualified as Name
+import Data.OneOrMore qualified as OneOrMore
 import Gren.Interface qualified as I
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Gren.Platform qualified as P
+import Nitpick.Main qualified as NitpickMain
 import Nitpick.PatternMatches qualified as PatternMatches
 import Optimize.Module qualified as Optimize
 import Reporting.Error qualified as E
@@ -56,6 +58,7 @@ compile platform pkg ifaces modul =
     Type.Solved annotations nodeTypes <- typeCheck modul canonical
     () <- checkNodeTypes canonical nodeTypes
     () <- nitpick canonical
+    () <- checkMain platform modul annotations canonical
     objects <- optimize platform modul annotations canonical
     let core = Lower.lower platform annotations nodeTypes canonical
     () <- dumpCore canonical core
@@ -174,6 +177,20 @@ nitpick canonical =
       Right ()
     Left errors ->
       Left (E.BadPatterns errors)
+
+-- | The three rejections @Optimize.Module@ used to make on the way past.
+--
+-- Ahead of 'optimize' rather than after it, so that while both are in the binary
+-- it is this one the corpus is checking: @reject/main-bad-type@,
+-- @reject/main-bad-flags@ and @reject/main-in-a-cycle@ pin the wording of all
+-- three, and the old check is unreachable behind this one.
+checkMain :: P.Platform -> Src.Module -> Map.Map Name.Name Can.Annotation -> Can.Module -> Either E.Error ()
+checkMain platform modul annotations canonical =
+  case NitpickMain.check platform annotations canonical of
+    Right () ->
+      Right ()
+    Left err ->
+      Left (E.BadMains (Localizer.fromModule modul) (OneOrMore.one err))
 
 optimize :: P.Platform -> Src.Module -> Map.Map Name.Name Can.Annotation -> Can.Module -> Either E.Error Opt.LocalGraph
 optimize platform modul annotations canonical =
