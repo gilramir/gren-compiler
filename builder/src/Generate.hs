@@ -125,7 +125,11 @@ dumpCore details artifacts mains =
           case maybeFile of
             Nothing -> return ()
             Just file ->
-              B.writeFile file (Program.render (Program.link cores (coreRoots mains)))
+              let roots =
+                    if Dump.linkEveryExport
+                      then concatMap Core._moduleExports (Map.elems cores)
+                      else coreRoots mains
+               in B.writeFile file (Program.render (Program.link cores roots))
 
 repl :: FilePath -> Details.Details -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
 repl root details ansi (Build.ReplArtifacts home modules localizer annotations) name =

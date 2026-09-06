@@ -22,6 +22,7 @@ module Core.Dump
     moduleDir,
     programDir,
     linkFile,
+    linkEveryExport,
   )
 where
 
@@ -65,6 +66,18 @@ linkFile :: Maybe FilePath
 linkFile =
   unsafePerformIO (Env.lookupEnv "GENG_DUMP_LINK")
 {-# NOINLINE linkFile #-}
+
+-- | @GENG_LINK_ROOTS=exports@: link from every module's exports rather than from
+-- the program's @main@.
+--
+-- A measurement rather than a mode. What a program reaches depends on the
+-- program; what @core@ and @node@ reach between them is a property of those
+-- packages, and it is the number the kernel decision needs
+-- (@docs/m1a-js-on-core.md@ §J3 item 3). Nothing but a dump reads it.
+linkEveryExport :: Bool
+linkEveryExport =
+  unsafePerformIO ((== Just "exports") <$> Env.lookupEnv "GENG_LINK_ROOTS")
+{-# NOINLINE linkEveryExport #-}
 
 -- | An empty value means the current directory, so that @VAR=@ is not silently
 -- the same as unset.
