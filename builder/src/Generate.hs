@@ -11,6 +11,7 @@ import Control.Concurrent (MVar, forkIO, newEmptyMVar, newMVar, putMVar, readMVa
 import Control.Monad (liftM2)
 import Core.AST qualified as Core
 import Core.Dump qualified as Dump
+import Core.Pass qualified as Pass
 import Core.Pretty qualified as Pretty
 import Core.Program qualified as Program
 import Data.ByteString.Builder qualified as B
@@ -103,7 +104,7 @@ fromCore :: Details.Details -> Build.Artifacts -> Opt.GlobalGraph -> Task Opt.Gl
 fromCore details artifacts graph =
   if not Dump.jsFromCore
     then return graph
-    else Task.io (flip FromCore.redefine graph <$> programCore details artifacts)
+    else Task.io (flip FromCore.redefine graph . Pass.run <$> programCore details artifacts)
 
 -- | The program's roots, as Core names.
 --

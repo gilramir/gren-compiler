@@ -1,0 +1,655 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wall #-}
+
+-- | Pattern-match compilation: a Core→Core pass (@docs/core.md@ C4,
+-- @docs/m1a-js-on-core.md@ §J3 item 2).
+--
+-- C4 says decision trees are an __optional pass whose output is still Core__,
+-- so this is a port of "Optimize.DecisionTree" — the SML\/NJ heuristics from
+-- Scott and Ramsey's "When Do Match-Compilation Heuristics Matter?" — from
+-- @Can.Pattern@ and @Opt.Choice@ onto 'Core.Pattern' and Core. A backend with
+-- real multi-clause dispatch skips it and loses nothing; JS and C run it.
+--
+-- __What the output looks like.__ One 'Core.ECase' per test, scrutinizing a
+-- variable, with __shallow__ patterns: a constructor and its arguments as fresh
+-- binders, an array of a known length, a record's fields, or a literal. Nested
+-- tests scrutinize the binders the enclosing pattern introduced, so a decision
+-- tree in Core is a tree of cases and needs no accessor node for "argument 2 of
+-- that constructor" — the pattern that tested the constructor is what names it.
+--
+-- __Where the branch's own variables come from.__ Not from the tests: a leaf
+-- re-destructures the branch's original pattern against the scrutinee, with
+-- every test in it replaced by a wildcard, exactly as @Optimize.Case@ emits
+-- 'Opt.Destructor's rooted at the scrutinee. A pattern that binds nothing gets
+-- no wrapper at all.
+--
+-- __Join points.__ A branch body reached from more than one leaf is bound once
+-- as a 'Core.EJoin' and entered with 'Core.EJump' — C15, and the reason C15 is
+-- a decision. The joins take no parameters: a leaf reads what it needs from the
+-- scrutinee, which is in scope for the whole case.
+--
+-- __What it does not do.__ It does not decide whether a case is exhaustive:
+-- the frontend did that (@Nitpick.PatternMatches@), and a 'Core.ECase' whose
+-- fallback is @Nothing@ arrives with alternatives that cover the type. The last
+-- alternative of a generated case is therefore the one no test has to be
+-- emitted for.
+module Core.Pass.Case
+  ( run,
+    table,
+    Ctors (..),
+  )
+where
+
+import Control.Monad.Trans.State.Strict (State, evalState, state)
+import Core.AST qualified as Core
+import Data.List qualified as List
+import Data.Map (Map)
+import Data.Map qualified as Map
+import Data.Maybe qualified as Maybe
+import Data.Name (Name)
+import Data.Name qualified as Name
+import Data.Set (Set)
+import Data.Set qualified as Set
+
+-- THE DATATYPE TABLE
+
+-- | What a constructor's name has to be able to say: how many alternatives its
+-- datatype has, and what its arguments' types are.
+--
+-- Types are why this table exists at all. C2 puts a type on every binder, and
+-- the binders this pass invents stand for a constructor's arguments, an array's
+-- elements and a record's fields — none of which a 'Core.Pattern' records. They
+-- come from the scrutinee's type and the datatype declaration, which is an
+-- instantiation rather than a lookup.
+data Ctors = Ctors
+  { _ctorsData :: !Core.DataDecl,
+    _ctorsCtor :: !Core.Ctor,
+    _ctorsAlts :: !Int
+  }
+
+type Table = Map Core.QualName Ctors
+
+-- | Every constructor of every module in the program.
+table :: [Core.Module] -> Table
+table modules =
+  Map.fromList
+    [ (Core._ctorName c, Ctors d c (length (Core._dataCtors d)))
+    | m <- modules,
+      d <- Core._moduleData m,
+      c <- Core._dataCtors d
+    ]
+
+-- ENTRY
+
+-- | Compile every @when@ in every definition of a module.
+run :: Table -> Core.Module -> Core.Module
+run tbl m =
+  m
+    { Core._moduleDefs = map (bind tbl) (Core._moduleDefs m),
+      Core._moduleInstances =
+        [ i {Core._instMethods = [(n, evalState (expr tbl e) 0) | (n, e) <- Core._instMethods i]}
+        | i <- Core._moduleInstances m
+        ]
+    }
+
+bind :: Table -> Core.Bind -> Core.Bind
+bind tbl (Core.Bind binder value) = Core.Bind binder (evalState (expr tbl value) 0)
+
+-- | Fresh names, from a counter that restarts at every definition, so a
+-- definition's compiled form does not depend on what was compiled before it.
+-- @$@ cannot appear in a Gren name, so nothing collides.
+type Fresh a = State Int a
+
+fresh :: [Char] -> Fresh Name
+fresh prefix = state (\uid -> (Name.fromChars (prefix ++ show uid), uid + 1))
+
+-- EXPRESSIONS
+
+expr :: Table -> Core.Expr -> Fresh Core.Expr
+expr tbl (Core.Expr value ty sp) =
+  let node v = Core.Expr v ty sp
+   in case value of
+        Core.ECase scrutinee alts fallback ->
+          do
+            scrutinee' <- expr tbl scrutinee
+            alts' <- traverse (\(Core.Alt p b) -> Core.Alt p <$> expr tbl b) alts
+            fallback' <- traverse (expr tbl) fallback
+            compile tbl ty sp scrutinee' alts' fallback'
+        Core.EVar _ -> pure (node value)
+        Core.EGlobal _ -> pure (node value)
+        Core.ELit _ -> pure (node value)
+        Core.ECrash _ -> pure (node value)
+        Core.ELam bs body -> node . Core.ELam bs <$> expr tbl body
+        Core.EApp fn args -> node <$> (Core.EApp <$> expr tbl fn <*> traverse (expr tbl) args)
+        Core.ELet binds body -> node <$> (Core.ELet <$> traverse (bindM tbl) binds <*> expr tbl body)
+        Core.ELetRec binds body -> node <$> (Core.ELetRec <$> traverse (bindM tbl) binds <*> expr tbl body)
+        Core.EJoin binds body -> node <$> (Core.EJoin <$> traverse (bindM tbl) binds <*> expr tbl body)
+        Core.EJump j args -> node . Core.EJump j <$> traverse (expr tbl) args
+        Core.ECtor q tag args -> node . Core.ECtor q tag <$> traverse (expr tbl) args
+        Core.ERecord fields -> node . Core.ERecord <$> traverse (fieldM tbl) fields
+        Core.EUpdate base fields ->
+          node <$> (Core.EUpdate <$> expr tbl base <*> traverse (fieldM tbl) fields)
+        Core.EAccess base f -> node . (`Core.EAccess` f) <$> expr tbl base
+        Core.EArray items -> node . Core.EArray <$> traverse (expr tbl) items
+        Core.EPrim op args -> node . Core.EPrim op <$> traverse (expr tbl) args
+        Core.ETyLam vars body -> node . Core.ETyLam vars <$> expr tbl body
+        Core.ETyApp body types -> node . (`Core.ETyApp` types) <$> expr tbl body
+        Core.EWitLam bs body -> node . Core.EWitLam bs <$> expr tbl body
+        Core.EWitApp body args -> node <$> (Core.EWitApp <$> expr tbl body <*> traverse (expr tbl) args)
+
+bindM :: Table -> Core.Bind -> Fresh Core.Bind
+bindM tbl (Core.Bind binder value) = Core.Bind binder <$> expr tbl value
+
+fieldM :: Table -> (Core.Field, Core.Expr) -> Fresh (Core.Field, Core.Expr)
+fieldM tbl (f, e) = (,) f <$> expr tbl e
+
+-- COMPILE ONE CASE
+
+compile :: Table -> Core.Type -> Core.Span -> Core.Expr -> [Core.Alt] -> Maybe Core.Expr -> Fresh Core.Expr
+compile tbl ty sp scrutinee alts fallback =
+  do
+    let allAlts = alts ++ [Core.Alt Core.PWild f | f <- Maybe.maybeToList fallback]
+        branches = [Branch goal [(Root, p)] | (goal, Core.Alt p _) <- zip [0 ..] allAlts]
+        tree = build tbl (Set.singleton Root) branches
+        shared = [goal | (goal, n) <- Map.toAscList (targetCounts tree), n > 1]
+
+    (root, wrap) <- rootOf ty sp scrutinee
+    let scrutType = Core.typeOf scrutinee
+        env = Map.singleton Root (root, scrutType)
+        leafBody goal =
+          let Core.Alt p body = allAlts !! goal
+           in destructure ty sp root scrutType p body
+
+    joins <- traverse (\goal -> (,) goal <$> fresh "$j") shared
+    let jumps = Map.fromList joins
+        leaf goal =
+          case Map.lookup goal jumps of
+            Just j -> Core.Expr (Core.EJump j []) ty (Core.spanOf (leafBody goal))
+            Nothing -> leafBody goal
+
+    body <- toCore tbl ty sp leaf env tree
+    pure $
+      wrap $
+        case joins of
+          [] -> body
+          _ ->
+            Core.Expr
+              ( Core.EJoin
+                  [ Core.Bind (Core.Binder j ty (Core.spanOf (leafBody goal))) (leafBody goal)
+                  | (goal, j) <- joins
+                  ]
+                  body
+              )
+              ty
+              sp
+
+-- | The scrutinee has to be a variable, because every test scrutinizes one and
+-- because a leaf reads the branch's own bindings back out of it. A scrutinee
+-- that is already a variable is used as it is, which is the same shortcut
+-- @Optimize.Expression@ takes.
+rootOf :: Core.Type -> Core.Span -> Core.Expr -> Fresh (Name, Core.Expr -> Core.Expr)
+rootOf ty sp scrutinee =
+  case Core._exprValue scrutinee of
+    Core.EVar n -> pure (n, id)
+    _ ->
+      do
+        n <- fresh "$m"
+        let binder = Core.Binder n (Core.typeOf scrutinee) (Core.spanOf scrutinee)
+        pure (n, \inner -> Core.Expr (Core.ELet [Core.Bind binder scrutinee] inner) ty sp)
+
+-- | A branch body, with the branch's own variables bound.
+--
+-- The pattern is stripped to what it binds — every test in it becomes a
+-- wildcard, since the tree has already decided this branch matches — and a
+-- pattern that binds nothing produces no wrapper.
+destructure :: Core.Type -> Core.Span -> Name -> Core.Type -> Core.Pattern -> Core.Expr -> Core.Expr
+destructure ty sp root scrutType pattern body =
+  case bindingsOnly pattern of
+    Core.PWild -> body
+    p ->
+      Core.Expr
+        (Core.ECase (Core.Expr (Core.EVar root) scrutType sp) [Core.Alt p body] Nothing)
+        ty
+        (Core.spanOf body)
+
+bindingsOnly :: Core.Pattern -> Core.Pattern
+bindingsOnly pattern =
+  case pattern of
+    Core.PWild -> Core.PWild
+    Core.PLit _ -> Core.PWild
+    Core.PVar b -> Core.PVar b
+    Core.PAs b inner -> Core.PAs b (bindingsOnly inner)
+    Core.PCtor q tag args ->
+      keep (Core.PCtor q tag (map bindingsOnly args)) (concatMap binders args)
+    Core.PRecord fields ->
+      keep
+        (Core.PRecord [(f, bindingsOnly p) | (f, p) <- fields, not (null (binders p))])
+        (concatMap (binders . snd) fields)
+    Core.PArray items tail_ ->
+      keep
+        (Core.PArray (map bindingsOnly items) tail_)
+        (Maybe.maybeToList tail_ ++ concatMap binders items)
+  where
+    keep p bs = if null bs then Core.PWild else p
+
+binders :: Core.Pattern -> [Core.Binder]
+binders pattern =
+  case pattern of
+    Core.PWild -> []
+    Core.PLit _ -> []
+    Core.PVar b -> [b]
+    Core.PAs b inner -> b : binders inner
+    Core.PCtor _ _ args -> concatMap binders args
+    Core.PRecord fields -> concatMap (binders . snd) fields
+    Core.PArray items tail_ -> Maybe.maybeToList tail_ ++ concatMap binders items
+
+-- THE TREE, AS CORE
+
+type Env = Map Path (Name, Core.Type)
+
+toCore :: Table -> Core.Type -> Core.Span -> (Int -> Core.Expr) -> Env -> Tree -> Fresh Core.Expr
+toCore tbl ty sp leaf env tree =
+  case tree of
+    Match goal -> pure (leaf goal)
+    Test path edges fallback ->
+      case Map.lookup path env of
+        Nothing ->
+          error "Core.Pass.Case: a test on a path with no binding. See `build`, which only picks bound paths."
+        Just (scrutName, scrutType) ->
+          do
+            alts <- traverse (edge tbl ty sp leaf env path scrutType) edges
+            fallbackAlt <- traverse (fmap (Core.Alt Core.PWild) . toCore tbl ty sp leaf env) fallback
+            pure $
+              Core.Expr
+                ( Core.ECase
+                    (Core.Expr (Core.EVar scrutName) scrutType sp)
+                    (alts ++ Maybe.maybeToList fallbackAlt)
+                    Nothing
+                )
+                ty
+                sp
+
+edge :: Table -> Core.Type -> Core.Span -> (Int -> Core.Expr) -> Env -> Path -> Core.Type -> Edge -> Fresh Core.Alt
+edge tbl ty sp leaf env path scrutType (Edge test slots subTree) =
+  do
+    bound <- traverse (\slot -> (,) slot <$> fresh "$m") slots
+    let typed =
+          [ (slot, Core.Binder n (slotType tbl scrutType test slot) sp)
+          | (slot, n) <- bound
+          ]
+        env' = foldr (\(slot, b) -> Map.insert (child slot path) (Core._binderName b, Core._binderType b)) env typed
+    inner <- toCore tbl ty sp leaf env' subTree
+    pure (Core.Alt (shallow tbl test typed) inner)
+
+-- | The pattern one edge tests with: one level deep, with a binder wherever the
+-- subtree has a test to make and a wildcard everywhere else.
+shallow :: Table -> Test -> [(Slot, Core.Binder)] -> Core.Pattern
+shallow tbl test typed =
+  case test of
+    IsLit lit -> Core.PLit lit
+    IsRecord -> Core.PRecord [(f, Core.PVar b) | (Field f, b) <- typed]
+    IsArray len -> Core.PArray [slotAt (Elem_ i) | i <- [0 .. len - 1]] Nothing
+    IsCtor q tag _ ->
+      Core.PCtor q tag [slotAt (Arg_ i) | i <- [0 .. ctorArity tbl q - 1]]
+  where
+    slotAt slot = maybe Core.PWild Core.PVar (List.lookup slot typed)
+
+-- PATHS
+
+-- | Where a value sits inside the scrutinee. A path is only ever tested once
+-- something has bound it, so it never has to be turned back into an accessor.
+data Path
+  = Root
+  | Arg !Int !Path
+  | Elem !Int !Path
+  | Fld !Name !Path
+  deriving (Eq, Ord, Show)
+
+data Slot
+  = Arg_ !Int
+  | Elem_ !Int
+  | Field !Name
+  deriving (Eq, Ord, Show)
+
+child :: Slot -> Path -> Path
+child slot path =
+  case slot of
+    Arg_ i -> Arg i path
+    Elem_ i -> Elem i path
+    Field f -> Fld f path
+
+-- TESTS
+
+data Test
+  = -- | Constructor name, tag, and how many the datatype has.
+    IsCtor !Core.QualName !Int !Int
+  | IsArray !Int
+  | IsRecord
+  | IsLit !Core.Literal
+  deriving (Eq, Ord, Show)
+
+-- | Whether a set of tests covers every value the type can hold. Only then can
+-- the last edge stand in for the default.
+isComplete :: [Test] -> Bool
+isComplete tests =
+  case tests of
+    [] -> False
+    IsCtor _ _ alts : _ -> length tests == alts
+    IsRecord : _ -> True
+    IsArray _ : _ -> False
+    IsLit _ : _ -> False
+
+-- BUILDING THE TREE
+
+data Tree
+  = Match !Int
+  | Test !Path ![Edge] !(Maybe Tree)
+
+data Edge = Edge !Test ![Slot] !Tree
+
+data Branch = Branch
+  { _goal :: !Int,
+    _pats :: ![(Path, Core.Pattern)]
+  }
+
+build :: Table -> Set Path -> [Branch] -> Tree
+build tbl bound rawBranches =
+  let branches = map flattenAliases rawBranches
+   in case checkForMatch tbl branches of
+        Just goal -> Match goal
+        Nothing ->
+          let path = pickPath tbl bound branches
+              (edges, fallback) = gatherEdges tbl bound branches path
+           in case (edges, fallback) of
+                ([], []) -> error "Core.Pass.Case: a test with no edges and no fallback"
+                ([], _) -> build tbl bound fallback
+                (_, []) -> Test path edges Nothing
+                _ -> Test path edges (Just (build tbl bound fallback))
+
+-- | An alias binds the same value its sub-pattern matches, and binding is the
+-- leaf's business, so only the sub-pattern is left for the tree to look at.
+flattenAliases :: Branch -> Branch
+flattenAliases (Branch goal pats) =
+  Branch goal [(path, strip p) | (path, p) <- pats]
+  where
+    strip p =
+      case p of
+        Core.PAs _ inner -> strip inner
+        _ -> p
+
+-- | If the first branch has no test left to make, it is the answer.
+--
+-- A single edge that covers the type is __not__ collapsed away, which is where
+-- this parts company with @Optimize.DecisionTree@: there, a path is a
+-- JavaScript accessor and a node that decides nothing can be dropped: here the
+-- node is what __binds__ the values below it, so a single-constructor type or a
+-- record becomes a one-alternative 'Core.ECase' and the backend emits no test
+-- for it.
+checkForMatch :: Table -> [Branch] -> Maybe Int
+checkForMatch tbl branches =
+  case branches of
+    Branch goal pats : _
+      | all (not . needsTests tbl . snd) pats -> Just goal
+    _ -> Nothing
+
+-- | Whether a pattern still has something to decide.
+--
+-- Narrower than @Optimize.DecisionTree@'s, which answers "does this destructure
+-- anything". Destructuring is the leaf's job here, so a record whose fields are
+-- all variables, or a single-constructor type whose arguments are, decides
+-- nothing and needs no node.
+needsTests :: Table -> Core.Pattern -> Bool
+needsTests tbl pattern =
+  case pattern of
+    Core.PWild -> False
+    Core.PVar _ -> False
+    Core.PAs _ inner -> needsTests tbl inner
+    Core.PLit _ -> True
+    Core.PArray _ _ -> True
+    Core.PRecord fields -> any (needsTests tbl . snd) fields
+    Core.PCtor q _ args -> alternatives tbl q > 1 || any (needsTests tbl) args
+
+-- EDGES
+
+gatherEdges :: Table -> Set Path -> [Branch] -> Path -> ([Edge], [Branch])
+gatherEdges tbl bound branches path =
+  let tests = testsAtPath tbl path branches
+      edges =
+        [ Edge test slots (build tbl (Set.union bound (Set.fromList (map (`child` path) slots))) relevant)
+        | test <- tests,
+          let relevant = Maybe.mapMaybe (toRelevantBranch test path) branches,
+          let slots = slotsFor tbl relevant path test
+        ]
+      fallback =
+        if isComplete tests
+          then []
+          else filter (isIrrelevantTo tbl path) branches
+   in (edges, fallback)
+
+-- | The children this edge has to name, which is the ones something below it
+-- tests. A record's are its fields, in name order (C14's reason: an order that
+-- reaches the output is written down or it is a coincidence).
+slotsFor :: Table -> [Branch] -> Path -> Test -> [Slot]
+slotsFor tbl branches path test =
+  let tested = [p | Branch _ pats <- branches, (p, pat) <- pats, needsTests tbl pat]
+      below = Maybe.mapMaybe (slotUnder path) tested
+   in case test of
+        IsLit _ -> []
+        IsCtor _ _ _ -> List.sort (List.nub [s | s@(Arg_ _) <- below])
+        IsArray _ -> List.sort (List.nub [s | s@(Elem_ _) <- below])
+        IsRecord ->
+          List.sort $
+            List.nub $
+              [Field f | Branch _ pats <- branches, (Fld f p, _) <- pats, p == path]
+                ++ [s | s@(Field _) <- below]
+
+slotUnder :: Path -> Path -> Maybe Slot
+slotUnder path candidate =
+  case candidate of
+    Root -> Nothing
+    Arg i parent -> if parent == path then Just (Arg_ i) else slotUnder path parent
+    Elem i parent -> if parent == path then Just (Elem_ i) else slotUnder path parent
+    Fld f parent -> if parent == path then Just (Field f) else slotUnder path parent
+
+testsAtPath :: Table -> Path -> [Branch] -> [Test]
+testsAtPath tbl selected branches =
+  let allTests = Maybe.mapMaybe (testAtPath tbl selected) branches
+      skipVisited test (unique, visited) =
+        if Set.member test visited
+          then (unique, visited)
+          else (test : unique, Set.insert test visited)
+   in fst (foldr skipVisited ([], Set.empty) allTests)
+
+testAtPath :: Table -> Path -> Branch -> Maybe Test
+testAtPath tbl selected (Branch _ pats) =
+  case List.lookup selected pats of
+    Nothing -> Nothing
+    Just pattern ->
+      case pattern of
+        Core.PCtor q tag _ -> Just (IsCtor q tag (alternatives tbl q))
+        Core.PArray items Nothing -> Just (IsArray (length items))
+        Core.PArray _ (Just _) -> arrayTailError
+        Core.PRecord _ -> Just IsRecord
+        Core.PLit lit -> Just (IsLit lit)
+        Core.PVar _ -> Nothing
+        Core.PWild -> Nothing
+        Core.PAs _ _ -> error "Core.Pass.Case: an alias reached testAtPath; flattenAliases removes them"
+
+toRelevantBranch :: Test -> Path -> Branch -> Maybe Branch
+toRelevantBranch test path branch@(Branch goal pats) =
+  case extract path pats of
+    Nothing -> Just branch
+    Just (start, pattern, end) ->
+      case pattern of
+        Core.PCtor q _ args ->
+          case test of
+            IsCtor testName _ _
+              | q == testName ->
+                  Just (Branch goal (start ++ [(Arg i path, p) | (i, p) <- zip [0 ..] args] ++ end))
+            _ -> Nothing
+        Core.PArray items Nothing ->
+          case test of
+            IsArray len
+              | length items == len ->
+                  Just (Branch goal (start ++ [(Elem i path, p) | (i, p) <- zip [0 ..] items] ++ end))
+            _ -> Nothing
+        Core.PArray _ (Just _) -> arrayTailError
+        Core.PRecord fields ->
+          case test of
+            IsRecord -> Just (Branch goal (start ++ [(Fld f path, p) | (f, p) <- fields] ++ end))
+            _ -> Nothing
+        Core.PLit lit ->
+          case test of
+            IsLit testLit | lit == testLit -> Just (Branch goal (start ++ end))
+            _ -> Nothing
+        Core.PVar _ -> Just branch
+        Core.PWild -> Just branch
+        Core.PAs _ _ -> Just branch
+
+extract :: Path -> [(Path, Core.Pattern)] -> Maybe ([(Path, Core.Pattern)], Core.Pattern, [(Path, Core.Pattern)])
+extract selected pats =
+  case pats of
+    [] -> Nothing
+    first@(path, pattern) : rest ->
+      if path == selected
+        then Just ([], pattern, rest)
+        else case extract selected rest of
+          Nothing -> Nothing
+          Just (start, found, end) -> Just (first : start, found, end)
+
+isIrrelevantTo :: Table -> Path -> Branch -> Bool
+isIrrelevantTo tbl selected (Branch _ pats) =
+  case List.lookup selected pats of
+    Nothing -> True
+    Just pattern -> not (needsTests tbl pattern)
+
+-- PICKING A PATH
+
+-- | @Optimize.DecisionTree@'s heuristics — fewest defaults, then smallest
+-- branching factor — over the paths that are __bound__.
+--
+-- That restriction is the one difference, and it is not a refinement: a decider
+-- over JavaScript accessors may test @root.a.b@ before knowing what @root@ is,
+-- because reading a field of the wrong constructor gives @undefined@ and the
+-- test simply fails. Core has no such reading. A test here scrutinizes a
+-- variable that an enclosing test bound, so a path becomes available only once
+-- its parent has been decided.
+pickPath :: Table -> Set Path -> [Branch] -> Path
+pickPath tbl bound branches =
+  let choices =
+        [ path
+        | Branch _ pats <- branches,
+          (path, pattern) <- pats,
+          needsTests tbl pattern,
+          Set.member path bound
+        ]
+   in case choices of
+        [] -> error "Core.Pass.Case: a branch needs a test and no bound path offers one"
+        _ ->
+          case bests (weigh (smallDefaults tbl branches) choices) of
+            [path] -> path
+            tied ->
+              case bests (weigh (smallBranchingFactor tbl bound branches) tied) of
+                path : _ -> path
+                [] -> error "Core.Pass.Case: bests returned nothing from a non-empty list"
+
+weigh :: (Path -> Int) -> [Path] -> [(Path, Int)]
+weigh toWeight paths = [(path, toWeight path) | path <- paths]
+
+bests :: [(Path, Int)] -> [Path]
+bests weighted =
+  case weighted of
+    [] -> error "Core.Pass.Case: cannot choose the best of zero paths"
+    (headPath, headWeight) : rest ->
+      let gather acc@(minWeight, paths) (path, weight)
+            | weight == minWeight = (minWeight, path : paths)
+            | weight < minWeight = (weight, [path])
+            | otherwise = acc
+       in snd (List.foldl' gather (headWeight, [headPath]) rest)
+
+smallDefaults :: Table -> [Branch] -> Path -> Int
+smallDefaults tbl branches path =
+  length (filter (isIrrelevantTo tbl path) branches)
+
+smallBranchingFactor :: Table -> Set Path -> [Branch] -> Path -> Int
+smallBranchingFactor tbl bound branches path =
+  let (edges, fallback) = gatherEdges tbl bound branches path
+   in length edges + (if null fallback then 0 else 1)
+
+-- COUNTING TARGETS
+
+-- | How many leaves reach each branch body. More than one is a join point.
+targetCounts :: Tree -> Map Int Int
+targetCounts tree =
+  case tree of
+    Match goal -> Map.singleton goal 1
+    Test _ edges fallback ->
+      Map.unionsWith (+) (map targetCounts (Maybe.maybeToList fallback ++ [t | Edge _ _ t <- edges]))
+
+-- TYPES
+
+alternatives :: Table -> Core.QualName -> Int
+alternatives tbl q =
+  case Map.lookup q tbl of
+    Just (Ctors _ _ alts) -> alts
+    Nothing -> unknownCtor q
+
+ctorArity :: Table -> Core.QualName -> Int
+ctorArity tbl q =
+  case Map.lookup q tbl of
+    Just (Ctors _ c _) -> length (Core._ctorFields c)
+    Nothing -> unknownCtor q
+
+-- | The type of what one slot holds.
+--
+-- A constructor's argument types are written against the datatype's own
+-- parameters, so they are instantiated with the scrutinee type's arguments; an
+-- array's elements and a record's fields are read straight off the scrutinee
+-- type. A scrutinee whose type is not the shape the test implies leaves the
+-- declared type as it stands, which is the only honest answer available and is
+-- unreachable for a type-correct program.
+slotType :: Table -> Core.Type -> Test -> Slot -> Core.Type
+slotType tbl scrutType test slot =
+  case (test, slot) of
+    (IsCtor q _ _, Arg_ i) ->
+      case Map.lookup q tbl of
+        Nothing -> unknownCtor q
+        Just (Ctors d c _) ->
+          let args = case scrutType of
+                Core.TCon _ as -> as
+                _ -> []
+              subst = Map.fromList (zip (Core._dataParams d) args)
+           in case drop i (Core._ctorFields c) of
+                field : _ -> substitute subst field
+                [] -> error "Core.Pass.Case: a constructor argument past the end of the declaration"
+    (IsArray _, Elem_ _) ->
+      case scrutType of
+        Core.TCon _ [element] -> element
+        _ -> scrutType
+    (IsRecord, Field f) ->
+      case scrutType of
+        Core.TRecord fields _ -> Maybe.fromMaybe scrutType (List.lookup f fields)
+        _ -> scrutType
+    _ -> scrutType
+
+substitute :: Map Name Core.Type -> Core.Type -> Core.Type
+substitute subst tipe =
+  case tipe of
+    Core.TVar n -> Maybe.fromMaybe tipe (Map.lookup n subst)
+    Core.TCon q args -> Core.TCon q (map (substitute subst) args)
+    Core.TFun args result -> Core.TFun (map (substitute subst) args) (substitute subst result)
+    Core.TRecord fields row -> Core.TRecord [(f, substitute subst t) | (f, t) <- fields] row
+    Core.TForall vars constraints body ->
+      let inner = foldr Map.delete subst vars
+       in Core.TForall
+            vars
+            [Core.CClass c (substitute inner t) | Core.CClass c t <- constraints]
+            (substitute inner body)
+
+unknownCtor :: Core.QualName -> a
+unknownCtor (Core.QualName _ short) =
+  error ("Core.Pass.Case: no datatype declares " ++ Name.toChars short)
+
+arrayTailError :: a
+arrayTailError =
+  error "Core.Pass.Case: an array pattern with a tail — the frontend has no syntax for one"

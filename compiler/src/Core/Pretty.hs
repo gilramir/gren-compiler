@@ -203,6 +203,11 @@ expr opts depth e =
             <> mconcat ["\n" <> expr opts (depth + 1) a | a <- args]
         ELet binds inner -> letLike opts depth "let" binds inner
         ELetRec binds inner -> letLike opts depth "letrec" binds inner
+        EJoin binds inner -> letLike opts depth "join" binds inner
+        EJump j args ->
+          "jump "
+            <> name j
+            <> mconcat ["\n" <> expr opts (depth + 1) a | a <- args]
         ECase scrut alts fallback ->
           "case\n"
             <> expr opts (depth + 1) scrut

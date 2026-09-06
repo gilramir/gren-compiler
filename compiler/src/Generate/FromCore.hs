@@ -129,15 +129,51 @@ ctorOpts d =
 
 moduleNodes :: Map Core.QualName Ctor -> (ModuleName.Canonical, Core.Module) -> [(Opt.Global, Opt.Node)]
 moduleNodes ctors (home, m) =
-  map (define (Env ctors home)) (Core._moduleDefs m)
+  map (define (Env ctors Map.empty home)) (Core._moduleDefs m)
 
 define :: Env -> Core.Bind -> (Opt.Global, Opt.Node)
 define env (Core.Bind binder value) =
   let name = Core._binderName binder
-      (body, _) = runState (expr env value) 0
-   in ( Opt.Global (_home env) name,
-        Opt.Define (region (Core._binderSpan binder)) body (deps value)
-      )
+      r = region (Core._binderSpan binder)
+      node =
+        case tailShape value of
+          Nothing ->
+            let (body, _) = runState (expr env value) 0
+             in Opt.Define r body (deps value)
+          Just (params, join, loop) ->
+            let (body, _) = runState (expr (entering name params join env) loop) 0
+             in Opt.DefineTailFunc r [A.At r p | p <- params] body (deps value)
+   in (Opt.Global (_home env) name, node)
+
+-- | A function whose body is a join over its own parameters, entered once with
+-- them: what "Core.Pass.TailCall" produces, and the one join shape the JS
+-- backend has a real jump for.
+--
+-- @Opt.DefineTailFunc@ labels the generated @while (true)@ with the function's
+-- own name and @Opt.TailCall@ reassigns the parameters and @continue@s it, so
+-- Core's entry join and Opt's tail function are the same construct written
+-- twice. Every other join is a call (see 'joins'), because @Opt@ has no general
+-- labelled block — @docs/core.md@ C15.
+tailShape :: Core.Expr -> Maybe ([Name], Name, Core.Expr)
+tailShape value =
+  case Core._exprValue value of
+    Core.ELam params body ->
+      case Core._exprValue body of
+        Core.EJoin [Core.Bind joinBinder joinValue] entry
+          | Core.EJump jumped args <- Core._exprValue entry,
+            jumped == Core._binderName joinBinder,
+            Core.ELam loopParams loop <- Core._exprValue joinValue,
+            names loopParams == names params,
+            [a | Core.Expr (Core.EVar a) _ _ <- args] == names params ->
+              Just (names params, jumped, loop)
+        _ -> Nothing
+    _ -> Nothing
+  where
+    names = map Core._binderName
+
+entering :: Name -> [Name] -> Name -> Env -> Env
+entering label params join env =
+  env {_tails = Map.insert join (Tail label params) (_tails env)}
 
 -- | Which graph nodes a definition's body reaches.
 --
@@ -167,11 +203,21 @@ toGlobal (Core.QualName home@(ModuleName.Canonical pkg raw) name)
 
 data Env = Env
   { _ctors :: Map Core.QualName Ctor,
+    -- | The joins that are a function's own entry, and so compile to
+    -- @Opt.TailCall@ rather than to a call. See 'tailShape'.
+    _tails :: Map Name Tail,
     -- | The module being translated. `Opt.VarDebug` wants the module doing the
     -- referring rather than the one referred to, and Core drops that when it
     -- rewrites a `Debug` reference to the `Debug` module — but the module being
     -- translated is exactly the referrer, so nothing is lost here.
     _home :: ModuleName.Canonical
+  }
+
+-- | Where a jump to an entry join goes: the label the JS backend puts on the
+-- loop — a function's own name — and the parameters it reassigns.
+data Tail = Tail
+  { _tailLabel :: !Name,
+    _tailParams :: ![Name]
   }
 
 -- | Fresh local names, in the same @_v0@, @_v1@ series `Optimize.Names` uses, so
@@ -203,6 +249,10 @@ expr env (Core.Expr value _ sp) =
           lets env r binds =<< expr env body
         Core.ELetRec binds body ->
           lets env r binds =<< expr env body
+        Core.EJoin binds body ->
+          joins env r binds =<< expr env body
+        Core.EJump join args ->
+          jump env r join args
         Core.ECase scrutinee alts _fallback ->
           caseOf env r scrutinee alts
         Core.ECtor name tag args ->
@@ -237,7 +287,56 @@ lets env r binds body =
   foldr wrap (pure body) binds
   where
     wrap (Core.Bind binder value) acc =
-      Opt.Let . Opt.Def r (Core._binderName binder) <$> expr env value <*> acc
+      let name = Core._binderName binder
+       in case tailShape value of
+            Nothing -> Opt.Let . Opt.Def r name <$> expr env value <*> acc
+            Just (params, join, loop) ->
+              Opt.Let . Opt.TailDef r name [A.At r p | p <- params]
+                <$> expr (entering name params join env) loop
+                <*> acc
+
+-- JOINS
+
+-- | A join that is not a function's entry becomes a function, and a jump to it
+-- a call.
+--
+-- Not what C15 says a join point is, and it is the backend's limit rather than
+-- the IR's: @Opt.Case@ ties its own join points to a case — @Opt.Jump@ exists
+-- only inside a decider — so there is no general labelled block to land a
+-- general 'Core.EJoin' on. It costs one closure where a labelled block would
+-- cost nothing, and it goes away with the @Opt@ hop
+-- (@docs/m1a-js-on-core.md@ §J3).
+--
+-- A join with no parameters takes an ignored one, because @Opt@'s call helpers
+-- start at one argument and a call with none generates the function rather than
+-- a call to it.
+joins :: Env -> A.Region -> [Core.Bind] -> Opt.Expr -> Fresh Opt.Expr
+joins env r binds body =
+  foldr wrap (pure body) binds
+  where
+    wrap (Core.Bind binder value) acc =
+      do
+        translated <- expr env value
+        let name = Core._binderName binder
+            function =
+              case translated of
+                Opt.Function {} -> translated
+                _ -> Opt.Function r [A.At r ignored] translated
+        Opt.Let (Opt.Def r name function) <$> acc
+
+jump :: Env -> A.Region -> Name -> [Core.Expr] -> Fresh Opt.Expr
+jump env r join args =
+  case Map.lookup join (_tails env) of
+    Just (Tail label params) ->
+      Opt.TailCall label . zip params <$> traverse (expr env) args
+    Nothing ->
+      case args of
+        [] -> pure (Opt.Call r (Opt.VarLocal r join) [Opt.Record r Map.empty])
+        _ -> Opt.Call r (Opt.VarLocal r join) <$> traverse (expr env) args
+
+-- | The parameter a parameterless join takes and never reads.
+ignored :: Name
+ignored = Name.fromChars "$jarg"
 
 -- LITERALS
 

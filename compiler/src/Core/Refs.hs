@@ -57,6 +57,8 @@ refsIn (Core.Expr value _ _) =
     Core.EApp fn args -> foldMap refsIn (fn : args)
     Core.ELet binds body -> foldMap bindRefs binds <> refsIn body
     Core.ELetRec binds body -> foldMap bindRefs binds <> refsIn body
+    Core.EJoin binds body -> foldMap bindRefs binds <> refsIn body
+    Core.EJump _ args -> foldMap refsIn args
     Core.ECase scrut alts fallback ->
       refsIn scrut <> foldMap altRefs alts <> foldMap refsIn fallback
     Core.ECtor q _ args -> ctor q <> foldMap refsIn args
@@ -116,6 +118,12 @@ freeLocals (Core.Expr value _ _) =
     Core.ELetRec binds body ->
       without (map Core._bindBinder binds) $
         Set.unions (freeLocals body : map (freeLocals . Core._bindValue) binds)
+    -- A join name is not a local: it cannot be referred to except by 'EJump',
+    -- and it is in scope in the join's own body only through the jumps there.
+    Core.EJoin binds body ->
+      without (map Core._bindBinder binds) $
+        Set.unions (freeLocals body : map (freeLocals . Core._bindValue) binds)
+    Core.EJump _ args -> Set.unions (map freeLocals args)
     Core.ECase scrut alts fallback ->
       Set.unions
         ( freeLocals scrut

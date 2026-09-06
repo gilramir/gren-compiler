@@ -282,6 +282,24 @@ data Expr_
     EArray ![Expr]
   | -- | Saturated. The set is enumerated in "Core.Prim" (C13).
     EPrim !PrimOp ![Expr]
+  | -- | Join points (C15): a body that is reached from more than one place, and
+    -- the jump to it. A decision tree is the producer — "Core.Pass.Case" — and a
+    -- self tail call is the other one, "Core.Pass.TailCall".
+    --
+    -- Each 'Bind' binds one join. A join with parameters holds an 'ELam' and is
+    -- entered by an 'EJump' carrying that many arguments; a join with none holds
+    -- its body directly and is entered by @EJump j []@. Either way the binder's
+    -- type is the type of what 'EJump' evaluates to.
+    --
+    -- __The rule that makes it a join point rather than a function__: an
+    -- 'EJump' appears only in __tail position__ within the body of the 'EJoin'
+    -- that binds it, and names a join in scope. A join is therefore not a
+    -- value — it cannot be passed, returned or captured — which is what lets
+    -- every backend compile it to a jump: a labelled block and a @break@ on JS,
+    -- a local tail call on the BEAM, a @goto@ in C.
+    EJoin ![Bind] !Expr
+  | -- | Enter a join. Tail position only; see 'EJoin'.
+    EJump !Name ![Expr]
   | -- | Type abstraction.    ⎫
     ETyLam ![Name] !Expr
   | -- | Type application.    ⎬ erased by specialization (R1)
@@ -386,6 +404,8 @@ isSpecialized (Expr e _ _) =
     EApp fn args -> all isSpecialized (fn : args)
     ELet binds body -> all (isSpecialized . _bindValue) binds && isSpecialized body
     ELetRec binds body -> all (isSpecialized . _bindValue) binds && isSpecialized body
+    EJoin binds body -> all (isSpecialized . _bindValue) binds && isSpecialized body
+    EJump _ args -> all isSpecialized args
     ECase scrut alts fallback ->
       isSpecialized scrut
         && all (isSpecialized . _altBody) alts

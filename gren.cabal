@@ -121,6 +121,9 @@ Library common
         Core.Lower.Module
         Core.Lower.Type
         Core.Order
+        Core.Pass
+        Core.Pass.Case
+        Core.Pass.TailCall
         Core.Prim
         Core.Program
         Core.Pretty
@@ -265,6 +268,8 @@ Test-Suite gren-tests
         Core.LowerExpressionSpec
         Core.LowerTypeSpec
         Core.OrderSpec
+        Core.PassCaseSpec
+        Core.PassTailCallSpec
         Core.PrimSpec
         Core.ProgramSpec
         Generate.VLQSpec

@@ -24,6 +24,7 @@ module Core.Dump
     linkFile,
     linkEveryExport,
     jsFromCore,
+    corePasses,
   )
 where
 
@@ -90,6 +91,24 @@ jsFromCore :: Bool
 jsFromCore =
   unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_JS_FROM_CORE")
 {-# NOINLINE jsFromCore #-}
+
+-- | @GENG_CORE_PASSES=case,tailcall@: which Core→Core passes to run before the
+-- backend reads the program.
+--
+-- Off by default, because C11 gives M1a's pipeline no passes and C4 says the
+-- decision-tree pass is optional in the first place. A switch is also what lets
+-- the corpus run the same programs with and without them, which is the
+-- obligation C12 attaches to @accept\/pattern-shapes@.
+corePasses :: [String]
+corePasses =
+  unsafePerformIO (maybe [] (splitOn ',') <$> Env.lookupEnv "GENG_CORE_PASSES")
+{-# NOINLINE corePasses #-}
+
+splitOn :: Char -> String -> [String]
+splitOn sep s =
+  case break (== sep) s of
+    (word, []) -> [word | not (null word)]
+    (word, _ : rest) -> [word | not (null word)] ++ splitOn sep rest
 
 -- | An empty value means the current directory, so that @VAR=@ is not silently
 -- the same as unset.
