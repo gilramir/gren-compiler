@@ -28,6 +28,7 @@ module Data.Utf8
     toEscapedBuilder,
     --
     fromPtr,
+    fromByteString,
     fromSnippet,
     fromChars,
     --
@@ -47,11 +48,12 @@ import Data.ByteString.Builder qualified as Builder
 import Data.ByteString.Builder.Internal qualified as B
 import Data.ByteString.Internal qualified as B
 import Data.ByteString.Lazy qualified as LazyByteString
+import Data.ByteString.Unsafe qualified as B
 import Data.Char qualified as Char
 import Data.List qualified as List
 import Foreign.ForeignPtr (touchForeignPtr)
 import Foreign.ForeignPtr.Unsafe (unsafeForeignPtrToPtr)
-import Foreign.Ptr (minusPtr, plusPtr)
+import Foreign.Ptr (castPtr, minusPtr, plusPtr)
 import GHC.Exts
   ( Char (C#),
     Int (I#),
@@ -411,6 +413,20 @@ fromPtr pos end =
             copyFromPtr pos mba 0 len
             freeze mba
         )
+    )
+
+-- | The bytes as they stand, with no decoding and no validation.
+--
+-- Added for @Core.Wire.Decode@ (@docs/m1a-wire.md@): a length-delimited
+-- protobuf field arrives as a slice of the input, and 'fromChars' would decode
+-- it to @[Char]@ only to encode the same bytes back. Whether the slice is valid
+-- UTF-8 is the reader's question and it asks it separately.
+fromByteString :: B.ByteString -> Utf8 t
+fromByteString bs =
+  unsafeDupablePerformIO
+    ( B.unsafeUseAsCStringLen
+        bs
+        (\(ptr, len) -> let !p = castPtr ptr in return (fromPtr p (plusPtr p len)))
     )
 
 -- FROM SNIPPET

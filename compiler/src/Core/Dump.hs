@@ -18,10 +18,14 @@
 -- module, with nothing dropped on the way. @harness/core-golden.py@ checks it.
 module Core.Dump
   ( fileName,
+    wireFileName,
     writeModule,
+    writeWire,
     moduleDir,
     programDir,
     linkFile,
+    wireRoundTrip,
+    wireDir,
     linkEveryExport,
     corePasses,
     spikeFile,
@@ -41,15 +45,30 @@ import System.IO.Unsafe (unsafePerformIO)
 -- the same module name do not collide. A package name has a slash in it, which
 -- a file name cannot, so it becomes a dash.
 fileName :: ModuleName.Canonical -> FilePath
-fileName (ModuleName.Canonical pkg raw) =
+fileName home = baseName home <.> "core"
+
+baseName :: ModuleName.Canonical -> FilePath
+baseName (ModuleName.Canonical pkg raw) =
   let package = map (\c -> if c == '/' then '-' else c) (Pkg.toChars pkg)
-   in package ++ "." ++ ModuleName.toChars raw <.> "core"
+   in package ++ "." ++ ModuleName.toChars raw
+
+-- | The same name with the wire format's extension, so that a dump directory
+-- holds @Pkg.Module.core@ and @Pkg.Module.corepb@ side by side and the two
+-- forms of one module sort together.
+wireFileName :: ModuleName.Canonical -> FilePath
+wireFileName home = baseName home <.> "corepb"
 
 writeModule :: FilePath -> ModuleName.Canonical -> B.Builder -> IO ()
 writeModule dir home builder =
   do
     Dir.createDirectoryIfMissing True dir
     B.writeFile (dir </> fileName home) builder
+
+writeWire :: FilePath -> ModuleName.Canonical -> B.Builder -> IO ()
+writeWire dir home builder =
+  do
+    Dir.createDirectoryIfMissing True dir
+    B.writeFile (dir </> wireFileName home) builder
 
 -- | @GENG_DUMP_CORE@: where "Compile" writes each module as it is compiled.
 moduleDir :: Maybe FilePath
@@ -93,6 +112,30 @@ corePasses :: [String]
 corePasses =
   unsafePerformIO (maybe [] (splitOn ',') <$> Env.lookupEnv "GENG_CORE_PASSES")
 {-# NOINLINE corePasses #-}
+
+-- | @GENG_WIRE=1@: put every module through the wire format before the backend
+-- sees it — encode it, decode the bytes back, and hand the backend what came
+-- out.
+--
+-- D90, and the reason it is a switch on an ordinary build rather than a test:
+-- a codec that nothing calls is a codec whose bugs are found at M2. With this
+-- on, @harness/run.py@'s @geng-hs-wire@ target runs the whole corpus through
+-- the bytes and fails on a program that computes a different answer, which no
+-- round-trip assertion can do.
+wireRoundTrip :: Bool
+wireRoundTrip =
+  unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_WIRE")
+{-# NOINLINE wireRoundTrip #-}
+
+-- | @GENG_DUMP_WIRE@: where the encoded modules are written, if anywhere.
+--
+-- 'programDir' with different bytes: one file per module of the whole program,
+-- named so that it sorts beside the text dump. @harness/wire.py@ reads these
+-- with a decoder built from the schema alone.
+wireDir :: Maybe FilePath
+wireDir =
+  unsafePerformIO (dirFromEnv "GENG_DUMP_WIRE")
+{-# NOINLINE wireDir #-}
 
 -- | @GENG_SPIKE_C@: where the Core → C spike writes its C, if it is asked at
 -- all. Unset — which is every build but a spike run — and nothing happens.

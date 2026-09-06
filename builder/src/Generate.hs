@@ -14,6 +14,7 @@ import Core.Pass qualified as Pass
 import Core.Pretty qualified as Pretty
 import Core.Program qualified as Program
 import Core.Refs qualified as Refs
+import Core.Wire qualified as Wire
 import Data.ByteString.Builder qualified as B
 import Data.Map ((!))
 import Data.Map qualified as Map
@@ -91,7 +92,45 @@ programCore details artifacts@(Build.Artifacts pkg _ _ _) =
     maybeDeps <- readMVar =<< Details.loadCores details
     let deps = Maybe.fromMaybe Map.empty maybeDeps
     let own = Map.mapKeys (ModuleName.Canonical pkg) (ownCore artifacts)
-    return (Map.union own deps)
+    throughWire (Map.union own deps)
+
+-- | Every module out through the wire format and back, when @GENG_WIRE=1@ asks
+-- (D90) — and written to @GENG_DUMP_WIRE@ when that asks.
+--
+-- This is where the serializer becomes load-bearing rather than merely present.
+-- It sits in 'programCore' rather than beside the backend so that one switch
+-- covers a build, a @--optimize@ build and a @GENG_DUMP_PROGRAM_CORE@ dump; the
+-- REPL has its own assembly and calls it too.
+--
+-- Failure is fatal and is not an @Exit.Generate@: a module that will not encode
+-- or will not decode is a defect in the compiler, not a problem with the user's
+-- program — except for D91's out-of-range integer literal, which is the one
+-- thing a user can write that this refuses, and which says so.
+throughWire :: Map.Map ModuleName.Canonical Core.Module -> IO (Map.Map ModuleName.Canonical Core.Module)
+throughWire cores
+  | not Dump.wireRoundTrip && Maybe.isNothing Dump.wireDir = return cores
+  | otherwise = Map.traverseWithKey oneModule cores
+  where
+    oneModule home core =
+      case Wire.encode core of
+        Left problems ->
+          error (unlines (("Core.Wire: " ++ ModuleName.toChars (ModuleName._module home)) : problems))
+        Right encoded ->
+          do
+            case Dump.wireDir of
+              Nothing -> return ()
+              Just dir -> Dump.writeWire dir home (B.byteString encoded)
+            if not Dump.wireRoundTrip
+              then return core
+              else case Wire.decode encoded of
+                Right back -> return back
+                Left err ->
+                  error
+                    ( "Core.Wire: what "
+                        ++ ModuleName.toChars (ModuleName._module home)
+                        ++ " encoded to does not decode: "
+                        ++ Wire.renderError err
+                    )
 
 -- | The Core of the modules being built, by raw name.
 --
@@ -363,7 +402,7 @@ linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels =
               [ (ModuleName.Canonical (ModuleName._package home) raw, core)
               | Build.Fresh raw _ core <- modules
               ]
-      let cores = Pass.run (Map.union own deps)
+      cores <- Pass.run <$> throughWire (Map.union own deps)
       return (Program.link (backendFor kernels cores) cores (replRoots home name))
 
 -- | What a REPL entry reaches: the value being printed, and @Debug.toString@.

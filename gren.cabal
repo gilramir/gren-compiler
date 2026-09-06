@@ -129,6 +129,10 @@ Library common
         Core.Program
         Core.Pretty
         Core.Refs
+        Core.Wire
+        Core.Wire.Decode
+        Core.Wire.Encode
+        Core.Wire.Protobuf
         Generate.CoreJS
         Generate.CoreJS.Expression
         Generate.Html
