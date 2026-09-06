@@ -11,6 +11,8 @@ module Gren.Details
     load,
     loadObjects,
     loadInterfaces,
+    Cores,
+    loadCores,
   )
 where
 
@@ -21,6 +23,7 @@ import Compile qualified
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar)
 import Control.Monad (liftM2, liftM3)
+import Core.AST qualified as Core
 import Data.Binary (Binary, get, getWord8, put, putWord8)
 import Data.ByteString.Internal (ByteString)
 import Data.Either qualified as Either
@@ -97,24 +100,48 @@ data Foreign
 
 data Extras
   = ArtifactsCached
-  | ArtifactsFresh Interfaces Opt.GlobalGraph
+  | ArtifactsFresh Interfaces Opt.GlobalGraph Cores
 
 type Interfaces =
   Map.Map ModuleName.Canonical I.DependencyInterface
+
+-- | Every dependency module's Core, on the way to the backend.
+--
+-- The same route the objects take, for the same reason: M1a re-targets the JS
+-- backend onto Core, so Core has to reach 'Generate' for the dependencies and
+-- not only for the modules being built. Nothing here is forced by a build that
+-- does not generate code — 'Core.Lower.Module' is a pure function behind a lazy
+-- field.
+type Cores =
+  Map.Map ModuleName.Canonical Core.Module
 
 -- LOAD ARTIFACTS
 
 loadObjects :: FilePath -> Details -> IO (MVar (Maybe Opt.GlobalGraph))
 loadObjects root (Details _ _ _ _ _ extras) =
   case extras of
-    ArtifactsFresh _ o -> newMVar (Just o)
+    ArtifactsFresh _ o _ -> newMVar (Just o)
     ArtifactsCached -> fork (File.readBinary (Dirs.objects root))
 
 loadInterfaces :: FilePath -> Details -> IO (MVar (Maybe Interfaces))
 loadInterfaces root (Details _ _ _ _ _ extras) =
   case extras of
-    ArtifactsFresh i _ -> newMVar (Just i)
+    ArtifactsFresh i _ _ -> newMVar (Just i)
     ArtifactsCached -> fork (File.readBinary (Dirs.interfaces root))
+
+-- | The dependency modules' Core.
+--
+-- 'ArtifactsCached' has nothing to offer and cannot be reached: nothing reads
+-- @d.dat@ back, so '_extras' is always 'ArtifactsFresh'
+-- (@docs/upstream/compiler-artifact-cache-is-write-only.md@). If that cache is
+-- ever restored, Core needs a file of its own beside @i.dat@ and @o.dat@ — and
+-- a project-cache key naming the compiler build, which
+-- 'Directories.artifactKey' now is.
+loadCores :: Details -> IO (MVar (Maybe Cores))
+loadCores (Details _ _ _ _ _ extras) =
+  case extras of
+    ArtifactsFresh _ _ c -> newMVar (Just c)
+    ArtifactsCached -> newMVar Nothing
 
 -- LOAD -- used by Make, Docs, Repl
 
@@ -164,16 +191,21 @@ verifyDependencies outline solution directDeps =
         Right artifacts ->
           let objs = Map.foldr addObjects Opt.empty artifacts
               ifaces = Map.foldrWithKey (addInterfaces directDeps) Map.empty artifacts
+              cores = Map.foldrWithKey addCores Map.empty artifacts
               foreigns = Map.map (OneOrMore.destruct Foreign) $ Map.foldrWithKey gatherForeigns Map.empty $ Map.intersection artifacts directDeps
-              details = Details File.zeroTime outline 0 Map.empty foreigns (ArtifactsFresh ifaces objs)
+              details = Details File.zeroTime outline 0 Map.empty foreigns (ArtifactsFresh ifaces objs cores)
            in return $ Right details
 
 addObjects :: Artifacts -> Opt.GlobalGraph -> Opt.GlobalGraph
-addObjects (Artifacts _ objs) graph =
+addObjects (Artifacts _ objs _) graph =
   Opt.addGlobalGraph objs graph
 
+addCores :: Pkg.Name -> Artifacts -> Cores -> Cores
+addCores pkg (Artifacts _ _ cores) acc =
+  Map.union acc (Map.mapKeysMonotonic (ModuleName.Canonical pkg) cores)
+
 addInterfaces :: Map.Map Pkg.Name a -> Pkg.Name -> Artifacts -> Interfaces -> Interfaces
-addInterfaces directDeps pkg (Artifacts ifaces _) dependencyInterfaces =
+addInterfaces directDeps pkg (Artifacts ifaces _ _) dependencyInterfaces =
   Map.union dependencyInterfaces $
     Map.mapKeysMonotonic (ModuleName.Canonical pkg) $
       if Map.member pkg directDeps
@@ -181,7 +213,7 @@ addInterfaces directDeps pkg (Artifacts ifaces _) dependencyInterfaces =
         else Map.map I.privatize ifaces
 
 gatherForeigns :: Pkg.Name -> Artifacts -> Map.Map ModuleName.Raw (OneOrMore.OneOrMore Pkg.Name) -> Map.Map ModuleName.Raw (OneOrMore.OneOrMore Pkg.Name)
-gatherForeigns pkg (Artifacts ifaces _) foreigns =
+gatherForeigns pkg (Artifacts ifaces _ _) foreigns =
   let isPublic di =
         case di of
           I.Public _ -> Just (OneOrMore.one pkg)
@@ -192,7 +224,8 @@ gatherForeigns pkg (Artifacts ifaces _) foreigns =
 
 data Artifacts = Artifacts
   { _ifaces :: Map.Map ModuleName.Raw I.DependencyInterface,
-    _objects :: Opt.GlobalGraph
+    _objects :: Opt.GlobalGraph,
+    _cores :: Map.Map ModuleName.Raw Core.Module
   }
 
 type Dep =
@@ -255,7 +288,8 @@ build depsMVar pkg (Dependency outline sources) =
                       Just results ->
                         let ifaces = gatherInterfaces exposedDict results
                             objects = gatherObjects results
-                            artifacts = Artifacts ifaces objects
+                            cores = gatherCores results
+                            artifacts = Artifacts ifaces objects cores
                          in do
                               return (Right artifacts)
 
@@ -265,10 +299,25 @@ gatherObjects :: Map.Map ModuleName.Raw Result -> Opt.GlobalGraph
 gatherObjects results =
   Map.foldrWithKey addLocalGraph Opt.empty results
 
+-- | The Core of every module in this package that has any.
+--
+-- Kernel modules have none: they never reach 'Compile.compile', because their
+-- JavaScript is spliced in as chunks rather than compiled from Gren.
+gatherCores :: Map.Map ModuleName.Raw Result -> Map.Map ModuleName.Raw Core.Module
+gatherCores = Map.mapMaybe getCore
+
+getCore :: Result -> Maybe Core.Module
+getCore result =
+  case result of
+    RLocal _ _ core _ -> Just core
+    RForeign _ -> Nothing
+    RKernelLocal _ -> Nothing
+    RKernelForeign -> Nothing
+
 addLocalGraph :: ModuleName.Raw -> Result -> Opt.GlobalGraph -> Opt.GlobalGraph
 addLocalGraph name status graph =
   case status of
-    RLocal _ objs _ -> Opt.addLocalGraph objs graph
+    RLocal _ objs _ _ -> Opt.addLocalGraph objs graph
     RForeign _ -> graph
     RKernelLocal cs -> Opt.addKernel (Name.getKernel name) cs graph
     RKernelForeign -> graph
@@ -283,7 +332,7 @@ gatherInterfaces exposed artifacts =
 toLocalInterface :: (I.Interface -> a) -> Result -> Maybe a
 toLocalInterface func result =
   case result of
-    RLocal iface _ _ -> Just (func iface)
+    RLocal iface _ _ _ -> Just (func iface)
     RForeign _ -> Nothing
     RKernelLocal _ -> Nothing
     RKernelForeign -> Nothing
@@ -306,7 +355,7 @@ gatherForeignInterfaces directArtifacts =
         _ : _ -> ForeignAmbiguous
 
     gather :: Pkg.Name -> Artifacts -> Map.Map ModuleName.Raw (OneOrMore.OneOrMore I.Interface) -> Map.Map ModuleName.Raw (OneOrMore.OneOrMore I.Interface)
-    gather _ (Artifacts ifaces _) buckets =
+    gather _ (Artifacts ifaces _ _) buckets =
       Map.unionWith OneOrMore.more buckets (Map.mapMaybe isPublic ifaces)
 
     isPublic :: I.DependencyInterface -> Maybe (OneOrMore.OneOrMore I.Interface)
@@ -391,7 +440,10 @@ getDepHome fi =
 -- COMPILE
 
 data Result
-  = RLocal !I.Interface !Opt.LocalGraph (Maybe Docs.Module)
+  = -- | The 'Core.Module' field carries no bang: a build that generates no code
+    -- never forces it, and lowering a module it is not going to use would be
+    -- the one cost this plumbing could have added.
+    RLocal !I.Interface !Opt.LocalGraph Core.Module (Maybe Docs.Module)
   | RForeign I.Interface
   | RKernelLocal [Kernel.Chunk]
   | RKernelForeign
@@ -410,10 +462,10 @@ compile platform pkg mvar status =
             case Compile.compile platform pkg (Map.mapMaybe getInterface results) modul of
               Left _ ->
                 return Nothing
-              Right (Compile.Artifacts canonical annotations _nodeTypes _core objects) ->
+              Right (Compile.Artifacts canonical annotations _nodeTypes core objects) ->
                 let ifaces = I.fromModule pkg canonical annotations
                     docs = makeDocs docsStatus canonical
-                 in return (Just (RLocal ifaces objects docs))
+                 in return (Just (RLocal ifaces objects core docs))
     SForeign iface ->
       return (Just (RForeign iface))
     SKernelLocal chunks ->
@@ -424,7 +476,7 @@ compile platform pkg mvar status =
 getInterface :: Result -> Maybe I.Interface
 getInterface result =
   case result of
-    RLocal iface _ _ -> Just iface
+    RLocal iface _ _ _ -> Just iface
     RForeign iface -> Just iface
     RKernelLocal _ -> Nothing
     RKernelForeign -> Nothing
@@ -485,9 +537,18 @@ instance Binary Foreign where
   get = liftM2 Foreign get get
   put (Foreign a b) = put a >> put b
 
+-- | Unchanged, and unreachable.
+--
+-- The only thing that holds an 'Artifacts' in a serialized form is
+-- 'ArtifactCache', which nothing constructs and nothing reads — see
+-- @docs/upstream/compiler-artifact-cache-is-write-only.md@. So '_cores' is
+-- dropped on the way out and comes back empty rather than being given an
+-- encoding that no reader would exercise: a Core wire format is C10's job and
+-- has its own gate. Writing one here to satisfy a dead instance would be a
+-- format nobody checked.
 instance Binary Artifacts where
-  get = liftM2 Artifacts get get
-  put (Artifacts a b) = put a >> put b
+  get = liftM3 Artifacts get get (pure Map.empty)
+  put (Artifacts a b _) = put a >> put b
 
 instance Binary ArtifactCache where
   get = liftM2 ArtifactCache get get

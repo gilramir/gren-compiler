@@ -115,6 +115,7 @@ Library common
         Canonicalize.Type
         Compile
         Core.AST
+        Core.Dump
         Core.Lower.Expression
         Core.Lower.Literal
         Core.Lower.Module

@@ -115,7 +115,7 @@ exports modul =
             Can.ExportValue -> [name]
             Can.ExportBinop -> maybe [] (pure . binopTarget) (Map.lookup name (Can._binops modul))
             _ -> []
-          | (name, A.At _ entry) <- Map.toAscList entries
+        | (name, A.At _ entry) <- Map.toAscList entries
         ]
 
 binopTarget :: Can.Binop -> Name

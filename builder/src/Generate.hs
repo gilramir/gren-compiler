@@ -9,6 +9,9 @@ import AST.Optimized qualified as Opt
 import Build qualified
 import Control.Concurrent (MVar, forkIO, newEmptyMVar, newMVar, putMVar, readMVar)
 import Control.Monad (liftM2)
+import Core.AST qualified as Core
+import Core.Dump qualified as Dump
+import Core.Pretty qualified as Pretty
 import Data.ByteString.Builder qualified as B
 import Data.Map ((!))
 import Data.Map qualified as Map
@@ -33,23 +36,76 @@ type Task a =
   Task.Task Exit.Generate a
 
 dev :: FilePath -> Details.Details -> Build.Artifacts -> Task JS.GeneratedResult
-dev root details (Build.Artifacts pkg _ roots modules) =
+dev root details artifacts@(Build.Artifacts pkg _ roots modules) =
   do
     objects <- finalizeObjects =<< loadObjects root details modules
+    dumpProgramCore details artifacts
     let mode = Mode.Dev
     let graph = objectsToGlobalGraph objects
     let mains = gatherMains pkg objects roots
     return $ JS.generate mode graph mains
 
 prod :: FilePath -> Details.Details -> Build.Artifacts -> Task JS.GeneratedResult
-prod root details (Build.Artifacts pkg _ roots modules) =
+prod root details artifacts@(Build.Artifacts pkg _ roots modules) =
   do
     objects <- finalizeObjects =<< loadObjects root details modules
     checkForDebugUses objects
+    dumpProgramCore details artifacts
     let graph = objectsToGlobalGraph objects
     let mode = Mode.Prod (Mode.shortenFieldNames graph)
     let mains = gatherMains pkg objects roots
     return $ JS.generate mode graph mains
+
+-- PROGRAM CORE
+
+-- | Every module of the program, in Core (M1a).
+--
+-- The backend is handed a program rather than a module at a time, so Core has to
+-- arrive the same way the objects do: the dependencies' from 'Details', the
+-- project's own from the 'Build.Artifacts'. This is the plumbing the JS backend
+-- will read; nothing generates code from it yet.
+--
+-- A 'Build.Cached' module contributes nothing, because @.greni@/@.greno@ hold an
+-- interface and an 'Opt.LocalGraph' and no Core. That branch cannot be reached
+-- today — nothing reads @d.dat@ back, so every module is fresh
+-- (@docs/upstream/compiler-artifact-cache-is-write-only.md@) — and the day the
+-- cache is restored, Core needs a file beside those two and this function needs
+-- to load it. Until then a missing entry would be a silently smaller program, so
+-- 'dumpProgramCore' reports the count and @harness/core-golden.py@ compares the
+-- module set against the frontend's own dump.
+programCore :: Details.Details -> Build.Artifacts -> IO (Map.Map ModuleName.Canonical Core.Module)
+programCore details (Build.Artifacts pkg _ roots modules) =
+  do
+    maybeDeps <- readMVar =<< Details.loadCores details
+    let deps = Maybe.fromMaybe Map.empty maybeDeps
+    let own = Map.fromList (Maybe.mapMaybe moduleCore modules ++ Maybe.mapMaybe rootCore (NE.toList roots))
+    return (Map.union own deps)
+  where
+    moduleCore modul =
+      case modul of
+        Build.Fresh name _ _ core -> Just (ModuleName.Canonical pkg name, core)
+        Build.Cached _ _ _ -> Nothing
+
+    rootCore root =
+      case root of
+        Build.Inside _ -> Nothing
+        Build.Outside name _ _ core -> Just (ModuleName.Canonical pkg name, core)
+
+-- | Write the program's Core, if @GENG_DUMP_PROGRAM_CORE@ names a directory.
+--
+-- Same file names as "Compile"'s per-module dump, so that the two directories
+-- can be compared as directories. See "Core.Dump".
+dumpProgramCore :: Details.Details -> Build.Artifacts -> Task ()
+dumpProgramCore details artifacts =
+  case Dump.programDir of
+    Nothing -> return ()
+    Just dir ->
+      Task.io $
+        do
+          cores <- programCore details artifacts
+          mapM_
+            (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder Pretty.defaultOptions core))
+            (Map.toAscList cores)
 
 repl :: FilePath -> Details.Details -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
 repl root details ansi (Build.ReplArtifacts home modules localizer annotations) name =
@@ -78,7 +134,7 @@ lookupMain pkg locals root =
         (,) (ModuleName.Canonical pkg name) <$> maybeMain
    in case root of
         Build.Inside name -> toPair name =<< Map.lookup name locals
-        Build.Outside name _ g -> toPair name g
+        Build.Outside name _ g _ -> toPair name g
 
 -- LOADING OBJECTS
 
@@ -98,7 +154,7 @@ loadObjects root details modules =
 loadObject :: FilePath -> Build.Module -> IO (ModuleName.Raw, MVar (Maybe Opt.LocalGraph))
 loadObject root modul =
   case modul of
-    Build.Fresh name _ graph ->
+    Build.Fresh name _ graph _ ->
       do
         mvar <- newMVar (Just graph)
         return (name, mvar)

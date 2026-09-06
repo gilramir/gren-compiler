@@ -10,6 +10,7 @@ import AST.Source qualified as Src
 import Canonicalize.Module qualified as Canonicalize
 import Canonicalize.NodeId qualified as NodeId
 import Core.AST qualified as Core
+import Core.Dump qualified as Dump
 import Core.Lower.Module qualified as Lower
 import Core.Pretty qualified as Pretty
 import Data.ByteString.Builder qualified as B
@@ -25,9 +26,7 @@ import Optimize.Module qualified as Optimize
 import Reporting.Error qualified as E
 import Reporting.Render.Type.Localizer qualified as Localizer
 import Reporting.Result qualified as R
-import System.Directory qualified as Dir
 import System.Environment qualified as Env
-import System.FilePath ((<.>), (</>))
 import System.IO.Unsafe (unsafePerformIO)
 import Type.Constrain.Module qualified as Type
 import Type.Solve qualified as Type
@@ -161,20 +160,13 @@ nodeTypeCheckEnabled =
 -- definitions is the wrong way to find that out.
 dumpCore :: Can.Module -> Core.Module -> Either E.Error ()
 dumpCore canonical core =
-  case coreDumpDir of
+  case Dump.moduleDir of
     Nothing ->
       Right ()
     Just dir ->
       unsafePerformIO $
         do
-          let ModuleName.Canonical pkg raw = Can._name canonical
-          -- One flat directory, one file per module, named so that two
-          -- packages with the same module name do not collide. A package name
-          -- has a slash in it.
-          let package = map (\c -> if c == '/' then '-' else c) (Pkg.toChars pkg)
-          let path = dir </> package ++ "." ++ ModuleName.toChars raw <.> "core"
-          Dir.createDirectoryIfMissing True dir
-          B.writeFile path $
+          Dump.writeModule dir (Can._name canonical) $
             mconcat
               [ Pretty.moduleToBuilder Pretty.defaultOptions core,
                 case Lower.unloweredEffects canonical of
@@ -183,13 +175,6 @@ dumpCore canonical core =
                     B.stringUtf8 ("\n-- not lowered: " ++ List.intercalate ", " (map Name.toChars names) ++ "\n")
               ]
           return (Right ())
-
-coreDumpDir :: Maybe FilePath
-coreDumpDir =
-  unsafePerformIO (fmap nonEmpty <$> Env.lookupEnv "GENG_DUMP_CORE")
-  where
-    nonEmpty dir = if null dir then "." else dir
-{-# NOINLINE coreDumpDir #-}
 
 nitpick :: Can.Module -> Either E.Error ()
 nitpick canonical =
