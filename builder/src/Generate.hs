@@ -9,6 +9,7 @@ import Build qualified
 import Control.Concurrent (readMVar)
 import Core.AST qualified as Core
 import Core.Dump qualified as Dump
+import Core.Low qualified as Low
 import Core.Pass qualified as Pass
 import Core.Pretty qualified as Pretty
 import Core.Program qualified as Program
@@ -21,6 +22,7 @@ import Data.Name qualified as N
 import Data.NonEmptyList qualified as NE
 import Data.Set qualified as Set
 import Generate.CoreJS qualified as CoreJS
+import Generate.LowC qualified as LowC
 import Generate.Mode qualified as Mode
 import Gren.Details qualified as Details
 import Gren.Kernel qualified as K
@@ -28,6 +30,8 @@ import Gren.ModuleName qualified as ModuleName
 import Nitpick.Debug qualified as Nitpick
 import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
+import System.FilePath ((</>))
+import System.FilePath qualified as FilePath
 import Prelude hiding (cycle, print)
 
 -- GENERATORS
@@ -48,6 +52,7 @@ dev details artifacts =
   do
     kernels <- kernelChunks details
     dumpCore details artifacts kernels
+    spikeC details artifacts
     program <- linkCore details artifacts kernels
     return $ CoreJS.generate Mode.Dev program kernels
 
@@ -262,6 +267,76 @@ dumpCore details artifacts kernels =
                       then concatMap Core._moduleExports (Map.elems cores)
                       else coreRoots artifacts cores
                in B.writeFile file (Program.render (Program.link (backendFor kernels cores) cores roots))
+
+-- | The Core → C spike (@docs/m1a-c-spike.md@), when @GENG_SPIKE_C@ asks for it.
+--
+-- Hung off a build rather than given a CLI surface, because §X10 is explicit
+-- that the spike is __not a backend__: no @geng make --output=x.c@, no target
+-- in @harness/run.py@, no corpus. When it is over, "Generate.CoreJS" is still
+-- the only backend and deleting this function deletes the spike.
+--
+-- __The roots are the whole trick__ (§X3). This links from the one scalar
+-- binding @GENG_SPIKE_ROOT@ names, not from the program\'s @main@ — measured
+-- 2026-09-06, @main = "x"@ links 56 bindings and 26 kernel JavaScript
+-- functions, among them @Platform.leaf@ and @Scheduler.spawn@, and the language
+-- itself costs five of them. 'Program.link' takes its roots as a plain list, so
+-- this is an argument at a call site and not a mechanism.
+--
+-- Two files: the C, and the finding. §X9 makes the spike\'s criterion a written
+-- list of everything @Low@ had to compute that Core does not carry, and
+-- "Core.Low" produces it as it goes rather than leaving it to be remembered.
+spikeC :: Details.Details -> Build.Artifacts -> Task ()
+spikeC details artifacts@(Build.Artifacts pkg _ _ _) =
+  case (Dump.spikeFile, Dump.spikeRoot) of
+    (Just file, Just (home, name)) ->
+      Task.io $
+        do
+          cores <- Pass.run <$> programCore details artifacts
+          let root =
+                Core.QualName
+                  (ModuleName.Canonical pkg (N.fromChars home))
+                  (N.fromChars name)
+          let program = Program.link spikeBackend cores [root]
+          case Low.lower program root of
+            Left err -> B.writeFile file (B.stringUtf8 ("/* " ++ err ++ " */\n"))
+            Right low ->
+              do
+                B.writeFile file (LowC.generate low)
+                B.writeFile (file ++ ".notes") (Low.renderNotes (Low._lowNotes low))
+                -- The spike's own link, and not the program's. @GENG_DUMP_LINK@
+                -- writes the link rooted at @main@, which is the 87-binding one
+                -- §X2 measured; §X5's budget is about what the /spike's/ root
+                -- reaches, and checking the C kernel against the wrong list
+                -- would pass anything.
+                B.writeFile (file ++ ".link") (Program.render program)
+                B.writeFile (FilePath.takeDirectory file </> "geng_tags.h") (LowC.renderTags low)
+    _ -> return ()
+
+-- | The linker's view of a backend that has no JavaScript in it.
+--
+-- __Both fields empty, and that is the whole of §X5's budget.__ A kernel
+-- module is a node in the JS link because its chunks are spliced and its
+-- JavaScript calls back into Gren — so reaching @Basics.add@ reaches the whole
+-- @Basics@ chunk list, which references @Utils@, which references @Dict@,
+-- @Set@ and @Array@. Measured on the first spike run: linking @Case.answer@
+-- with the JavaScript backend's kernel map dragged in @Dict@, @Set@ and
+-- @Array.splice1@, none of which the arithmetic wants.
+--
+-- For C there is no JavaScript to splice. So a kernel name is not defined, the
+-- graph stops there, and the reference comes out in 'Program._progMissing'
+-- instead — which is exactly the list §X5 makes the C kernel's budget. The
+-- transitive closure disappears because the edge that created it was a fact
+-- about JavaScript.
+--
+-- 'Program._backendEdges' is empty for the same kind of reason: its edges are a
+-- @port@'s runtime constructor and a static @main@'s entry point, and §X3's
+-- root has neither.
+spikeBackend :: Program.Backend
+spikeBackend =
+  Program.Backend
+    { Program._backendKernels = Map.empty,
+      Program._backendEdges = Map.empty
+    }
 
 -- | One REPL entry, generated the way @dev@ is (§J17).
 repl :: Details.Details -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder

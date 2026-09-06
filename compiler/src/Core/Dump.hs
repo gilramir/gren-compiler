@@ -24,6 +24,8 @@ module Core.Dump
     linkFile,
     linkEveryExport,
     corePasses,
+    spikeFile,
+    spikeRoot,
   )
 where
 
@@ -91,6 +93,43 @@ corePasses :: [String]
 corePasses =
   unsafePerformIO (maybe [] (splitOn ',') <$> Env.lookupEnv "GENG_CORE_PASSES")
 {-# NOINLINE corePasses #-}
+
+-- | @GENG_SPIKE_C@: where the Core → C spike writes its C, if it is asked at
+-- all. Unset — which is every build but a spike run — and nothing happens.
+--
+-- A file and an environment variable rather than a @geng make --output=x.c@,
+-- because @docs/m1a-c-spike.md@ §X10 is explicit that the spike is __not a
+-- backend__: it has no CLI surface, no target in @harness/run.py@ and no
+-- corpus. This is the same shape 'linkFile' has and for the same reason —
+-- a measurement hung off a build, not a mode of one.
+spikeFile :: Maybe FilePath
+spikeFile =
+  unsafePerformIO (Env.lookupEnv "GENG_SPIKE_C")
+{-# NOINLINE spikeFile #-}
+
+-- | @GENG_SPIKE_ROOT=Spike.IntArith.answer@: the binding the spike links from.
+--
+-- §X3, and it is the whole reason the spike is affordable. Rooting at @main@
+-- links 56 bindings and 26 kernel JavaScript functions before the program says
+-- anything — a @Program@, and therefore @Task@, @Platform@, @Scheduler@,
+-- @Json@ and @Process@ — and hand-writing those in C is a runtime rather than a
+-- spike. Rooting at a scalar binding links the arithmetic and its six kernel
+-- names. 'Core.Program.link' takes its roots as a plain list, so this is an
+-- argument and not a mechanism.
+--
+-- The module is everything before the last dot and the binding is what follows
+-- it; the package is the application's, which only the caller knows.
+spikeRoot :: Maybe (String, String)
+spikeRoot =
+  fmap splitLast (unsafePerformIO (Env.lookupEnv "GENG_SPIKE_ROOT"))
+{-# NOINLINE spikeRoot #-}
+
+-- | @"Spike.IntArith.answer"@ to @("Spike.IntArith", "answer")@.
+splitLast :: String -> (String, String)
+splitLast s =
+  case break (== '.') (reverse s) of
+    (name, _ : home) -> (reverse home, reverse name)
+    (name, []) -> ("", reverse name)
 
 splitOn :: Char -> String -> [String]
 splitOn sep s =
