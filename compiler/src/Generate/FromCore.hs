@@ -1,0 +1,458 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wall #-}
+
+-- | Build the JS backend's input from Core (@docs/m1a-js-on-core.md@ §J3 item 6).
+--
+-- M1a's criterion is that the JS backend reads Core. The backend's input is an
+-- 'AST.Optimized.GlobalGraph' — §J1 — so the shortest honest route to that
+-- criterion is to build the graph's __value definitions__ from Core instead of
+-- from @Optimize.*@, and leave the rest of the graph alone. Every definition's
+-- body then comes from Core; what stays is what Core does not carry yet:
+-- constructor, kernel, effect-manager and port nodes, the record-field census,
+-- and each root's @main@.
+--
+-- That is a deliberate first step rather than the destination. It retires the
+-- risk that matters — whether Core carries enough to generate code from — while
+-- reusing a JS emitter, a minifier and a source-map writer that already work.
+-- The nodes it does not build are exactly the ones §J3 items 3 and 5 are about,
+-- and §J7 measures them: 298 kernel functions and ten manager fields.
+--
+-- __Where this differs from the existing pipeline, on purpose:__
+--
+--   * __Pattern matching is naive.__ Alternatives are tested in source order,
+--     as a right-nested 'Opt.Chain', so a shared test is repeated and no branch
+--     body is ever duplicated. Decision trees are C4's optional Core→Core pass
+--     and §J6's decision; this needs neither, which is also §J6's point — the
+--     join-point question is an optimization question, not a correctness one.
+--   * __No tail-call rewriting.__ 'Opt.TailCall' and 'Opt.DefineTailFunc' are
+--     `Optimize.Expression`'s work and §J3 item 4's decision. Deep self-recursion
+--     in Gren source will grow the JS stack here where it did not before.
+--   * __Recursive groups become ordinary definitions.__ 'Opt.Cycle' exists for
+--     value cycles, and Canonical rejects those: a cycle that survives
+--     `detectBadCycles` goes through a function, and a function body does not run
+--     until it is called, so plain @var@ definitions in any order are correct.
+module Generate.FromCore
+  ( redefine,
+  )
+where
+
+import AST.Canonical qualified as Can
+import AST.Optimized qualified as Opt
+import Control.Monad.Trans.State.Strict (State, runState, state)
+import Core.AST qualified as Core
+import Core.Program qualified as Program
+import Data.Index qualified as Index
+import Data.Map (Map)
+import Data.Map qualified as Map
+import Data.Name (Name)
+import Data.Name qualified as Name
+import Data.Set (Set)
+import Data.Set qualified as Set
+import Data.Utf8 qualified as Utf8
+import Gren.Float qualified as EF
+import Gren.ModuleName qualified as ModuleName
+import Gren.Package qualified as Pkg
+import Gren.String qualified as ES
+import Optimize.DecisionTree qualified as DT
+import Reporting.Annotation qualified as A
+
+-- ENTRY
+
+-- | Replace every value definition in the graph with one built from Core.
+--
+-- 'Map.union' is left-biased, so a Core definition wins over the one
+-- @Optimize.Module@ produced for the same name, and every other kind of node
+-- stays. The field census stays too: kernel JavaScript names fields that no Gren
+-- expression mentions (§J7), so a census taken from Core alone would be short.
+redefine :: Map ModuleName.Canonical Core.Module -> Opt.GlobalGraph -> Opt.GlobalGraph
+redefine cores (Opt.GlobalGraph nodes fields) =
+  let ctors = Map.fromList (concatMap ctorEntries (Map.elems cores))
+      defined =
+        Map.fromList
+          [ (global, keepDeps nodes global node)
+          | (global, node) <- concatMap (moduleNodes ctors) (Map.toAscList cores)
+          ]
+   in Opt.GlobalGraph (Map.union defined nodes) fields
+
+-- | Keep the dependencies of the node being replaced, as well as the ones the
+-- Core body reaches.
+--
+-- Not belt and braces: a @main@ whose type is a @Program@ has a generated flags
+-- decoder hanging off its definition node — @Optimize.Module@ passes it in as
+-- @mainDeps@ — and the decoder is `Optimize.Port`'s work, which Core does not
+-- carry (§J3 item 5). Its dependencies are therefore attached to a definition
+-- whose body says nothing about them, and dropping them emits a program that
+-- refers to a `Json.Decode` function nobody defined.
+--
+-- The cost is that the Core path's dependency sets are a superset rather than
+-- exactly what Core reaches, so this is not yet evidence that the Core walk is
+-- complete. Measuring the difference is worth doing before the old path goes.
+--
+-- What /is/ established: deleting every value definition Core did not supply —
+-- rather than letting the old one stand — leaves the whole corpus passing and a
+-- 1201-module program answering correctly. So Core supplies every definition
+-- these programs need; nothing is quietly falling back to an `Optimize.*` body.
+keepDeps :: Map Opt.Global Opt.Node -> Opt.Global -> Opt.Node -> Opt.Node
+keepDeps nodes global node =
+  case (node, Map.lookup global nodes) of
+    (Opt.Define r body ds, Just (Opt.Define _ _ old)) -> Opt.Define r body (Set.union ds old)
+    (Opt.Define r body ds, Just (Opt.Cycle _ _ _ old)) -> Opt.Define r body (Set.union ds old)
+    (Opt.Define r body ds, Just (Opt.DefineTailFunc _ _ _ old)) -> Opt.Define r body (Set.union ds old)
+    _ -> node
+
+-- | What a constructor needs to be built and to be tested for. The tag is on the
+-- Core node, so it is not here.
+data Ctor = Ctor
+  { _opts :: !Can.CtorOpts,
+    -- | How many constructors the datatype has. A one-constructor type is
+    -- irrefutable and gets no test at all, which is what keeps a record-shaped
+    -- @type@ from being compared against itself.
+    _alts :: !Int
+  }
+
+ctorEntries :: Core.Module -> [(Core.QualName, Ctor)]
+ctorEntries m =
+  [ (Core._ctorName c, Ctor (ctorOpts d) (length (Core._dataCtors d)))
+  | d <- Core._moduleData m,
+    c <- Core._dataCtors d
+  ]
+
+-- | The representation choice, derived the way `Canonicalize.Environment.Local`
+-- derives it from source: one constructor with one field is unboxed, all-nullary
+-- constructors are an enum, anything else is a tagged record.
+ctorOpts :: Core.DataDecl -> Can.CtorOpts
+ctorOpts d =
+  case Core._dataCtors d of
+    [c] | length (Core._ctorFields c) == 1 -> Can.Unbox
+    cs | all (null . Core._ctorFields) cs -> Can.Enum
+    _ -> Can.Normal
+
+moduleNodes :: Map Core.QualName Ctor -> (ModuleName.Canonical, Core.Module) -> [(Opt.Global, Opt.Node)]
+moduleNodes ctors (home, m) =
+  map (define (Env ctors home)) (Core._moduleDefs m)
+
+define :: Env -> Core.Bind -> (Opt.Global, Opt.Node)
+define env (Core.Bind binder value) =
+  let name = Core._binderName binder
+      (body, _) = runState (expr env value) 0
+   in ( Opt.Global (_home env) name,
+        Opt.Define (region (Core._binderSpan binder)) body (deps value)
+      )
+
+-- | Which graph nodes a definition's body reaches.
+--
+-- The globals and constructors "Core.Program" already collects for the linker,
+-- mapped into the backend's namespace: a kernel reference is a dependency on the
+-- whole kernel module, because that is the granularity `Gren.Kernel` splices at,
+-- and a `Debug` reference is a dependency on the @Debug@ module the way
+-- @Optimize.Names@ records it.
+deps :: Core.Expr -> Set Opt.Global
+deps value =
+  let refs = Program.refsIn value
+      globals = Set.map toGlobal (Program._refGlobals refs)
+      ctors =
+        Set.fromList
+          [ Opt.Global home name
+          | q@(Core.QualName home name) <- Set.toList (Program._refCtors refs),
+            not (isBool q)
+          ]
+   in Set.union globals ctors
+
+toGlobal :: Core.QualName -> Opt.Global
+toGlobal (Core.QualName home@(ModuleName.Canonical pkg raw) name)
+  | pkg == Pkg.kernel = Opt.toKernelGlobal raw
+  | otherwise = Opt.Global home name
+
+-- ENVIRONMENT
+
+data Env = Env
+  { _ctors :: Map Core.QualName Ctor,
+    -- | The module being translated. `Opt.VarDebug` wants the module doing the
+    -- referring rather than the one referred to, and Core drops that when it
+    -- rewrites a `Debug` reference to the `Debug` module — but the module being
+    -- translated is exactly the referrer, so nothing is lost here.
+    _home :: ModuleName.Canonical
+  }
+
+-- | Fresh local names, in the same @_v0@, @_v1@ series `Optimize.Names` uses, so
+-- that generated code reads the same way it did.
+type Fresh a = State Int a
+
+fresh :: Fresh Name
+fresh = state (\uid -> (Name.fromVarIndex uid, uid + 1))
+
+-- EXPRESSIONS
+
+expr :: Env -> Core.Expr -> Fresh Opt.Expr
+expr env (Core.Expr value _ sp) =
+  let r = region sp
+   in case value of
+        Core.EVar name ->
+          pure (Opt.VarLocal r name)
+        Core.EGlobal (Core.QualName home@(ModuleName.Canonical pkg raw) name)
+          | pkg == Pkg.kernel -> pure (Opt.VarKernel r raw name)
+          | home == ModuleName.debug -> pure (Opt.VarDebug r name (_home env) Nothing)
+          | otherwise -> pure (Opt.VarGlobal r (Opt.Global home name))
+        Core.ELit lit ->
+          pure (literal r lit)
+        Core.ELam binders body ->
+          Opt.Function r (map (\b -> A.At r (Core._binderName b)) binders) <$> expr env body
+        Core.EApp fn args ->
+          Opt.Call r <$> expr env fn <*> traverse (expr env) args
+        Core.ELet binds body ->
+          lets env r binds =<< expr env body
+        Core.ELetRec binds body ->
+          lets env r binds =<< expr env body
+        Core.ECase scrutinee alts _fallback ->
+          caseOf env r scrutinee alts
+        Core.ECtor name tag args ->
+          ctor env r name tag args
+        Core.ERecord fields ->
+          Opt.Record r . Map.fromList <$> traverse (field env r) fields
+        Core.EUpdate base fields ->
+          Opt.Update r <$> expr env base <*> (Map.fromList <$> traverse (field env r) fields)
+        Core.EAccess base name ->
+          (\b -> Opt.Access b r name) <$> expr env base
+        Core.EArray items ->
+          Opt.Array r <$> traverse (expr env) items
+        Core.EPrim _ _ ->
+          error "Generate.FromCore: EPrim — `core` has no @prim declarations yet (docs/m1a-lowering.md §L4)"
+        Core.ECrash _ ->
+          error "Generate.FromCore: ECrash — the lowering does not produce one yet (docs/m1a-lowering.md §L4)"
+        Core.ETyLam _ _ ->
+          error "Generate.FromCore: ETyLam — specialization is M1b (docs/m1a-lowering.md §L2)"
+        Core.ETyApp _ _ ->
+          error "Generate.FromCore: ETyApp — specialization is M1b (docs/m1a-lowering.md §L2)"
+        Core.EWitLam _ _ ->
+          error "Generate.FromCore: EWitLam — classes are M1b"
+        Core.EWitApp _ _ ->
+          error "Generate.FromCore: EWitApp — classes are M1b"
+
+field :: Env -> A.Region -> (Core.Field, Core.Expr) -> Fresh (A.Located Name, Opt.Expr)
+field env r (name, value) =
+  (,) (A.At r name) <$> expr env value
+
+lets :: Env -> A.Region -> [Core.Bind] -> Opt.Expr -> Fresh Opt.Expr
+lets env r binds body =
+  foldr wrap (pure body) binds
+  where
+    wrap (Core.Bind binder value) acc =
+      Opt.Let . Opt.Def r (Core._binderName binder) <$> expr env value <*> acc
+
+-- LITERALS
+
+literal :: A.Region -> Core.Literal -> Opt.Expr
+literal r lit =
+  case lit of
+    Core.LIntLegacy n -> Opt.Int r (fromInteger n)
+    Core.LInt n -> Opt.Int r (fromIntegral n)
+    Core.LInt64 n -> Opt.Int r (fromIntegral n)
+    Core.LUInt32 n -> Opt.Int r (fromIntegral n)
+    Core.LUInt64 n -> Opt.Int r (fromIntegral n)
+    Core.LFloat d -> Opt.Float r (float d)
+    Core.LFloat32 f -> Opt.Float r (float (realToFrac f))
+    Core.LChar code -> Opt.Chr r (jsLiteral [toEnum (fromIntegral code)])
+    Core.LString text -> Opt.Str r (jsLiteral (Utf8.toChars text))
+
+-- | A `Gren.Float` is the digits as written, and Core holds a `Double`, so the
+-- digits have to be written again. Haskell's `show` produces the shortest
+-- decimal that reads back as the same `Double`, and every form it produces —
+-- @1.0@, @1.0e-2@, @Infinity@, @NaN@ — is also valid JavaScript.
+float :: Double -> EF.Float
+float = Utf8.fromChars . show
+
+-- | Text as the body of a JavaScript literal.
+--
+-- `Generate.JavaScript.Builder` writes a string between __single__ quotes, so
+-- that is the quote to escape and the double quote goes out as itself — which is
+-- also what `Parse.String` does when it builds one of these from source.
+--
+-- Core holds characters (C2's `Text`), not the escapes they were written with,
+-- so this is where they are escaped again, and it escapes only what has to be:
+-- the quote, the backslash, the C0 controls and DEL, and U+2028 and U+2029,
+-- which older JavaScript treats as line terminators inside a string. Everything
+-- else, astral characters included, goes out as itself, in UTF-8.
+--
+-- Deliberately __not__ `Gren.String`'s surrogate-pair encoder. That is the
+-- function whose boundary was off by one — `docs/upstream/`
+-- @compiler-u-ffff-becomes-a-surrogate-pair.md@ — and a literal character needs
+-- no arithmetic to go wrong in.
+jsLiteral :: [Char] -> ES.String
+jsLiteral = Utf8.fromChars . concatMap escape
+  where
+    escape c =
+      case c of
+        '\'' -> "\\'"
+        '\\' -> "\\\\"
+        '\n' -> "\\n"
+        '\r' -> "\\r"
+        '\t' -> "\\t"
+        _
+          | code < 0x20 || code == 0x7F || code == 0x2028 || code == 0x2029 ->
+              "\\u" ++ pad (showHex code)
+          | otherwise -> [c]
+      where
+        code = fromEnum c
+
+    pad hex = replicate (4 - length hex) '0' ++ hex
+
+    showHex 0 = "0"
+    showHex n = go n ""
+      where
+        go 0 acc = acc
+        go m acc = go (m `div` 16) (digit (m `mod` 16) : acc)
+        digit d = if d < 10 then toEnum (fromEnum '0' + d) else toEnum (fromEnum 'a' + d - 10)
+
+-- CONSTRUCTORS
+
+-- | A saturated constructor application, which is the only shape Core has: a
+-- bare constructor is an `ELam` around one of these.
+ctor :: Env -> A.Region -> Core.QualName -> Int -> [Core.Expr] -> Fresh Opt.Expr
+ctor env r name@(Core.QualName home short) tag args
+  | isBool name = pure (Opt.Bool r (short == Name.true))
+  | otherwise =
+      let reference =
+            case _opts (lookupCtor env name) of
+              Can.Normal -> Opt.VarGlobal r (Opt.Global home short)
+              Can.Enum -> Opt.VarEnum r (Opt.Global home short) (zeroBased tag)
+              Can.Unbox -> Opt.VarBox r (Opt.Global home short)
+       in case args of
+            [] -> pure reference
+            _ -> Opt.Call r reference <$> traverse (expr env) args
+
+lookupCtor :: Env -> Core.QualName -> Ctor
+lookupCtor env name@(Core.QualName _ short) =
+  case Map.lookup name (_ctors env) of
+    Just c -> c
+    Nothing -> error ("Generate.FromCore: no datatype declares " ++ Name.toChars short)
+
+-- | `Data.Index` exports the type and not the constructor, on purpose: an index
+-- is meant to be built by walking a list. A constructor tag arrives as a machine
+-- integer from Core, so this is the one place that has to count up to it.
+zeroBased :: Int -> Index.ZeroBased
+zeroBased n = iterate Index.next Index.first !! n
+
+isBool :: Core.QualName -> Bool
+isBool (Core.QualName home short) =
+  home == ModuleName.basics && (short == Name.true || short == Name.false)
+
+-- CASE
+
+-- | Alternatives tested in order: a right-nested chain of conjunctions.
+--
+-- The scrutinee is bound to a name first, because a decider tests paths from a
+-- root variable rather than from an expression — unless it is already a
+-- variable, in which case that one is the root, which is the same shortcut
+-- `Optimize.Expression` takes.
+caseOf :: Env -> A.Region -> Core.Expr -> [Core.Alt] -> Fresh Opt.Expr
+caseOf env r scrutinee alts =
+  do
+    oscrutinee <- expr env scrutinee
+    label <- fresh
+    case oscrutinee of
+      Opt.VarLocal _ root ->
+        do
+          decider <- chain env root alts
+          pure (Opt.Case label root decider [])
+      _ ->
+        do
+          root <- fresh
+          decider <- chain env root alts
+          pure (Opt.Let (Opt.Def r root oscrutinee) (Opt.Case label root decider []))
+
+chain :: Env -> Name -> [Core.Alt] -> Fresh (Opt.Decider Opt.Choice)
+chain env root alts =
+  case alts of
+    [] ->
+      error "Generate.FromCore: a case with no alternatives"
+    [alt] ->
+      -- The last alternative is the fallback. Every `ECase` the lowering
+      -- produces is exhaustive — `Nitpick.PatternMatches` rejects the ones that
+      -- are not, which is why `Core.ECase`'s fallback is `Nothing` — so nothing
+      -- is lost by not testing it.
+      leaf env root alt
+    alt@(Core.Alt pattern _) : rest ->
+      let (tests, _) = compile env root DT.Empty pattern
+       in if null tests
+            then leaf env root alt
+            else Opt.Chain tests <$> leaf env root alt <*> chain env root rest
+
+leaf :: Env -> Name -> Core.Alt -> Fresh (Opt.Decider Opt.Choice)
+leaf env root (Core.Alt pattern body) =
+  do
+    obody <- expr env body
+    let (_, destructors) = compile env root DT.Empty pattern
+    pure (Opt.Leaf (Opt.Inline (foldr Opt.Destruct obody destructors)))
+
+-- | What a pattern tests, and what it binds.
+--
+-- One walk, two answers, because a naive matcher needs the tests without the
+-- bindings (to decide whether to take the branch) and the bindings without the
+-- tests (inside it).
+compile :: Env -> Name -> DT.Path -> Core.Pattern -> ([(DT.Path, DT.Test)], [Opt.Destructor])
+compile env root path pattern =
+  case pattern of
+    Core.PWild ->
+      ([], [])
+    Core.PVar binder ->
+      ([], [Opt.Destructor (Core._binderName binder) (optPath root path)])
+    Core.PAs binder inner ->
+      -- The alias binds the same value the sub-pattern matches, so the
+      -- sub-pattern keeps the same path and the binding is one more destructor.
+      let (tests, ds) = compile env root path inner
+       in (tests, Opt.Destructor (Core._binderName binder) (optPath root path) : ds)
+    Core.PLit lit ->
+      ([(path, litTest lit)], [])
+    Core.PCtor name@(Core.QualName home short) tag args ->
+      let Ctor opts alts = lookupCtor env name
+          subs =
+            case opts of
+              Can.Unbox -> map (compile env root (DT.Unbox path)) args
+              _ -> Index.indexedMap (\i arg -> compile env root (DT.Index i path) arg) args
+          below = (concatMap fst subs, concatMap snd subs)
+          -- A one-constructor type is irrefutable, and a `Can.Unbox` test would
+          -- compare the payload against the constructor's own name. `DecisionTree`
+          -- drops those tests for the same reason.
+          test =
+            if isBool name
+              then [(path, DT.IsBool (short == Name.true))]
+              else [(path, DT.IsCtor home short (zeroBased tag) alts opts) | alts > 1]
+       in (test ++ fst below, snd below)
+    Core.PRecord fields ->
+      let subs = map (\(f, p) -> compile env root (DT.RecordField f path) p) fields
+       in (concatMap fst subs, concatMap snd subs)
+    Core.PArray items Nothing ->
+      let subs = Index.indexedMap (\i p -> compile env root (DT.ArrayIndex i path) p) items
+       in ((path, DT.IsArray (length items)) : concatMap fst subs, concatMap snd subs)
+    Core.PArray _ (Just _) ->
+      error "Generate.FromCore: an array pattern with a tail — the frontend has no syntax for one"
+
+litTest :: Core.Literal -> DT.Test
+litTest lit =
+  case lit of
+    Core.LIntLegacy n -> DT.IsInt (fromInteger n)
+    Core.LInt n -> DT.IsInt (fromIntegral n)
+    Core.LInt64 n -> DT.IsInt (fromIntegral n)
+    Core.LUInt32 n -> DT.IsInt (fromIntegral n)
+    Core.LUInt64 n -> DT.IsInt (fromIntegral n)
+    Core.LChar code -> DT.IsChr (jsLiteral [toEnum (fromIntegral code)])
+    Core.LString text -> DT.IsStr (jsLiteral (Utf8.toChars text))
+    Core.LFloat _ -> error "Generate.FromCore: a float pattern — the frontend rejects one"
+    Core.LFloat32 _ -> error "Generate.FromCore: a float pattern — the frontend rejects one"
+
+optPath :: Name -> DT.Path -> Opt.Path
+optPath root path =
+  case path of
+    DT.Empty -> Opt.Root root
+    DT.Index index sub -> Opt.Index index (optPath root sub)
+    DT.ArrayIndex index sub -> Opt.ArrayIndex index (optPath root sub)
+    DT.RecordField name sub -> Opt.Field name (optPath root sub)
+    DT.Unbox sub -> Opt.Unbox (optPath root sub)
+
+-- REGIONS
+
+region :: Core.Span -> A.Region
+region (Core.Span _ startRow startCol endRow endCol) =
+  A.Region
+    (A.Position (fromIntegral startRow) (fromIntegral startCol))
+    (A.Position (fromIntegral endRow) (fromIntegral endCol))

@@ -23,6 +23,7 @@ module Core.Dump
     programDir,
     linkFile,
     linkEveryExport,
+    jsFromCore,
   )
 where
 
@@ -78,6 +79,17 @@ linkEveryExport :: Bool
 linkEveryExport =
   unsafePerformIO ((== Just "exports") <$> Env.lookupEnv "GENG_LINK_ROOTS")
 {-# NOINLINE linkEveryExport #-}
+
+-- | @GENG_JS_FROM_CORE=1@: build the JS backend's input from Core.
+--
+-- A switch rather than a mode, for now: both paths are in the binary and the
+-- differential harness runs the corpus through each (`docs/m1a-js-on-core.md`
+-- §J3 items 6 and 7). It stops being a switch when the Core path answers
+-- everything the old one does.
+jsFromCore :: Bool
+jsFromCore =
+  unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_JS_FROM_CORE")
+{-# NOINLINE jsFromCore #-}
 
 -- | An empty value means the current directory, so that @VAR=@ is not silently
 -- the same as unset.

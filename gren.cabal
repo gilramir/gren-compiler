@@ -123,6 +123,7 @@ Library common
         Core.Prim
         Core.Program
         Core.Pretty
+        Generate.FromCore
         Generate.Html
         Generate.Node
         Generate.JavaScript

@@ -21,6 +21,7 @@ import Data.Name qualified as N
 import Data.NonEmptyList qualified as NE
 import Directories qualified as Dirs
 import File qualified
+import Generate.FromCore qualified as FromCore
 import Generate.JavaScript qualified as JS
 import Generate.Mode qualified as Mode
 import Gren.Details qualified as Details
@@ -41,9 +42,9 @@ dev root details artifacts@(Build.Artifacts pkg _ roots modules) =
   do
     objects <- finalizeObjects =<< loadObjects root details modules
     let mode = Mode.Dev
-    let graph = objectsToGlobalGraph objects
     let mains = gatherMains pkg objects roots
     dumpCore details artifacts mains
+    graph <- fromCore details artifacts (objectsToGlobalGraph objects)
     return $ JS.generate mode graph mains
 
 prod :: FilePath -> Details.Details -> Build.Artifacts -> Task JS.GeneratedResult
@@ -51,10 +52,10 @@ prod root details artifacts@(Build.Artifacts pkg _ roots modules) =
   do
     objects <- finalizeObjects =<< loadObjects root details modules
     checkForDebugUses objects
-    let graph = objectsToGlobalGraph objects
-    let mode = Mode.Prod (Mode.shortenFieldNames graph)
     let mains = gatherMains pkg objects roots
     dumpCore details artifacts mains
+    graph <- fromCore details artifacts (objectsToGlobalGraph objects)
+    let mode = Mode.Prod (Mode.shortenFieldNames graph)
     return $ JS.generate mode graph mains
 
 -- PROGRAM CORE
@@ -91,6 +92,18 @@ programCore details (Build.Artifacts pkg _ roots modules) =
       case root of
         Build.Inside _ -> Nothing
         Build.Outside name _ _ core -> Just (ModuleName.Canonical pkg name, core)
+
+-- | The backend's input, with every value definition rebuilt from Core if
+-- @GENG_JS_FROM_CORE=1@ asks for it.
+--
+-- `Generate.FromCore` says what it does and does not rebuild. Off by default:
+-- both paths are in the binary so that the differential harness can run the
+-- corpus through each (`docs/m1a-js-on-core.md` §J3 items 6 and 7).
+fromCore :: Details.Details -> Build.Artifacts -> Opt.GlobalGraph -> Task Opt.GlobalGraph
+fromCore details artifacts graph =
+  if not Dump.jsFromCore
+    then return graph
+    else Task.io (flip FromCore.redefine graph <$> programCore details artifacts)
 
 -- | The program's roots, as Core names.
 --
