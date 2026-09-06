@@ -15,8 +15,8 @@ import Data.Maybe qualified as Maybe
 import Data.NonEmptyList qualified as NE
 import File qualified
 import Generate qualified
+import Generate.CoreJS qualified as CoreJS
 import Generate.Html qualified as Html
-import Generate.JavaScript qualified as JS
 import Generate.Node qualified as Node
 import Generate.SourceMap (SourceMap)
 import Generate.SourceMap qualified as SourceMap
@@ -91,17 +91,17 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                     return ()
                   (Platform.Browser, [name]) ->
                     do
-                      (JS.GeneratedResult source sourceMap) <- generate root details desiredMode artifacts
+                      (CoreJS.GeneratedResult source sourceMap) <- generate details desiredMode artifacts
                       let bundle = prepareOutput withSourceMaps flags Html.leadingLines sourceMap source
                       writeToDisk style "index.html" (Html.sandwich name bundle) (NE.List name [])
                   (Platform.Node, [name]) ->
                     do
-                      (JS.GeneratedResult source sourceMap) <- generate root details desiredMode artifacts
+                      (CoreJS.GeneratedResult source sourceMap) <- generate details desiredMode artifacts
                       let bundle = prepareOutput withSourceMaps flags Node.leadingLines sourceMap (Node.sandwich name source)
                       writeToDisk style "app" bundle (NE.List name [])
                   (_, name : names) ->
                     do
-                      (JS.GeneratedResult source sourceMap) <- generate root details desiredMode artifacts
+                      (CoreJS.GeneratedResult source sourceMap) <- generate details desiredMode artifacts
                       let bundle = prepareOutput withSourceMaps flags 0 sourceMap source
                       writeToDisk style "index.js" bundle (NE.List name names)
               Just DevStdOut ->
@@ -110,7 +110,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                     return ()
                   _ ->
                     do
-                      (JS.GeneratedResult source sourceMap) <- generate root details desiredMode artifacts
+                      (CoreJS.GeneratedResult source sourceMap) <- generate details desiredMode artifacts
                       let bundle = prepareOutput withSourceMaps flags 0 sourceMap source
                       Task.io $ B.hPutBuilder IO.stdout bundle
               Just DevNull ->
@@ -119,7 +119,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                 case platform of
                   Platform.Node -> do
                     name <- hasOneMain artifacts
-                    (JS.GeneratedResult source sourceMap) <- generate root details desiredMode artifacts
+                    (CoreJS.GeneratedResult source sourceMap) <- generate details desiredMode artifacts
                     let bundle = prepareOutput withSourceMaps flags Node.leadingLines sourceMap (Node.sandwich name source)
                     writeToDisk style target bundle (NE.List name [])
                   _ -> do
@@ -127,7 +127,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
               Just (JS target) ->
                 case getNoMains artifacts of
                   [] -> do
-                    (JS.GeneratedResult source sourceMap) <- generate root details desiredMode artifacts
+                    (CoreJS.GeneratedResult source sourceMap) <- generate details desiredMode artifacts
                     let bundle = prepareOutput withSourceMaps flags 0 sourceMap source
                     writeToDisk style target bundle (Build.getRootNames artifacts)
                   name : names ->
@@ -136,7 +136,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                 case platform of
                   Platform.Browser -> do
                     name <- hasOneMain artifacts
-                    (JS.GeneratedResult source sourceMap) <- generate root details desiredMode artifacts
+                    (CoreJS.GeneratedResult source sourceMap) <- generate details desiredMode artifacts
                     let bundle = prepareOutput withSourceMaps flags Html.leadingLines sourceMap source
                     writeToDisk style target (Html.sandwich name bundle) (NE.List name [])
                   _ -> do
@@ -279,9 +279,9 @@ writeToDisk style target builder names =
 
 data DesiredMode = Dev | Prod
 
-generate :: FilePath -> Details.Details -> DesiredMode -> Build.Artifacts -> Task JS.GeneratedResult
-generate root details desiredMode artifacts =
+generate :: Details.Details -> DesiredMode -> Build.Artifacts -> Task CoreJS.GeneratedResult
+generate details desiredMode artifacts =
   Task.mapError Exit.MakeBadGenerate $
     case desiredMode of
-      Dev -> Generate.dev root details artifacts
-      Prod -> Generate.prod root details artifacts
+      Dev -> Generate.dev details artifacts
+      Prod -> Generate.prod details artifacts

@@ -44,8 +44,7 @@ import Data.ByteString.Builder qualified as B
 import Data.Index qualified as Index
 import Data.IntMap qualified as IntMap
 import Data.List qualified as List
-import Data.Map ((!))
-import Data.Map (Map)
+import Data.Map (Map, (!))
 import Data.Map qualified as Map
 import Data.Name (Name)
 import Data.Name qualified as Name
@@ -822,11 +821,12 @@ chain env root alts fallback =
       case fallback of
         Just f -> codeToStmtList (generate env f)
         Nothing -> error "Generate.CoreJS: a case with no alternatives"
-    [alt] | Nothing <- fallback ->
-      -- The last alternative is the fallback when there is no other: every
-      -- `ECase` the lowering produces is exhaustive, which is why
-      -- `Core.AST.ECase`'s own fallback is a `Maybe`.
-      branch env root alt
+    [alt]
+      | Nothing <- fallback ->
+          -- The last alternative is the fallback when there is no other: every
+          -- `ECase` the lowering produces is exhaustive, which is why
+          -- `Core.AST.ECase`'s own fallback is a `Maybe`.
+          branch env root alt
     alt@(Core.Alt pattern _) : rest ->
       let (tests, _) = match env root pattern
        in if null tests

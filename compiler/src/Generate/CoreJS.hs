@@ -17,7 +17,8 @@
 -- answered both questions — what is reachable and in what order (C14) — so this
 -- is a fold over '_progLinked' and nothing else.
 module Generate.CoreJS
-  ( generate,
+  ( GeneratedResult (..),
+    generate,
     generateForRepl,
     shortenFieldNames,
   )
@@ -36,7 +37,6 @@ import Data.Name qualified as Name
 import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
 import Generate.CoreJS.Expression qualified as Expr
-import Generate.JavaScript (GeneratedResult (..), printForRepl)
 import Generate.JavaScript.Builder qualified as JS
 import Generate.JavaScript.Functions qualified as Functions
 import Generate.JavaScript.Name qualified as JsName
@@ -45,9 +45,17 @@ import Generate.SourceMap qualified as SourceMap
 import Gren.Kernel qualified as K
 import Gren.ModuleName qualified as ModuleName
 import Reporting.Annotation qualified as A
+import Reporting.Doc qualified as D
+import Reporting.Render.Type qualified as RT
 import Reporting.Render.Type.Localizer qualified as L
 
 -- ENTRY
+
+-- | What a backend hands "Make": the JavaScript, and the source map for it.
+data GeneratedResult = GeneratedResult
+  { _source :: B.Builder,
+    _sourceMap :: SourceMap.SourceMap
+  }
 
 -- | The whole program, in one pass over the link order.
 --
@@ -79,15 +87,14 @@ generate mode program kernels =
 -- swapped for the REPL's: no module wrapper, because the script is piped
 -- straight into @node@ and nothing imports it; and no @_Platform_export@,
 -- because a REPL entry has no @main@. What replaces the export is
--- `Generate.JavaScript.printForRepl`, which both REPLs share.
+-- 'printForRepl'.
 --
 -- The value being printed is a root, and so is @Debug.toString@ — not because
 -- the printer calls it (it calls kernel @Debug@\'s @_Debug_toAnsiString@
 -- directly) but because that binding is what reaches the kernel module the
 -- function is in. Rooting the kernel module instead would work here, where the
--- printer runs last and no order can be wrong, but it would make the two REPLs
--- reach different sets and a differential comparison between them worth less.
--- 'Generate.replRoots' is where that choice is written down.
+-- printer runs last and no order can be wrong. 'Generate.replRoots' is where
+-- that choice is written down.
 generateForRepl :: Bool -> L.Localizer -> Program -> Map Name [K.Chunk] -> ModuleName.Canonical -> Name -> Can.Annotation -> B.Builder
 generateForRepl ansi localizer program kernels home name (Can.Forall _ tipe) =
   let mode = Mode.Dev
@@ -103,6 +110,36 @@ generateForRepl ansi localizer program kernels home name (Can.Forall _ tipe) =
         <> Functions.functions
         <> JS._code builder
         <> printForRepl ansi localizer home name tipe
+
+-- | The tail of a REPL script: print the value, then print its type.
+--
+-- The one part of a REPL entry that is not generated from the program at all —
+-- it is written out of the annotation the type checker produced, which is why
+-- 'generateForRepl' takes one.
+printForRepl :: Bool -> L.Localizer -> ModuleName.Canonical -> Name -> Can.Type -> B.Builder
+printForRepl ansi localizer home name tipe =
+  let value = JsName.toBuilder (JsName.fromGlobal home name)
+      toString = JsName.toBuilder (JsName.fromKernel Name.debug "toAnsiString")
+      tipeDoc = RT.canToDoc localizer RT.None tipe
+      bool = if ansi then "true" else "false"
+   in "var _value = "
+        <> toString
+        <> "("
+        <> bool
+        <> ", "
+        <> value
+        <> ");\n\
+           \var _type = "
+        <> B.stringUtf8 (show (D.toString tipeDoc))
+        <> ";\n\
+           \function _print(t) { console.log(_value + ("
+        <> bool
+        <> " ? '\x1b[90m' + t + '\x1b[0m' : t)); }\n\
+           \if (_value.length + 3 + _type.length >= 80 || _type.indexOf('\\n') >= 0) {\n\
+           \    _print('\\n    : ' + _type.split('\\n').join('\\n      '));\n\
+           \} else {\n\
+           \    _print(' : ' + _type);\n\
+           \}\n"
 
 prelude :: B.Builder
 prelude =

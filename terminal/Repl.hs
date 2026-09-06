@@ -405,7 +405,7 @@ attemptEval (Flags _ root outline sources deps) (Env interpreter ansi) oldState 
             Task.eio id $
               Build.fromRepl root details sources (toByteString newState output)
 
-          traverse (Task.mapError Exit.ReplBadGenerate . Generate.repl root details ansi artifacts) (toPrintName output)
+          traverse (Task.mapError Exit.ReplBadGenerate . Generate.repl details ansi artifacts) (toPrintName output)
 
     case result of
       Left exit ->

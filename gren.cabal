@@ -131,12 +131,9 @@ Library common
         Core.Refs
         Generate.CoreJS
         Generate.CoreJS.Expression
-        Generate.FromCore
         Generate.Html
         Generate.Node
-        Generate.JavaScript
         Generate.JavaScript.Builder
-        Generate.JavaScript.Expression
         Generate.JavaScript.Functions
         Generate.JavaScript.Literal
         Generate.JavaScript.Name

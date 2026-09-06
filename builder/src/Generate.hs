@@ -5,10 +5,8 @@ module Generate
   )
 where
 
-import AST.Optimized qualified as Opt
 import Build qualified
-import Control.Concurrent (MVar, forkIO, newEmptyMVar, newMVar, putMVar, readMVar)
-import Control.Monad (liftM2)
+import Control.Concurrent (readMVar)
 import Core.AST qualified as Core
 import Core.Dump qualified as Dump
 import Core.Pass qualified as Pass
@@ -22,16 +20,11 @@ import Data.Maybe qualified as Maybe
 import Data.Name qualified as N
 import Data.NonEmptyList qualified as NE
 import Data.Set qualified as Set
-import Directories qualified as Dirs
-import File qualified
 import Generate.CoreJS qualified as CoreJS
-import Generate.FromCore qualified as FromCore
-import Generate.JavaScript qualified as JS
 import Generate.Mode qualified as Mode
 import Gren.Details qualified as Details
 import Gren.Kernel qualified as K
 import Gren.ModuleName qualified as ModuleName
-import Gren.Package qualified as Pkg
 import Nitpick.Debug qualified as Nitpick
 import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
@@ -42,39 +35,33 @@ import Prelude hiding (cycle, print)
 type Task a =
   Task.Task Exit.Generate a
 
-dev :: FilePath -> Details.Details -> Build.Artifacts -> Task JS.GeneratedResult
-dev root details artifacts@(Build.Artifacts pkg _ roots modules) =
+-- | A development build: the linked Core program, emitted by
+-- "Generate.CoreJS".
+--
+-- There is one backend. Until §J18 there were two, and this chose between them
+-- on @GENG_JS_NATIVE@ — the switch that let the corpus run every case through
+-- each, which is what made the Core path a measured claim rather than a stated
+-- one (@docs\/m1a-js-on-core.md@ §J3 items 6 and 7). It stopped being useful
+-- when the old path stopped being an independent answer.
+dev :: Details.Details -> Build.Artifacts -> Task CoreJS.GeneratedResult
+dev details artifacts =
   do
     kernels <- kernelChunks details
     dumpCore details artifacts kernels
-    native <- linkCore details artifacts kernels
-    case native of
-      Just program -> return $ CoreJS.generate Mode.Dev program kernels
-      Nothing ->
-        do
-          objects <- finalizeObjects =<< loadObjects root details modules
-          let objectGraph = objectsToGlobalGraph objects
-          graph <- fromCore details artifacts objectGraph
-          return $ JS.generate Mode.Dev graph (gatherMains pkg objects roots)
+    program <- linkCore details artifacts kernels
+    return $ CoreJS.generate Mode.Dev program kernels
 
-prod :: FilePath -> Details.Details -> Build.Artifacts -> Task JS.GeneratedResult
-prod root details artifacts@(Build.Artifacts pkg _ roots modules) =
+-- | An @--optimize@ build: 'dev', with the field table filled in and @Debug@
+-- refused.
+prod :: Details.Details -> Build.Artifacts -> Task CoreJS.GeneratedResult
+prod details artifacts =
   do
     checkForDebugUses artifacts
     kernels <- kernelChunks details
     dumpCore details artifacts kernels
-    native <- linkCore details artifacts kernels
-    case native of
-      Just program ->
-        let mode = Mode.Prod (CoreJS.shortenFieldNames (Program._progFields program))
-         in return $ CoreJS.generate mode program kernels
-      Nothing ->
-        do
-          objects <- finalizeObjects =<< loadObjects root details modules
-          let objectGraph = objectsToGlobalGraph objects
-          graph <- fromCore details artifacts objectGraph
-          let mode = Mode.Prod (Mode.shortenFieldNames graph)
-          return $ JS.generate mode graph (gatherMains pkg objects roots)
+    program <- linkCore details artifacts kernels
+    let mode = Mode.Prod (CoreJS.shortenFieldNames (Program._progFields program))
+    return $ CoreJS.generate mode program kernels
 
 -- PROGRAM CORE
 
@@ -129,30 +116,6 @@ ownCore (Build.Artifacts _ _ roots modules) =
       case root of
         Build.Inside _ -> Nothing
         Build.Outside name _ _ core -> Just (name, core)
-
--- | The backend's input, with every value definition rebuilt from Core if
--- @GENG_JS_FROM_CORE=1@ asks for it.
---
--- `Generate.FromCore` says what it does and does not rebuild. Off by default:
--- both paths are in the binary so that the differential harness can run the
--- corpus through each (`docs/m1a-js-on-core.md` §J3 items 6 and 7).
---
--- @GENG_DEPS_GAP@ asks for the other thing this function is in a position to
--- know: how far `Generate.FromCore.keepDeps`'s union moves the dependency sets
--- (§J10). It reads both the Core and the graph the old pipeline built, so it is
--- measured here and it does not need the switch on.
-fromCore :: Details.Details -> Build.Artifacts -> Opt.GlobalGraph -> Task Opt.GlobalGraph
-fromCore details artifacts graph =
-  case (Dump.jsFromCore, Dump.depsGap) of
-    (False, Nothing) -> return graph
-    (usingCore, maybeGapFile) ->
-      Task.io $
-        do
-          cores <- Pass.run <$> programCore details artifacts
-          case maybeGapFile of
-            Nothing -> return ()
-            Just file -> B.writeFile file (FromCore.renderGap (FromCore.gap cores graph))
-          return (if usingCore then FromCore.redefine cores graph else graph)
 
 -- | What the kernel JavaScript refers to, read off the chunks the builder
 -- already holds (C16, @docs\/m1a-js-on-core.md@ §J7's two caveats).
@@ -216,21 +179,17 @@ runtimeEdges cores =
         Core.MainHtml -> Just N.virtualDom
         Core.MainProgram _ -> Nothing
 
--- | The linked Core program, when @GENG_JS_NATIVE=1@ asks for one (§J15).
+-- | The linked Core program (§J15).
 --
--- This is the whole of what the Core-native emitter is handed besides the kernel
--- chunks: one call to `Core.Program.link`, with the roots 'coreRoots' names and
--- the kernel information 'kernelInfo' reads off those same chunks. Nothing on
--- this path looks at an `AST.Optimized.GlobalGraph` at all — 'Generate.dev' and
--- 'Generate.prod' do not even load one (§J16).
-linkCore :: Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Task (Maybe Program.Program)
-linkCore details artifacts kernels
-  | not Dump.jsNative = return Nothing
-  | otherwise =
-      Task.io $
-        do
-          cores <- Pass.run <$> programCore details artifacts
-          return (Just (Program.link (backendFor kernels cores) cores (coreRoots artifacts cores)))
+-- This is the whole of what the emitter is handed besides the kernel chunks: one
+-- call to `Core.Program.link`, with the roots 'coreRoots' names and the kernel
+-- information 'kernelInfo' reads off those same chunks.
+linkCore :: Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Task Program.Program
+linkCore details artifacts kernels =
+  Task.io $
+    do
+      cores <- Pass.run <$> programCore details artifacts
+      return (Program.link (backendFor kernels cores) cores (coreRoots artifacts cores))
 
 -- | The kernel modules' JavaScript, which C16 keeps in the build system.
 --
@@ -303,31 +262,13 @@ dumpCore details artifacts kernels =
                       else coreRoots artifacts cores
                in B.writeFile file (Program.render (Program.link (backendFor kernels cores) cores roots))
 
--- | One REPL entry, generated the same two ways @dev@ is (§J17).
---
--- The REPL was the last caller of 'loadObjects' that the Core-native path could
--- not answer, and so the last reason @GENG_JS_NATIVE=1@ still needed the old
--- pipeline\'s graph in the binary for something other than the differential
--- targets. With @GENG_JS_NATIVE@ off it is stock: @Generate.JavaScript@ walks
--- the graph from the value being printed.
---
--- @GENG_JS_FROM_CORE@ does /not/ apply here, and there is nothing to apply: that
--- switch rebuilds an `AST.Optimized.GlobalGraph` out of Core so the old backend
--- can walk it, and `Generate.FromCore` is handed a 'Build.Artifacts' the REPL
--- does not have. The REPL has the two ends and not the middle.
-repl :: FilePath -> Details.Details -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
-repl root details ansi artifacts@(Build.ReplArtifacts home modules localizer annotations) name =
+-- | One REPL entry, generated the way @dev@ is (§J17).
+repl :: Details.Details -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
+repl details ansi artifacts@(Build.ReplArtifacts home _ localizer annotations) name =
   do
     kernels <- kernelChunks details
-    native <- linkReplCore details artifacts name kernels
-    case native of
-      Just program ->
-        return $ CoreJS.generateForRepl ansi localizer program kernels home name (annotations ! name)
-      Nothing ->
-        do
-          objects <- finalizeObjects =<< loadObjects root details modules
-          let graph = objectsToGlobalGraph objects
-          return $ JS.generateForRepl ansi localizer graph home name (annotations ! name)
+    program <- linkReplCore details artifacts name kernels
+    return $ CoreJS.generateForRepl ansi localizer program kernels home name (annotations ! name)
 
 -- | 'linkCore' for a REPL entry, which differs from a program in its roots.
 --
@@ -335,21 +276,19 @@ repl root details ansi artifacts@(Build.ReplArtifacts home modules localizer ann
 -- whatever it imports out of the project — plus the dependencies\' Core, exactly
 -- as 'programCore' assembles them for a build. A 'Build.Cached' module
 -- contributes nothing here for the reason 'programCore' gives.
-linkReplCore :: Details.Details -> Build.ReplArtifacts -> N.Name -> Map.Map N.Name [K.Chunk] -> Task (Maybe Program.Program)
-linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels
-  | not Dump.jsNative = return Nothing
-  | otherwise =
-      Task.io $
-        do
-          maybeDeps <- readMVar =<< Details.loadCores details
-          let deps = Maybe.fromMaybe Map.empty maybeDeps
-          let own =
-                Map.fromList
-                  [ (ModuleName.Canonical (ModuleName._package home) raw, core)
-                  | Build.Fresh raw _ _ core <- modules
-                  ]
-          let cores = Pass.run (Map.union own deps)
-          return (Just (Program.link (backendFor kernels cores) cores (replRoots home name)))
+linkReplCore :: Details.Details -> Build.ReplArtifacts -> N.Name -> Map.Map N.Name [K.Chunk] -> Task Program.Program
+linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels =
+  Task.io $
+    do
+      maybeDeps <- readMVar =<< Details.loadCores details
+      let deps = Maybe.fromMaybe Map.empty maybeDeps
+      let own =
+            Map.fromList
+              [ (ModuleName.Canonical (ModuleName._package home) raw, core)
+              | Build.Fresh raw _ _ core <- modules
+              ]
+      let cores = Pass.run (Map.union own deps)
+      return (Program.link (backendFor kernels cores) cores (replRoots home name))
 
 -- | What a REPL entry reaches: the value being printed, and @Debug.toString@.
 --
@@ -385,66 +324,3 @@ checkForDebugUses artifacts =
   case Map.keys (Map.filter Nitpick.hasDebugUses (ownCore artifacts)) of
     [] -> return ()
     m : ms -> Task.throw (Exit.GenerateCannotOptimizeDebugValues m ms)
-
--- GATHER MAINS
-
-gatherMains :: Pkg.Name -> Objects -> NE.List Build.Root -> Map.Map ModuleName.Canonical Opt.Main
-gatherMains pkg (Objects _ locals) roots =
-  Map.fromList $ Maybe.mapMaybe (lookupMain pkg locals) (NE.toList roots)
-
-lookupMain :: Pkg.Name -> Map.Map ModuleName.Raw Opt.LocalGraph -> Build.Root -> Maybe (ModuleName.Canonical, Opt.Main)
-lookupMain pkg locals root =
-  let toPair name (Opt.LocalGraph maybeMain _ _) =
-        (,) (ModuleName.Canonical pkg name) <$> maybeMain
-   in case root of
-        Build.Inside name -> toPair name =<< Map.lookup name locals
-        Build.Outside name _ g _ -> toPair name g
-
--- LOADING OBJECTS
-
-data LoadingObjects = LoadingObjects
-  { _foreign_mvar :: MVar (Maybe Opt.GlobalGraph),
-    _local_mvars :: Map.Map ModuleName.Raw (MVar (Maybe Opt.LocalGraph))
-  }
-
-loadObjects :: FilePath -> Details.Details -> [Build.Module] -> Task LoadingObjects
-loadObjects root details modules =
-  Task.io $
-    do
-      mvar <- Details.loadObjects root details
-      mvars <- traverse (loadObject root) modules
-      return $ LoadingObjects mvar (Map.fromList mvars)
-
-loadObject :: FilePath -> Build.Module -> IO (ModuleName.Raw, MVar (Maybe Opt.LocalGraph))
-loadObject root modul =
-  case modul of
-    Build.Fresh name _ graph _ ->
-      do
-        mvar <- newMVar (Just graph)
-        return (name, mvar)
-    Build.Cached name _ _ ->
-      do
-        mvar <- newEmptyMVar
-        _ <- forkIO $ putMVar mvar =<< File.readBinary (Dirs.greno root name)
-        return (name, mvar)
-
--- FINALIZE OBJECTS
-
-data Objects = Objects
-  { _foreign :: Opt.GlobalGraph,
-    _locals :: Map.Map ModuleName.Raw Opt.LocalGraph
-  }
-
-finalizeObjects :: LoadingObjects -> Task Objects
-finalizeObjects (LoadingObjects mvar mvars) =
-  Task.eio id $
-    do
-      result <- readMVar mvar
-      results <- traverse readMVar mvars
-      case liftM2 Objects result (sequence results) of
-        Just loaded -> return (Right loaded)
-        Nothing -> return (Left Exit.GenerateCannotLoadArtifacts)
-
-objectsToGlobalGraph :: Objects -> Opt.GlobalGraph
-objectsToGlobalGraph (Objects globals locals) =
-  foldr Opt.addLocalGraph globals locals

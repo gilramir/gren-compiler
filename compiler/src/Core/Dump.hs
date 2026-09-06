@@ -23,10 +23,7 @@ module Core.Dump
     programDir,
     linkFile,
     linkEveryExport,
-    jsFromCore,
-    jsNative,
     corePasses,
-    depsGap,
   )
 where
 
@@ -82,48 +79,6 @@ linkEveryExport :: Bool
 linkEveryExport =
   unsafePerformIO ((== Just "exports") <$> Env.lookupEnv "GENG_LINK_ROOTS")
 {-# NOINLINE linkEveryExport #-}
-
--- | @GENG_JS_FROM_CORE=1@: build the JS backend's input from Core.
---
--- A switch rather than a mode, for now: both paths are in the binary and the
--- differential harness runs the corpus through each (`docs/m1a-js-on-core.md`
--- §J3 items 6 and 7). It stops being a switch when the Core path answers
--- everything the old one does.
-jsFromCore :: Bool
-jsFromCore =
-  unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_JS_FROM_CORE")
-{-# NOINLINE jsFromCore #-}
-
--- | @GENG_JS_NATIVE=1@: generate JavaScript from the linked Core program,
--- with no @Opt.GlobalGraph@ anywhere in the path.
---
--- The end of §J3 item 6, where @GENG_JS_FROM_CORE@ is the middle of it: that one
--- builds the old backend's input out of Core and lets it walk the graph, this
--- one is "Generate.CoreJS" reading `Core.Program.link`'s output directly. A
--- switch for the same reason and with the same exit: both are in the binary so
--- that the differential harness can run the corpus through each, and it stops
--- being a switch when this path answers everything the old one does.
---
--- It implies @GENG_JS_FROM_CORE@ in the sense that it needs the program's Core,
--- but not in the sense that it needs the graph built from it: nothing in this
--- path reads a node.
-jsNative :: Bool
-jsNative =
-  unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_JS_NATIVE")
-{-# NOINLINE jsNative #-}
-
--- | @GENG_DEPS_GAP@: a file to write the dependency-set measurement to.
---
--- The Core path and @Optimize.*@ each decide what every definition refers to,
--- and they should agree; a passing corpus does not say that they do. This asks
--- for the difference instead, and it does not need @GENG_JS_FROM_CORE@: the
--- measurement compares two dependency sets and changes neither, so it can be
--- taken on a build that generates the old way (@docs\/m1a-js-on-core.md@ §J10,
--- §J14).
-depsGap :: Maybe FilePath
-depsGap =
-  unsafePerformIO (Env.lookupEnv "GENG_DEPS_GAP")
-{-# NOINLINE depsGap #-}
 
 -- | @GENG_CORE_PASSES=case,tailcall@: which Core→Core passes to run before the
 -- backend reads the program.
