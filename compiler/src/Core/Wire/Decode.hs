@@ -2,7 +2,7 @@
 {-# LANGUAGE NoPolyKinds #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Bytes to Core, against @schema/geng/core/v2.proto@.
+-- | Bytes to Core, against @schema/geng/core/v3.proto@.
 --
 -- __The reader enforces the canonical profile__ (§B7). C10 writes its seven
 -- rules as properties of the writer; making them properties of the reader too
@@ -69,7 +69,8 @@ data Input = Input
 -- the moment it has read tag 1.
 data Env = Env
   { _path :: ![String],
-    _strings :: !(Map.Map Int Str)
+    _strings :: !(Map.Map Int Str),
+    _quals :: !(Map.Map Int QualName)
   }
 
 -- | Every string in a module, as one type. 'Core.Wire.Encode' says why the
@@ -106,7 +107,7 @@ instance Monad P where
 
 runP :: P a -> BS.ByteString -> Int -> Either Error a
 runP p buf base =
-  fmap fst (unP p (Env [] Map.empty) (Input buf base))
+  fmap fst (unP p (Env [] Map.empty Map.empty) (Input buf base))
 
 -- | Push a field name onto the path an error will name.
 inField :: String -> P a -> P a
@@ -393,6 +394,94 @@ withTable strings body =
     let table = Map.fromList (zip [1 ..] strings)
     P (\env input -> unP body env {_strings = table} input)
 
+-- QUALIFIED NAMES (D93)
+
+-- | A 1-based index into the module's name table. Zero is absent, and every
+-- qualified-name field in the schema is required where it appears, so a zero is
+-- always an error.
+resolveQual :: Word64 -> P QualName
+resolveQual 0 = failP "a qualified-name field is absent"
+resolveQual i =
+  do
+    table <- P (\env input -> Right (_quals env, input))
+    case Map.lookup (fromIntegral i) table of
+      Just q -> pure q
+      Nothing -> failP ("qualified-name index " ++ show i ++ " is past the end of the table")
+
+-- | A qualified-name field. Every one is required where it appears, so an
+-- absent field is reported the way 'msg' reported it in version 2.
+qual :: String -> Word32 -> P QualName
+qual name tag =
+  do
+    got <- next name tag WVarint varint
+    case got of
+      Nothing -> failP ("field " ++ show tag ++ " (" ++ name ++ ") is missing")
+      Just i -> resolveQual i
+
+-- | An @optional@ qualified name.
+optQual :: String -> Word32 -> P (Maybe QualName)
+optQual name tag =
+  do
+    got <- next name tag WVarint varint
+    case got of
+      Nothing -> pure Nothing
+      Just i -> Just <$> resolveQual i
+
+-- | @repeated uint32@ of qualified names, packed like 'repText'.
+repQual :: String -> Word32 -> P [QualName]
+repQual name tag =
+  do
+    here <- offset
+    got <- next name tag WBytes (submessage packedVarints)
+    case got of
+      Nothing -> pure []
+      Just [] -> failAt here ("field " ++ show tag ++ " is present holding its default []")
+      Just indices -> mapM resolveQual indices
+
+qualTable :: P [QualName]
+qualTable = go id
+  where
+    go acc =
+      do
+        got <- next "names" 2 WBytes (submessage qualEntryP)
+        case got of
+          Nothing -> pure (acc [])
+          Just q -> go (acc . (q :))
+
+qualEntryP :: P QualName
+qualEntryP =
+  message "QualName" 2 $
+    do
+      home <- msg "home" 1 moduleNameP
+      name <- text "name" 2
+      pure (QualName home name)
+
+-- | D93\'s order, checked over the content the way it is stated.
+--
+-- Not the derived @Ord QualName@, which compares '_qnHome' first and therefore
+-- the /module/ before the /package/ — a perfectly good total order and a
+-- surprising one for a second frontend to have to reproduce. C6\'s discipline is
+-- that an order which is not written down is a dependency on a container\'s
+-- implementation, and the derived instance is exactly that hazard: it is right
+-- there, it works, and only reading it says what it does.
+withQualTable :: [QualName] -> P a -> P a
+withQualTable quals body =
+  do
+    let keys = map sortKey quals
+    unless (and (zipWith (<) keys (drop 1 keys))) $
+      failP "the qualified-name table is not in ascending (author, project, module, name) order"
+    let table = Map.fromList (zip [1 ..] quals)
+    P (\env input -> unP body env {_quals = table} input)
+
+-- | (author, project, module, name), each as UTF-8 bytes — which is what
+-- @Ord (Utf8 t)@ is, checked rather than assumed.
+sortKey :: QualName -> (Str, Str, Str, Str)
+sortKey (QualName (ModuleName.Canonical (Pkg.Name author project) modul) name) =
+  (asStr author, asStr project, asStr modul, asStr name)
+
+asStr :: Utf8.Utf8 t -> Str
+asStr = Coerce.coerce
+
 -- | A @oneof@: exactly one member, and it is written even when it holds its
 -- type's default, so there is no rule 5 here.
 oneof :: String -> [(Word32, WireType, P a)] -> P a
@@ -465,14 +554,6 @@ moduleNameP =
       modul <- text "module" 3
       pure (ModuleName.Canonical (Pkg.Name author project) modul)
 
-qualP :: P QualName
-qualP =
-  message "QualName" 2 $
-    do
-      home <- msg "home" 1 moduleNameP
-      name <- text "name" 2
-      pure (QualName home name)
-
 -- SPANS
 
 spanP :: P Span
@@ -524,7 +605,7 @@ tconP :: P Type
 tconP =
   message "TCon" 2 $
     do
-      name <- msg "name" 1 qualP
+      name <- qual "name" 1
       args <- rep "args" 2 typeP
       pure (TCon name args)
 
@@ -565,7 +646,7 @@ constraintP :: P Constraint
 constraintP =
   message "Constraint" 2 $
     do
-      cls <- msg "class_name" 1 qualP
+      cls <- qual "class_name" 1
       t <- msg "type" 2 typeP
       pure (CClass cls t)
 
@@ -575,18 +656,18 @@ dataDeclP :: P DataDecl
 dataDeclP =
   message "DataDecl" 5 $
     do
-      name <- msg "name" 1 qualP
+      name <- qual "name" 1
       params <- repText "params" 2
       transparency <- enum_ "transparency" 3 transparencyFromCode
       ctors <- rep "ctors" 4 ctorP
-      classes <- rep "classes" 5 qualP
+      classes <- repQual "classes" 5
       pure (DataDecl name params transparency ctors classes)
 
 ctorP :: P Ctor
 ctorP =
   message "Ctor" 3 $
     do
-      name <- msg "name" 1 qualP
+      name <- qual "name" 1
       tag <- u32 "tag" 2
       fields <- rep "fields" 3 typeP
       pure (Ctor name (fromIntegral tag) fields)
@@ -616,7 +697,7 @@ classDeclP :: P ClassDecl
 classDeclP =
   message "ClassDecl" 4 $
     do
-      name <- msg "name" 1 qualP
+      name <- qual "name" 1
       param <- text "param" 2
       openness <- enum_ "openness" 3 opennessFromCode
       methods <- rep "methods" 4 methodSigP
@@ -634,7 +715,7 @@ instanceDeclP :: P InstanceDecl
 instanceDeclP =
   message "InstanceDecl" 4 $
     do
-      cls <- msg "class_name" 1 qualP
+      cls <- qual "class_name" 1
       head_ <- msg "head" 2 typeP
       origin <- enum_ "origin" 3 originFromCode
       methods <- rep "methods" 4 methodImplP
@@ -652,26 +733,29 @@ methodImplP =
 
 moduleP :: P Module
 moduleP =
-  message "Module" 12 $
+  message "Module" 13 $
     do
       strings <- stringTable
-      withTable strings $ moduleBodyP
+      withTable strings $
+        do
+          quals <- qualTable
+          withQualTable quals moduleBodyP
 
 moduleBodyP :: P Module
 moduleBodyP =
   do
-    name <- msg "name" 2 moduleNameP
-    entries <- rep "files" 3 fileEntryP
+    name <- msg "name" 3 moduleNameP
+    entries <- rep "files" 4 fileEntryP
     files <- fileTable entries
-    dataDecls <- rep "data_decls" 4 dataDeclP
-    classes <- rep "classes" 5 classDeclP
-    instances <- rep "instances" 6 instanceDeclP
-    defs <- rep "defs" 7 bindP
-    defsRec <- rep "defs_rec" 8 recGroupP
-    exports <- rep "exports" 9 qualP
-    manager <- optMsg "manager" 10 managerP
-    ports <- rep "ports" 11 portP
-    main_ <- optMsg "main" 12 mainP
+    dataDecls <- rep "data_decls" 5 dataDeclP
+    classes <- rep "classes" 6 classDeclP
+    instances <- rep "instances" 7 instanceDeclP
+    defs <- rep "defs" 8 bindP
+    defsRec <- rep "defs_rec" 9 recGroupP
+    exports <- repQual "exports" 10
+    manager <- optMsg "manager" 11 managerP
+    ports <- rep "ports" 12 portP
+    main_ <- optMsg "main" 13 mainP
     pure
       Module
         { _moduleName = name,
@@ -688,7 +772,7 @@ moduleBodyP =
         }
 
 recGroupP :: P [QualName]
-recGroupP = message "RecGroup" 1 (rep "names" 1 qualP)
+recGroupP = message "RecGroup" 1 (repQual "names" 1)
 
 -- | C19's well-formedness rule, which the schema cannot state: @flags@ is
 -- present exactly when the kind is @MAIN_KIND_PROGRAM@.
@@ -714,12 +798,12 @@ managerP =
     do
       here <- offset
       kind <- enum_ "kind" 1 managerKindFromCode
-      entries <- rep "entries" 2 qualP
-      init_ <- msg "init" 3 qualP
-      onEffects <- msg "on_effects" 4 qualP
-      onSelfMsg <- msg "on_self_msg" 5 qualP
-      cmdMap <- optMsg "cmd_map" 6 qualP
-      subMap <- optMsg "sub_map" 7 qualP
+      entries <- repQual "entries" 2
+      init_ <- qual "init" 3
+      onEffects <- qual "on_effects" 4
+      onSelfMsg <- qual "on_self_msg" 5
+      cmdMap <- optQual "cmd_map" 6
+      subMap <- optQual "sub_map" 7
       let wantsCmd = kind /= ManagerSub
       let wantsSub = kind /= ManagerCmd
       when (wantsCmd /= isJust' cmdMap) $
@@ -782,7 +866,7 @@ nodeP =
   oneof
     "node"
     [ (3, WVarint, EVar <$> indexText),
-      (4, WBytes, EGlobal <$> submessage qualP),
+      (4, WVarint, EGlobal <$> (resolveQual =<< varint)),
       (5, WBytes, ELit <$> submessage literalP),
       (6, WBytes, submessage (absP ELam)),
       (7, WBytes, submessage (appP EApp)),
@@ -841,7 +925,7 @@ ctorExprP :: P Expr_
 ctorExprP =
   message "ECtor" 3 $
     do
-      name <- msg "name" 1 qualP
+      name <- qual "name" 1
       tag <- u32 "tag" 2
       args <- rep "args" 3 exprP
       pure (ECtor name (fromIntegral tag) args)
@@ -974,7 +1058,7 @@ pctorP :: P Pattern
 pctorP =
   message "PCtor" 3 $
     do
-      name <- msg "name" 1 qualP
+      name <- qual "name" 1
       tag <- u32 "tag" 2
       args <- rep "args" 3 patternP
       pure (PCtor name (fromIntegral tag) args)

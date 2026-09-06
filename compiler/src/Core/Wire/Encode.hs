@@ -2,7 +2,7 @@
 {-# LANGUAGE NoPolyKinds #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Core to bytes, against @schema/geng/core/v2.proto@.
+-- | Core to bytes, against @schema/geng/core/v3.proto@.
 --
 -- Read this beside the schema; each function below is one message, in the
 -- schema's order, and each field is one line in the schema's tag order. That
@@ -42,6 +42,7 @@ import Data.Bits (shiftR, (.&.))
 import Data.ByteString.Builder qualified as B
 import Data.Coerce qualified as Coerce
 import Data.Int (Int32, Int64)
+import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Data.Set qualified as Set
@@ -77,7 +78,7 @@ str = Coerce.coerce
 -- encode time or, worse, a table that a second frontend would not reproduce.
 data Table
   = Collecting
-  | Resolved !(Map.Map Str Int)
+  | Resolved !(Map.Map Str Int) !(Map.Map QualName Int)
 
 -- | Bytes and how many of them there are — or the strings they would need, or
 -- the reasons there are none.
@@ -87,17 +88,18 @@ data Table
 -- messages rather than stopping at the first means a module with three
 -- out-of-range literals reports three, which is what a person fixing them wants.
 data Piece
-  = Piece !Int B.Builder ![Str]
+  = Piece !Int B.Builder ![Str] ![QualName]
   | Bad [String]
 
 instance Semigroup Piece where
   Bad a <> Bad b = Bad (a ++ b)
   Bad a <> _ = Bad a
   _ <> Bad b = Bad b
-  Piece n1 b1 s1 <> Piece n2 b2 s2 = Piece (n1 + n2) (b1 <> b2) (s1 ++ s2)
+  Piece n1 b1 s1 q1 <> Piece n2 b2 s2 q2 =
+    Piece (n1 + n2) (b1 <> b2) (s1 ++ s2) (q1 ++ q2)
 
 instance Monoid Piece where
-  mempty = Piece 0 mempty []
+  mempty = Piece 0 mempty [] []
 
 newtype Enc = Enc {runEnc :: Table -> Piece}
 
@@ -119,16 +121,37 @@ run :: Enc -> Either [String] B.Builder
 run enc =
   case runEnc enc Collecting of
     Bad problems -> Left problems
-    Piece _ _ strings ->
-      let table = Map.fromList (zip (Set.toAscList (Set.fromList strings)) [1 ..])
-       in case runEnc enc (Resolved table) of
+    Piece _ _ strings quals ->
+      let stringTbl = Map.fromList (zip (Set.toAscList (Set.fromList strings)) [1 ..])
+          qualTbl = Map.fromList (zip (List.sortBy qualOrder (Set.toList (Set.fromList quals))) [1 ..])
+       in case runEnc enc (Resolved stringTbl qualTbl) of
             Bad problems -> Left problems
-            Piece _ builder _ -> Right builder
+            Piece _ builder _ _ -> Right builder
+
+-- | The order D93 states, and it is __not__ the derived one.
+--
+-- @Ord QualName@ compares '_qnHome' first, and @Ord ModuleName.Canonical@
+-- compares the /module/ before the /package/ — so the derived order is
+-- (module, author, project, name), which is a perfectly good total order and a
+-- surprising thing for a second frontend to have to reproduce. C6's whole
+-- discipline is that an order which is not written down is a dependency on a
+-- container's implementation, and this is that hazard in its purest form: the
+-- instance is right there, it works, and reading it is the only way to find out
+-- what it does.
+--
+-- Strings got away with the derived instance because @Ord (Utf8 t)@ /is/ UTF-8
+-- byte order — checked, not assumed. This one does not, so it is written out.
+qualOrder :: QualName -> QualName -> Ordering
+qualOrder (QualName (ModuleName.Canonical (Pkg.Name a1 p1) m1) n1) (QualName (ModuleName.Canonical (Pkg.Name a2 p2) m2) n2) =
+  compare (str a1) (str a2)
+    <> compare (str p1) (str p2)
+    <> compare (str m1) (str m2)
+    <> compare (str n1) (str n2)
 
 -- PRIMITIVES
 
 varintP :: Word64 -> Piece
-varintP n = Piece (varintSize n) (go n) []
+varintP n = Piece (varintSize n) (go n) [] []
   where
     go w =
       if w < 0x80
@@ -145,7 +168,7 @@ key :: Word32 -> WireType -> Enc
 key tag wire = lift (keyP tag wire)
 
 bytes :: Int -> B.Builder -> Enc
-bytes n b = lift (Piece n b [])
+bytes n b = lift (Piece n b [] [])
 
 -- FIELDS
 --
@@ -201,8 +224,61 @@ withIndex s0 what =
             let collected = if Utf8.size s == 0 then [] else [s]
              in case runEnc (what 0) Collecting of
                   Bad problems -> Bad problems
-                  Piece _ _ more -> Piece 0 mempty (collected ++ more)
-          Resolved m -> runEnc (what (indexOf m s)) table
+                  Piece _ _ more quals -> Piece 0 mempty (collected ++ more) quals
+          Resolved m _ -> runEnc (what (indexOf m s)) table
+
+-- QUALIFIED NAMES
+--
+-- D93: a `QualName` is a 1-based index into the module's name table, and 0 is
+-- absent. Version 2 had already made its strings indices; what was left at every
+-- occurrence was the *shape* -- a nested message with a key, a length and three
+-- varints -- and that is what this removes.
+
+-- | Collect a qualified name on the first pass, and do @what@ with its index on
+-- the second.
+withQual :: QualName -> (Word32 -> Enc) -> Enc
+withQual q what =
+  Enc $ \table ->
+    case table of
+      Collecting ->
+        case runEnc (what 0) Collecting of
+          Bad problems -> Bad problems
+          Piece _ _ strings more -> Piece 0 mempty (qualStrings q ++ strings) (q : more)
+      Resolved _ m ->
+        case Map.lookup q m of
+          Just i -> runEnc (what (fromIntegral i)) table
+          Nothing ->
+            -- Unreachable, for 'indexOf'\'s reason: one 'Enc', run twice.
+            Bad ["Core.Wire.Encode: a qualified name is not in the name table"]
+
+-- | The four strings a qualified name is made of.
+--
+-- 'withQual' has to report these as well as the name itself, and forgetting to
+-- was the one bug this change had: the name table's entries index into the
+-- __string__ table, so a qualified name that is only ever seen as an index
+-- still puts four strings in the table it indexes into. The two tables are not
+-- independent, and the collecting pass is where that shows.
+qualStrings :: QualName -> [Str]
+qualStrings (QualName (ModuleName.Canonical (Pkg.Name author project) modul) name) =
+  filter (\s -> Utf8.size s > 0) [str author, str project, str modul, str name]
+
+-- | A qualified-name field. Every one of them is required where it appears, so
+-- there is no index 0 to write and rule 5 has nothing to skip.
+qual :: Word32 -> QualName -> Enc
+qual tag q = withQual q (u32 tag)
+
+-- | An @optional@ qualified name: explicit presence.
+optQual :: Word32 -> Maybe QualName -> Enc
+optQual _ Nothing = mempty
+optQual tag (Just q) = withQual q (\i -> key tag WVarint <> varint (fromIntegral i))
+
+-- | @repeated uint32@ of qualified names, packed like 'repText'.
+repQual :: Word32 -> [QualName] -> Enc
+repQual _ [] = mempty
+repQual tag qs = go qs mempty
+  where
+    go [] acc = key tag WBytes <> packedRun acc
+    go (q : rest) acc = withQual q (\i -> go rest (acc <> varint (fromIntegral i)))
 
 -- | A string field, implicit presence: index 0 is omitted, exactly as an empty
 -- string was in version 1.
@@ -226,14 +302,17 @@ repText :: Word32 -> [Utf8.Utf8 t] -> Enc
 repText _ [] = mempty
 repText tag ss = go ss mempty
   where
-    go [] acc = key tag WBytes <> packed acc
+    go [] acc = key tag WBytes <> packedRun acc
     go (s : rest) acc = withIndex s (\i -> go rest (acc <> varint (fromIntegral i)))
 
-    packed inner =
-      Enc $ \table ->
-        case runEnc inner table of
-          Bad problems -> Bad problems
-          Piece n b more -> runEnc (varint (fromIntegral n)) table <> Piece n b more
+-- | A packed payload: its own length, then the varints.
+packedRun :: Enc -> Enc
+packedRun inner =
+  Enc $ \table ->
+    case runEnc inner table of
+      Bad problems -> Bad problems
+      Piece n b more quals ->
+        runEnc (varint (fromIntegral n)) table <> Piece n b more quals
 
 -- | The table itself, written at tag 1 so that rule 1 puts it on the wire ahead
 -- of everything that indexes into it.
@@ -242,11 +321,25 @@ stringTable =
   Enc $ \table ->
     case table of
       Collecting -> mempty
-      Resolved m -> runEnc (foldMap rawText (Map.keys m)) table
+      Resolved m _ -> runEnc (foldMap rawText (Map.keys m)) table
   where
     rawText s =
       let n = Utf8.size s
        in key 1 WBytes <> varint (fromIntegral n) <> bytes n (Utf8.toBuilder s)
+
+-- | The name table at tag 2, in 'qualOrder'. Its entries index into the string
+-- table, which is why that one is tag 1.
+qualTable :: Enc
+qualTable =
+  Enc $ \table ->
+    case table of
+      Collecting -> mempty
+      Resolved _ m ->
+        runEnc
+          (foldMap (msg 2 . rawQual) (List.sortBy qualOrder (Map.keys m)))
+          table
+  where
+    rawQual (QualName home name) = msg 1 (moduleNameEnc home) <> text 2 name
 
 -- MESSAGES
 
@@ -256,8 +349,8 @@ msg tag inner =
   Enc $ \table ->
     case runEnc inner table of
       Bad problems -> Bad problems
-      Piece n b more ->
-        runEnc (key tag WBytes <> varint (fromIntegral n)) table <> Piece n b more
+      Piece n b more quals ->
+        runEnc (key tag WBytes <> varint (fromIntegral n)) table <> Piece n b more quals
 
 -- | An @optional@ submessage.
 optMsg :: Word32 -> (a -> Enc) -> Maybe a -> Enc
@@ -282,11 +375,6 @@ moduleNameEnc (ModuleName.Canonical (Pkg.Name author project) modul) =
     <> text 2 project
     <> text 3 modul
 
-qualEnc :: QualName -> Enc
-qualEnc (QualName home name) =
-  msg 1 (moduleNameEnc home)
-    <> text 2 name
-
 -- SPANS
 
 spanEnc :: Span -> Enc
@@ -308,7 +396,7 @@ typeEnc :: Type -> Enc
 typeEnc t =
   case t of
     TVar n -> oneofText 1 n
-    TCon name args -> msg 2 (msg 1 (qualEnc name) <> rep 2 typeEnc args)
+    TCon name args -> msg 2 (qual 1 name <> rep 2 typeEnc args)
     TFun args result -> msg 3 (rep 1 typeEnc args <> msg 2 (typeEnc result))
     TRecord fields row ->
       msg 4 (rep 1 fieldTypeEnc fields <> optText 2 row)
@@ -319,21 +407,21 @@ fieldTypeEnc :: (Field, Type) -> Enc
 fieldTypeEnc (field, t) = text 1 field <> msg 2 (typeEnc t)
 
 constraintEnc :: Constraint -> Enc
-constraintEnc (CClass cls t) = msg 1 (qualEnc cls) <> msg 2 (typeEnc t)
+constraintEnc (CClass cls t) = qual 1 cls <> msg 2 (typeEnc t)
 
 -- DECLARATIONS
 
 dataDeclEnc :: DataDecl -> Enc
 dataDeclEnc (DataDecl name params transparency ctors classes) =
-  msg 1 (qualEnc name)
+  qual 1 name
     <> repText 2 params
     <> enum_ 3 (transparencyCode transparency)
     <> rep 4 ctorEnc ctors
-    <> rep 5 qualEnc classes
+    <> repQual 5 classes
 
 ctorEnc :: Ctor -> Enc
 ctorEnc (Ctor name tag fields) =
-  msg 1 (qualEnc name)
+  qual 1 name
     <> u32 2 (fromIntegral tag)
     <> rep 3 typeEnc fields
 
@@ -359,7 +447,7 @@ managerKindCode ManagerFx = 2
 
 classDeclEnc :: ClassDecl -> Enc
 classDeclEnc (ClassDecl name param openness methods) =
-  msg 1 (qualEnc name)
+  qual 1 name
     <> text 2 param
     <> enum_ 3 (opennessCode openness)
     <> rep 4 methodSigEnc methods
@@ -369,7 +457,7 @@ methodSigEnc (name, t) = text 1 name <> msg 2 (typeEnc t)
 
 instanceDeclEnc :: InstanceDecl -> Enc
 instanceDeclEnc (InstanceDecl cls head_ origin methods) =
-  msg 1 (qualEnc cls)
+  qual 1 cls
     <> msg 2 (typeEnc head_)
     <> enum_ 3 (originCode origin)
     <> rep 4 methodImplEnc methods
@@ -382,20 +470,21 @@ methodImplEnc (name, body) = text 1 name <> msg 2 (exprEnc body)
 moduleEnc :: Module -> Enc
 moduleEnc m =
   stringTable
-    <> msg 2 (moduleNameEnc (_moduleName m))
-    <> rep 3 fileEntryEnc (Map.toAscList (_moduleFiles m))
-    <> rep 4 dataDeclEnc (_moduleData m)
-    <> rep 5 classDeclEnc (_moduleClasses m)
-    <> rep 6 instanceDeclEnc (_moduleInstances m)
-    <> rep 7 bindEnc (_moduleDefs m)
-    <> rep 8 recGroupEnc (_moduleDefsRec m)
-    <> rep 9 qualEnc (_moduleExports m)
-    <> optMsg 10 managerEnc (_moduleManager m)
-    <> rep 11 portEnc (_modulePorts m)
-    <> optMsg 12 mainEnc (_moduleMain m)
+    <> qualTable
+    <> msg 3 (moduleNameEnc (_moduleName m))
+    <> rep 4 fileEntryEnc (Map.toAscList (_moduleFiles m))
+    <> rep 5 dataDeclEnc (_moduleData m)
+    <> rep 6 classDeclEnc (_moduleClasses m)
+    <> rep 7 instanceDeclEnc (_moduleInstances m)
+    <> rep 8 bindEnc (_moduleDefs m)
+    <> rep 9 recGroupEnc (_moduleDefsRec m)
+    <> repQual 10 (_moduleExports m)
+    <> optMsg 11 managerEnc (_moduleManager m)
+    <> rep 12 portEnc (_modulePorts m)
+    <> optMsg 13 mainEnc (_moduleMain m)
 
 recGroupEnc :: [QualName] -> Enc
-recGroupEnc names = rep 1 qualEnc names
+recGroupEnc names = repQual 1 names
 
 mainEnc :: Main -> Enc
 mainEnc main_ =
@@ -407,12 +496,12 @@ mainEnc main_ =
 managerEnc :: Manager -> Enc
 managerEnc (Manager kind entries init_ onEffects onSelfMsg cmdMap subMap) =
   enum_ 1 (managerKindCode kind)
-    <> rep 2 qualEnc entries
-    <> msg 3 (qualEnc init_)
-    <> msg 4 (qualEnc onEffects)
-    <> msg 5 (qualEnc onSelfMsg)
-    <> optMsg 6 qualEnc cmdMap
-    <> optMsg 7 qualEnc subMap
+    <> repQual 2 entries
+    <> qual 3 init_
+    <> qual 4 onEffects
+    <> qual 5 onSelfMsg
+    <> optQual 6 cmdMap
+    <> optQual 7 subMap
 
 portEnc :: Port -> Enc
 portEnc (Port binder flow) =
@@ -444,7 +533,7 @@ nodeEnc :: Expr_ -> Enc
 nodeEnc node =
   case node of
     EVar n -> oneofText 3 n
-    EGlobal q -> msg 4 (qualEnc q)
+    EGlobal q -> withQual q (\i -> key 4 WVarint <> varint (fromIntegral i))
     ELit l -> msg 5 (literalEnc l)
     ELam binders body -> msg 6 (absEnc binders body)
     EApp fn args -> msg 7 (appEnc fn args)
@@ -453,7 +542,7 @@ nodeEnc node =
     ECase scrut alts fallback ->
       msg 10 (msg 1 (exprEnc scrut) <> rep 2 altEnc alts <> optMsg 3 exprEnc fallback)
     ECtor name tag args ->
-      msg 11 (msg 1 (qualEnc name) <> u32 2 (fromIntegral tag) <> rep 3 exprEnc args)
+      msg 11 (qual 1 name <> u32 2 (fromIntegral tag) <> rep 3 exprEnc args)
     ERecord fields -> msg 12 (rep 1 fieldExprEnc fields)
     EUpdate base fields -> msg 13 (msg 1 (exprEnc base) <> rep 2 fieldExprEnc fields)
     EAccess base field -> msg 14 (msg 1 (exprEnc base) <> text 2 field)
@@ -513,7 +602,7 @@ patternEnc pattern =
     PWild -> unit 2
     PLit l -> msg 3 (literalEnc l)
     PCtor name tag args ->
-      msg 4 (msg 1 (qualEnc name) <> u32 2 (fromIntegral tag) <> rep 3 patternEnc args)
+      msg 4 (qual 1 name <> u32 2 (fromIntegral tag) <> rep 3 patternEnc args)
     PRecord fields -> msg 5 (rep 1 fieldPatternEnc fields)
     PArray items tail_ -> msg 6 (rep 1 patternEnc items <> optMsg 2 binderEnc tail_)
     PAs binder inner -> msg 7 (msg 1 (binderEnc binder) <> msg 2 (patternEnc inner))
