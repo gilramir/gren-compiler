@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NoPolyKinds #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Bytes to Core, against @schema/geng/core/v1.proto@.
+-- | Bytes to Core, against @schema/geng/core/v2.proto@.
 --
 -- __The reader enforces the canonical profile__ (§B7). C10 writes its seven
 -- rules as properties of the writer; making them properties of the reader too
@@ -41,6 +42,7 @@ import Core.Wire.Protobuf
 import Data.Bits (shiftL, testBit, (.&.), (.|.))
 import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe qualified as BS
+import Data.Coerce qualified as Coerce
 import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Data.Utf8 qualified as Utf8
@@ -59,60 +61,80 @@ data Input = Input
     _base :: !Int
   }
 
-newtype P a = P {unP :: [String] -> Input -> Either Error (a, Input)}
+-- | The path an error will name, and the module's string table (D92).
+--
+-- The table is in the environment rather than threaded as an argument because
+-- every string in the module is an index into it and there are thirty fields
+-- that hold one; it is empty until 'withTable' sets it, which 'moduleP' does
+-- the moment it has read tag 1.
+data Env = Env
+  { _path :: ![String],
+    _strings :: !(Map.Map Int Str)
+  }
+
+-- | Every string in a module, as one type. 'Core.Wire.Encode' says why the
+-- phantom parameter is coerced away here and nowhere else.
+data WIRE_STRING
+
+type Str = Utf8.Utf8 WIRE_STRING
+
+unStr :: Str -> Utf8.Utf8 t
+unStr = Coerce.coerce
+
+newtype P a = P {unP :: Env -> Input -> Either Error (a, Input)}
 
 instance Functor P where
-  fmap f (P g) = P (\path i -> fmap (\(a, i') -> (f a, i')) (g path i))
+  fmap f (P g) = P (\env i -> fmap (\(a, i') -> (f a, i')) (g env i))
 
 instance Applicative P where
   pure a = P (\_ i -> Right (a, i))
   P f <*> P g =
     P
-      ( \path i -> do
-          (h, i1) <- f path i
-          (a, i2) <- g path i1
+      ( \env i -> do
+          (h, i1) <- f env i
+          (a, i2) <- g env i1
           Right (h a, i2)
       )
 
 instance Monad P where
   P g >>= f =
     P
-      ( \path i -> do
-          (a, i1) <- g path i
-          unP (f a) path i1
+      ( \env i -> do
+          (a, i1) <- g env i
+          unP (f a) env i1
       )
 
 runP :: P a -> BS.ByteString -> Int -> Either Error a
 runP p buf base =
-  fmap fst (unP p [] (Input buf base))
+  fmap fst (unP p (Env [] Map.empty) (Input buf base))
 
 -- | Push a field name onto the path an error will name.
 inField :: String -> P a -> P a
-inField name (P g) = P (\path i -> g (name : path) i)
+inField name (P g) = P (\env i -> g env {_path = name : _path env} i)
 
 failAt :: Int -> String -> P a
-failAt at why = P (\path _ -> Left (Error at path why))
+failAt at why = P (\env _ -> Left (Error at (_path env) why))
 
 failP :: String -> P a
-failP why = P (\path i -> Left (Error (_base i) path why))
+failP why = P (\env i -> Left (Error (_base i) (_path env) why))
 
 -- BYTES
 
 takeByte :: P Word8
 takeByte =
   P
-    ( \path i ->
+    ( \env i ->
         case BS.uncons (_buf i) of
-          Nothing -> Left (Error (_base i) path "ran off the end of the message")
+          Nothing -> Left (Error (_base i) (_path env) "ran off the end of the message")
           Just (w, rest) -> Right (w, Input rest (_base i + 1))
     )
 
 takeBytes :: Int -> P BS.ByteString
 takeBytes n =
   P
-    ( \path i ->
+    ( \env i ->
         if BS.length (_buf i) < n
-          then Left (Error (_base i) path ("wanted " ++ show n ++ " bytes and the message has " ++ show (BS.length (_buf i))))
+          then Left (Error (_base i) (_path env) ("wanted " ++ show n ++ " bytes and the message has " ++ show (BS.length (_buf i))))
           else Right (BS.unsafeTake n (_buf i), Input (BS.unsafeDrop n (_buf i)) (_base i + n))
     )
 
@@ -154,10 +176,10 @@ varint =
 peekKey :: P (Maybe Word64)
 peekKey =
   P
-    ( \path i ->
+    ( \env i ->
         if BS.null (_buf i)
           then Right (Nothing, i)
-          else case unP varint path i of
+          else case unP varint env i of
             Left e -> Left e
             Right (k, _) -> Right (Just k, i)
     )
@@ -185,8 +207,8 @@ submessage body =
     n <- varint
     slice <- takeBytes (fromIntegral n)
     P
-      ( \path i ->
-          case unP body path (Input slice (_base i - fromIntegral n)) of
+      ( \env i ->
+          case unP body env (Input slice (_base i - fromIntegral n)) of
             Left e -> Left e
             Right (a, _) -> Right (a, i)
       )
@@ -257,7 +279,9 @@ enum_ name tag from =
       Just a -> pure a
       Nothing -> failAt here ("field " ++ show tag ++ " has no such enum value: " ++ show code)
 
-utf8 :: P (Utf8.Utf8 t)
+-- | A length-delimited run of UTF-8 bytes. Only the string table holds these
+-- now; everywhere else a string is an index into it (D92).
+utf8 :: P Str
 utf8 =
   do
     here <- offset
@@ -267,18 +291,35 @@ utf8 =
       then pure (Utf8.fromByteString raw)
       else failAt here "string is not valid UTF-8"
 
-text :: String -> Word32 -> P (Utf8.Utf8 t)
-text name tag =
+-- | A 1-based index into the module's string table; 0 is the empty string and
+-- is not an entry.
+resolve :: Word64 -> P (Utf8.Utf8 t)
+resolve 0 = pure (Utf8.fromByteString BS.empty)
+resolve i =
   do
-    got <- next name tag WBytes utf8
-    case got of
-      Nothing -> pure (Utf8.fromByteString BS.empty)
-      Just s
-        | Utf8.size s == 0 -> failP ("field " ++ show tag ++ " is present holding its default \"\"")
-        | otherwise -> pure s
+    table <- P (\env input -> Right (_strings env, input))
+    case Map.lookup (fromIntegral i) table of
+      Just s -> pure (unStr s)
+      Nothing -> failP ("string index " ++ show i ++ " is past the end of the table")
 
+-- | A string field, implicit presence. Absent is index 0 is the empty string,
+-- which is what an absent `string` meant in version 1, and index 0 written out
+-- is rule 5's violation.
+text :: String -> Word32 -> P (Utf8.Utf8 t)
+text name tag = resolve =<< defaulted name tag WVarint (0 :: Word64) varint
+
+-- | A @oneof@ member of string type: always written, so index 0 is legitimate.
+indexText :: P (Utf8.Utf8 t)
+indexText = resolve =<< varint
+
+-- | An @optional@ string: explicit presence, so index 0 is a legitimate value.
 optText :: String -> Word32 -> P (Maybe (Utf8.Utf8 t))
-optText name tag = next name tag WBytes utf8
+optText name tag =
+  do
+    got <- next name tag WVarint varint
+    case got of
+      Nothing -> pure Nothing
+      Just i -> Just <$> resolve i
 
 msg :: String -> Word32 -> P a -> P a
 msg name tag body =
@@ -301,15 +342,56 @@ rep name tag body = go id
           Nothing -> pure (acc [])
           Just a -> go (acc . (a :))
 
+-- | @repeated uint32@, packed — rule 3\'s first instance in this schema, since
+-- version 2 turned a list of names into a list of indices. An absent field is
+-- the empty list, and a present-but-empty one is rule 5\'s violation.
 repText :: String -> Word32 -> P [Utf8.Utf8 t]
-repText name tag = go id
+repText name tag =
+  do
+    here <- offset
+    got <- next name tag WBytes (submessage packedVarints)
+    case got of
+      Nothing -> pure []
+      Just [] -> failAt here ("field " ++ show tag ++ " is present holding its default []")
+      Just indices -> mapM resolve indices
+
+-- | Varints to the end of a packed payload.
+packedVarints :: P [Word64]
+packedVarints = go id
   where
     go acc =
       do
-        got <- next name tag WBytes utf8
+        done <- isEnd
+        if done
+          then pure (acc [])
+          else do
+            n <- varint
+            go (acc . (n :))
+
+-- | The table, and the two things about it a second frontend has to reproduce:
+-- every entry non-empty, and the whole in strictly ascending UTF-8 byte order.
+-- Checked rather than assumed, for C10\'s reason — two frontends that disagreed
+-- about the order would produce two files with the same meaning and different
+-- bytes.
+stringTable :: P [Str]
+stringTable = go id
+  where
+    go acc =
+      do
+        got <- next "strings" 1 WBytes utf8
         case got of
           Nothing -> pure (acc [])
           Just s -> go (acc . (s :))
+
+withTable :: [Str] -> P a -> P a
+withTable strings body =
+  do
+    unless (all ((> 0) . Utf8.size) strings) $
+      failP "the string table has an empty entry"
+    unless (and (zipWith (<) strings (drop 1 strings))) $
+      failP "the string table is not in strictly ascending UTF-8 byte order"
+    let table = Map.fromList (zip [1 ..] strings)
+    P (\env input -> unP body env {_strings = table} input)
 
 -- | A @oneof@: exactly one member, and it is written even when it holds its
 -- type's default, so there is no rule 5 here.
@@ -431,7 +513,7 @@ typeP =
   message "Type" 5 $
     oneof
       "type"
-      [ (1, WBytes, TVar <$> utf8),
+      [ (1, WVarint, TVar <$> indexText),
         (2, WBytes, submessage tconP),
         (3, WBytes, submessage tfunP),
         (4, WBytes, submessage trecordP),
@@ -570,34 +652,40 @@ methodImplP =
 
 moduleP :: P Module
 moduleP =
-  message "Module" 11 $
+  message "Module" 12 $
     do
-      name <- msg "name" 1 moduleNameP
-      entries <- rep "files" 2 fileEntryP
-      files <- fileTable entries
-      dataDecls <- rep "data_decls" 3 dataDeclP
-      classes <- rep "classes" 4 classDeclP
-      instances <- rep "instances" 5 instanceDeclP
-      defs <- rep "defs" 6 bindP
-      defsRec <- rep "defs_rec" 7 recGroupP
-      exports <- rep "exports" 8 qualP
-      manager <- optMsg "manager" 9 managerP
-      ports <- rep "ports" 10 portP
-      main_ <- optMsg "main" 11 mainP
-      pure
-        Module
-          { _moduleName = name,
-            _moduleFiles = files,
-            _moduleData = dataDecls,
-            _moduleClasses = classes,
-            _moduleInstances = instances,
-            _moduleDefs = defs,
-            _moduleDefsRec = defsRec,
-            _moduleExports = exports,
-            _moduleManager = manager,
-            _modulePorts = ports,
-            _moduleMain = main_
-          }
+      strings <- stringTable
+      withTable strings $ moduleBodyP
+
+moduleBodyP :: P Module
+moduleBodyP =
+  do
+    name <- msg "name" 2 moduleNameP
+    entries <- rep "files" 3 fileEntryP
+    files <- fileTable entries
+    dataDecls <- rep "data_decls" 4 dataDeclP
+    classes <- rep "classes" 5 classDeclP
+    instances <- rep "instances" 6 instanceDeclP
+    defs <- rep "defs" 7 bindP
+    defsRec <- rep "defs_rec" 8 recGroupP
+    exports <- rep "exports" 9 qualP
+    manager <- optMsg "manager" 10 managerP
+    ports <- rep "ports" 11 portP
+    main_ <- optMsg "main" 12 mainP
+    pure
+      Module
+        { _moduleName = name,
+          _moduleFiles = files,
+          _moduleData = dataDecls,
+          _moduleClasses = classes,
+          _moduleInstances = instances,
+          _moduleDefs = defs,
+          _moduleDefsRec = defsRec,
+          _moduleExports = exports,
+          _moduleManager = manager,
+          _modulePorts = ports,
+          _moduleMain = main_
+        }
 
 recGroupP :: P [QualName]
 recGroupP = message "RecGroup" 1 (rep "names" 1 qualP)
@@ -693,7 +781,7 @@ nodeP :: P Expr_
 nodeP =
   oneof
     "node"
-    [ (3, WBytes, EVar <$> utf8),
+    [ (3, WVarint, EVar <$> indexText),
       (4, WBytes, EGlobal <$> submessage qualP),
       (5, WBytes, ELit <$> submessage literalP),
       (6, WBytes, submessage (absP ELam)),
@@ -932,7 +1020,7 @@ literalP =
         (5, WFixed64, LFloat <$> fixed64AsDouble),
         (6, WFixed32, LFloat32 <$> fixed32AsFloat),
         (7, WVarint, LChar . unzigzag32 <$> varint),
-        (8, WBytes, LString <$> utf8),
+        (8, WVarint, LString <$> indexText),
         (9, WVarint, LIntLegacy . toInteger . unzigzag64 <$> varint)
       ]
 

@@ -27,9 +27,10 @@ import Core.AST
 import Core.Prim qualified as Prim
 import Core.Wire qualified as Wire
 import Data.ByteString qualified as BS
+import Data.List qualified as List
 import Data.Map qualified as Map
-import Data.Utf8 qualified as Utf8
 import Data.Name qualified as Name
+import Data.Utf8 qualified as Utf8
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Test.Hspec
@@ -38,9 +39,11 @@ spec :: Spec
 spec = do
   describe "the file" $ do
     it "starts with the magic and the schema version" $
+      -- The literal 2 is deliberate. A version bump is meant to be a visible
+      -- event, and this failing is what one looks like.
       case Wire.encode (moduleWith []) of
         Left problems -> expectationFailure (unwords problems)
-        Right bytes -> BS.take 9 bytes `shouldBe` Wire.magic <> BS.singleton 1
+        Right bytes -> BS.take 9 bytes `shouldBe` Wire.magic <> BS.singleton 2
 
     it "refuses a file that is not Core" $
       isLeft (Wire.decode "not core at all, not even close") `shouldBe` True
@@ -87,6 +90,31 @@ spec = do
             }
         )
 
+  describe "the string table (D92)" $ do
+    it "sorts by content and not by the order the strings were met" $
+      -- The property the whole scheme rests on: two frontends that walked a
+      -- module in different orders must still produce the same table, so the
+      -- order has to be a property of the set and not of the traversal. Here
+      -- the names are met as z, a, m and must be written as a, m, z.
+      case Wire.encode (moduleWith (map (bindOf . expr . EVar) ["zzz", "aaa", "mmm"])) of
+        Left problems -> expectationFailure (unwords problems)
+        Right bytes ->
+          let at needle = fst (BS.breakSubstring needle bytes)
+           in map BS.length [at "aaa", at "mmm", at "zzz"]
+                `shouldSatisfy` \ns -> ns == List.sort ns
+
+    it "writes a repeated string once" $
+      -- Ten uses of a forty-character name against ten uses of a one-character
+      -- name. Interned, the difference is the one table entry — about forty
+      -- bytes. Written inline it would be ten of them, about four hundred.
+      case (tenUsesOf "x", tenUsesOf "aVeryLongIdentifierIndeedYesQuiteLong") of
+        (Right short, Right long) ->
+          (BS.length long - BS.length short) `shouldSatisfy` (< 100)
+        _ -> expectationFailure "did not encode"
+
+    it "carries an empty string, which is index zero and not a table entry" $
+      roundTrip (moduleWith [bindOf (lit (LString (utf8 "")))])
+
   describe "D91" $ do
     it "carries an integer literal at the edge of the range" $
       roundTrip (moduleWith [bindOf (lit (LIntLegacy 9223372036854775807))])
@@ -128,6 +156,10 @@ roundTrip m =
 -- place the difference is visible, which is the same reason C10 compares bytes.
 encodeOf :: Expr -> Either [String] BS.ByteString
 encodeOf e = Wire.encode (moduleWith [bindOf e])
+
+-- | A module holding ten bindings whose bodies all name one variable.
+tenUsesOf :: Name.Name -> Either [String] BS.ByteString
+tenUsesOf n = Wire.encode (moduleWith (replicate 10 (bindOf (expr (EVar n)))))
 
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True

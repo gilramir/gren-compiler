@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NoPolyKinds #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Core to bytes, against @schema/geng/core/v1.proto@.
+-- | Core to bytes, against @schema/geng/core/v2.proto@.
 --
 -- Read this beside the schema; each function below is one message, in the
 -- schema's order, and each field is one line in the schema's tag order. That
@@ -28,7 +29,7 @@
 -- level once per level, which for a Core expression tree is depth-many copies of
 -- the whole subtree.
 module Core.Wire.Encode
-  ( Enc (..),
+  ( Enc,
     run,
     moduleEnc,
   )
@@ -37,10 +38,13 @@ where
 import Core.AST
 import Core.Prim qualified as Prim
 import Core.Wire.Protobuf
+import Data.Bits (shiftR, (.&.))
 import Data.ByteString.Builder qualified as B
+import Data.Coerce qualified as Coerce
 import Data.Int (Int32, Int64)
 import Data.Map qualified as Map
 import Data.Name qualified as Name
+import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
 import Data.Word (Word32, Word64)
 import Gren.ModuleName qualified as ModuleName
@@ -48,54 +52,107 @@ import Gren.Package qualified as Pkg
 
 -- THE ENCODING MONOID
 
--- | Bytes and how many of them there are — or the reasons there are none.
+-- | Every string in a module, as one type.
 --
--- The failure case exists for exactly one rule, D91's: 'LIntLegacy' carries an
+-- 'Utf8.Utf8'\'s phantom parameter keeps 'Data.Name.Name', 'Pkg.Author',
+-- 'Pkg.Project' and 'Core.AST.Text' apart in the compiler, which is the point of
+-- it — @Core.AST@\'s header explains why putting undecoded JavaScript source in
+-- the last of those has to be a type error. The table does not care: they are
+-- all UTF-8 bytes and the representation is identical, so a coercion is the
+-- whole of the conversion.
+data WIRE_STRING
+
+type Str = Utf8.Utf8 WIRE_STRING
+
+str :: Utf8.Utf8 t -> Str
+str = Coerce.coerce
+
+-- | The module's string table, or the pass that is still collecting it (D92).
+--
+-- The encoder runs twice over the same 'Enc': once 'Collecting', where only the
+-- strings it reports are read, and once 'Resolved', where only the bytes are.
+-- Two passes rather than a separate collecting traversal, because a separate
+-- traversal is a second exhaustive walk of @Core.AST@ that can drift from this
+-- one — and drift here is a string missing from the table, which is a crash at
+-- encode time or, worse, a table that a second frontend would not reproduce.
+data Table
+  = Collecting
+  | Resolved !(Map.Map Str Int)
+
+-- | Bytes and how many of them there are — or the strings they would need, or
+-- the reasons there are none.
+--
+-- The failure case exists for exactly one rule, D91\'s: 'LIntLegacy' carries an
 -- unbounded 'Integer' and the wire format carries a @sint64@. Accumulating the
 -- messages rather than stopping at the first means a module with three
 -- out-of-range literals reports three, which is what a person fixing them wants.
-data Enc
-  = Enc !Int B.Builder
-  | EncBad [String]
+data Piece
+  = Piece !Int B.Builder ![Str]
+  | Bad [String]
+
+instance Semigroup Piece where
+  Bad a <> Bad b = Bad (a ++ b)
+  Bad a <> _ = Bad a
+  _ <> Bad b = Bad b
+  Piece n1 b1 s1 <> Piece n2 b2 s2 = Piece (n1 + n2) (b1 <> b2) (s1 ++ s2)
+
+instance Monoid Piece where
+  mempty = Piece 0 mempty []
+
+newtype Enc = Enc {runEnc :: Table -> Piece}
 
 instance Semigroup Enc where
-  EncBad a <> EncBad b = EncBad (a ++ b)
-  EncBad a <> _ = EncBad a
-  _ <> EncBad b = EncBad b
-  Enc n1 b1 <> Enc n2 b2 = Enc (n1 + n2) (b1 <> b2)
+  Enc f <> Enc g = Enc (\t -> f t <> g t)
 
 instance Monoid Enc where
-  mempty = Enc 0 mempty
+  mempty = Enc (const mempty)
+
+lift :: Piece -> Enc
+lift = Enc . const
 
 -- | The bytes, or what stopped them.
+--
+-- Both passes are here, and the order is forced: the table has to be known
+-- before an index can be written, and it cannot be known before the module has
+-- been walked.
 run :: Enc -> Either [String] B.Builder
-run e =
-  case e of
-    Enc _ b -> Right b
-    EncBad problems -> Left problems
+run enc =
+  case runEnc enc Collecting of
+    Bad problems -> Left problems
+    Piece _ _ strings ->
+      let table = Map.fromList (zip (Set.toAscList (Set.fromList strings)) [1 ..])
+       in case runEnc enc (Resolved table) of
+            Bad problems -> Left problems
+            Piece _ builder _ -> Right builder
 
 -- PRIMITIVES
 
-varint :: Word64 -> Enc
-varint n = Enc (varintSize n) (go n)
+varintP :: Word64 -> Piece
+varintP n = Piece (varintSize n) (go n) []
   where
     go w =
       if w < 0x80
         then B.word8 (fromIntegral w)
-        else B.word8 (fromIntegral (w `mod` 0x80) + 0x80) <> go (w `div` 0x80)
+        else B.word8 (fromIntegral (w .&. 0x7f) + 0x80) <> go (w `shiftR` 7)
+
+keyP :: Word32 -> WireType -> Piece
+keyP tag wire = varintP (tagKey tag wire)
+
+varint :: Word64 -> Enc
+varint = lift . varintP
 
 key :: Word32 -> WireType -> Enc
-key tag wire = varint (tagKey tag wire)
+key tag wire = lift (keyP tag wire)
 
 bytes :: Int -> B.Builder -> Enc
-bytes = Enc
+bytes n b = lift (Piece n b [])
 
 -- FIELDS
 --
 -- One function per shape a field can have. The name says what the schema says:
 -- `u32` is an implicit-presence `uint32` and skips zero; `optMsg` is an
 -- `optional` message and writes exactly when it is `Just`; `oneofText` is a
--- `oneof` member and writes even when it is empty.
+-- `oneof` member and writes even when its index is zero.
 
 -- | @uint32@, implicit presence.
 u32 :: Word32 -> Word32 -> Enc
@@ -112,47 +169,105 @@ enum_ :: Word32 -> Word32 -> Enc
 enum_ _ 0 = mempty
 enum_ tag code = key tag WVarint <> varint (fromIntegral code)
 
--- | @string@, implicit presence. Empty is the default and is skipped.
+-- STRINGS
+--
+-- D92: a string is a 1-based index into the module's table, and 0 is the empty
+-- string. One-based is what keeps rule 5 saying what it said in version 1 --
+-- an omitted implicit-presence field reads back as 0, which is the empty
+-- string, which is what an omitted `string` used to mean.
+
+-- | The index of a string, given the table. Zero for the empty string, which is
+-- never a table entry.
+indexOf :: Map.Map Str Int -> Str -> Word32
+indexOf table s
+  | Utf8.size s == 0 = 0
+  | otherwise =
+      case Map.lookup s table of
+        Just i -> fromIntegral i
+        Nothing ->
+          -- Unreachable: the collecting pass and the resolving pass are the
+          -- same 'Enc' run twice, so every string the second one asks for is
+          -- one the first one reported.
+          error ("Core.Wire.Encode: " ++ show (Utf8.toChars s) ++ " is not in the string table")
+
+-- | Collect a string on the first pass, and do @what@ with its index on the
+-- second.
+withIndex :: Utf8.Utf8 t -> (Word32 -> Enc) -> Enc
+withIndex s0 what =
+  let s = str s0
+   in Enc $ \table ->
+        case table of
+          Collecting ->
+            let collected = if Utf8.size s == 0 then [] else [s]
+             in case runEnc (what 0) Collecting of
+                  Bad problems -> Bad problems
+                  Piece _ _ more -> Piece 0 mempty (collected ++ more)
+          Resolved m -> runEnc (what (indexOf m s)) table
+
+-- | A string field, implicit presence: index 0 is omitted, exactly as an empty
+-- string was in version 1.
 text :: Word32 -> Utf8.Utf8 t -> Enc
-text tag s
-  | Utf8.size s == 0 = mempty
-  | otherwise = utf8Field tag s
+text tag s = withIndex s (u32 tag)
 
--- | A @oneof@ member of string type: written whenever selected, empty or not.
+-- | A @oneof@ member: written whenever selected, index 0 or not.
 oneofText :: Word32 -> Utf8.Utf8 t -> Enc
-oneofText = utf8Field
+oneofText tag s = withIndex s (\i -> key tag WVarint <> varint (fromIntegral i))
 
-utf8Field :: Word32 -> Utf8.Utf8 t -> Enc
-utf8Field tag s =
-  let n = Utf8.size s
-   in key tag WBytes <> varint (fromIntegral n) <> bytes n (Utf8.toBuilder s)
+-- | An @optional@ string: explicit presence, so a 'Just' of the empty string is
+-- still written, as index 0.
+optText :: Word32 -> Maybe (Utf8.Utf8 t) -> Enc
+optText _ Nothing = mempty
+optText tag (Just s) = withIndex s (\i -> key tag WVarint <> varint (fromIntegral i))
+
+-- | @repeated uint32@, and rule 3\'s first instance in this schema: a repeated
+-- numeric scalar is always packed, so this is one length-delimited run of
+-- varints and not one record each. An empty list is omitted entirely.
+repText :: Word32 -> [Utf8.Utf8 t] -> Enc
+repText _ [] = mempty
+repText tag ss = go ss mempty
+  where
+    go [] acc = key tag WBytes <> packed acc
+    go (s : rest) acc = withIndex s (\i -> go rest (acc <> varint (fromIntegral i)))
+
+    packed inner =
+      Enc $ \table ->
+        case runEnc inner table of
+          Bad problems -> Bad problems
+          Piece n b more -> runEnc (varint (fromIntegral n)) table <> Piece n b more
+
+-- | The table itself, written at tag 1 so that rule 1 puts it on the wire ahead
+-- of everything that indexes into it.
+stringTable :: Enc
+stringTable =
+  Enc $ \table ->
+    case table of
+      Collecting -> mempty
+      Resolved m -> runEnc (foldMap rawText (Map.keys m)) table
+  where
+    rawText s =
+      let n = Utf8.size s
+       in key 1 WBytes <> varint (fromIntegral n) <> bytes n (Utf8.toBuilder s)
+
+-- MESSAGES
 
 -- | A submessage: always written, because a message field has explicit presence.
 msg :: Word32 -> Enc -> Enc
 msg tag inner =
-  case inner of
-    EncBad problems -> EncBad problems
-    Enc n b -> key tag WBytes <> varint (fromIntegral n) <> bytes n b
+  Enc $ \table ->
+    case runEnc inner table of
+      Bad problems -> Bad problems
+      Piece n b more ->
+        runEnc (key tag WBytes <> varint (fromIntegral n)) table <> Piece n b more
 
 -- | An @optional@ submessage.
 optMsg :: Word32 -> (a -> Enc) -> Maybe a -> Enc
 optMsg _ _ Nothing = mempty
 optMsg tag f (Just a) = msg tag (f a)
 
--- | An @optional@ string: explicit presence, so an empty one is still written.
-optText :: Word32 -> Maybe (Utf8.Utf8 t) -> Enc
-optText _ Nothing = mempty
-optText tag (Just s) = utf8Field tag s
-
 -- | @repeated@ of a message type. Records with one tag, in list order — which
--- is C14's order for a binding list, and the schema's stated order elsewhere.
+-- is C14\'s order for a binding list, and the schema\'s stated order elsewhere.
 rep :: Word32 -> (a -> Enc) -> [a] -> Enc
 rep tag f = foldMap (msg tag . f)
-
--- | @repeated string@. Not packed: only numeric scalars can be, and this schema
--- has no repeated numeric scalar at all — rule 3 has no instance in it.
-repText :: Word32 -> [Utf8.Utf8 t] -> Enc
-repText tag = foldMap (utf8Field tag)
 
 -- | A @oneof@ member of message type, and the shape @Unit@ takes: a tag and a
 -- zero length, which is how a nullary constructor is spelled.
@@ -266,17 +381,18 @@ methodImplEnc (name, body) = text 1 name <> msg 2 (exprEnc body)
 
 moduleEnc :: Module -> Enc
 moduleEnc m =
-  msg 1 (moduleNameEnc (_moduleName m))
-    <> rep 2 fileEntryEnc (Map.toAscList (_moduleFiles m))
-    <> rep 3 dataDeclEnc (_moduleData m)
-    <> rep 4 classDeclEnc (_moduleClasses m)
-    <> rep 5 instanceDeclEnc (_moduleInstances m)
-    <> rep 6 bindEnc (_moduleDefs m)
-    <> rep 7 recGroupEnc (_moduleDefsRec m)
-    <> rep 8 qualEnc (_moduleExports m)
-    <> optMsg 9 managerEnc (_moduleManager m)
-    <> rep 10 portEnc (_modulePorts m)
-    <> optMsg 11 mainEnc (_moduleMain m)
+  stringTable
+    <> msg 2 (moduleNameEnc (_moduleName m))
+    <> rep 3 fileEntryEnc (Map.toAscList (_moduleFiles m))
+    <> rep 4 dataDeclEnc (_moduleData m)
+    <> rep 5 classDeclEnc (_moduleClasses m)
+    <> rep 6 instanceDeclEnc (_moduleInstances m)
+    <> rep 7 bindEnc (_moduleDefs m)
+    <> rep 8 recGroupEnc (_moduleDefsRec m)
+    <> rep 9 qualEnc (_moduleExports m)
+    <> optMsg 10 managerEnc (_moduleManager m)
+    <> rep 11 portEnc (_modulePorts m)
+    <> optMsg 12 mainEnc (_moduleMain m)
 
 recGroupEnc :: [QualName] -> Enc
 recGroupEnc names = rep 1 qualEnc names
@@ -420,7 +536,7 @@ literalEnc l =
     LString s -> oneofText 8 s
     LIntLegacy n
       | n >= legacyMin && n <= legacyMax -> sint64Oneof 9 (fromIntegral n)
-      | otherwise -> EncBad [legacyProblem n]
+      | otherwise -> lift (Bad [legacyProblem n])
 
 sint32Oneof :: Word32 -> Int32 -> Enc
 sint32Oneof tag n = key tag WVarint <> varint (zigzag32 n)

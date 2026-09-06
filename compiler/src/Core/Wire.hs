@@ -3,7 +3,7 @@
 
 -- | The Core wire format: the file, and the two directions.
 --
--- @schema/geng/core/v1.proto@ in the @geng-lang@ repository is the schema of
+-- @schema/geng/core/v2.proto@ in the @geng-lang@ repository is the schema of
 -- record (D88) and @docs/m1a-wire.md@ is the brief. C10 is the decision this
 -- implements and @DESIGN.md@ §8's "byte-identical Core" is what it is for: the
 -- only machine-checkable oracle M4's self-hosting port has is that two
@@ -56,10 +56,11 @@ import Data.Word (Word64)
 magic :: BS.ByteString
 magic = BS8.pack "GENGCORE"
 
--- | Version 1. See the header of @schema/geng/core/v1.proto@ for what bumping
--- it means.
+-- | Version 2. See the header of @schema/geng/core/v2.proto@ for what bumping
+-- it means, and D92 for what changed: strings became indices into a table the
+-- module carries.
 schemaVersion :: Word64
-schemaVersion = 1
+schemaVersion = 2
 
 -- ENCODING
 
