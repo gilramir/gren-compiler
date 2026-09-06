@@ -273,6 +273,7 @@ Test-Suite gren-tests
         Core.PassCaseSpec
         Core.PassTailCallSpec
         Core.PrimSpec
+        Core.WireSpec
         Core.ProgramSpec
         Generate.JavaScript.LiteralSpec
         Generate.VLQSpec

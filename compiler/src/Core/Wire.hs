@@ -119,6 +119,11 @@ decode input
 
 -- | The version stamp, read before the message so that a version mismatch is
 -- reported as one rather than as an unknown field.
+--
+-- __It is held to rule 2 like every other varint__, which it was not until
+-- @harness/wire.py@ said so. The version is outside the @Module@ message and
+-- so outside "Core.Wire.Decode", and a hand-written second reader is a place
+-- for a rule to be forgotten — which is the argument for having one.
 readVarint :: BS.ByteString -> Int -> Either Protobuf.Error (Word64, BS.ByteString, Int)
 readVarint = go 0 0
   where
@@ -129,4 +134,7 @@ readVarint = go 0 0
           let acc' = acc + (fromIntegral (w `mod` 0x80) * (2 ^ shift))
            in if w >= 0x80
                 then go (shift + 7 :: Int) acc' rest (at + 1)
-                else Right (acc', rest, at + 1)
+                else
+                  if shift > (0 :: Int) && w == 0
+                    then Left (Protobuf.Error at [] "the schema version's varint is not minimally encoded")
+                    else Right (acc', rest, at + 1)
