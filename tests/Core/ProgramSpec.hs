@@ -11,6 +11,7 @@ module Core.ProgramSpec where
 import Core.AST qualified as Core
 import Core.Program (Missing (..), MissingKind (..), Program (..))
 import Core.Program qualified as Program
+import Core.Refs qualified as Refs
 import Data.List (elemIndex)
 import Data.Map qualified as Map
 import Data.Name (Name)
@@ -227,6 +228,8 @@ spec = do
 
   mainSpec
 
+  loadOrderSpec
+
 -- HELPERS
 
 -- | A module declaring ports, and a second module that names one of them.
@@ -436,6 +439,93 @@ kernelSpec = describe "kernel modules" $ do
      in map (\m -> (_missingKind m, _missingName m)) (_progMissing p)
           `shouldBe` [(MissingKernel, kernelQ "Utils" "compare")]
 
+loadOrderSpec :: Spec
+loadOrderSpec = describe "load-time order" $ do
+  it "puts a cycle member after what its right-hand side reads" $
+    -- C14's relation is "refers to", which inside a cycle decides nothing, and
+    -- something still has to go first. `alias` is `helper` and nothing else, so
+    -- emitted first it reads an undefined; `helper` is a function and reads
+    -- nothing until it is called. Codepoint order would put `alias` first.
+    let p =
+          linkWith
+            Map.empty
+            [ modul
+                home
+                [ bind "main" (appE (globalE (q "alias")) [one]),
+                  bind "alias" (globalE (q "helper")),
+                  bind "helper" (lam "x" (globalE (q "alias")))
+                ]
+            ]
+            [q "main"]
+     in (map (snd . splitQ) (map fst (_progBindings p)), length (_progRecursive p))
+          `shouldBe` (["helper", "alias", "main"], 1)
+
+  it "leaves a group alone when nothing in it reads at load" $
+    -- Two mutually recursive functions: neither reads the other until called, so
+    -- the strict relation is empty and C14's own order — by name — stands.
+    let p =
+          linkWith
+            Map.empty
+            [ modul
+                home
+                [ bind "main" (appE (globalE (q "isOdd")) [one]),
+                  bind "isEven" (lam "x" (globalE (q "isOdd"))),
+                  bind "isOdd" (lam "x" (globalE (q "isEven")))
+                ]
+            ]
+            [q "main"]
+     in map (snd . splitQ) (map fst (_progBindings p)) `shouldBe` ["isEven", "isOdd", "main"]
+
+  it "puts a kernel module before a binding whose value is one of its functions" $
+    -- The case that found it. `Array.length` is `_Array_length` and nothing
+    -- else, and it is in a cycle with the kernel module that defines that name.
+    let p =
+          linkWith
+            (Map.singleton "Utils" (kernelModule [q "calledBack"] [] []))
+            [ modul
+                home
+                [ bind "main" (appE (globalE (q "alias")) [one]),
+                  bind "alias" (globalE (kernelQ "Utils" "compare")),
+                  bind "calledBack" (lam "x" (globalE (q "alias")))
+                ]
+            ]
+            [q "main"]
+     in map linkedName (_progLinked p) `shouldBe` ["calledBack", "Utils", "alias", "main"]
+
+  it "orders a port after the kernel module the backend says it lands in" $
+    -- `compiler#387`, as a property rather than as a bug report: a port's
+    -- runtime call reads module-level state in the kernel chunk that declares
+    -- it, so the chunk has to be emitted first. Core names no runtime function,
+    -- so the edge comes from the backend.
+    let portName = Core.QualName home "used"
+        p =
+          Program.link
+            Program.Backend
+              { Program._backendKernels = Map.singleton "Platform" (kernelModule [] [] []),
+                Program._backendEdges =
+                  Map.singleton portName (Refs.global (Program.kernelName "Platform"))
+              }
+            (Map.fromList [(Core._moduleName m, m) | m <- portModules [outPort "used"]])
+            [qIn other "main"]
+     in map linkedName (_progLinked p) `shouldBe` ["encode", "Platform", "used", "main"]
+
+  it "drops the kernel module again when no port reaches it" $
+    -- The edge is not a root: it is only followed from a port that is reached.
+    let p =
+          Program.link
+            Program.Backend
+              { Program._backendKernels = Map.singleton "Platform" (kernelModule [] [] []),
+                Program._backendEdges =
+                  Map.singleton (Core.QualName home "unused") (Refs.global (Program.kernelName "Platform"))
+              }
+            (Map.fromList [(Core._moduleName m, m) | m <- portModules [outPort "unused"]])
+            [qIn other "main"]
+     in _progKernels p `shouldBe` []
+
+lam :: Name -> Core.Expr -> Core.Expr
+lam name body =
+  Core.Expr (Core.ELam [Core.Binder name intT span0] body) intT span0
+
 linkedName :: Program.Linked -> Name
 linkedName item =
   case item of
@@ -454,7 +544,10 @@ link = linkWith Map.empty
 -- 'Program.link' never sees JavaScript.
 linkWith :: Map.Map Name Program.Kernel -> [Core.Module] -> [Core.QualName] -> Program
 linkWith kernels modules roots =
-  Program.link kernels (Map.fromList [(Core._moduleName m, m) | m <- modules]) roots
+  Program.link
+    (Program.Backend {Program._backendKernels = kernels, Program._backendEdges = Map.empty})
+    (Map.fromList [(Core._moduleName m, m) | m <- modules])
+    roots
 
 kernelModule :: [Core.QualName] -> [Name] -> [Name] -> Program.Kernel
 kernelModule gren kernels fields =

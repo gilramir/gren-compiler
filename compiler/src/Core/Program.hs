@@ -23,15 +23,11 @@
 --   * __The field set__ ('_progFields'), which @--optimize@'s field shortening
 --     needs and which is only knowable program-wide.
 --
--- And it takes one thing in that Core does not carry and a JS backend cannot do
--- without: what the kernel JavaScript refers to (C16, §J7). @core@'s kernel files
--- call back into Gren, so their references are edges in the program's graph like
--- any other, and a linker that does not know them drops code the kernel calls;
--- they name record fields too, which @--optimize@ has to shorten alongside the
--- ones Gren code names. That is a 'Kernel' per kernel module, supplied by the
--- build system that already holds the chunks — which is C16 exactly: the
--- JavaScript stays out of the IR, and what crosses into the linker is the two
--- sets of names, not the code.
+-- And it takes one thing in that Core does not carry and no backend can do
+-- without: a 'Backend', which is everything the build system knows about the
+-- target that Core deliberately does not say. Two halves, both names and neither
+-- code, which is C16 exactly — the JavaScript stays out of the IR and out of
+-- here.
 --
 -- And one thing it produces that is a measurement rather than an output:
 -- '_progMissing', the names reachable code refers to and no Core module
@@ -42,6 +38,7 @@
 module Core.Program
   ( Program (..),
     Linked (..),
+    Backend (..),
     Kernel (..),
     Missing (..),
     MissingKind (..),
@@ -54,7 +51,7 @@ where
 
 import Core.AST qualified as Core
 import Core.Order qualified as Order
-import Core.Refs (Refs (..), ctor, global, mainRefs, portRefs, refsIn)
+import Core.Refs (Refs (..), ctor, global, mainRefs, portRefs, refsIn, strictIn, strictPort)
 import Data.ByteString.Builder qualified as B
 import Data.List qualified as List
 import Data.Map (Map)
@@ -114,6 +111,29 @@ data Linked
   | LPort !ModuleName.Canonical !Core.Port
   | LKernel !Name
 
+-- | What the build system tells the linker about the backend it is linking for.
+--
+-- Core says what a program /is/; a backend knows what its runtime does with it,
+-- and the two meet here rather than in the IR. Both fields are names.
+data Backend = Backend
+  { -- | The kernel modules, by short name (C16, §J7). @core@'s kernel files call
+    -- back into Gren, so their references are edges in the program's graph like
+    -- any other and a linker that does not know them drops code the kernel
+    -- calls; they name record fields too, which @--optimize@ has to shorten
+    -- alongside the ones Gren code names.
+    _backendKernels :: Map Name Kernel,
+    -- | Extra edges, from a declaration to the name a runtime enters it through.
+    --
+    -- A @port@'s runtime constructor lives in a kernel module and reads
+    -- module-level state in it, so the chunk has to be emitted first; a static
+    -- @main@ is handed to one. __Which__ name that is is the backend's business
+    -- and Core names none of them (C16, C18, C19), so the backend says so here.
+    --
+    -- Edges and not roots: a root makes the kernel module reachable and says
+    -- nothing about /when/, and when is the whole content of @compiler#387@.
+    _backendEdges :: Map Core.QualName Refs
+  }
+
 -- | One kernel module, as the linker needs it: names, never code.
 --
 -- Measured over @core@ and @node@'s 26 kernel files (§J7): 123 distinct
@@ -168,11 +188,11 @@ data MissingKind
 
 -- LINK
 
-link :: Map Name Kernel -> Map ModuleName.Canonical Core.Module -> [Core.QualName] -> Program
-link kernels modules roots =
+link :: Backend -> Map ModuleName.Canonical Core.Module -> [Core.QualName] -> Program
+link backend modules roots =
   let binds = Map.fromList (concatMap moduleBindings (Map.toAscList modules))
       ports = Map.fromList (concatMap modulePorts (Map.toAscList modules))
-      kernelNodes = Map.mapKeys kernelName kernels
+      kernelNodes = Map.mapKeys kernelName (_backendKernels backend)
       -- A port and a kernel module define a name the same way a binding does, so
       -- reachability and the order are computed over the three together and
       -- split apart afterwards.
@@ -184,6 +204,7 @@ link kernels modules roots =
           (<>)
           [ managerRefs modules,
             entryRefs modules,
+            _backendEdges backend,
             Map.map (refsIn . Core._bindValue) binds,
             Map.map (portRefs . snd) ports,
             Map.map (kernelRefs ctorOwner) kernelNodes
@@ -201,7 +222,17 @@ link kernels modules roots =
         ordered
           (Set.toAscList (Set.intersection reached defined))
           (Map.map (Set.intersection reached . Set.map resolve . _refGlobals) reachedRefs)
-      items = Maybe.mapMaybe (linkedItem binds ports) [q | group <- groups, q <- group]
+      strict =
+        Map.unionsWith
+          Set.union
+          [ Map.map (Set.map resolve . strictIn . Core._bindValue) binds,
+            -- A port's runtime call runs when the port is emitted, so the kernel
+            -- module it lands in is strict too — which is the ordering
+            -- @compiler#387@ is about, stated where every other order is.
+            Map.map (Set.map resolve . strictPort . snd) ports,
+            Map.map (Set.map resolve . _refGlobals) (Map.restrictKeys (_backendEdges backend) (Map.keysSet ports))
+          ]
+      items = Maybe.mapMaybe (linkedItem binds ports) (concatMap (settle strict) groups)
    in Program
         { _progRoots = roots,
           _progLinked = items,
@@ -366,6 +397,32 @@ walk defined refs seen frontier =
        in walk defined refs (Set.union seen fresh) (Set.toAscList fresh)
 
 -- ORDER
+
+-- | The order within one group.
+--
+-- C14's relation is \"refers to\", which is the right one for deciding what must
+-- be emitted before what /exists/. Inside a cycle it decides nothing, because
+-- every member refers to every other, and something still has to go first — and
+-- for a backend with load-time initialization the choice is not free: a
+-- definition whose right-hand side is evaluated when it is emitted must follow
+-- what that right-hand side __reads__.
+--
+-- The two relations differ only inside a lambda, so this re-runs C14's own
+-- algorithm over the group with the strict relation ("Core.Refs.strictIn"), and
+-- the result is the same specification applied twice. @Array.length@ is the case
+-- that found it: it is @_Array_length@ and nothing else, it is in a cycle with
+-- the kernel @Array@ module that defines that name, and emitted first it reads
+-- an @undefined@.
+--
+-- A kernel module has no entry here and so no strict references, which says that
+-- kernel JavaScript calls back into Gren from inside its functions rather than
+-- while it loads. That is an assumption about @core@'s kernel files, and it is
+-- the same one the old pipeline's depth-first traversal makes.
+settle :: Map Core.QualName (Set Core.QualName) -> [Core.QualName] -> [Core.QualName]
+settle strict group =
+  case group of
+    [_] -> group
+    _ -> concat (Order.groups group strict)
 
 -- | Reachable bindings as groups, in link order.
 --

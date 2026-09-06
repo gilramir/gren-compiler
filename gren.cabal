@@ -129,6 +129,8 @@ Library common
         Core.Program
         Core.Pretty
         Core.Refs
+        Generate.CoreJS
+        Generate.CoreJS.Expression
         Generate.FromCore
         Generate.Html
         Generate.Node

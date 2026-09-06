@@ -16,6 +16,8 @@ module Core.Refs
     refsIn,
     portRefs,
     mainRefs,
+    strictIn,
+    strictPort,
     freeLocals,
     patternBinders,
   )
@@ -75,6 +77,64 @@ refsIn (Core.Expr value _ _) =
     Core.ETyApp body _ -> refsIn body
     Core.EWitLam _ body -> refsIn body
     Core.EWitApp body args -> foldMap refsIn (body : args)
+
+-- | What evaluating an expression reads __immediately__: the globals it names
+-- outside any lambda.
+--
+-- The other half of C14. 'refsIn' answers "what must exist", which is the order
+-- a program is emitted in; this answers "what must already have a value", which
+-- is the order it may be evaluated in. The two agree everywhere except inside a
+-- cycle, and a cycle is exactly where they have to be told apart: @Array.length@
+-- and the kernel @Array@ module are mutually reachable, so one of them is
+-- emitted first, and if it is the one whose right-hand side /reads/ the other
+-- the program throws on load.
+--
+-- Shallow on purpose. @f x@ at the top level reads @f@ now and whatever @f@'s
+-- body reads when it is called, and following that through would be asking which
+-- values a program computes rather than which names it reads. A genuine
+-- evaluation cycle is a different problem, and the one @Opt.Cycle@'s @$cyclic$@
+-- thunks and its dev-mode \"infinite recursion\" message exist for.
+strictIn :: Core.Expr -> Set Core.QualName
+strictIn (Core.Expr value _ _) =
+  case value of
+    -- A lambda body does not run until the lambda is called, which is the whole
+    -- distinction this function draws.
+    Core.ELam _ _ -> Set.empty
+    Core.EGlobal q -> Set.singleton q
+    Core.EVar _ -> Set.empty
+    Core.ELit _ -> Set.empty
+    Core.ECrash _ -> Set.empty
+    Core.EApp fn args -> foldMap strictIn (fn : args)
+    Core.ELet binds body -> foldMap strictBind binds <> strictIn body
+    Core.ELetRec binds body -> foldMap strictBind binds <> strictIn body
+    Core.EJoin binds body -> foldMap strictBind binds <> strictIn body
+    Core.EJump _ args -> foldMap strictIn args
+    Core.ECase scrut alts fallback ->
+      strictIn scrut <> foldMap (\(Core.Alt _ b) -> strictIn b) alts <> foldMap strictIn fallback
+    Core.ECtor _ _ args -> foldMap strictIn args
+    Core.ERecord fields -> foldMap (strictIn . snd) fields
+    Core.EUpdate base fields -> strictIn base <> foldMap (strictIn . snd) fields
+    Core.EAccess base _ -> strictIn base
+    Core.EArray items -> foldMap strictIn items
+    Core.EPrim _ args -> foldMap strictIn args
+    Core.ETyLam _ body -> strictIn body
+    Core.ETyApp body _ -> strictIn body
+    Core.EWitLam _ _ -> Set.empty
+    Core.EWitApp body args -> foldMap strictIn (body : args)
+  where
+    strictBind = strictIn . Core._bindValue
+
+-- | A @port@'s converters are evaluated when the port is: a runtime's port
+-- constructor takes the converter as a value, so the declaration is as strict as
+-- an ordinary binding with the same right-hand side.
+strictPort :: Core.Port -> Set Core.QualName
+strictPort (Core.Port _ flow) =
+  case flow of
+    Core.PortOut c -> strictConv c
+    Core.PortIn c -> strictConv c
+    Core.PortTask input output -> foldMap strictConv input <> strictConv output
+  where
+    strictConv = strictIn . Core._convCode
 
 -- | What a @port@ declaration refers to: its converters, and nothing else.
 --

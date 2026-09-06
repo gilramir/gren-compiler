@@ -14,6 +14,7 @@ import Core.Dump qualified as Dump
 import Core.Pass qualified as Pass
 import Core.Pretty qualified as Pretty
 import Core.Program qualified as Program
+import Core.Refs qualified as Refs
 import Data.ByteString.Builder qualified as B
 import Data.Map ((!))
 import Data.Map qualified as Map
@@ -23,6 +24,7 @@ import Data.NonEmptyList qualified as NE
 import Data.Set qualified as Set
 import Directories qualified as Dirs
 import File qualified
+import Generate.CoreJS qualified as CoreJS
 import Generate.FromCore qualified as FromCore
 import Generate.JavaScript qualified as JS
 import Generate.Mode qualified as Mode
@@ -44,12 +46,16 @@ dev :: FilePath -> Details.Details -> Build.Artifacts -> Task JS.GeneratedResult
 dev root details artifacts@(Build.Artifacts pkg _ roots modules) =
   do
     objects <- finalizeObjects =<< loadObjects root details modules
-    let mode = Mode.Dev
     let mains = gatherMains pkg objects roots
     let objectGraph = objectsToGlobalGraph objects
     dumpCore details artifacts objectGraph mains
-    graph <- fromCore details artifacts objectGraph
-    return $ JS.generate mode graph mains
+    native <- linkCore details artifacts objectGraph mains
+    case native of
+      Just program -> return $ CoreJS.generate Mode.Dev program (kernelChunks objectGraph)
+      Nothing ->
+        do
+          graph <- fromCore details artifacts objectGraph
+          return $ JS.generate Mode.Dev graph mains
 
 prod :: FilePath -> Details.Details -> Build.Artifacts -> Task JS.GeneratedResult
 prod root details artifacts@(Build.Artifacts pkg _ roots modules) =
@@ -59,9 +65,16 @@ prod root details artifacts@(Build.Artifacts pkg _ roots modules) =
     let mains = gatherMains pkg objects roots
     let objectGraph = objectsToGlobalGraph objects
     dumpCore details artifacts objectGraph mains
-    graph <- fromCore details artifacts objectGraph
-    let mode = Mode.Prod (Mode.shortenFieldNames graph)
-    return $ JS.generate mode graph mains
+    native <- linkCore details artifacts objectGraph mains
+    case native of
+      Just program ->
+        let mode = Mode.Prod (CoreJS.shortenFieldNames (Program._progFields program))
+         in return $ CoreJS.generate mode program (kernelChunks objectGraph)
+      Nothing ->
+        do
+          graph <- fromCore details artifacts objectGraph
+          let mode = Mode.Prod (Mode.shortenFieldNames graph)
+          return $ JS.generate mode graph mains
 
 -- PROGRAM CORE
 
@@ -134,6 +147,13 @@ fromCore details artifacts graph =
 -- The graph's own field census is not the answer to the second half: it is the
 -- whole program's, kernel and Gren at once, where the linker wants each kernel
 -- module's share attributed to it so that an unreached one contributes nothing.
+backendFor :: Opt.GlobalGraph -> Map.Map ModuleName.Canonical Core.Module -> Program.Backend
+backendFor graph cores =
+  Program.Backend
+    { Program._backendKernels = kernelInfo graph,
+      Program._backendEdges = runtimeEdges cores
+    }
+
 kernelInfo :: Opt.GlobalGraph -> Map.Map N.Name Program.Kernel
 kernelInfo (Opt.GlobalGraph nodes _) =
   Map.fromList
@@ -149,37 +169,82 @@ kernelInfo (Opt.GlobalGraph nodes _) =
           Program._kernelFields = Map.keysSet (K.countFields chunks)
         }
 
+-- | The kernel module each declaration's runtime call lands in.
+--
+-- A @port@'s constructor is in the kernel @Platform@ module and registers the
+-- port in a @var@ that module declares, so the chunk has to come first; a
+-- @main : String@ is printed by kernel @Node@ and a @main : Html msg@ is handed
+-- to kernel @VirtualDom@. None of those names is in Core and none should be —
+-- C16 keeps kernel JavaScript in the build system, C18 and C19 keep the runtime
+-- call out of the declaration — so the JS backend supplies them here, where the
+-- backend is already chosen.
+--
+-- @compiler#387@ is the bug this prevents, and it is why these are edges rather
+-- than roots: stock 0.6.6 emits a port's @var@ above the kernel @var@ it
+-- registers itself in, because @Optimize.Module.addPort@ records the converter's
+-- dependencies and not the module the generated call lands in.
+runtimeEdges :: Map.Map ModuleName.Canonical Core.Module -> Map.Map Core.QualName Refs.Refs
+runtimeEdges cores =
+  Map.fromList $
+    concat
+      [ [ (Core.QualName home (Core._binderName (Core._portBinder p)), kernel N.platform)
+        | p <- Core._modulePorts modul
+        ]
+          ++ [ (Core.QualName home N._main, kernel short)
+             | Just m <- [Core._moduleMain modul],
+               Just short <- [staticHome m]
+             ]
+      | (home, modul) <- Map.toList cores
+      ]
+  where
+    kernel = Refs.global . Program.kernelName
+    staticHome m =
+      case m of
+        Core.MainString -> Just N.node
+        Core.MainHtml -> Just N.virtualDom
+        Core.MainProgram _ -> Nothing
+
+-- | The linked Core program, when @GENG_JS_NATIVE=1@ asks for one (§J15).
+--
+-- This is the whole of what the Core-native emitter is handed besides the kernel
+-- chunks: one call to `Core.Program.link`, with the roots 'coreRoots' names and
+-- the kernel information 'kernelInfo' reads off the graph. Nothing downstream of
+-- it looks at an `AST.Optimized.GlobalGraph` node.
+linkCore :: Details.Details -> Build.Artifacts -> Opt.GlobalGraph -> Map.Map ModuleName.Canonical Opt.Main -> Task (Maybe Program.Program)
+linkCore details artifacts graph mains
+  | not Dump.jsNative = return Nothing
+  | otherwise =
+      Task.io $
+        do
+          cores <- Pass.run <$> programCore details artifacts
+          return (Just (Program.link (backendFor graph cores) cores (coreRoots mains)))
+
+-- | The kernel modules' chunks, which C16 keeps here rather than in Core.
+--
+-- 'kernelInfo' takes the /names/ out of the same nodes for the linker; this
+-- takes the JavaScript, for the emitter. Two readings of one thing, because the
+-- two consumers want different halves of it and neither wants the graph.
+kernelChunks :: Opt.GlobalGraph -> Map.Map N.Name [K.Chunk]
+kernelChunks (Opt.GlobalGraph nodes _) =
+  Map.fromList
+    [ (short, chunks)
+    | (Opt.Global (ModuleName.Canonical pkg short) _, Opt.Kernel chunks _) <- Map.toList nodes,
+      pkg == Pkg.kernel
+    ]
+
 -- | The program's roots, as Core names.
 --
 -- The JS backend's roots are the @main@ of each root module, which is where
 -- 'gatherMains' stops; in Core each one is an ordinary top-level binding called
 -- @main@ in that module.
 --
--- And the kernel modules this backend's /runtime/ enters through, which are
--- roots for the same reason a @main@ is: nothing in the program refers to them,
--- and the program does not run without them. Which ones those are is the JS
--- backend's knowledge and not Core's — C16 again, and the same division
--- `Generate.FromCore.mainDeps` and @definePort@ make — so it is applied here,
--- where the backend is already chosen, rather than inside the linker.
---
--- @Platform@ is named by any module that declares a @port@, reached or not. The
--- over-approximation is deliberate and free: every program that has a port has
--- a @Cmd@ or a @Sub@ too, so @Platform@ is reachable from Gren code anyway, and
--- the alternative is asking the linker a question it cannot answer until it has
--- already answered it.
-coreRoots :: Map.Map ModuleName.Canonical Opt.Main -> Map.Map ModuleName.Canonical Core.Module -> [Core.QualName]
-coreRoots mains cores =
+-- The kernel modules a runtime enters through are /not/ here. They were, and it
+-- was wrong: a root makes a kernel module reachable and says nothing about when
+-- it is emitted, so a port's @var@ could still land above the chunk it
+-- registers itself in. They are edges instead — 'runtimeEdges'.
+coreRoots :: Map.Map ModuleName.Canonical Opt.Main -> [Core.QualName]
+coreRoots mains =
   [Core.QualName home N._main | home <- Map.keys mains]
-    ++ map Program.kernelName (Set.toAscList (Set.unions (map runtime (Map.elems cores))))
-  where
-    runtime modul =
-      Set.union
-        (if null (Core._modulePorts modul) then Set.empty else Set.singleton N.platform)
-        ( case Core._moduleMain modul of
-            Just Core.MainString -> Set.singleton N.node
-            Just Core.MainHtml -> Set.singleton N.virtualDom
-            _ -> Set.empty
-        )
 
 -- | Write what @GENG_DUMP_PROGRAM_CORE@ and @GENG_DUMP_LINK@ ask for, if either
 -- names a place to put it.
@@ -208,8 +273,8 @@ dumpCore details artifacts graph mains =
               let roots =
                     if Dump.linkEveryExport
                       then concatMap Core._moduleExports (Map.elems cores)
-                      else coreRoots mains cores
-               in B.writeFile file (Program.render (Program.link (kernelInfo graph) cores roots))
+                      else coreRoots mains
+               in B.writeFile file (Program.render (Program.link (backendFor graph cores) cores roots))
 
 repl :: FilePath -> Details.Details -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
 repl root details ansi (Build.ReplArtifacts home modules localizer annotations) name =
