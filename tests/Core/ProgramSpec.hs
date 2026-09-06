@@ -223,6 +223,8 @@ spec = do
           reached = map (snd . splitQ) (names p)
        in ("decode" `elem` reached, "encode" `elem` reached) `shouldBe` (True, False)
 
+  kernelSpec
+
 -- HELPERS
 
 -- | A module declaring ports, and a second module that names one of them.
@@ -306,12 +308,122 @@ fxManager =
       Core._managerSubMap = Just (q "subMap")
     }
 
+kernelSpec :: Spec
+kernelSpec = describe "kernel modules" $ do
+  it "keeps a binding only the kernel JavaScript calls" $
+    -- §J7's first caveat, and the reason it is a caveat: nothing in Gren refers
+    -- to `calledBack`, so without the kernel's edges it is dead code and the
+    -- bundle refers to a name nobody emitted.
+    let p =
+          linkWith
+            (Map.singleton "Utils" (kernelModule [q "calledBack"] [] []))
+            [modul home [bind "main" (globalE (kernelQ "Utils" "compare")), bind "calledBack" one]]
+            [q "main"]
+     in names p `shouldBe` [q "calledBack", q "main"]
+
+  it "keeps a datatype a kernel constructor reference reaches" $
+    -- `Maybe.Just` is one of the 18, and a constructor is not a binding: the
+    -- build system cannot tell the two apart, so the linker does.
+    let p =
+          linkWith
+            (Map.singleton "Utils" (kernelModule [q "Just"] [] []))
+            [ (modul home [bind "main" (globalE (kernelQ "Utils" "compare"))])
+                { Core._moduleData = [dataDecl "Maybe" "Just"]
+                }
+            ]
+            [q "main"]
+     in map Core._dataName (_progData p) `shouldBe` [q "Maybe"]
+
+  it "collects the record fields a reached kernel module names" $
+    -- §J7's second caveat: 113 of them across `core` and `node`, and
+    -- `--optimize` shortens every field or none.
+    let p =
+          linkWith
+            (Map.singleton "Utils" (kernelModule [] [] ["fromKernel"]))
+            [modul home [bind "main" (globalE (kernelQ "Utils" "compare"))]]
+            [q "main"]
+     in Set.toAscList (_progFields p) `shouldBe` ["fromKernel"]
+
+  it "collects nothing from a kernel module nothing reaches" $
+    let p =
+          linkWith
+            (Map.singleton "Utils" (kernelModule [q "calledBack"] [] ["fromKernel"]))
+            [modul home [bind "main" one, bind "calledBack" one]]
+            [q "main"]
+     in (_progKernels p, Set.toAscList (_progFields p), names p)
+          `shouldBe` ([], [], [q "main"])
+
+  it "follows a kernel module into another kernel module" $
+    let p =
+          linkWith
+            ( Map.fromList
+                [ ("Utils", kernelModule [] ["Basics"] []),
+                  ("Basics", kernelModule [q "calledBack"] [] [])
+                ]
+            )
+            [modul home [bind "main" (globalE (kernelQ "Utils" "compare")), bind "calledBack" one]]
+            [q "main"]
+     in (_progKernels p, names p) `shouldBe` (["Basics", "Utils"], [q "calledBack", q "main"])
+
+  it "orders a kernel module before the code that calls it" $
+    -- The property `compiler#387` is about, in the one place it can be stated
+    -- once for every kind of thing a program emits.
+    let p =
+          linkWith
+            (Map.singleton "Utils" (kernelModule [] [] []))
+            [modul home [bind "main" (globalE (kernelQ "Utils" "compare"))]]
+            [q "main"]
+     in map linkedName (_progLinked p) `shouldBe` ["Utils", "main"]
+
+  it "orders a kernel module after the bindings it calls" $
+    let p =
+          linkWith
+            (Map.singleton "Utils" (kernelModule [q "calledBack"] [] []))
+            [modul home [bind "main" (globalE (kernelQ "Utils" "compare")), bind "calledBack" one]]
+            [q "main"]
+     in map linkedName (_progLinked p) `shouldBe` ["calledBack", "Utils", "main"]
+
+  it "still reports the kernel function as missing" $
+    -- The whole point of `_progMissing` is that it counts what Core does not
+    -- express, and knowing the module's edges does not make its functions Core.
+    let p =
+          linkWith
+            (Map.singleton "Utils" (kernelModule [] [] []))
+            [modul home [bind "main" (globalE (kernelQ "Utils" "compare"))]]
+            [q "main"]
+     in map (\m -> (_missingKind m, _missingName m)) (_progMissing p)
+          `shouldBe` [(MissingKernel, kernelQ "Utils" "compare")]
+
+linkedName :: Program.Linked -> Name
+linkedName item =
+  case item of
+    Program.LBind (Core.QualName _ n) _ -> n
+    Program.LPort _ port -> Core._binderName (Core._portBinder port)
+    Program.LKernel short -> short
+
 splitQ :: Core.QualName -> (ModuleName.Canonical, Name)
 splitQ (Core.QualName h n) = (h, n)
 
 link :: [Core.Module] -> [Core.QualName] -> Program
-link modules roots =
-  Program.link (Map.fromList [(Core._moduleName m, m) | m <- modules]) roots
+link = linkWith Map.empty
+
+-- | Linking with kernel modules in the picture (C16). The build system supplies
+-- these from the chunks; a test supplies them by hand, which is the point —
+-- 'Program.link' never sees JavaScript.
+linkWith :: Map.Map Name Program.Kernel -> [Core.Module] -> [Core.QualName] -> Program
+linkWith kernels modules roots =
+  Program.link kernels (Map.fromList [(Core._moduleName m, m) | m <- modules]) roots
+
+kernelModule :: [Core.QualName] -> [Name] -> [Name] -> Program.Kernel
+kernelModule gren kernels fields =
+  Program.Kernel
+    { Program._kernelGren = Set.fromList gren,
+      Program._kernelKernels = Set.fromList kernels,
+      Program._kernelFields = Set.fromList fields
+    }
+
+kernelQ :: Name -> Name -> Core.QualName
+kernelQ short name = Core.QualName (ModuleName.Canonical Pkg.kernel short) name
 
 names :: Program -> [Core.QualName]
 names = map fst . _progBindings

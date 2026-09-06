@@ -20,12 +20,14 @@ import Data.Map qualified as Map
 import Data.Maybe qualified as Maybe
 import Data.Name qualified as N
 import Data.NonEmptyList qualified as NE
+import Data.Set qualified as Set
 import Directories qualified as Dirs
 import File qualified
 import Generate.FromCore qualified as FromCore
 import Generate.JavaScript qualified as JS
 import Generate.Mode qualified as Mode
 import Gren.Details qualified as Details
+import Gren.Kernel qualified as K
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Nitpick.Debug qualified as Nitpick
@@ -44,8 +46,9 @@ dev root details artifacts@(Build.Artifacts pkg _ roots modules) =
     objects <- finalizeObjects =<< loadObjects root details modules
     let mode = Mode.Dev
     let mains = gatherMains pkg objects roots
-    dumpCore details artifacts mains
-    graph <- fromCore details artifacts (objectsToGlobalGraph objects)
+    let objectGraph = objectsToGlobalGraph objects
+    dumpCore details artifacts objectGraph mains
+    graph <- fromCore details artifacts objectGraph
     return $ JS.generate mode graph mains
 
 prod :: FilePath -> Details.Details -> Build.Artifacts -> Task JS.GeneratedResult
@@ -54,8 +57,9 @@ prod root details artifacts@(Build.Artifacts pkg _ roots modules) =
     objects <- finalizeObjects =<< loadObjects root details modules
     checkForDebugUses objects
     let mains = gatherMains pkg objects roots
-    dumpCore details artifacts mains
-    graph <- fromCore details artifacts (objectsToGlobalGraph objects)
+    let objectGraph = objectsToGlobalGraph objects
+    dumpCore details artifacts objectGraph mains
+    graph <- fromCore details artifacts objectGraph
     let mode = Mode.Prod (Mode.shortenFieldNames graph)
     return $ JS.generate mode graph mains
 
@@ -118,6 +122,33 @@ fromCore details artifacts graph =
             Just file -> B.writeFile file (FromCore.renderGap (FromCore.gap cores graph))
           return (if usingCore then FromCore.redefine cores graph else graph)
 
+-- | What the kernel JavaScript refers to, read off the chunks the builder
+-- already holds (C16, @docs\/m1a-js-on-core.md@ §J7's two caveats).
+--
+-- "Core.Program" needs it for two reasons and neither is optional. Kernel
+-- JavaScript calls back into Gren, so a linker that does not know those edges
+-- drops code the kernel calls; and it names record fields, which @--optimize@
+-- has to shorten together with the ones Gren code names. The chunks stay here —
+-- C16's whole point is that they never enter the IR — and only the names cross.
+--
+-- The graph's own field census is not the answer to the second half: it is the
+-- whole program's, kernel and Gren at once, where the linker wants each kernel
+-- module's share attributed to it so that an unreached one contributes nothing.
+kernelInfo :: Opt.GlobalGraph -> Map.Map N.Name Program.Kernel
+kernelInfo (Opt.GlobalGraph nodes _) =
+  Map.fromList
+    [ (short, kernel chunks)
+    | (Opt.Global (ModuleName.Canonical pkg short) _, Opt.Kernel chunks _) <- Map.toList nodes,
+      pkg == Pkg.kernel
+    ]
+  where
+    kernel chunks =
+      Program.Kernel
+        { Program._kernelGren = Set.fromList [Core.QualName home name | K.GrenVar home name <- chunks],
+          Program._kernelKernels = Set.fromList [short | K.JsVar short _ <- chunks],
+          Program._kernelFields = Map.keysSet (K.countFields chunks)
+        }
+
 -- | The program's roots, as Core names.
 --
 -- The JS backend's roots are the @main@ of each root module, which is where
@@ -134,8 +165,8 @@ coreRoots mains =
 -- "Compile"'s per-module dump so that the two are comparable as directories. The
 -- second is 'Core.Program.link''s summary: what the roots reach, in what order,
 -- and what they refer to that Core cannot supply yet.
-dumpCore :: Details.Details -> Build.Artifacts -> Map.Map ModuleName.Canonical Opt.Main -> Task ()
-dumpCore details artifacts mains =
+dumpCore :: Details.Details -> Build.Artifacts -> Opt.GlobalGraph -> Map.Map ModuleName.Canonical Opt.Main -> Task ()
+dumpCore details artifacts graph mains =
   case (Dump.programDir, Dump.linkFile) of
     (Nothing, Nothing) -> return ()
     (maybeDir, maybeFile) ->
@@ -155,7 +186,7 @@ dumpCore details artifacts mains =
                     if Dump.linkEveryExport
                       then concatMap Core._moduleExports (Map.elems cores)
                       else coreRoots mains
-               in B.writeFile file (Program.render (Program.link cores roots))
+               in B.writeFile file (Program.render (Program.link (kernelInfo graph) cores roots))
 
 repl :: FilePath -> Details.Details -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
 repl root details ansi (Build.ReplArtifacts home modules localizer annotations) name =

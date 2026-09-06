@@ -12,6 +12,7 @@
 module Core.Refs
   ( Refs (..),
     global,
+    ctor,
     refsIn,
     portRefs,
     freeLocals,
