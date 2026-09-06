@@ -187,7 +187,76 @@ spec = do
       let p = link (managerModules fxManager) [qIn other "main"]
        in ("subscription" `elem` map snd (map splitQ (names p))) `shouldBe` False
 
+  describe "ports" $ do
+    it "keeps a port the program reaches, and drops one it does not" $
+      let p = link (portModules [outPort "used", outPort "unused"]) [qIn other "main"]
+       in map (fmap portName) (_progPorts p) `shouldBe` [(home, "used")]
+
+    it "follows a port to its converter" $
+      -- The converter is not a binding, so nothing else names it: an edge from
+      -- the port to what its converter refers to is the only thing keeping the
+      -- encoder alive.
+      let p = link (portModules [outPort "used"]) [qIn other "main"]
+       in (q "encode" `elem` names p) `shouldBe` True
+
+    it "puts a port after the converter's dependencies" $
+      -- The converter has to be defined by the time the port's definition runs,
+      -- which is why ports are ordered with the bindings rather than after them.
+      let p = link (portModules [outPort "used"]) [qIn other "main"]
+          order = map (snd . splitQ) (map fst (_progBindings p) ++ [portQ pt | (_, pt) <- _progPorts p])
+       in (elemIndex "encode" order < elemIndex "used" order) `shouldBe` True
+
+    it "does not report a port as a missing value" $
+      -- A port defines its name. Before C18 it did not, and every port in a
+      -- program was a `MissingValue` line in this summary.
+      let p = link (portModules [outPort "used"]) [qIn other "main"]
+       in _progMissing p `shouldBe` []
+
+    it "takes both converters of a task port with an input" $
+      let p = link (portModules [taskPort "used" True]) [qIn other "main"]
+       in (all (`elem` map (snd . splitQ) (names p)) ["encode", "decode"]) `shouldBe` True
+
+    it "takes only the decoder of a task port with no input" $
+      -- The shape whose runtime call Core cannot write as an expression. What
+      -- the linker sees of it is one converter instead of two.
+      let p = link (portModules [taskPort "used" False]) [qIn other "main"]
+          reached = map (snd . splitQ) (names p)
+       in ("decode" `elem` reached, "encode" `elem` reached) `shouldBe` (True, False)
+
 -- HELPERS
+
+-- | A module declaring ports, and a second module that names one of them.
+--
+-- Two modules for the same reason 'managerModules' uses two: a root inside the
+-- port's own module could reach everything by naming it directly, and what is
+-- being tested is that naming the /port/ is enough.
+portModules :: [Core.Port] -> [Core.Module]
+portModules ports =
+  [ (modul home [bind "encode" one, bind "decode" one]) {Core._modulePorts = ports},
+    modul other [bind "main" (globalE (q "used"))]
+  ]
+
+-- | An outgoing port whose encoder names @Main.encode@ and nothing else.
+outPort :: Name -> Core.Port
+outPort name =
+  Core.Port (Core.Binder name intT span0) (Core.PortOut (converter "encode"))
+
+-- | A task port, with an input converter or without one.
+taskPort :: Name -> Bool -> Core.Port
+taskPort name hasInput =
+  Core.Port (Core.Binder name intT span0) $
+    Core.PortTask
+      (if hasInput then Just (converter "encode") else Nothing)
+      (converter "decode")
+
+converter :: Name -> Core.Converter
+converter name = Core.Converter False (globalE (q name))
+
+portName :: Core.Port -> Name
+portName = Core._binderName . Core._portBinder
+
+portQ :: Core.Port -> Core.QualName
+portQ = q . portName
 
 -- | A module with a manager, and a second module that enters it.
 --
@@ -298,5 +367,6 @@ modul name defs =
       Core._moduleDefs = defs,
       Core._moduleDefsRec = [],
       Core._moduleManager = Nothing,
+      Core._modulePorts = [],
       Core._moduleExports = []
     }

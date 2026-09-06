@@ -13,6 +13,7 @@ module Core.Refs
   ( Refs (..),
     global,
     refsIn,
+    portRefs,
     freeLocals,
     patternBinders,
   )
@@ -72,6 +73,23 @@ refsIn (Core.Expr value _ _) =
     Core.ETyApp body _ -> refsIn body
     Core.EWitLam _ body -> refsIn body
     Core.EWitApp body args -> foldMap refsIn (body : args)
+
+-- | What a @port@ declaration refers to: its converters, and nothing else.
+--
+-- A port is a declaration rather than an expression (C18), so the linker cannot
+-- reach its dependencies by walking a body. This is the body it does not have —
+-- and it is why a port needs no rule of its own to stay alive, unlike an effect
+-- manager: something in the program refers to the port's /name/, and the name
+-- is defined here.
+portRefs :: Core.Port -> Refs
+portRefs (Core.Port _ flow) =
+  case flow of
+    Core.PortOut c -> converterRefs c
+    Core.PortIn c -> converterRefs c
+    Core.PortTask input output -> foldMap converterRefs input <> converterRefs output
+
+converterRefs :: Core.Converter -> Refs
+converterRefs = refsIn . Core._convCode
 
 bindRefs :: Core.Bind -> Refs
 bindRefs = refsIn . Core._bindValue

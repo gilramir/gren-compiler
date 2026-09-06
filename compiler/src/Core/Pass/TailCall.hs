@@ -42,6 +42,15 @@ import Data.Name (Name)
 import Data.Name qualified as Name
 import Gren.ModuleName qualified as ModuleName
 
+-- | A @port@'s converters are deliberately left alone.
+--
+-- The pass rewrites a call a definition makes to /itself/ into a jump, and it
+-- knows which call that is from the name the definition is bound to. A
+-- converter is not bound to a name: the name a port defines stands for the port,
+-- so a reference to it inside a converter would be a reference to the port and
+-- not to the converter, and turning it into a jump would be wrong. Generated
+-- converters contain no recursion of any kind, so there is nothing being given
+-- up.
 run :: Core.Module -> Core.Module
 run m =
   let home = Core._moduleName m

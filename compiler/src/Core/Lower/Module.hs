@@ -23,21 +23,22 @@
 -- flat list and 'Core.AST._moduleDefsRec' names the groups of more than one, so
 -- a backend that has to emit a mutually recursive group together still can.
 --
--- __Ports and effect managers are not lowered.__ A @port@ becomes a generated
--- JSON encoder or decoder in @Optimize/Port.hs@, and an @effect module@ becomes
--- a manager node with no Core counterpart; neither has a place in Core until
--- @core@ stops needing them, which is @portable-core.md@ P3 and @ffi.md@ F4 at
--- M1b. 'unloweredEffects' is what a module still declares that this pass drops,
--- so that the gap is visible rather than a shorter list of definitions.
+-- __Effects are declarations.__ An @effect module@'s manager (C17) and a
+-- @port@ (C18) are each a thing a runtime assembles rather than a value a Gren
+-- expression computes, so Core names their pieces and a backend builds what its
+-- runtime wants: 'manager' and 'entries' for the one, "Core.Lower.Port" for the
+-- other. Nothing a module declares is dropped any more, which is why the
+-- function that used to report what was — @unloweredEffects@ — is gone.
+-- @portable-core.md@ P3 and @ffi.md@ F4 delete both constructs at M1b.
 module Core.Lower.Module
   ( lower,
-    unloweredEffects,
   )
 where
 
 import AST.Canonical qualified as Can
 import Core.AST qualified as Core
 import Core.Lower.Expression qualified as Expr
+import Core.Lower.Port qualified as Port
 import Core.Lower.Type (lowerUnion)
 import Core.Order qualified as Order
 import Core.Refs qualified as Refs
@@ -71,7 +72,8 @@ lower types modul =
           Core._moduleDefsRec =
             [map (Core.QualName home . bindName) g | g <- defs, length g > 1],
           Core._moduleExports = map (Core.QualName home) (exports modul),
-          Core._moduleManager = manager home (Can._effects modul)
+          Core._moduleManager = manager home (Can._effects modul),
+          Core._modulePorts = ports (Can._effects modul)
         }
 
 -- | The module's definitions, grouped and ordered by C14.
@@ -141,9 +143,10 @@ defName d =
 --
 -- Types and aliases are not values: an alias does not survive lowering at all,
 -- and a datatype is in 'Core.AST._moduleData' whether or not it is exposed.
--- What is left is definitions and operators, and an operator is exported under
--- its symbol while the value it names is an ordinary function, so it is that
--- function that goes in the list.
+-- What is left is definitions, operators and ports. An operator is exported
+-- under its symbol while the value it names is an ordinary function, so it is
+-- that function that goes in the list; a port is exported under its own name
+-- and defines it, so it goes in as itself.
 --
 -- Sorted rather than taken in the order the two branches produce: @exposing (..)@
 -- would otherwise inherit the declaration order, and an explicit @exposing@ list
@@ -156,11 +159,13 @@ exports modul =
       Can.ExportEverything _ ->
         concatMap (map defName . group) (declGroups (Can._decls modul))
           ++ map binopTarget (Map.elems (Can._binops modul))
+          ++ portNames (Can._effects modul)
       Can.Export exposed ->
         concat
           [ case entry of
               Can.ExportValue -> [name]
               Can.ExportBinop -> maybe [] (pure . binopTarget) (Map.lookup name (Can._binops modul))
+              Can.ExportPort -> [name]
               _ -> []
           | (name, A.At _ entry) <- Map.toAscList exposed
           ]
@@ -170,20 +175,30 @@ binopTarget (Can.Binop_ _ _ name) = name
 
 -- EFFECTS
 
--- | What a module declares that Core does not carry yet.
+-- | The module's @port@s, as Core declarations (C18).
 --
--- Ports only, since §J10a: a manager is lowered (see 'manager' and 'entries'),
--- and no package M1a builds against declares a port. @Optimize/Port.hs@ turns
--- one into a generated JSON encoder or decoder, which is a subsystem rather
--- than a shape, and @portable-core.md@ P3 rebuilds the whole port mechanism on
--- @ffi.md@ F4 at M1b. Lowering it now would be writing something to delete
--- with nothing exercising it in between.
-unloweredEffects :: Can.Module -> [Name]
-unloweredEffects modul =
-  case Can._effects modul of
+-- Ascending by name, which is both C6's order and the order a reader of the
+-- dump wants. "Core.Lower.Port" builds the converters; what is decided here is
+-- only that a port is one declaration per @port@ line, named by the binding it
+-- defines.
+ports :: Can.Effects -> [Core.Port]
+ports effects =
+  case effects of
     Can.NoEffects -> []
-    Can.Ports ports -> Map.keys ports
     Can.Manager {} -> []
+    Can.Ports ps ->
+      [Port.lower zeroSpan name p | (name, p) <- Map.toAscList ps]
+
+portNames :: Can.Effects -> [Name]
+portNames effects =
+  case effects of
+    Can.NoEffects -> []
+    Can.Manager {} -> []
+    Can.Ports ps -> Map.keys ps
+
+-- | The span generated code carries: this module's file, and no position in it.
+zeroSpan :: Core.Span
+zeroSpan = Core.Span selfFile 0 0 0 0
 
 -- | An @effect module@'s manager, as a Core declaration.
 --
@@ -251,7 +266,7 @@ entries home effects =
 
 leaf :: ModuleName.Canonical -> String -> Core.Type -> Core.Bind
 leaf (ModuleName.Canonical _ raw) name tipe =
-  let sp = Core.Span selfFile 0 0 0 0
+  let sp = zeroSpan
       string = Core.TCon (Core.QualName ModuleName.string Name.string) []
       platformLeaf =
         Core.Expr

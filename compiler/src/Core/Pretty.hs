@@ -60,6 +60,7 @@ moduleToBuilder opts m =
       block (map (classDecl opts) (_moduleClasses m)),
       block (map (instanceDecl opts) (_moduleInstances m)),
       block (maybe [] (pure . managerDecl) (_moduleManager m)),
+      block (map (portDecl opts) (_modulePorts m)),
       block (map (topBind opts (recNames m)) (_moduleDefs m))
     ]
 
@@ -80,6 +81,38 @@ managerDecl m =
     kind ManagerCmd = "cmd"
     kind ManagerSub = "sub"
     kind ManagerFx = "fx"
+
+-- | A @port@ declaration (C18): which way the payload crosses, whether it
+-- crosses as bytes, and the converters as ordinary Core.
+portDecl :: Options -> Port -> B.Builder
+portDecl opts (Port binder flow) =
+  case flow of
+    PortOut c ->
+      header "out" <> converter opts "encoder" c
+    PortIn c ->
+      header "in" <> converter opts "decoder" c
+    PortTask input output ->
+      header "task"
+        <> maybe "  no input\n" (converter opts "encoder") input
+        <> converter opts "decoder" output
+  where
+    header dir =
+      "port "
+        <> dir
+        <> " "
+        <> name (_binderName binder)
+        <> " : "
+        <> typeToBuilder opts (_binderType binder)
+        <> "\n"
+
+converter :: Options -> B.Builder -> Converter -> B.Builder
+converter opts label (Converter bytes code) =
+  "  "
+    <> label
+    <> (if bytes then " bytes" else "")
+    <> " =\n"
+    <> expr opts 1 code
+    <> "\n"
 
 recNames :: Module -> [QualName]
 recNames = concat . _moduleDefsRec

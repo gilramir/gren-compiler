@@ -310,13 +310,61 @@ ctorOpts d =
 
 moduleNodes :: Map Core.QualName Ctor -> (ModuleName.Canonical, Core.Module) -> [(Opt.Global, Opt.Node)]
 moduleNodes ctors (home, m) =
-  let entries = maybe Set.empty (Set.fromList . map short . Core._managerEntries) (Core._moduleManager m)
+  let env = Env ctors Map.empty home
+      entries = maybe Set.empty (Set.fromList . map short . Core._managerEntries) (Core._moduleManager m)
       short (Core.QualName _ n) = n
    in [ if Set.member (Core._binderName (Core._bindBinder b)) entries
           then (Opt.Global home (Core._binderName (Core._bindBinder b)), Opt.Link (Opt.Global home "$fx$"))
-          else define (Env ctors Map.empty home) b
+          else define env b
       | b <- Core._moduleDefs m
       ]
+        ++ map (definePort env) (Core._modulePorts m)
+
+-- | A @port@'s node, built from the Core declaration rather than from
+-- @Optimize.Module@'s.
+--
+-- The node is the same one `Optimize.Module` makes, and it has to be: the JS
+-- emitter reaches a raw, uncurried @_Platform_incomingPort@ through it, which
+-- is the whole reason C18 makes a port a declaration instead of an application
+-- Core could have written. What is different is where the converter came from —
+-- "Core.Lower.Port" instead of @Optimize.Port@ — and that is the thing being
+-- tested, because both have to generate a program that answers the same.
+definePort :: Env -> Core.Port -> (Opt.Global, Opt.Node)
+definePort env (Core.Port binder flow) =
+  let global = Opt.Global (_home env) (Core._binderName binder)
+      -- The kernel module the assembled call lands in, which is this backend's
+      -- to know and not Core's: C16 keeps kernel JavaScript in the build
+      -- system, and a Core 'Core.AST.Port' names no runtime function at all.
+      -- It has to be a dependency because @_Platform_incomingPort@ and its two
+      -- siblings read module-level @var@s in that chunk, so the chunk has to be
+      -- emitted first — the same edge `Optimize.Module.withPlatform` adds.
+      platform = Set.singleton (Opt.toKernelGlobal Name.platform)
+      node =
+        case flow of
+          Core.PortOut c ->
+            let (code, ds) = converter env c
+             in Opt.PortOutgoing (Core._convBytes c) code (Set.union platform ds)
+          Core.PortIn c ->
+            let (code, ds) = converter env c
+             in Opt.PortIncoming (Core._convBytes c) code (Set.union platform ds)
+          Core.PortTask input output ->
+            let (encoded, inDeps) =
+                  case input of
+                    Nothing -> (Nothing, Set.empty)
+                    Just c -> let (code, ds) = converter env c in (Just code, ds)
+                (decoded, outDeps) = converter env output
+             in Opt.PortTask
+                  (maybe False Core._convBytes input)
+                  encoded
+                  (Core._convBytes output)
+                  decoded
+                  (Set.unions [platform, inDeps, outDeps])
+   in (global, node)
+
+converter :: Env -> Core.Converter -> (Opt.Expr, Set Opt.Global)
+converter env (Core.Converter _ code) =
+  let (translated, needed) = runFresh (expr env code)
+   in (translated, Set.union (deps code) needed)
 
 -- | Why an entry binding is a link here and a definition in Core.
 --

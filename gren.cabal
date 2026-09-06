@@ -119,6 +119,7 @@ Library common
         Core.Lower.Expression
         Core.Lower.Literal
         Core.Lower.Module
+        Core.Lower.Port
         Core.Lower.Type
         Core.Order
         Core.Pass

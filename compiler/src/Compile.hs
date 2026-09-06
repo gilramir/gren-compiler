@@ -13,8 +13,6 @@ import Core.AST qualified as Core
 import Core.Dump qualified as Dump
 import Core.Lower.Module qualified as Lower
 import Core.Pretty qualified as Pretty
-import Data.ByteString.Builder qualified as B
-import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Gren.Interface qualified as I
@@ -152,12 +150,11 @@ nodeTypeCheckEnabled =
 
 -- | Write every module's Core to a directory, if @GENG_DUMP_CORE@ names one.
 --
--- The only thing that forces the lowering today, so it is also the test that
--- the lowering survives real code: nothing consumes Core until the JS backend
--- is re-targeted onto it, and an unforced thunk proves nothing. A module that
--- still declares ports or an effect manager says so in the dump, because Core
--- does not carry those yet (`Core.Lower.Module`) and a quietly shorter list of
--- definitions is the wrong way to find that out.
+-- It used to carry a @-- not lowered:@ trailer naming what the module declared
+-- and Core dropped, so that a shorter list of definitions could not pass for a
+-- complete one. Nothing is dropped any more — the manager went to Core at C17
+-- and the ports at C18 — so the trailer is gone with the function that computed
+-- it.
 dumpCore :: Can.Module -> Core.Module -> Either E.Error ()
 dumpCore canonical core =
   case Dump.moduleDir of
@@ -167,13 +164,7 @@ dumpCore canonical core =
       unsafePerformIO $
         do
           Dump.writeModule dir (Can._name canonical) $
-            mconcat
-              [ Pretty.moduleToBuilder Pretty.defaultOptions core,
-                case Lower.unloweredEffects canonical of
-                  [] -> mempty
-                  names ->
-                    B.stringUtf8 ("\n-- not lowered: " ++ List.intercalate ", " (map Name.toChars names) ++ "\n")
-              ]
+            Pretty.moduleToBuilder Pretty.defaultOptions core
           return (Right ())
 
 nitpick :: Can.Module -> Either E.Error ()

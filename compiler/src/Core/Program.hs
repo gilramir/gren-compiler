@@ -25,10 +25,10 @@
 --
 -- And one thing it produces that is a measurement rather than an output:
 -- '_progMissing', the names reachable code refers to and no Core module
--- defines. Today that is every kernel function, every effect manager and every
--- port, which is @docs/m1a-js-on-core.md@ §J3 items 3 and 5 — the two pieces of
--- M1a that need a decision before they need code. Printing the list is how the
--- size of those two decisions stops being a guess.
+-- defines. It is every kernel function and nothing else now — effect managers
+-- closed at C17 and ports at C18 — which is C16's decision that kernel
+-- JavaScript stays in the build system, and the list is what says so rather
+-- than a claim that it does.
 module Core.Program
   ( Program (..),
     Missing (..),
@@ -41,7 +41,7 @@ where
 
 import Core.AST qualified as Core
 import Core.Order qualified as Order
-import Core.Refs (Refs (..), global, refsIn)
+import Core.Refs (Refs (..), global, portRefs, refsIn)
 import Data.ByteString.Builder qualified as B
 import Data.List qualified as List
 import Data.Map (Map)
@@ -70,6 +70,11 @@ data Program = Program
     -- | The @effect module@ managers a runtime has to register, because an entry
     -- binding of each is reachable. Empty once P3 lands.
     _progManagers :: [(ModuleName.Canonical, Core.Manager)],
+    -- | The reachable @port@s, in link order among themselves. A port is a
+    -- declaration and not a 'Core.AST.Bind', so it is not in '_progBindings';
+    -- it is ordered with them all the same, so that a backend emitting a port
+    -- has already emitted the converter's dependencies. Empty once P3 lands.
+    _progPorts :: [(ModuleName.Canonical, Core.Port)],
     -- | What reachable code refers to and Core does not define.
     _progMissing :: [Missing]
   }
@@ -88,8 +93,9 @@ data MissingKind
     MissingKernel
   | -- | A @Debug@ value, which the frontend routes through its own module.
     MissingDebug
-  | -- | Anything else: a port or an effect manager today (§J3 item 5), and a
-    -- lowering bug if it is neither.
+  | -- | Anything else, which is now a lowering bug: every value a program can
+    -- refer to is either a binding, a constructor, a datatype or a port, and
+    -- Core carries all four.
     MissingValue
   deriving (Eq, Ord, Show)
 
@@ -97,13 +103,22 @@ data MissingKind
 
 link :: Map ModuleName.Canonical Core.Module -> [Core.QualName] -> Program
 link modules roots =
-  let defs = Map.fromList (concatMap moduleBindings (Map.toAscList modules))
+  let binds = Map.fromList (concatMap moduleBindings (Map.toAscList modules))
+      ports = Map.fromList (concatMap modulePorts (Map.toAscList modules))
+      -- A port defines a name the same way a binding does, so reachability and
+      -- the order are computed over both together and split apart afterwards.
+      defined = Set.union (Map.keysSet binds) (Map.keysSet ports)
       ctorOwner = Map.fromList (concatMap moduleCtors (Map.toAscList modules))
       datas = Map.fromList (concatMap moduleDatas (Map.toAscList modules))
-      refs = Map.unionWith (<>) (managerRefs modules) (Map.map (refsIn . Core._bindValue) defs)
+      refs =
+        Map.unionsWith
+          (<>)
+          [ managerRefs modules,
+            Map.map (refsIn . Core._bindValue) binds,
+            Map.map (portRefs . snd) ports
+          ]
 
-      reached = walk defs refs (Set.fromList roots) roots
-      reachedDefs = Map.restrictKeys defs reached
+      reached = walk defined refs (Set.fromList roots) roots
       reachedRefs = Map.restrictKeys refs reached
 
       reachedCtors = Set.unions (map _refCtors (Map.elems reachedRefs))
@@ -111,15 +126,20 @@ link modules roots =
         Set.fromList (Maybe.mapMaybe (`Map.lookup` ctorOwner) (Set.toAscList reachedCtors))
       reachedDatas = Map.elems (Map.restrictKeys datas reachedDataNames)
 
-      groups = ordered reachedDefs (Map.map (Set.intersection reached . _refGlobals) reachedRefs)
+      groups =
+        ordered
+          (Set.toAscList (Set.intersection reached defined))
+          (Map.map (Set.intersection reached . _refGlobals) reachedRefs)
+      linked = [q | group <- groups, q <- group]
    in Program
         { _progRoots = roots,
-          _progBindings = [(q, defs Map.! q) | group <- groups, q <- group],
+          _progBindings = [(q, b) | q <- linked, Just b <- [Map.lookup q binds]],
           _progRecursive = [group | group <- groups, length group > 1],
           _progData = reachedDatas,
           _progFields = Set.unions (map _refFields (Map.elems reachedRefs)),
           _progManagers = reachedManagers reached modules,
-          _progMissing = missing defs ctorOwner datas roots reachedRefs
+          _progPorts = [p | q <- linked, Just p <- [Map.lookup q ports]],
+          _progMissing = missing defined ctorOwner datas roots reachedRefs
         }
 
 -- | The extra edges an @effect module@'s manager puts in the graph: from each
@@ -165,6 +185,15 @@ moduleBindings :: (ModuleName.Canonical, Core.Module) -> [(Core.QualName, Core.B
 moduleBindings (home, m) =
   [(Core.QualName home (Core._binderName (Core._bindBinder b)), b) | b <- Core._moduleDefs m]
 
+-- | A port, under the name it defines, with its module beside it — a backend
+-- registering one needs the module for nothing but the record it builds, and
+-- carrying it here saves every consumer a second lookup.
+modulePorts :: (ModuleName.Canonical, Core.Module) -> [(Core.QualName, (ModuleName.Canonical, Core.Port))]
+modulePorts (home, m) =
+  [ (Core.QualName home (Core._binderName (Core._portBinder p)), (home, p))
+  | p <- Core._modulePorts m
+  ]
+
 moduleCtors :: (ModuleName.Canonical, Core.Module) -> [(Core.QualName, Core.QualName)]
 moduleCtors (_, m) =
   [(Core._ctorName c, Core._dataName d) | d <- Core._moduleData m, c <- Core._dataCtors d]
@@ -176,12 +205,12 @@ moduleDatas (_, m) =
 -- | Breadth-first from the roots. A name with no binding is not followed; it is
 -- reported by 'missing' instead.
 walk ::
-  Map Core.QualName Core.Bind ->
+  Set Core.QualName ->
   Map Core.QualName Refs ->
   Set Core.QualName ->
   [Core.QualName] ->
   Set Core.QualName
-walk defs refs seen frontier =
+walk defined refs seen frontier =
   case frontier of
     [] -> seen
     _ ->
@@ -190,8 +219,8 @@ walk defs refs seen frontier =
               [ maybe Set.empty _refGlobals (Map.lookup q refs)
               | q <- frontier
               ]
-          fresh = Set.filter (\q -> not (Set.member q seen) && Map.member q defs) next
-       in walk defs refs (Set.union seen fresh) (Set.toAscList fresh)
+          fresh = Set.filter (\q -> not (Set.member q seen) && Set.member q defined) next
+       in walk defined refs (Set.union seen fresh) (Set.toAscList fresh)
 
 -- ORDER
 
@@ -202,23 +231,23 @@ walk defs refs seen frontier =
 -- order, the least-named ready group first, each group's members by name. A
 -- definition therefore follows everything it uses, and the result is
 -- reproducible from that description alone.
-ordered :: Map Core.QualName Core.Bind -> Map Core.QualName (Set Core.QualName) -> [[Core.QualName]]
-ordered defs deps = Order.groups (Map.keys defs) deps
+ordered :: [Core.QualName] -> Map Core.QualName (Set Core.QualName) -> [[Core.QualName]]
+ordered defined deps = Order.groups defined deps
 
 -- MISSING
 
 -- | A root with no binding is missing too, and names itself as the user: the
 -- alternative is a program that quietly has no entry point.
 missing ::
-  Map Core.QualName Core.Bind ->
+  Set Core.QualName ->
   Map Core.QualName Core.QualName ->
   Map Core.QualName Core.DataDecl ->
   [Core.QualName] ->
   Map Core.QualName Refs ->
   [Missing]
-missing defs ctorOwner datas roots reachedRefs =
+missing defined ctorOwner datas roots reachedRefs =
   let undefined_ target =
-        not (Map.member target defs)
+        not (Set.member target defined)
           && not (Map.member target ctorOwner)
           && not (Map.member target datas)
 
@@ -269,6 +298,11 @@ render p =
         [ "  " <> B.stringUtf8 (ModuleName.toChars raw) <> " " <> managerKind m <> " " <> B.stringUtf8 (List.intercalate ", " (map qualToChars (managerImpl m))) <> "\n"
         | (ModuleName.Canonical _ raw, m) <- _progManagers p
         ],
+      "ports " <> int (length (_progPorts p)) <> "\n",
+      mconcat
+        [ "  " <> B.stringUtf8 (ModuleName.toChars raw) <> "." <> B.stringUtf8 (Name.toChars (Core._binderName (Core._portBinder port))) <> " " <> portFlow port <> "\n"
+        | (ModuleName.Canonical _ raw, port) <- _progPorts p
+        ],
       "missing " <> int (length (_progMissing p)) <> "\n",
       mconcat
         [ "  " <> kind (_missingKind m) <> " " <> qualB (_missingName m) <> " <- " <> qualB (_missingUsedBy m) <> "\n"
@@ -282,6 +316,19 @@ render p =
         MissingKernel -> "kernel"
         MissingDebug -> "debug "
         MissingValue -> "value "
+
+-- | Which way a port's payload crosses, and whether it crosses as bytes: the
+-- two things a reader of the summary would otherwise have to open the Core to
+-- find.
+portFlow :: Core.Port -> B.Builder
+portFlow (Core.Port _ flow) =
+  case flow of
+    Core.PortOut c -> "out " <> bytes c
+    Core.PortIn c -> "in " <> bytes c
+    Core.PortTask input output ->
+      "task " <> maybe "()" bytes input <> " -> " <> bytes output
+  where
+    bytes c = if Core._convBytes c then "bytes" else "json"
 
 managerKind :: Core.Manager -> B.Builder
 managerKind m =

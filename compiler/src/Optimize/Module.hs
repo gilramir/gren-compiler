@@ -96,23 +96,38 @@ addPort home name port_ graph =
   case port_ of
     Can.Incoming _ payloadType _ ->
       let (deps, fields, decoder) = Names.run (Port.toDecoder payloadType)
-          node = Opt.PortIncoming (Port.isBytes payloadType) decoder deps
+          node = Opt.PortIncoming (Port.isBytes payloadType) decoder (withPlatform deps)
        in addToGraph (Opt.Global home name) node fields graph
     Can.Outgoing _ payloadType _ ->
       let (deps, fields, encoder) = Names.run (Port.toEncoder payloadType)
-          node = Opt.PortOutgoing (Port.isBytes payloadType) encoder deps
+          node = Opt.PortOutgoing (Port.isBytes payloadType) encoder (withPlatform deps)
        in addToGraph (Opt.Global home name) node fields graph
     Can.Task _ Nothing payloadType _ ->
       let (deps, fields, decoder) = Names.run (Port.toDecoder payloadType)
-          node = Opt.PortTask False Nothing (Port.isBytes payloadType) decoder deps
+          node = Opt.PortTask False Nothing (Port.isBytes payloadType) decoder (withPlatform deps)
        in addToGraph (Opt.Global home name) node fields graph
     Can.Task _ (Just inputType) payloadType _ ->
       let (payloadDeps, payloadFields, decoder) = Names.run (Port.toDecoder payloadType)
           (inputDeps, inputFields, encoder) = Names.run (Port.toEncoder inputType)
           deps = Set.union payloadDeps inputDeps
           fields = Map.unionWith (+) payloadFields inputFields
-          node = Opt.PortTask (Port.isBytes inputType) (Just encoder) (Port.isBytes payloadType) decoder deps
+          node = Opt.PortTask (Port.isBytes inputType) (Just encoder) (Port.isBytes payloadType) decoder (withPlatform deps)
        in addToGraph (Opt.Global home name) node fields graph
+
+-- | A port's definition calls @_Platform_incomingPort@, @_Platform_outgoingPort@
+-- or @_Platform_taskPort@, every one of which reads and writes
+-- @_Platform_effectManagers@ or @_Platform_taskPorts@ — module-level @var@s in
+-- the same kernel chunk. So the chunk has to be emitted first, and a
+-- dependency on it is what says so.
+--
+-- Stock 0.6.6 records only the converter's dependencies here, which leaves the
+-- order to whatever else happens to pull the chunk in. When nothing does,
+-- @Generate.JavaScript@ emits the port's @var@ above @var
+-- _Platform_effectManagers = {}@ and the program dies at load with
+-- @Cannot read properties of undefined@ — see
+-- @docs/upstream/compiler-a-port-can-be-emitted-before-its-kernel.md@.
+withPlatform :: Set.Set Opt.Global -> Set.Set Opt.Global
+withPlatform = Set.insert (Opt.toKernelGlobal Name.platform)
 
 -- HELPER
 

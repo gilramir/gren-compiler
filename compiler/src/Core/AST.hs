@@ -39,6 +39,9 @@ module Core.AST
     Origin (..),
     Manager (..),
     ManagerKind (..),
+    Port (..),
+    PortFlow (..),
+    Converter (..),
 
     -- * Names
     QualName (..),
@@ -242,7 +245,9 @@ data Module = Module
     _moduleDefsRec :: ![[QualName]],
     _moduleExports :: ![QualName],
     -- | The @effect module@ manager this module declares, if it declares one.
-    _moduleManager :: !(Maybe Manager)
+    _moduleManager :: !(Maybe Manager),
+    -- | The @port@s this module declares, by name (C18).
+    _modulePorts :: ![Port]
   }
   deriving (Eq, Show)
 
@@ -279,6 +284,60 @@ data ManagerKind
   = ManagerCmd
   | ManagerSub
   | ManagerFx
+  deriving (Eq, Show)
+
+-- | A @port@, as a declaration rather than as an expression (C18, D84).
+--
+-- A port /defines a name/ — unlike a manager, a program refers to it, so
+-- ordinary reachability keeps it alive and no extra rule is needed. What it
+-- does not define is a value any Gren expression computes: the runtime's port
+-- constructor takes the wire name, the converter and the flags in its own
+-- calling convention, and hands back the @Cmd@, @Sub@ or @Task@ the binding
+-- stands for. So Core names the pieces and each backend assembles the call its
+-- runtime wants, exactly as it does for a 'Manager'.
+--
+-- The pieces that /are/ ordinary Core are the converters, and they are the
+-- whole of what @Optimize.Port@ generates: a JSON encoder or decoder built
+-- from the payload type out of @Json.Encode@, @Json.Decode@ and @Maybe@.
+--
+-- @portable-core.md@ P3 rebuilds the port mechanism on @ffi.md@ F4 at M1b and
+-- deletes this with it.
+data Port = Port
+  { -- | The binding a program refers to. Its name is also the wire name the
+    -- runtime registers the port under; they are the same name in the source
+    -- and there is no second one to carry.
+    _portBinder :: !Binder,
+    _portFlow :: !PortFlow
+  }
+  deriving (Eq, Show)
+
+-- | Which way a payload crosses, and what converts it.
+data PortFlow
+  = -- | @port foo : Payload -> Cmd msg@. The converter encodes.
+    PortOut !Converter
+  | -- | @port foo : (Payload -> msg) -> Sub msg@. The converter decodes.
+    PortIn !Converter
+  | -- | @port foo : Input -> Task x Payload@, or @port foo : Task x Payload@
+    -- with no input at all. The 'Maybe' is that distinction, and it is the one
+    -- place a runtime's own spelling of "absent" would otherwise have had to
+    -- be written into Core — the JS runtime's is a @null@ in the argument
+    -- position, which is not a Gren value and not something Core can say.
+    PortTask !(Maybe Converter) !Converter
+  deriving (Eq, Show)
+
+-- | How one payload crosses the boundary.
+data Converter = Converter
+  { -- | The payload is @Bytes@, and the runtime moves it whole rather than
+    -- through JSON.
+    _convBytes :: !Bool,
+    -- | The encoder — @payload -> Json.Encode.Value@ — or the decoder —
+    -- @Json.Decode.Decoder payload@ — as ordinary Core.
+    --
+    -- @Basics.identity@ when '_convBytes', which is what "no conversion" is
+    -- as an expression, and not dead weight: a @Bytes@ /outgoing/ port really
+    -- does apply it before taking the payload's buffer.
+    _convCode :: !Expr
+  }
   deriving (Eq, Show)
 
 -- EXPRESSIONS
