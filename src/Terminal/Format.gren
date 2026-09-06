@@ -1,81 +1,446 @@
 module Terminal.Format exposing
     ( Config
+    , Sources(..)
     , Error(..)
     , run
     , prettifyError
     )
 
+{-| `geng fmt` — the canonical formatter, in the binary (D62, `syntax.md` S4).
 
-import Stream
-import Stream.Log
-import Task exposing (Task)
+The formatting itself is `gilramir/gren-format-lib`, a Gren package depending on
+the same `gren-lang/compiler-common` this front-end already depends on. This
+module is the subcommand around it: which files, read them, write them back, and
+say what happened. `docs/m1a-fmt.md` §F9 is the brief.
+
+Three things this deliberately does not have.
+
+  - **No formatting options.** D62 says canonical and zero-option, and the point
+    of a canonical format is that there is nothing to configure. `--check` is
+    not an exception: it changes whether files are written, not what formatted
+    source looks like.
+
+  - **No unused-import removal** (D87). The standalone `gren-format` has
+    `--remove-unused-imports`; it edits the program rather than its layout, and
+    that is Go's `gofmt`/`goimports` line. `geng fmt` is `gofmt`.
+
+  - **No enforcement.** `geng make` does not care whether a file is formatted.
+    A formatter bug must not be a compiler bug (S4).
+
+The correctness argument is the one `DESIGN.md` §8 item 3 asks for and
+`harness/fmt.py` runs: the output reparses, its AST compares equal to the input's
+(`Compiler.Ast.Compare`), and formatting it again is a fixed point. Any of the
+three failing is an error, not a warning — a formatter that is unsure has no
+business writing the file.
+-}
+
 import Bytes exposing (Bytes)
+import Char
+import Cli.PrettyPrinter as PP
+import Cli.Report as Report exposing (Report)
+import Compiler.Ast.Compare as AstCompare
+import Compiler.Ast.Source as Src
+import Compiler.Outline as Outline exposing (Outline)
+import Compiler.Parse.Context as Context
+import Compiler.Parse.Module as PM
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
-import Compiler.Outline as Outline exposing (Outline)
-import Cli.Report as Report exposing (Report)
-import Terminal.PackageInstall as PackageInstall
-import Cli.PrettyPrinter as PP
-import Compiler.Parse.Module as PM
-import Compiler.Parse.Context as Context
+import Formatter.Logical exposing (makeLogicalPrintingTree)
+import Formatter.Render exposing (renderRoot)
+import Stream
+import Stream.Log
 import String.Parser.Advanced as Parser
+import Task exposing (Task)
+import Terminal.PackageInstall as PackageInstall
 
 
 type alias Config =
     { stdout : Stream.Writable Bytes
     , fsPermission : FileSystem.Permission
     , pathToString : Path -> String
-    , projectPath : Path
-    , outline : Outline
+    , sources : Sources
+    , check : Bool
     }
+
+
+{-| Where the files come from, as one field rather than two, so that neither
+"both" nor "neither" is a state this module has to have an opinion about.
+
+`Project` needs a `gren.json` and `Paths` does not: formatting a file someone
+named is not a question about a project, and requiring one would put the
+formatter out of reach of every format-on-save hook, which runs on one file in
+whatever directory it happens to be in.
+-}
+type Sources
+    = Project { projectPath : Path, outline : Outline }
+    | Paths (Array Path)
 
 
 type Error
     = FailedToFindSources Outline.FindSourceFilesError
     | NothingToFormat
+    | ReadFailure { path : Path, error : String }
     | ParseFailure { path : Path, error : String }
+    | PrettyPrintFailure { path : Path, error : String }
+    | ReparseFailure { path : Path, error : String }
+    | AstMismatchAfterFormat { path : Path, explanation : String }
+    | NotIdempotent { path : Path }
+    | OverwriteFailure { path : Path, error : String }
+    | NotFormatted (Array String)
+
+
+
+-- WHICH FILES
+
+
+{-| The files this run is about.
+
+With no path arguments that is the project, read out of `gren.json`'s source
+directories — the same list `geng make` compiles. With path arguments it is
+those paths: a named file whatever it is called, and a directory's Gren sources
+however deep they are.
+
+Directories recurse and there is no flag for it, because `gofmt dir` recurses
+and a formatter with a `--recurse` would have an option about which files it
+touched. A symlink is passed over and said so: writing one either replaces the
+link with a copy or reformats a file somewhere else in the tree, and a path
+argument is not permission to do either.
+-}
+gather : Config -> Task Error (Array { path : Path, display : String })
+gather config =
+    when config.sources is
+        Project { projectPath, outline } ->
+            Outline.findSourceFiles config.fsPermission outline projectPath
+                |> Task.mapError FailedToFindSources
+                |> Task.map
+                    (\files ->
+                        files
+                            -- `findSourceFiles` returns kernel JavaScript too.
+                            |> Array.keepIf (\file -> file.path.extension == "gren")
+                            |> Array.map
+                                (\file ->
+                                    { path = file.path
+                                    , display = config.pathToString (pathRelativeFrom projectPath file.path)
+                                    }
+                                )
+                    )
+
+        Paths paths ->
+            Array.foldl
+                (\path task ->
+                    task
+                        |> Task.andThen
+                            (\found ->
+                                expandPath config path
+                                    |> Task.map (\deeper -> found ++ deeper)
+                            )
+                )
+                (Task.succeed [])
+                paths
+                |> Task.map
+                    (Array.map
+                        (\path -> { path = path, display = Path.toPosixString path })
+                    )
+
+
+expandPath : Config -> Path -> Task Error (Array Path)
+expandPath config path =
+    FileSystem.metadata config.fsPermission { resolveLink = False } path
+        |> Task.mapError (\fsErr -> ReadFailure { path = path, error = FileSystem.errorToString fsErr })
+        |> Task.andThen
+            (\meta ->
+                when meta.entityType is
+                    FileSystem.Directory ->
+                        expandDirectory config path
+
+                    FileSystem.Symlink ->
+                        Stream.Log.line config.stdout (Path.toPosixString path ++ ": skipped (symbolic link)")
+                            |> Task.map (\_ -> [])
+
+                    _ ->
+                        Task.succeed [ path ]
+            )
+
+
+expandDirectory : Config -> Path -> Task Error (Array Path)
+expandDirectory config dir =
+    FileSystem.listDirectory config.fsPermission dir
+        |> Task.mapError (\fsErr -> ReadFailure { path = dir, error = FileSystem.errorToString fsErr })
+        |> Task.andThen
+            (\entries ->
+                let
+                    files =
+                        entries
+                            |> Array.keepIf (\entry -> entry.entityType == FileSystem.File)
+                            |> Array.keepIf (\entry -> entry.path.extension == "gren")
+                            |> Array.keepIf (\entry -> isGrenSourceName entry.path.filename)
+                            |> Array.map (\entry -> Path.prepend dir entry.path)
+
+                    subdirectories =
+                        entries
+                            |> Array.keepIf (\entry -> entry.entityType == FileSystem.Directory)
+                            |> Array.keepIf (\entry -> isWalkableDirectory entry.path.filename)
+                            |> Array.map (\entry -> Path.prepend dir entry.path)
+                in
+                Array.foldl
+                    (\subdirectory task ->
+                        task
+                            |> Task.andThen
+                                (\found ->
+                                    expandDirectory config subdirectory
+                                        |> Task.map (\deeper -> found ++ deeper)
+                                )
+                    )
+                    (Task.succeed files)
+                    subdirectories
+            )
+
+
+{-| Not into a dotted directory — `.git`, `.gren`, `.devbox` hold version
+control and build state — and not into `node_modules` or `gren_packages`, which
+hold *other people's* source. Without that last pair, `geng fmt .` in a project
+root would rewrite every dependency the project has installed.
+-}
+isWalkableDirectory : String -> Bool
+isWalkableDirectory name =
+    not (String.startsWith "." name)
+        && name /= "node_modules"
+        && name /= "gren_packages"
+
+
+{-| A module name is capitalized, so a walked `.gren` file whose name is not is
+not a module. A file named on the command line is formatted whatever it is
+called: naming it is already the intent this filter has to infer.
+-}
+isGrenSourceName : String -> Bool
+isGrenSourceName name =
+    when String.popFirst name is
+        Just { first } ->
+            Char.isUpper first
+
+        Nothing ->
+            False
+
+
+
+-- FORMATTING ONE FILE
+
+
+{-| Both forms of a file's text, because two different questions get asked of it.
+
+`source` has CRLF normalized to `\n` and is what gets parsed. `raw` is exactly
+the bytes on disk, and is only for asking "is this file already, byte for byte,
+what we would write?" — a question about the disk that cannot be answered from
+text the line endings have been scrubbed out of. A file whose only defect is its
+CRLFs is unformatted, and comparing against normalized text says it is not.
+-}
+readSource : Config -> Path -> Task Error { raw : String, source : String }
+readSource config path =
+    FileSystem.readFile config.fsPermission path
+        |> Task.mapError (\fsErr -> ReadFailure { path = path, error = FileSystem.errorToString fsErr })
+        |> Task.andThen
+            (\bytes ->
+                when Bytes.toString bytes is
+                    Nothing ->
+                        Task.fail (ReadFailure { path = path, error = "File content is not valid UTF-8" })
+
+                    Just raw ->
+                        Task.succeed
+                            { raw = raw
+                            , source = String.replace "\r\n" "\n" raw
+                            }
+            )
+
+
+parseModule : ({ path : Path, error : String } -> Error) -> Path -> String -> Result Error { ast : Src.Module, payload : Context.Context }
+parseModule wrapError path source =
+    let
+        parser =
+            Parser.succeed (\ast payload -> { ast = ast, payload = payload })
+                |> Parser.keep PM.parser
+                |> Parser.keep Parser.getPayload
+    in
+    when Parser.run parser Context.empty source is
+        Err errs ->
+            Err (wrapError { path = path, error = PM.errorsToString source errs })
+
+        Ok result ->
+            Ok result
+
+
+renderModule : Path -> Src.Module -> Context.Context -> Result Error String
+renderModule path module_ context =
+    let
+        wrapErr errString =
+            PrettyPrintFailure { path = path, error = errString }
+    in
+    makeLogicalPrintingTree module_ context
+        |> Result.mapError wrapErr
+        |> Result.andThen (\lpt -> renderRoot lpt |> Result.mapError wrapErr)
+
+
+{-| parse → render → reparse → AST compare → render again → fixed point.
+
+The last three are the check `DESIGN.md` §8 item 3 asks for, done on every file
+on every run rather than in a test suite: the formatter proves it did not change
+the program each time it formats one.
+-}
+formatSource : Path -> String -> Result Error String
+formatSource path source =
+    parseModule ParseFailure path source
+        |> Result.andThen
+            (\first ->
+                renderModule path first.ast first.payload
+                    |> Result.andThen
+                        (\pretty1 ->
+                            parseModule ReparseFailure path pretty1
+                                |> Result.andThen
+                                    (\second ->
+                                        AstCompare.compareModules first.ast second.ast
+                                            |> Result.mapError
+                                                (\explanation ->
+                                                    AstMismatchAfterFormat { path = path, explanation = explanation }
+                                                )
+                                            |> Result.andThen (\_ -> renderModule path second.ast second.payload)
+                                            |> Result.andThen
+                                                (\pretty2 ->
+                                                    if pretty1 == pretty2 then
+                                                        Ok pretty1
+
+                                                    else
+                                                        Err (NotIdempotent { path = path })
+                                                )
+                                    )
+                        )
+            )
+
+
+{-| Is what is on disk already, byte for byte, what formatting would write?
+-}
+isAlreadyFormatted : { raw : String, pretty : String } -> Bool
+isAlreadyFormatted { raw, pretty } =
+    pretty ++ "\n" == raw
+
+
+{-| Write to `<file>.tmp` and rename onto the original, so an interrupted run
+leaves the source file as it was rather than half of it.
+-}
+atomicWrite : Config -> Path -> String -> Task Error {}
+atomicWrite config path pretty =
+    let
+        tmpPath =
+            { path | extension = "tmp" }
+    in
+    FileSystem.writeFile config.fsPermission (Bytes.fromString (pretty ++ "\n")) tmpPath
+        |> Task.mapError (\fsErr -> OverwriteFailure { path = path, error = FileSystem.errorToString fsErr })
+        |> Task.andThen
+            (\_ ->
+                FileSystem.move config.fsPermission path tmpPath
+                    |> Task.mapError (\fsErr -> OverwriteFailure { path = path, error = FileSystem.errorToString fsErr })
+            )
+        |> Task.map (\_ -> {})
+
+
+
+-- THE RUN
+
+
+type alias Tally =
+    { rewritten : Array String
+    , skipped : Int
+    }
 
 
 run : Config -> Task Error String
-run { fsPermission, pathToString, projectPath, outline } =
-    Outline.findSourceFiles fsPermission outline projectPath
-        |> Task.mapError FailedToFindSources
+run config =
+    gather config
         |> Task.andThen
             (\files ->
-                let
-                    parseFn { path, source } previous =
-                        Task.andThen
-                            (\previousFiles ->
-                                if path.extension /= "gren" then
-                                    -- Probably kernel code
-                                    Task.succeed previousFiles
-
-                                else
-                                    let
-                                        relPath =
-                                            pathRelativeFrom projectPath path
-                                    in
-                                    when Parser.run PM.parser Context.empty source is
-                                        Ok _ -> 
-                                            Task.succeed <|
-                                                Array.pushLast (pathToString relPath) previousFiles
-
-                                        Err errs ->
-                                            Task.fail <|
-                                                ParseFailure
-                                                    { path = relPath
-                                                    , error = PM.errorsToString source errs 
-                                                    }
-                            )
-                            previous
-                in
                 if files == [] then
                     Task.fail NothingToFormat
 
                 else
-                    Array.foldl parseFn (Task.succeed []) files
-                        |> Task.map (String.join "\n")
+                    Array.foldl (formatOne config) (Task.succeed { rewritten = [], skipped = 0 }) files
+                        |> Task.andThen (summarize config)
             )
+
+
+formatOne : Config -> { path : Path, display : String } -> Task Error Tally -> Task Error Tally
+formatOne config file previous =
+    previous
+        |> Task.andThen
+            (\tally ->
+                readSource config file.path
+                    |> Task.andThen
+                        (\{ raw, source } ->
+                            when formatSource file.path source is
+                                Err err ->
+                                    Task.fail err
+
+                                Ok pretty ->
+                                    if isAlreadyFormatted { raw = raw, pretty = pretty } then
+                                        Task.succeed { tally | skipped = tally.skipped + 1 }
+
+                                    else if config.check then
+                                        -- `--check` reports; it does not write.
+                                        Task.succeed
+                                            { tally | rewritten = Array.pushLast file.display tally.rewritten }
+
+                                    else
+                                        atomicWrite config file.path pretty
+                                            |> Task.map
+                                                (\_ ->
+                                                    { tally | rewritten = Array.pushLast file.display tally.rewritten }
+                                                )
+                        )
+            )
+
+
+{-| What the run prints, and — under `--check` — whether it failed.
+
+`--check` is the CI mode S4 asks for, so an unformatted file has to be an exit
+code and not a sentence on stdout that a green build prints anyway.
+-}
+summarize : Config -> Tally -> Task Error String
+summarize config { rewritten, skipped } =
+    if config.check then
+        if rewritten == [] then
+            Task.succeed (fileCount skipped ++ " already formatted.")
+
+        else
+            Task.fail (NotFormatted rewritten)
+
+    else
+        let
+            paths =
+                if Array.length rewritten > 0 then
+                    String.join "\n" rewritten ++ "\n"
+
+                else
+                    ""
+        in
+        Task.succeed
+            (paths
+                ++ fileCount (Array.length rewritten)
+                ++ " reformatted, "
+                ++ fileCount skipped
+                ++ " already formatted."
+            )
+
+
+fileCount : Int -> String
+fileCount n =
+    String.fromInt n
+        ++ (if n == 1 then
+                " file"
+
+            else
+                " files"
+           )
+
+
+
+-- PATHS
 
 
 -- TODO: add to gren-lang/node?
@@ -110,6 +475,10 @@ findCommonPrefix count left right =
             count
 
 
+
+-- REPORTS
+
+
 prettifyError : Error -> Report
 prettifyError error =
     when error is
@@ -131,12 +500,87 @@ prettifyError error =
             Report.create
                 "NOTHING TO FORMAT"
                 Nothing
-                ( PP.words "I can't seem to find any files in this project."
-                )
+                (PP.words "I can't seem to find any files to format.")
+
+        ReadFailure { path, error = message } ->
+            Report.create
+                "COULD NOT READ FILE"
+                (Just path)
+                (PP.words message)
 
         ParseFailure { path, error = message } ->
             Report.create
                 "FAILED TO PARSE"
                 (Just path)
-                ( PP.verticalBlock (Array.map PP.text (String.split "\n" message))
+                (PP.verticalBlock (Array.map PP.text (String.split "\n" message)))
+
+        PrettyPrintFailure { path, error = message } ->
+            Report.create
+                "FAILED TO FORMAT"
+                (Just path)
+                (PP.verticalBlock
+                    [ PP.words "I parsed this file but could not lay it out again:"
+                    , PP.empty
+                    , PP.words message
+                        |> PP.indent
+                    , PP.empty
+                    , PP.words "This is a bug in the formatter. The file has not been changed."
+                    ]
+                )
+
+        ReparseFailure { path, error = message } ->
+            Report.create
+                "FORMATTED OUTPUT DOES NOT PARSE"
+                (Just path)
+                (PP.verticalBlock
+                    [ PP.words "I formatted this file and then could not read back what I had written:"
+                    , PP.empty
+                    , PP.verticalBlock (Array.map PP.text (String.split "\n" message))
+                        |> PP.indent
+                    , PP.empty
+                    , PP.words "This is a bug in the formatter. The file has not been changed."
+                    ]
+                )
+
+        AstMismatchAfterFormat { path, explanation } ->
+            Report.create
+                "FORMATTING WOULD CHANGE THIS PROGRAM"
+                (Just path)
+                (PP.verticalBlock
+                    [ PP.words "I formatted this file, read the result back, and it is not the same program:"
+                    , PP.empty
+                    , PP.words explanation
+                        |> PP.indent
+                    , PP.empty
+                    , PP.words "This is a bug in the formatter. The file has not been changed."
+                    ]
+                )
+
+        NotIdempotent { path } ->
+            Report.create
+                "FORMATTING IS NOT STABLE HERE"
+                (Just path)
+                (PP.verticalBlock
+                    [ PP.words "Formatting this file gives one result, and formatting that result gives another."
+                    , PP.empty
+                    , PP.words "This is a bug in the formatter. The file has not been changed."
+                    ]
+                )
+
+        OverwriteFailure { path, error = message } ->
+            Report.create
+                "COULD NOT WRITE FILE"
+                (Just path)
+                (PP.words message)
+
+        NotFormatted paths ->
+            Report.create
+                "THESE FILES ARE NOT FORMATTED"
+                Nothing
+                (PP.verticalBlock
+                    [ PP.verticalBlock (Array.map PP.text paths)
+                        |> PP.indent
+                    , PP.empty
+                    , PP.words "Run gren fmt to format them."
+                    ]
                 )

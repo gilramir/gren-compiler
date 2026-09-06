@@ -1,6 +1,7 @@
 module Terminal.Parser exposing
     ( Command (..)
     , MakeFlags
+    , FormatFlags
     , DiffArgs (..)
     , parser
     )
@@ -31,7 +32,7 @@ type Command
     | PackageDiff DiffArgs
     | Paths Paths.Options
     | Run RunOptions
-    | Format
+    | Format FormatFlags
 
 
 type alias InitFlags =
@@ -51,6 +52,12 @@ type alias MakeFlags =
     , output : Maybe Compiler.Backend.MakeOutput
     , report : Maybe {}
     , entryPoints : Array ModuleName
+    }
+
+
+type alias FormatFlags =
+    { paths : Array Path
+    , check : Bool
     }
 
 
@@ -204,20 +211,44 @@ parser =
                 , builder =
                     \_args flags -> Paths flags
                 }
-            -- |> Cli.Parser.withCommand
-            --     { word = "format"
-            --     , arguments =
-            --         Cli.Parser.noArgs
-            --     , flags =
-            --         Cli.Parser.noFlags
-            --     , commonDescription = Nothing
-            --     , summary =
-            --         "Format Gren source code."
-            --     , example =
-            --         PP.empty
-            --     , builder =
-            --         \_args _flags -> Format
-            --     }
+            |> Cli.Parser.withCommand
+                { word = "fmt"
+                , arguments =
+                    Cli.Parser.zeroOrMoreArgs Cli.Parser.pathParser
+                , flags =
+                    Cli.Parser.initFlags
+                        (\check ->
+                            { check = check
+                            }
+                        )
+                        |> Cli.Parser.toggle "check" "Do not write anything. Exit with an error listing the files that are not formatted, which is what CI wants."
+                , commonDescription = Nothing
+                , summary =
+                    "Format Gren source code."
+                , example =
+                    PP.verticalBlock
+                        [ PP.words
+                            """
+                            There is one format and there is nothing to configure. With no arguments
+                            this formats every source file in the project; give it files or
+                            directories to format those instead, and a directory is walked all the
+                            way down.
+                            """
+                        , PP.empty
+                        , PP.words "gren fmt --check"
+                            |> PP.indent
+                            |> PP.color PP.Green
+                        , PP.empty
+                        , PP.words
+                            """
+                            This changes nothing and fails if anything would have changed. Compiling
+                            does not care whether your code is formatted; this is how you make CI
+                            care.
+                            """
+                        ]
+                , builder =
+                    \args flags -> Format { paths = args, check = flags.check }
+                }
             |> Cli.Parser.withCommand
                 { word = "make"
                 , arguments =

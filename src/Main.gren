@@ -861,17 +861,25 @@ parseUserArgs model compilerPath =
                         |> Task.onError endWithErrorString
                         |> Task.perform RunCmd
 
-                CliParser.Format ->
-                    Terminal.PackageInstall.readProjectOutline model.fsPermission
-                        |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
+                CliParser.Format formatFlags ->
+                    -- Only the no-argument form is a question about a project;
+                    -- `gren fmt Some/File.gren` must work wherever the file is.
+                    (if formatFlags.paths == [] then
+                        Terminal.PackageInstall.readProjectOutline model.fsPermission
+                            |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
+                            |> Task.map Terminal.Format.Project
+
+                     else
+                        Task.succeed (Terminal.Format.Paths formatFlags.paths)
+                    )
                         |> Task.andThen
-                            (\{ projectPath, outline } ->
+                            (\sources ->
                                 Terminal.Format.run
                                     { stdout = model.stdout
                                     , fsPermission = model.fsPermission
-                                    , pathToString = model.pathToString                        
-                                    , projectPath = projectPath
-                                    , outline = outline
+                                    , pathToString = model.pathToString
+                                    , sources = sources
+                                    , check = formatFlags.check
                                     }
                                     |> Task.mapError Terminal.Format.prettifyError
                             )
