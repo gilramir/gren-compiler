@@ -18,10 +18,12 @@
 -- is a fold over '_progLinked' and nothing else.
 module Generate.CoreJS
   ( generate,
+    generateForRepl,
     shortenFieldNames,
   )
 where
 
+import AST.Canonical qualified as Can
 import Core.AST qualified as Core
 import Core.Program (Linked (..), Program (..))
 import Data.ByteString.Builder qualified as B
@@ -34,7 +36,7 @@ import Data.Name qualified as Name
 import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
 import Generate.CoreJS.Expression qualified as Expr
-import Generate.JavaScript (GeneratedResult (..))
+import Generate.JavaScript (GeneratedResult (..), printForRepl)
 import Generate.JavaScript.Builder qualified as JS
 import Generate.JavaScript.Functions qualified as Functions
 import Generate.JavaScript.Name qualified as JsName
@@ -43,6 +45,7 @@ import Generate.SourceMap qualified as SourceMap
 import Gren.Kernel qualified as K
 import Gren.ModuleName qualified as ModuleName
 import Reporting.Annotation qualified as A
+import Reporting.Render.Type.Localizer qualified as L
 
 -- ENTRY
 
@@ -69,6 +72,37 @@ generate mode program kernels =
               <> "}(this.module ? this.module.exports : this));",
           _sourceMap = SourceMap.wrap (JS._mappings builder)
         }
+
+-- | One REPL entry, as a script that prints the value and its type (§J17).
+--
+-- The same fold over the link order that 'generate' performs, with the two ends
+-- swapped for the REPL's: no module wrapper, because the script is piped
+-- straight into @node@ and nothing imports it; and no @_Platform_export@,
+-- because a REPL entry has no @main@. What replaces the export is
+-- `Generate.JavaScript.printForRepl`, which both REPLs share.
+--
+-- The value being printed is a root, and so is @Debug.toString@ — not because
+-- the printer calls it (it calls kernel @Debug@\'s @_Debug_toAnsiString@
+-- directly) but because that binding is what reaches the kernel module the
+-- function is in. Rooting the kernel module instead would work here, where the
+-- printer runs last and no order can be wrong, but it would make the two REPLs
+-- reach different sets and a differential comparison between them worth less.
+-- 'Generate.replRoots' is where that choice is written down.
+generateForRepl :: Bool -> L.Localizer -> Program -> Map Name [K.Chunk] -> ModuleName.Canonical -> Name -> Can.Annotation -> B.Builder
+generateForRepl ansi localizer program kernels home name (Can.Forall _ tipe) =
+  let mode = Mode.Dev
+      env = envFor mode program
+      started =
+        List.foldl'
+          (flip JS.stmtToBuilder)
+          (JS.emptyBuilder 0)
+          (constructors env program)
+      linked = List.foldl' (item env kernels) started (_progLinked program)
+      builder = List.foldl' (flip JS.stmtToBuilder) linked (managers program)
+   in "process.on('uncaughtException', function(err) { process.stderr.write(err.toString() + '\\n'); process.exit(1); });"
+        <> Functions.functions
+        <> JS._code builder
+        <> printForRepl ansi localizer home name tipe
 
 prelude :: B.Builder
 prelude =

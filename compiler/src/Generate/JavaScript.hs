@@ -4,6 +4,7 @@ module Generate.JavaScript
   ( GeneratedResult (..),
     generate,
     generateForRepl,
+    printForRepl,
   )
 where
 
@@ -29,7 +30,7 @@ import Reporting.Annotation qualified as A
 import Reporting.Doc qualified as D
 import Reporting.Render.Type qualified as RT
 import Reporting.Render.Type.Localizer qualified as L
-import Prelude hiding (cycle, print)
+import Prelude hiding (cycle)
 
 -- GENERATE
 
@@ -107,10 +108,16 @@ generateForRepl ansi localizer (Opt.GlobalGraph graph _) home name (Can.Forall _
    in "process.on('uncaughtException', function(err) { process.stderr.write(err.toString() + '\\n'); process.exit(1); });"
         <> Functions.functions
         <> stateToBuilder evalState
-        <> print ansi localizer home name tipe
+        <> printForRepl ansi localizer home name tipe
 
-print :: Bool -> L.Localizer -> ModuleName.Canonical -> Name.Name -> Can.Type -> B.Builder
-print ansi localizer home name tipe =
+-- | The tail of a REPL script: print the value, then print its type.
+--
+-- Exported because it is the one part of 'generateForRepl' that is not a graph
+-- walk. `Generate.CoreJS.generateForRepl` emits the same tail after a linked
+-- Core program, and the two REPLs printing identically is only a claim if they
+-- share the code that does the printing (@docs/m1a-js-on-core.md@ §J17).
+printForRepl :: Bool -> L.Localizer -> ModuleName.Canonical -> Name.Name -> Can.Type -> B.Builder
+printForRepl ansi localizer home name tipe =
   let value = JsName.toBuilder (JsName.fromGlobal home name)
       toString = JsName.toBuilder (JsName.fromKernel Name.debug "toAnsiString")
       tipeDoc = RT.canToDoc localizer RT.None tipe

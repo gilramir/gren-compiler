@@ -303,12 +303,73 @@ dumpCore details artifacts kernels =
                       else coreRoots artifacts cores
                in B.writeFile file (Program.render (Program.link (backendFor kernels cores) cores roots))
 
+-- | One REPL entry, generated the same two ways @dev@ is (§J17).
+--
+-- The REPL was the last caller of 'loadObjects' that the Core-native path could
+-- not answer, and so the last reason @GENG_JS_NATIVE=1@ still needed the old
+-- pipeline\'s graph in the binary for something other than the differential
+-- targets. With @GENG_JS_NATIVE@ off it is stock: @Generate.JavaScript@ walks
+-- the graph from the value being printed.
+--
+-- @GENG_JS_FROM_CORE@ does /not/ apply here, and there is nothing to apply: that
+-- switch rebuilds an `AST.Optimized.GlobalGraph` out of Core so the old backend
+-- can walk it, and `Generate.FromCore` is handed a 'Build.Artifacts' the REPL
+-- does not have. The REPL has the two ends and not the middle.
 repl :: FilePath -> Details.Details -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
-repl root details ansi (Build.ReplArtifacts home modules localizer annotations) name =
+repl root details ansi artifacts@(Build.ReplArtifacts home modules localizer annotations) name =
   do
-    objects <- finalizeObjects =<< loadObjects root details modules
-    let graph = objectsToGlobalGraph objects
-    return $ JS.generateForRepl ansi localizer graph home name (annotations ! name)
+    kernels <- kernelChunks details
+    native <- linkReplCore details artifacts name kernels
+    case native of
+      Just program ->
+        return $ CoreJS.generateForRepl ansi localizer program kernels home name (annotations ! name)
+      Nothing ->
+        do
+          objects <- finalizeObjects =<< loadObjects root details modules
+          let graph = objectsToGlobalGraph objects
+          return $ JS.generateForRepl ansi localizer graph home name (annotations ! name)
+
+-- | 'linkCore' for a REPL entry, which differs from a program in its roots.
+--
+-- The modules are the REPL\'s own — the generated @Gren_Repl@ module and
+-- whatever it imports out of the project — plus the dependencies\' Core, exactly
+-- as 'programCore' assembles them for a build. A 'Build.Cached' module
+-- contributes nothing here for the reason 'programCore' gives.
+linkReplCore :: Details.Details -> Build.ReplArtifacts -> N.Name -> Map.Map N.Name [K.Chunk] -> Task (Maybe Program.Program)
+linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels
+  | not Dump.jsNative = return Nothing
+  | otherwise =
+      Task.io $
+        do
+          maybeDeps <- readMVar =<< Details.loadCores details
+          let deps = Maybe.fromMaybe Map.empty maybeDeps
+          let own =
+                Map.fromList
+                  [ (ModuleName.Canonical (ModuleName._package home) raw, core)
+                  | Build.Fresh raw _ _ core <- modules
+                  ]
+          let cores = Pass.run (Map.union own deps)
+          return (Just (Program.link (backendFor kernels cores) cores (replRoots home name)))
+
+-- | What a REPL entry reaches: the value being printed, and @Debug.toString@.
+--
+-- The second is @Generate.JavaScript.generateForRepl@\'s, kept name for name.
+-- Nothing generated calls @Debug.toString@ — the printer calls kernel @Debug@\'s
+-- @_Debug_toAnsiString@ straight — so what the root is for is the kernel module
+-- that function is in, which that binding refers to and nothing else does.
+--
+-- It is a Gren binding rather than the kernel module itself on purpose. §J13\'s
+-- rule is that a kernel module a /runtime/ enters through is an edge and not a
+-- root, because a root says a thing is reachable and says nothing about when;
+-- here the printer is appended after every linked item, so no order could be
+-- wrong. Keeping the same root as the old path is worth more: it is what makes
+-- the two REPLs reach the same set, and so makes comparing their output a test
+-- of the emitter rather than of two different programs.
+replRoots :: ModuleName.Canonical -> N.Name -> [Core.QualName]
+replRoots home name =
+  [ Core.QualName ModuleName.debug (N.fromChars "toString"),
+    Core.QualName home name
+  ]
 
 -- CHECK FOR DEBUG
 
