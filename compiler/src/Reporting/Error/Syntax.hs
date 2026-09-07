@@ -9,6 +9,8 @@ module Reporting.Error.Syntax
     --
     Decl (..),
     DeclClass (..),
+    Attribute (..),
+    DeclInstance (..),
     DeclType (..),
     TypeAlias (..),
     CustomType (..),
@@ -129,6 +131,8 @@ data Decl
   | --
     Port Port Row Col
   | DeclClass DeclClass Row Col
+  | DeclInstance DeclInstance Row Col
+  | DeclAttribute Attribute Row Col
   | DeclType DeclType Row Col
   | DeclDef Name.Name DeclDef Row Col
   | --
@@ -179,6 +183,43 @@ data DeclClass
   | ClassMethodAlignment Word16 Row Col
   deriving (Show)
 
+-- ATTRIBUTES
+
+data Attribute
+  = AttributeSpace Space Row Col
+  | AttributeName Row Col
+  | AttributeUnknown Name.Name Row Col
+  | AttributeOpen Row Col
+  | AttributeClass Row Col
+  | AttributeEnd Row Col
+  | AttributeNotOnCustomType Row Col
+  | --
+    AttributeIndentName Row Col
+  | AttributeIndentOpen Row Col
+  | AttributeIndentClass Row Col
+  | AttributeIndentEnd Row Col
+  | AttributeIndentDecl Row Col
+  deriving (Show)
+
+-- INSTANCE DECLARATIONS
+
+data DeclInstance
+  = InstanceSpace Space Row Col
+  | InstanceHead Type Row Col
+  | InstanceWhere Row Col
+  | InstanceMethodName Row Col
+  | InstanceMethodEquals Row Col
+  | InstanceMethodArg Pattern Row Col
+  | InstanceMethodBody Name.Name Expr Row Col
+  | --
+    InstanceIndentHead Row Col
+  | InstanceIndentWhere Row Col
+  | InstanceIndentBody Row Col
+  | InstanceIndentMethodEquals Row Col
+  | InstanceIndentMethodBody Row Col
+  | InstanceMethodAlignment Word16 Row Col
+  deriving (Show)
+
 -- TYPE DECLARATIONS
 
 data DeclType
@@ -195,6 +236,7 @@ data TypeAlias
   | AliasName Row Col
   | AliasEquals Row Col
   | AliasBody Type Row Col
+  | AliasTakesNoAttribute Row Col
   | --
     AliasIndentEquals Row Col
   | AliasIndentBody Row Col
@@ -1486,6 +1528,10 @@ toDeclarationsReport source decl =
       toPortReport source port_ row col
     DeclClass declClass row col ->
       toDeclClassReport source declClass row col
+    DeclInstance declInstance row col ->
+      toDeclInstanceReport source declInstance row col
+    DeclAttribute attribute row col ->
+      toAttributeReport source attribute row col
     DeclType declType row col ->
       toDeclTypeReport source declType row col
     DeclDef name declDef row col ->
@@ -1753,6 +1799,157 @@ toDeclClassReport source declClass startRow startCol =
             D.reflow
               "I was expecting the next method to start in the same column as the one before\
               \ it. Everything in the class lines up."
+
+-- ATTRIBUTE
+
+toAttributeReport :: Code.Source -> Attribute -> Row -> Col -> Report.Report
+toAttributeReport source attribute startRow startCol =
+  let stuck row col title what =
+        let surroundings = A.Region (A.Position startRow startCol) (A.Position row col)
+            region = toRegion row col
+         in Report.Report title region [] $
+              Code.toSnippet
+                source
+                surroundings
+                (Just region)
+                ( D.reflow "I am partway through an attribute, but I got stuck here:",
+                  D.stack
+                    [ what,
+                      D.reflow "The one attribute there is looks like this:",
+                      D.indent 4 $
+                        D.vcat
+                          [ "@derive(Eq, Ord, Inspect)",
+                            D.cyan "type" <> " UserId = UserId Int"
+                          ]
+                    ]
+                )
+   in case attribute of
+        AttributeSpace space row col ->
+          toSpaceReport source space row col
+        AttributeName row col ->
+          stuck row col "PROBLEM IN ATTRIBUTE" $
+            D.reflow
+              "I was expecting the name of an attribute next, starting with a lower-case\
+              \ letter."
+        AttributeUnknown name row col ->
+          stuck row col "UNKNOWN ATTRIBUTE" $
+            D.reflow $
+              "I do not know an attribute named `" ++ Name.toChars name ++ "`."
+        AttributeOpen row col ->
+          stuck row col "PROBLEM IN ATTRIBUTE" $
+            D.reflow
+              "I was expecting an opening parenthesis and then the classes to derive."
+        AttributeClass row col ->
+          stuck row col "PROBLEM IN ATTRIBUTE" $
+            D.reflow
+              "I was expecting the name of a class next, starting with an upper-case letter."
+        AttributeEnd row col ->
+          stuck row col "PROBLEM IN ATTRIBUTE" $
+            D.reflow "I was expecting a comma or a closing parenthesis next."
+        AttributeNotOnCustomType row col ->
+          stuck row col "MISPLACED ATTRIBUTE" $
+            D.reflow
+              "I was expecting a custom type after this attribute. `@derive` says which\
+              \ classes an abstract type derives, so a type alias or a value has nothing to\
+              \ do with it."
+        AttributeIndentName row col ->
+          stuck row col "UNFINISHED ATTRIBUTE" $
+            D.reflow "I was expecting the name of an attribute next."
+        AttributeIndentOpen row col ->
+          stuck row col "UNFINISHED ATTRIBUTE" $
+            D.reflow "I was expecting an opening parenthesis next."
+        AttributeIndentClass row col ->
+          stuck row col "UNFINISHED ATTRIBUTE" $
+            D.reflow "I was expecting the name of a class next."
+        AttributeIndentEnd row col ->
+          stuck row col "UNFINISHED ATTRIBUTE" $
+            D.reflow "I was expecting a comma or a closing parenthesis next."
+        AttributeIndentDecl row col ->
+          stuck row col "UNFINISHED ATTRIBUTE" $
+            D.reflow "I was expecting the declaration this attribute is attached to next."
+
+-- INSTANCE
+
+toDeclInstanceReport :: Code.Source -> DeclInstance -> Row -> Col -> Report.Report
+toDeclInstanceReport source declInstance startRow startCol =
+  let stuck row col title what =
+        let surroundings = A.Region (A.Position startRow startCol) (A.Position row col)
+            region = toRegion row col
+         in Report.Report title region [] $
+              Code.toSnippet
+                source
+                surroundings
+                (Just region)
+                ( D.reflow "I am partway through an `instance` declaration, but I got stuck here:",
+                  D.stack
+                    [ what,
+                      D.reflow "An instance declaration looks like this:",
+                      D.indent 4 $
+                        D.vcat
+                          [ D.cyan "instance" <> " Inspect Path " <> D.cyan "where",
+                            "    inspect path =",
+                            "        Path.toString path"
+                          ]
+                    ]
+                )
+   in case declInstance of
+        InstanceSpace space row col ->
+          toSpaceReport source space row col
+        InstanceHead tipe row col ->
+          toTypeReport source TC_InstanceHead tipe row col
+        InstanceWhere row col ->
+          stuck row col "PROBLEM IN INSTANCE DECLARATION" $
+            D.fillSep
+              [ "I",
+                "was",
+                "expecting",
+                D.cyan "where",
+                "next,",
+                "and",
+                "then",
+                "the",
+                "definitions",
+                "this",
+                "instance",
+                "provides."
+              ]
+        InstanceMethodName row col ->
+          stuck row col "PROBLEM IN INSTANCE DECLARATION" $
+            D.reflow
+              "I was expecting the name of one of the class's methods next, starting with a\
+              \ lower-case letter."
+        InstanceMethodEquals row col ->
+          stuck row col "PROBLEM IN INSTANCE DECLARATION" $
+            D.reflow
+              "I was expecting an argument or an equals sign next. A method here is a\
+              \ definition and takes no annotation of its own: the class already gave it a\
+              \ type."
+        InstanceMethodArg pattern row col ->
+          toPatternReport source PArg pattern row col
+        InstanceMethodBody name expr row col ->
+          toExprReport source (InDef name startRow startCol) expr row col
+        InstanceIndentHead row col ->
+          stuck row col "UNFINISHED INSTANCE DECLARATION" $
+            D.reflow "I was expecting a class and the type it applies to next, like `Ord Path`."
+        InstanceIndentWhere row col ->
+          stuck row col "UNFINISHED INSTANCE DECLARATION" $
+            D.fillSep ["I", "was", "expecting", D.cyan "where", "next."]
+        InstanceIndentBody row col ->
+          stuck row col "UNFINISHED INSTANCE DECLARATION" $
+            D.reflow
+              "I was expecting the instance's definitions next, indented under it. An instance\
+              \ with no definitions implements nothing."
+        InstanceIndentMethodEquals row col ->
+          stuck row col "UNFINISHED INSTANCE DECLARATION" $
+            D.reflow "I was expecting an equals sign and then this method's body."
+        InstanceIndentMethodBody row col ->
+          stuck row col "UNFINISHED INSTANCE DECLARATION" $
+            D.reflow "I was expecting this method's body next."
+        InstanceMethodAlignment _ row col ->
+          stuck row col "PROBLEM IN INSTANCE DECLARATION" $
+            D.reflow
+              "I was expecting the next definition to start in the same column as the one\
+              \ before it. Everything in the instance lines up."
 
 -- PORT
 
@@ -2023,6 +2220,20 @@ toDeclTypeReport source declType startRow startCol =
 toTypeAliasReport :: Code.Source -> TypeAlias -> Row -> Col -> Report.Report
 toTypeAliasReport source typeAlias startRow startCol =
   case typeAlias of
+    AliasTakesNoAttribute row col ->
+      let surroundings = A.Region (A.Position startRow startCol) (A.Position row col)
+          region = toRegion row col
+       in Report.Report "MISPLACED ATTRIBUTE" region [] $
+            Code.toSnippet
+              source
+              surroundings
+              (Just region)
+              ( D.reflow "This attribute is on a type alias:",
+                D.reflow
+                  "`@derive` says which classes an abstract type derives, and a type alias is\
+                  \ transparent — whatever it stands for already derives structurally. Put\
+                  \ the attribute on a custom type, or remove it."
+              )
     AliasSpace space row col ->
       toSpaceReport source space row col
     AliasName row col ->
@@ -5992,6 +6203,7 @@ data TContext
   | TC_CustomType
   | TC_TypeAlias
   | TC_Port
+  | TC_InstanceHead
 
 toTypeReport :: Code.Source -> TContext -> Type -> Row -> Col -> Report.Report
 toTypeReport source context tipe startRow startCol =
@@ -6028,6 +6240,7 @@ toTypeReport source context tipe startRow startCol =
                   TC_CustomType -> "custom type"
                   TC_TypeAlias -> "type alias"
                   TC_Port -> "port"
+                  TC_InstanceHead -> "instance"
 
               something =
                 case context of
@@ -6035,6 +6248,7 @@ toTypeReport source context tipe startRow startCol =
                   TC_CustomType -> "a custom type"
                   TC_TypeAlias -> "a type alias"
                   TC_Port -> "a port"
+                  TC_InstanceHead -> "an instance declaration"
            in Report.Report ("PROBLEM IN " ++ map Char.toUpper thing) region [] $
                 Code.toSnippet
                   source
@@ -6072,6 +6286,7 @@ toTypeReport source context tipe startRow startCol =
               TC_CustomType -> "custom type"
               TC_TypeAlias -> "type alias"
               TC_Port -> "port"
+              TC_InstanceHead -> "instance"
        in Report.Report ("UNFINISHED " ++ map Char.toUpper thing) region [] $
             Code.toSnippet
               source

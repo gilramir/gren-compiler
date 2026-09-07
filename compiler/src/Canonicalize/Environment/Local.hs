@@ -46,7 +46,7 @@ addVars module_ (Env.Env home vs ts cs bs qvs qts qcs) =
     Result.ok $ Env.Env home vs2 ts cs bs qvs qts qcs
 
 collectVars :: Src.Module -> Result i w (Map.Map Name.Name Env.Var)
-collectVars (Src.Module _ _ _ _ values _ _ _ _ _ _ effects) =
+collectVars (Src.Module _ _ _ _ values _ _ _ _ _ _ _ effects) =
   let addDecl dict (A.At _ (Src.Value (A.At region name) _ _ _ _)) =
         Dups.insert name region (Env.TopLevel region) dict
    in Dups.detect Error.DuplicateDecl $
@@ -75,9 +75,9 @@ toEffectDups effects =
 -- ADD TYPES
 
 addTypes :: Src.Module -> Env.Env -> Result i w Env.Env
-addTypes (Src.Module _ _ _ _ _ _ unions aliases _ _ _ _) (Env.Env home vs ts cs bs qvs qts qcs) =
+addTypes (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _) (Env.Env home vs ts cs bs qvs qts qcs) =
   let addAliasDups dups (A.At _ (Src.Alias (A.At region name) _ _)) = Dups.insert name region () dups
-      addUnionDups dups (A.At _ (Src.Union (A.At region name) _ _ _)) = Dups.insert name region () dups
+      addUnionDups dups (A.At _ (Src.Union (A.At region name) _ _ _ _)) = Dups.insert name region () dups
       typeNameDups =
         List.foldl' addUnionDups (List.foldl' addAliasDups Dups.none (fmap snd aliases)) (fmap snd unions)
    in do
@@ -86,7 +86,7 @@ addTypes (Src.Module _ _ _ _ _ _ unions aliases _ _ _ _) (Env.Env home vs ts cs 
         addAliases (fmap snd aliases) (Env.Env home vs ts1 cs bs qvs qts qcs)
 
 addUnion :: ModuleName.Canonical -> Env.Exposed Env.Type -> A.Located Src.Union -> Result i w (Env.Exposed Env.Type)
-addUnion home types union@(A.At _ (Src.Union (A.At _ name) _ _ _)) =
+addUnion home types union@(A.At _ (Src.Union (A.At _ name) _ _ _ _)) =
   do
     arity <- checkUnionFreeVars union
     let one = Env.Specific home (Env.Union arity home)
@@ -143,7 +143,7 @@ getEdges edges (A.At _ tipe) =
 -- CHECK FREE VARIABLES
 
 checkUnionFreeVars :: A.Located Src.Union -> Result i w Int
-checkUnionFreeVars (A.At unionRegion (Src.Union (A.At _ name) args ctors _)) =
+checkUnionFreeVars (A.At unionRegion (Src.Union (A.At _ name) args ctors _ _)) =
   let addArg (_, A.At region arg) dict =
         Dups.insert arg region region dict
 
@@ -203,7 +203,7 @@ addFreeVars freeVars (A.At region tipe) =
 -- ADD CTORS
 
 addCtors :: Src.Module -> Env.Env -> Result i w (Env.Env, Unions, Aliases)
-addCtors (Src.Module _ _ _ _ _ _ unions aliases _ _ _ _) env@(Env.Env home vs ts cs bs qvs qts qcs) =
+addCtors (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _) env@(Env.Env home vs ts cs bs qvs qts qcs) =
   do
     unionInfo <- traverse (canonicalizeUnion env) (fmap snd unions)
     aliasInfo <- traverse (canonicalizeAlias env) (fmap snd aliases)
@@ -237,7 +237,7 @@ canonicalizeAlias env (A.At _ (Src.Alias (A.At _ name) args tipe)) =
 -- CANONICALIZE UNION
 
 canonicalizeUnion :: Env.Env -> A.Located Src.Union -> Result i w ((Name.Name, Can.Union), CtorDups)
-canonicalizeUnion env@(Env.Env home _ _ _ _ _ _ _) (A.At _ (Src.Union (A.At _ name) avars ctors _)) =
+canonicalizeUnion env@(Env.Env home _ _ _ _ _ _ _) (A.At _ (Src.Union (A.At _ name) avars ctors _ _)) =
   do
     cctors <- Index.indexedTraverse (canonicalizeCtor env) ctors
     let vars = map (A.toValue . snd) avars

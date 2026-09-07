@@ -35,9 +35,11 @@ type Result i w a =
 -- MODULES
 
 canonicalize :: Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Result i [W.Warning] Can.Module
-canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes _ _ (_, binops) _ _ effects) =
+canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ effects) =
   do
     checkClasses (fmap snd classes)
+    checkInstances (fmap snd instances)
+    checkDerives (fmap snd unions)
 
     let values = fmap snd valuesWithSourceOrder
     let home = ModuleName.Canonical pkg (Src.getName modul)
@@ -67,6 +69,36 @@ checkClasses classes =
       Result.ok ()
     A.At region (Src.Class (A.At _ name) _ _ _) : _ ->
       Result.throw (Error.ClassDeclUnsupported region name)
+
+-- | An `instance` declaration parses (§G15) and, like a class, has nowhere to
+-- go: the instance environment D114 describes is verb 3's, and `Can.Module`
+-- has no field for one. An instance the compiler read and forgot is worse than
+-- a class it forgot, because the program would still typecheck — against the
+-- structural answer the instance was written to replace.
+checkInstances :: [A.Located Src.Instance] -> Result i w ()
+checkInstances instances =
+  case instances of
+    [] ->
+      Result.ok ()
+    A.At region _ : _ ->
+      Result.throw (Error.InstanceDeclUnsupported region)
+
+-- | `@derive(Eq, Ord)` parses (§G15) and is rejected for a reason of its own,
+-- which is not the one classes and instances are rejected for. The attribute
+-- would be a no-op today rather than a lie: Gren's equality is structural for
+-- everything, so a type asking to derive `Eq` already has it. What makes
+-- accepting it wrong is `classes.md` §8.1 — `@derive` on a __transparent__
+-- type is a redundancy error — and transparent is a thing the compiler cannot
+-- yet tell from abstract, because §2.5's abstractness is verb 4's. Accepting
+-- the attribute now means accepting it in exactly the place the spec says must
+-- fail.
+checkDerives :: [A.Located Src.Union] -> Result i w ()
+checkDerives unions =
+  case [(region, name) | A.At region (Src.Union (A.At _ name) _ _ (_ : _) _) <- unions] of
+    [] ->
+      Result.ok ()
+    (region, name) : _ ->
+      Result.throw (Error.DeriveUnsupported region name)
 
 -- CANONICALIZE BINOP
 

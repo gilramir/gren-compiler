@@ -104,6 +104,15 @@ data ClassComments = ClassComments
   }
   deriving (Show)
 
+-- Instance declarations
+
+data InstanceComments = InstanceComments
+  { _afterInstanceKeyword :: [Comment],
+    _afterInstanceHead :: [Comment],
+    _afterInstanceWhere :: [Comment]
+  }
+  deriving (Show)
+
 -- Constraint context
 
 -- | One constraint in a context: what sits between the delimiter before it

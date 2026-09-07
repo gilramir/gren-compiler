@@ -41,6 +41,8 @@ data Error
   | BadArity A.Region BadArityContext Name.Name Int Int
   | ClassDeclUnsupported A.Region Name.Name
   | ConstraintUnsolved A.Region Name.Name
+  | DeriveUnsupported A.Region Name.Name
+  | InstanceDeclUnsupported A.Region
   | Binop A.Region Name.Name Name.Name
   | CustomTypeTooManyParams A.Region Name.Name Int
   | DuplicateDecl Name.Name A.Region A.Region
@@ -372,6 +374,35 @@ toReport source err =
               "Constraints parse in this version but are not solved yet, so accepting one\
               \ would mean compiling an annotation whose promise nothing checks. Remove\
               \ the constraint for now."
+          )
+    DeriveUnsupported region name ->
+      Report.Report "UNSUPPORTED ATTRIBUTE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "I can read the `@derive` on `"
+                ++ Name.toChars name
+                ++ "`, but I cannot act on it yet:",
+            D.reflow
+              "`@derive` belongs on an abstract type, and on a transparent one it is an\
+              \ error rather than a no-op. I cannot yet tell those two apart, so the one\
+              \ case that has to fail is the one I would let through. Remove it for now."
+          )
+    InstanceDeclUnsupported region ->
+      Report.Report "UNSUPPORTED INSTANCE DECLARATION" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow
+              "I can read this `instance` declaration, but I have nowhere to put it yet:",
+            D.reflow
+              "Instance declarations parse in this version and nothing downstream of the\
+              \ parser can receive one. An instance I read and forgot would be worse than a\
+              \ class I forgot, because the program would still compile — against the\
+              \ structural answer this instance was written to replace. Remove it for now."
           )
     ExportOpenAlias region name ->
       Report.Report "BAD EXPORT" region [] $

@@ -35,6 +35,8 @@ module AST.Source
     Value (..),
     Class (..),
     ClassMethod,
+    Instance (..),
+    InstanceMethod,
     Union (..),
     UnionVariant,
     Alias (..),
@@ -196,6 +198,7 @@ data Module = Module
     _imports :: [([Comment], Import)],
     _values :: [(SourceOrder, A.Located Value)],
     _classes :: [(SourceOrder, A.Located Class)],
+    _instances :: [(SourceOrder, A.Located Instance)],
     _unions :: [(SourceOrder, A.Located Union)],
     _aliases :: [(SourceOrder, A.Located Alias)],
     _binops :: ([Comment], [A.Located Infix]),
@@ -206,7 +209,7 @@ data Module = Module
   deriving (Show)
 
 getName :: Module -> Name
-getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _) =
+getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _ _) =
   case maybeName of
     Just (A.At _ name) ->
       name
@@ -242,7 +245,30 @@ data Class = Class (A.Located Name) (A.Located Name) [ClassMethod] SC.ClassComme
 type ClassMethod =
   ([Comment], A.Located Name, Annotation)
 
-data Union = Union (A.Located Name) [([Comment], A.Located Name)] [UnionVariant] SC.UnionComments
+-- | @instance Eq a => Eq (Array a) where@ and the definitions under it.
+--
+-- The head is kept as the `Type` it was written as, rather than split into a
+-- class and an argument here. `Eq (Array a)` is a type expression and parses
+-- as one; whether its head names a class is a question for the environment
+-- that knows what a class is, and there is no answer the parser could give
+-- that the resolver would not have to give again.
+--
+-- Methods take no annotation of their own: the class already gave each one a
+-- type, and a second one would be a place for them to disagree.
+data Instance = Instance (Maybe Context) Type [InstanceMethod] SC.InstanceComments
+  deriving (Show)
+
+type InstanceMethod =
+  ([Comment], A.Located Value)
+
+-- | A custom type, and the classes `@derive` says it derives.
+--
+-- The derived set is empty for a transparent type and stays empty: §2.1 says a
+-- transparent type derives structurally by being transparent, and §8.1 makes
+-- `@derive` on one a redundancy error rather than a no-op. So a non-empty list
+-- here means someone wrote the attribute, which is the only thing the parser
+-- can know — whether the type is abstract is an export question.
+data Union = Union (A.Located Name) [([Comment], A.Located Name)] [UnionVariant] [A.Located Name] SC.UnionComments
   deriving (Show)
 
 type UnionVariant =

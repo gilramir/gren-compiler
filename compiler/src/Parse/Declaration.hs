@@ -35,6 +35,7 @@ import Reporting.Error.Syntax qualified as E
 data Decl
   = Value (Maybe Src.DocComment) (A.Located Src.Value)
   | Class (Maybe Src.DocComment) (A.Located Src.Class)
+  | Instance (Maybe Src.DocComment) (A.Located Src.Instance)
   | Union (Maybe Src.DocComment) (A.Located Src.Union)
   | Alias (Maybe Src.DocComment) (A.Located Src.Alias)
   | Port (Maybe Src.DocComment) Src.Port
@@ -45,13 +46,82 @@ declaration :: Space.Parser E.Decl (Decl, [Src.Comment])
 declaration =
   do
     maybeDocs <- chompDocComment
+    derives <- chompDerive
     start <- getPosition
+    case derives of
+      Just classes ->
+        -- `@derive` says which classes an abstract type derives (D53,
+        -- `classes.md` §8.1), so the declaration it is attached to has to be a
+        -- custom type. Anything else is a misplaced attribute rather than a
+        -- declaration that quietly ignores it. The fallback only fires when
+        -- `type` is absent, so a real error *inside* the type declaration is
+        -- still reported as itself.
+        oneOf
+          E.DeclStart
+          [ typeDecl maybeDocs start classes,
+            attributeNotOnCustomType
+          ]
+      Nothing ->
+        oneOf
+          E.DeclStart
+          [ typeDecl maybeDocs start [],
+            portDecl maybeDocs,
+            classDecl maybeDocs start,
+            instanceDecl maybeDocs start,
+            valueDecl maybeDocs start
+          ]
+
+-- ATTRIBUTES
+
+-- | @\@derive(Eq, Ord, Inspect)@ on the line before a custom type.
+--
+-- Nothing in the parser handled @\@@ before this; `ffi.md` F1's @\@extern@ is
+-- the other customer and will land beside it. An attribute follows the doc
+-- comment and precedes the declaration, which is the order Rust and Gren's own
+-- doc comments already read in.
+chompDerive :: Parser E.Decl (Maybe [A.Located Name.Name])
+chompDerive =
+  oneOfWithFallback
+    [ inContext E.DeclAttribute (word1 0x40 {-\@-} E.DeclStart) $
+        do
+          name <- Var.lower E.AttributeName
+          nameEnd <- getPosition
+          if name /= Name.fromChars "derive"
+            then attributeUnknown name nameEnd
+            else return ()
+          Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentOpen
+          word1 0x28 {-(-} E.AttributeOpen
+          Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentClass
+          classes <- chompDeriveClasses []
+          Space.chomp E.AttributeSpace
+          Space.checkFreshLine E.AttributeIndentDecl
+          return (Just classes)
+    ]
+    Nothing
+
+attributeNotOnCustomType :: Space.Parser E.Decl (Decl, [Src.Comment])
+attributeNotOnCustomType =
+  P.Parser $ \(P.State _ _ _ _ row col) _ _ cerr _ ->
+    cerr row col (E.DeclAttribute (E.AttributeNotOnCustomType row col))
+
+attributeUnknown :: Name.Name -> A.Position -> Parser E.Attribute ()
+attributeUnknown name (A.Position row col) =
+  P.Parser $ \_ _ _ cerr _ -> cerr row col (E.AttributeUnknown name)
+
+chompDeriveClasses :: [A.Located Name.Name] -> Parser E.Attribute [A.Located Name.Name]
+chompDeriveClasses revClasses =
+  do
+    class_ <- addLocation (Var.upper E.AttributeClass)
+    Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentEnd
     oneOf
-      E.DeclStart
-      [ typeDecl maybeDocs start,
-        portDecl maybeDocs,
-        classDecl maybeDocs start,
-        valueDecl maybeDocs start
+      E.AttributeEnd
+      [ do
+          word1 0x2C {-,-} E.AttributeEnd
+          Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentClass
+          chompDeriveClasses (class_ : revClasses),
+        do
+          word1 0x29 {-)-} E.AttributeEnd
+          return (reverse (class_ : revClasses))
       ]
 
 -- DOC COMMENT
@@ -202,10 +272,86 @@ chompClassMethod commentsBefore =
     let typeComments = SC.ValueTypeComments commentsAfterName commentsAfterColon []
     return (((commentsBefore, name, Src.Annotation maybeContext tipe typeComments), commentsAfterTipe), end)
 
+-- INSTANCE DECLARATIONS
+
+-- | @instance Eq a => Eq (Array a) where@ and the definitions under it.
+--
+-- The head is parsed by `Type.annotation`, which is not a shortcut: an
+-- instance head *is* an annotation's shape — an optional context and then a
+-- type — and `Eq (Array a)` is a type expression whether or not `Eq` turns out
+-- to name a class. Asking the parser to split it into a class and an argument
+-- would be asking it a question only the environment can answer, and the
+-- resolver would have to ask it again.
+--
+-- `instance` is contextual (D117), so the same `lookAhead` guard `classDecl`
+-- uses applies here.
+instanceDecl :: Maybe Src.DocComment -> A.Position -> Space.Parser E.Decl (Decl, [Src.Comment])
+instanceDecl maybeDocs start =
+  do
+    _ <- lookAhead instanceDeclAhead
+    inContext E.DeclInstance (Keyword.instance_ E.DeclStart) $
+      do
+        commentsAfterKeyword <- Space.chompAndCheckIndent E.InstanceSpace E.InstanceIndentHead
+        ((maybeContext, head_, commentsAfterHead), _) <- specialize E.InstanceHead Type.annotation
+        Keyword.where_ E.InstanceWhere
+        commentsAfterWhere <- Space.chompAndCheckIndent E.InstanceSpace E.InstanceIndentBody
+        ((methods, commentsAfter), end) <-
+          withIndent $
+            do
+              ((method, commentsAfterMethod), methodEnd) <- chompInstanceMethod []
+              chompInstanceMethods [method] commentsAfterMethod methodEnd
+        let comments = SC.InstanceComments commentsAfterKeyword commentsAfterHead commentsAfterWhere
+        let instance_ = A.at start end (Src.Instance maybeContext head_ methods comments)
+        return ((Instance maybeDocs instance_, commentsAfter), end)
+
+instanceDeclAhead :: Parser E.Decl ()
+instanceDeclAhead =
+  do
+    Keyword.instance_ E.DeclStart
+    Space.chompAndCheckIndent E.DeclSpace E.DeclStart
+    _ <- Var.upper E.DeclStart
+    return ()
+
+chompInstanceMethods :: [Src.InstanceMethod] -> [Src.Comment] -> A.Position -> Space.Parser E.DeclInstance ([Src.InstanceMethod], [Src.Comment])
+chompInstanceMethods revMethods commentsBefore end =
+  oneOfWithFallback
+    [ do
+        Space.checkAligned E.InstanceMethodAlignment
+        ((method, commentsAfter), newEnd) <- chompInstanceMethod commentsBefore
+        chompInstanceMethods (method : revMethods) commentsAfter newEnd
+    ]
+    ((reverse revMethods, commentsBefore), end)
+
+chompInstanceMethod :: [Src.Comment] -> Space.Parser E.DeclInstance (Src.InstanceMethod, [Src.Comment])
+chompInstanceMethod commentsBefore =
+  do
+    start <- getPosition
+    name <- addLocation (Var.lower E.InstanceMethodName)
+    commentsAfterName <- Space.chompAndCheckIndent E.InstanceSpace E.InstanceIndentMethodEquals
+    chompInstanceMethodArgs start name commentsBefore [] commentsAfterName
+
+chompInstanceMethodArgs :: A.Position -> A.Located Name.Name -> [Src.Comment] -> [([Src.Comment], Src.Pattern)] -> [Src.Comment] -> Space.Parser E.DeclInstance (Src.InstanceMethod, [Src.Comment])
+chompInstanceMethodArgs start@(A.Position _ startCol) name@(A.At _ methodName) commentsBefore revArgs commentsAfterPrev =
+  oneOf
+    E.InstanceMethodEquals
+    [ do
+        arg <- specialize E.InstanceMethodArg Pattern.term
+        commentsAfterArg <- Space.chompAndCheckIndent E.InstanceSpace E.InstanceIndentMethodEquals
+        chompInstanceMethodArgs start name commentsBefore ((commentsAfterPrev, arg) : revArgs) commentsAfterArg,
+      do
+        word1 0x3D {-=-} E.InstanceMethodEquals
+        commentsAfterEquals <- Space.chompAndCheckIndent E.InstanceSpace E.InstanceIndentMethodBody
+        ((body, commentsAfter), end) <- specialize (E.InstanceMethodBody methodName) Expr.expression
+        let (commentsAfterBody, commentsAfterMethod) = List.span (A.isIndentedMoreThan startCol) commentsAfter
+        let comments = SC.ValueComments commentsAfterPrev commentsAfterEquals commentsAfterBody
+        let value = A.at start end (Src.Value name (reverse revArgs) body Nothing comments)
+        return (((commentsBefore, value), commentsAfterMethod), end)
+    ]
+
 -- TYPE DECLARATIONS
 
-typeDecl :: Maybe Src.DocComment -> A.Position -> Space.Parser E.Decl (Decl, [Src.Comment])
-typeDecl maybeDocs start =
+typeDecl :: Maybe Src.DocComment -> A.Position -> [A.Located Name.Name] -> Space.Parser E.Decl (Decl, [Src.Comment])
+typeDecl maybeDocs start derives =
   inContext E.DeclType (Keyword.type_ E.DeclStart) $
     do
       commentsAfterTypeKeyword <- Space.chompAndCheckIndent E.DT_Space E.DT_IndentName
@@ -213,6 +359,10 @@ typeDecl maybeDocs start =
         E.DT_Name
         [ inContext E.DT_Alias (Keyword.alias_ E.DT_Name) $
             do
+              -- A type alias is transparent, so whatever it stands for already
+              -- derives structurally and `@derive` on one is the redundancy
+              -- `classes.md` §8.1 calls an error rather than a no-op.
+              aliasTakesNoAttribute derives
               -- TODO: use commentsAfterTypeKeyword
               Space.chompAndCheckIndent E.AliasSpace E.AliasIndentEquals
               (name, args) <- chompAliasNameToEquals
@@ -226,9 +376,18 @@ typeDecl maybeDocs start =
               let firstVariant = (commentsAfterEquals, firstName, firstArgs, commentsAfterFirst)
               ((variants, commentsAfter), end) <- chompVariants (NonEmpty.singleton firstVariant) firstEnd
               let comments = SC.UnionComments commentsAfterTypeKeyword commentsAfterArgs
-              let union = A.at start end (Src.Union name args variants comments)
+              let union = A.at start end (Src.Union name args variants derives comments)
               return ((Union maybeDocs union, commentsAfter), end)
         ]
+
+aliasTakesNoAttribute :: [A.Located Name.Name] -> Parser E.TypeAlias ()
+aliasTakesNoAttribute derives =
+  case derives of
+    [] ->
+      P.Parser $ \state _ eok _ _ -> eok () state
+    _ : _ ->
+      P.Parser $ \(P.State _ _ _ _ row col) _ _ cerr _ ->
+        cerr row col E.AliasTakesNoAttribute
 
 -- TYPE ALIASES
 

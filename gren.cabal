@@ -282,6 +282,7 @@ Test-Suite gren-tests
         Parse.AliasSpec
         Parse.ClassSpec
         Parse.ConstraintSpec
+        Parse.InstanceSpec
         Parse.RecordUpdateSpec
         Parse.SpaceSpec
         Parse.UnderscorePatternSpec
