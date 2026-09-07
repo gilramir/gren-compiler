@@ -706,7 +706,7 @@ crawlKernel foreignDeps sources mvar pkg bytes =
 getDepHome :: ForeignInterface -> Maybe Pkg.Name
 getDepHome fi =
   case fi of
-    ForeignSpecific (I.Interface pkg _ _ _ _ _) -> Just pkg
+    ForeignSpecific (I.Interface pkg _ _ _ _ _ _) -> Just pkg
     ForeignAmbiguous -> Nothing
 
 -- COMPILE
@@ -731,13 +731,14 @@ compile platform pkg mvar status =
           Nothing ->
             return Nothing
           Just results ->
-            case Compile.compile platform pkg (Map.mapMaybe getInterface results) modul of
-              Left _ ->
-                return Nothing
-              Right (Compile.Artifacts canonical annotations _nodeTypes core) ->
-                let ifaces = I.fromModule pkg canonical annotations
-                    docs = makeDocs docsStatus canonical
-                 in return (Just (RLocal ifaces core docs))
+            let importedIfaces = Map.mapMaybe getInterface results
+             in case Compile.compile platform pkg importedIfaces modul of
+                  Left _ ->
+                    return Nothing
+                  Right (Compile.Artifacts canonical annotations _nodeTypes core) ->
+                    let ifaces = I.fromModule pkg importedIfaces canonical annotations
+                        docs = makeDocs docsStatus canonical
+                     in return (Just (RLocal ifaces core docs))
     SForeign iface ->
       return (Just (RForeign iface))
     SKernelLocal chunks ->

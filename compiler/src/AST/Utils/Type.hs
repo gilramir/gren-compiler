@@ -3,6 +3,7 @@
 module AST.Utils.Type
   ( delambda,
     dealias,
+    substitute,
     deepDealias,
     iteratedDealias,
   )
@@ -31,6 +32,18 @@ dealias args aliasType =
       dealiasHelp (Map.fromList args) tipe
     Filled tipe ->
       tipe
+
+-- | Replace type variables by types.
+--
+-- This is 'dealiasHelp' under the name of what it does, because specializing a
+-- class method's signature at an instance head is the same operation as
+-- filling an alias's parameters: @eq : a -> a -> Bool@ at @instance Eq (Array
+-- b)@ is @a := Array b@. The 'TAlias' case is why it is worth sharing — an
+-- alias's body binds the alias's /own/ parameter names, so nothing recurses
+-- into it and only the arguments are substituted.
+substitute :: Map.Map Name.Name Type -> Type -> Type
+substitute =
+  dealiasHelp
 
 dealiasHelp :: Map.Map Name.Name Type -> Type -> Type
 dealiasHelp typeTable tipe =

@@ -14,6 +14,8 @@ module Canonicalize.Environment
     addLocals,
     findClass,
     findClassQual,
+    findClassDecl,
+    findClassDeclQual,
     findType,
     findTypeQual,
     findCtor,
@@ -177,10 +179,19 @@ addLocalBoth name region var =
 -- §G20.2) and are stored apart, so a name that is a type here is a specific
 -- mistake rather than a missing name, and is reported as one.
 findClass :: A.Region -> Env -> Name.Name -> Result i w Can.Class
-findClass region (Env _ _ ts _ _ cls _ _ _ _ qcls _) name =
+findClass region env name =
+  fst <$> findClassDecl region env name
+
+-- | The same lookup, keeping the declaration.
+--
+-- An instance needs it and a constraint does not: an instance is checked
+-- against the methods the class publishes, so it is the one caller that has to
+-- read what is on the other side of the name.
+findClassDecl :: A.Region -> Env -> Name.Name -> Result i w (Can.Class, Can.ClassDecl)
+findClassDecl region (Env _ _ ts _ _ cls _ _ _ _ qcls _) name =
   case Map.lookup name cls of
-    Just (Specific home _) ->
-      Result.ok (Can.Class home name)
+    Just (Specific home decl) ->
+      Result.ok (Can.Class home name, decl)
     Just (Ambiguous h hs) ->
       Result.throw (Error.AmbiguousClass region Nothing name h hs)
     Nothing ->
@@ -189,12 +200,16 @@ findClass region (Env _ _ ts _ _ cls _ _ _ _ qcls _) name =
         else Result.throw (Error.NotFoundClass region Nothing name (toPossibleNames cls qcls))
 
 findClassQual :: A.Region -> Env -> Name.Name -> Name.Name -> Result i w Can.Class
-findClassQual region (Env _ _ _ _ _ cls _ _ _ _ qcls _) prefix name =
+findClassQual region env prefix name =
+  fst <$> findClassDeclQual region env prefix name
+
+findClassDeclQual :: A.Region -> Env -> Name.Name -> Name.Name -> Result i w (Can.Class, Can.ClassDecl)
+findClassDeclQual region (Env _ _ _ _ _ cls _ _ _ _ qcls _) prefix name =
   case Map.lookup prefix qcls of
     Just qualified ->
       case Map.lookup name qualified of
-        Just (Specific home _) ->
-          Result.ok (Can.Class home name)
+        Just (Specific home decl) ->
+          Result.ok (Can.Class home name, decl)
         Just (Ambiguous h hs) ->
           Result.throw (Error.AmbiguousClass region (Just prefix) name h hs)
         Nothing ->

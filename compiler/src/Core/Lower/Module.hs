@@ -44,7 +44,7 @@ import Canonicalize.Effects qualified as Effects
 import Core.AST qualified as Core
 import Core.Lower.Expression qualified as Expr
 import Core.Lower.Port qualified as Port
-import Core.Lower.Type (lowerClass, lowerUnion)
+import Core.Lower.Type (lowerAnnotation, lowerClass, lowerUnion)
 import Core.Order qualified as Order
 import Core.Refs qualified as Refs
 import Data.List qualified as List
@@ -74,9 +74,8 @@ lower platform annotations types modul =
             [lowerUnion home name union | (name, union) <- Map.toAscList (Can._unions modul)],
           Core._moduleClasses =
             [lowerClass home name decl | (name, decl) <- Map.toAscList (Can._classes modul)],
-          -- An instance declaration is still rejected in `Canonicalize.Module`,
-          -- so there is nothing here to lower yet (§G20).
-          Core._moduleInstances = [],
+          Core._moduleInstances =
+            [lowerInstance env i | i <- Map.elems (Can._instances modul)],
           Core._moduleDefs = concat defs,
           Core._moduleDefsRec =
             [map (Core.QualName home . bindName) g | g <- defs, length g > 1],
@@ -84,6 +83,34 @@ lower platform annotations types modul =
           Core._moduleManager = manager home (Can._effects modul),
           Core._modulePorts = ports (Can._effects modul),
           Core._moduleMain = mainFrom (mainOf platform annotations)
+        }
+
+-- | An instance declaration (@docs/m1b-classes.md@ §G22.4).
+--
+-- __The head is a @TForall@__ when the instance has a context.
+-- @instance Eq a => Eq (Array a)@ lowers its head to
+-- @forall a. (Eq a) => Array a@, which is 'lowerAnnotation' on the head read
+-- as the annotation it is — the same function, the same sorted constraint
+-- list, and no second way of writing a constrained type down.
+--
+-- __A method is an expression, not a binding.__ Core's 'Core.InstanceDecl'
+-- holds @[(Name, Expr)]@, so the 'Core.Bind' the shared lowering builds is
+-- unwrapped and its binder dropped: an instance method has no name anything
+-- may refer to, which is the same fact that keeps it out of '_decls' and out
+-- of the interface's values.
+--
+-- Every instance is 'Core.Written'. 'Core.Derived' is @\@derive@'s, and
+-- nothing produces one until verb 4.
+lowerInstance :: Expr.Env -> Can.Instance -> Core.InstanceDecl
+lowerInstance env (Can.Instance head_ methods) =
+  let Can.Class classHome className = Can._ih_class head_
+   in Core.InstanceDecl
+        { Core._instClass = Core.QualName classHome className,
+          Core._instHead =
+            lowerAnnotation (Can.Forall (Can._ih_context head_) (Can.instanceType head_)),
+          Core._instOrigin = Core.Written,
+          Core._instMethods =
+            [(name, Core._bindValue (Expr.def env d)) | (name, d) <- Map.toAscList methods]
         }
 
 -- | What a module's @main@ is, or why it is not one (C19).

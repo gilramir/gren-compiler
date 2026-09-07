@@ -13,6 +13,7 @@ import Canonicalize.Environment.Dups qualified as Dups
 import Canonicalize.Environment.Foreign qualified as Foreign
 import Canonicalize.Environment.Local qualified as Local
 import Canonicalize.Expression qualified as Expr
+import Canonicalize.Instance qualified as Instance
 import Canonicalize.Pattern qualified as Pattern
 import Canonicalize.Type qualified as Type
 import Data.Graph qualified as Graph
@@ -38,7 +39,6 @@ canonicalize :: Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> 
 canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ effects) =
   do
     checkClassesAreFirstParty pkg (fmap snd classes)
-    checkInstances (fmap snd instances)
     checkDerives (fmap snd unions)
 
     let values = fmap snd valuesWithSourceOrder
@@ -50,10 +50,21 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
         =<< Foreign.createInitialEnv home ifaces (fmap snd imports)
 
     cvalues <- canonicalizeValues env values
+    cinstances <- Instance.canonicalize pkg (importedInstances ifaces) env (fmap snd instances)
     ceffects <- Effects.canonicalize env values cunions effects
     cexports <- canonicalizeExports values cunions caliases cclasses cbinops ceffects exports
 
-    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cbinops ceffects
+    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops ceffects
+
+-- | The instances this module's imports make visible.
+--
+-- A plain union of what each import publishes, because each of those is
+-- already the closure of its own imports (D122) — which is what makes an
+-- instance environment assembled from direct imports the transitive one D114
+-- asks for, with nothing in the build graph having to know about instances.
+importedInstances :: Map.Map ModuleName.Raw I.Interface -> Map.Map Can.InstanceKey Can.InstanceHead
+importedInstances ifaces =
+  Map.unions (map I._instances (Map.elems ifaces))
 
 -- CLASS DECLARATIONS
 
@@ -74,19 +85,6 @@ checkClassesAreFirstParty pkg classes
           Result.ok ()
         A.At region (Src.Class (A.At _ name) _ _ _) : _ ->
           Result.throw (Error.ClassDeclThirdParty region name)
-
--- | An `instance` declaration parses (§G15) and, like a class, has nowhere to
--- go: the instance environment D114 describes is verb 3's, and `Can.Module`
--- has no field for one. An instance the compiler read and forgot is worse than
--- a class it forgot, because the program would still typecheck — against the
--- structural answer the instance was written to replace.
-checkInstances :: [A.Located Src.Instance] -> Result i w ()
-checkInstances instances =
-  case instances of
-    [] ->
-      Result.ok ()
-    A.At region _ : _ ->
-      Result.throw (Error.InstanceDeclUnsupported region)
 
 -- | `@derive(Eq, Ord)` parses (§G15) and is rejected for a reason of its own,
 -- which is not the one classes and instances are rejected for. The attribute

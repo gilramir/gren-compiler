@@ -1,6 +1,7 @@
 module Canonicalize.Type
   ( toAnnotation,
     canonicalize,
+    addFreeVars,
   )
 where
 

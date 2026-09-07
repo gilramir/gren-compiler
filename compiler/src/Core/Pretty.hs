@@ -178,16 +178,29 @@ classDecl opts c =
     openness Open = ""
     openness Closed = "closed "
 
+-- | The head reads as the declaration it came from.
+--
+-- 'Core.AST._instHead' is a whole 'Type', and a constrained one is a 'TForall'
+-- — @forall a. (Eq a) => Array a@ — so printing the class in front of it
+-- verbatim would put the quantifier inside the head it quantifies. The prefix
+-- is lifted out instead, which is the order the source wrote and the order the
+-- class's own method signatures already print in.
 instanceDecl :: Options -> InstanceDecl -> B.Builder
 instanceDecl opts i =
-  mconcat
-    [ origin (_instOrigin i),
-      "instance " <> qual (_instClass i) <> " " <> atomicType opts (_instHead i) <> "\n",
-      mconcat
-        [ indent 1 <> name n <> " =\n" <> expr opts 2 e <> "\n"
-        | (n, e) <- _instMethods i
+  let (prefix, head_) =
+        case _instHead i of
+          TForall vars constraints inner ->
+            (forallPrefix opts vars constraints, inner)
+          inner ->
+            ("", inner)
+   in mconcat
+        [ origin (_instOrigin i),
+          "instance " <> prefix <> qual (_instClass i) <> " " <> atomicType opts head_ <> "\n",
+          mconcat
+            [ indent 1 <> name n <> " =\n" <> expr opts 2 e <> "\n"
+            | (n, e) <- _instMethods i
+            ]
         ]
-    ]
   where
     origin Derived = "derived "
     origin Written = ""
@@ -221,11 +234,18 @@ typeToBuilder opts = go
             <> commas [name f <> " : " <> go ft | (f, ft) <- fields]
             <> " }"
         TForall vars constraints body ->
-          "forall"
-            <> mconcat [" " <> name v | v <- vars]
-            <> ". "
-            <> constraintPrefix constraints
-            <> go body
+          forallPrefix opts vars constraints <> go body
+
+-- | @forall a. (Eq a) => @ — the quantifier and its constraints, without the
+-- type they are in front of, because 'instanceDecl' prints them in front of a
+-- head it writes itself.
+forallPrefix :: Options -> [Name.Name] -> [Constraint] -> B.Builder
+forallPrefix opts vars constraints =
+  "forall"
+    <> mconcat [" " <> name v | v <- vars]
+    <> ". "
+    <> constraintPrefix constraints
+  where
     constraintPrefix [] = ""
     constraintPrefix cs = "(" <> commas (map constraint cs) <> ") => "
     constraint (CClass c t) = qual c <> " " <> atomicType opts t

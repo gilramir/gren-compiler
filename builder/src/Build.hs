@@ -699,7 +699,7 @@ compile (Env key root projectType platform _ buildID _ _) docsNeed (Details.Loca
             Right docs ->
               do
                 let name = Src.getName modul
-                let iface = I.fromModule pkg canonical annotations
+                let iface = I.fromModule pkg ifaces canonical annotations
                 let greni = Dirs.greni root name
                 writeCore root name core
                 maybeOldi <- File.readBinary greni
@@ -919,7 +919,7 @@ finalizeReplArtifacts env@(Env _ root projectType platform _ _ _ _) source modul
         case Compile.compile platform pkg ifaces modul of
           Right (Compile.Artifacts canonical annotations _nodeTypes core) ->
             let h = Can._name canonical
-                m = Fresh (Src.getName modul) (I.fromModule pkg canonical annotations) core
+                m = Fresh (Src.getName modul) (I.fromModule pkg ifaces canonical annotations) core
                 ms = Map.foldrWithKey addInside [] results
              in return $ Right $ ReplArtifacts h (m : ms) (L.fromModule modul) annotations
           Left errors ->

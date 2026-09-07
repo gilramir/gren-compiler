@@ -109,6 +109,7 @@ Library common
         Canonicalize.Environment.Foreign
         Canonicalize.Environment.Local
         Canonicalize.Expression
+        Canonicalize.Instance
         Canonicalize.Module
         Canonicalize.NodeId
         Canonicalize.Pattern

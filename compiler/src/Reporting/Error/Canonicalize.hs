@@ -47,7 +47,13 @@ data Error
   | ConstraintNotAClass A.Region Name.Name
   | ConstraintVarUnbound A.Region Name.Name Name.Name
   | DeriveUnsupported A.Region Name.Name
-  | InstanceDeclUnsupported A.Region
+  | InstanceDeclThirdParty A.Region Name.Name
+  | InstanceHeadNotApplied A.Region
+  | InstanceHeadNotType A.Region Name.Name
+  | InstanceHeadIsAlias A.Region Name.Name Name.Name
+  | InstanceDuplicate A.Region Name.Name Name.Name
+  | InstanceMethodUnknown A.Region Name.Name Name.Name [Name.Name]
+  | InstanceMethodMissing A.Region Name.Name Name.Name [Name.Name]
   | Binop A.Region Name.Name Name.Name
   | CustomTypeTooManyParams A.Region Name.Name Int
   | DuplicateDecl Name.Name A.Region A.Region
@@ -473,19 +479,128 @@ toReport source err =
               \ error rather than a no-op. I cannot yet tell those two apart, so the one\
               \ case that has to fail is the one I would let through. Remove it for now."
           )
-    InstanceDeclUnsupported region ->
-      Report.Report "UNSUPPORTED INSTANCE DECLARATION" region [] $
+    InstanceDeclThirdParty region className ->
+      Report.Report "INSTANCE DECLARATION NOT ALLOWED HERE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This `"
+                ++ Name.toChars className
+                ++ "` instance is declared in a package that is not allowed to declare one:",
+            D.reflow $
+              "Only the packages the toolchain ships may declare classes and instances for\
+              \ now. An instance is not exported and not imported — it holds for every\
+              \ module that depends on this one — so who may write one is the whole of what\
+              \ keeps two packages from disagreeing about the same type. The restriction\
+              \ lifts when user-defined classes open up."
+          )
+    InstanceHeadNotApplied region ->
+      Report.Report "BAD INSTANCE HEAD" region [] $
         Code.toSnippet
           source
           region
           Nothing
           ( D.reflow
-              "I can read this `instance` declaration, but I have nowhere to put it yet:",
+              "An instance head is a class applied to one type, and this is not that:",
             D.reflow
-              "Instance declarations parse in this version and nothing downstream of the\
-              \ parser can receive one. An instance I read and forgot would be worse than a\
-              \ class I forgot, because the program would still compile — against the\
-              \ structural answer this instance was written to replace. Remove it for now."
+              "It looks like `instance Eq (Array a) where`: the class first, then the one\
+              \ type the instance is for. A class takes exactly one argument here, so there\
+              \ is never more than one type after it."
+          )
+    InstanceHeadNotType region className ->
+      Report.Report "BAD INSTANCE HEAD" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This says which `"
+                ++ Name.toChars className
+                ++ "` instance to declare, and it does not name a type:",
+            D.reflow
+              "An instance is for a type — `Int`, `Array a`, a custom type of your own —\
+              \ because that is what a call site has in its hand when it looks one up. A\
+              \ type variable, a record or a function has nothing to look up."
+          )
+    InstanceHeadIsAlias region className aliasName ->
+      Report.Report "BAD INSTANCE HEAD" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`"
+                ++ Name.toChars aliasName
+                ++ "` is a type alias, so it cannot be what a `"
+                ++ Name.toChars className
+                ++ "` instance is for:",
+            D.reflow $
+              "An alias is another spelling of a type rather than a type of its own, so an\
+              \ instance for `"
+                ++ Name.toChars aliasName
+                ++ "` and an instance for what it stands for would be two instances for one\
+                   \ type and I could not tell which one a call meant. Name the type it\
+                   \ stands for instead."
+          )
+    InstanceDuplicate region className typeName ->
+      Report.Report "DUPLICATE INSTANCE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "There is already a `"
+                ++ Name.toChars className
+                ++ "` instance for `"
+                ++ Name.toChars typeName
+                ++ "`:",
+            D.reflow
+              "A type belongs to a class in one way, and that is what lets a call site pick\
+              \ an instance without being told which. The other one may be in this module\
+              \ or in something it depends on — an instance holds everywhere, so both are\
+              \ in scope here."
+          )
+    InstanceMethodUnknown region className methodName methodNames ->
+      Report.Report "UNKNOWN METHOD" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "The `"
+                ++ Name.toChars className
+                ++ "` class does not declare a `"
+                ++ Name.toChars methodName
+                ++ "` method:",
+            D.stack
+              [ D.reflow "These are the methods it declares:",
+                D.indent 4 $ D.vcat $ map (D.dullyellow . D.fromName) methodNames,
+                D.reflow
+                  "An instance says what the class's methods do for one type, so a\
+                  \ definition of anything else has nothing to be."
+              ]
+          )
+    InstanceMethodMissing region className typeName methodNames ->
+      Report.Report "MISSING METHODS" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This `"
+                ++ Name.toChars className
+                ++ "` instance for `"
+                ++ Name.toChars typeName
+                ++ "` does not define every method:",
+            D.stack
+              [ D.reflow "These are missing:",
+                D.indent 4 $ D.vcat $ map (D.dullyellow . D.fromName) methodNames,
+                D.reflow
+                  "A class has no default implementations, so an instance that leaves a\
+                  \ method out is an instance a call to that method cannot use."
+              ]
           )
     ExportOpenAlias region name ->
       Report.Report "BAD EXPORT" region [] $

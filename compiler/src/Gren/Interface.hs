@@ -25,6 +25,7 @@ import Data.Map.Merge.Strict qualified as Map
 import Data.Map.Strict ((!))
 import Data.Map.Strict qualified as Map
 import Data.Name qualified as Name
+import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Reporting.Annotation qualified as A
 
@@ -43,7 +44,17 @@ data Interface = Interface
     -- is D114's field's opposite number: an __instance__ has no name and is
     -- global, so it can never live in a map keyed by name and cut down by an
     -- export list, and conflating the two would export instances by accident.
-    _classes :: Map.Map Name.Name Class
+    _classes :: Map.Map Name.Name Class,
+    -- | The instances this module makes visible: its own and its imports'
+    -- (D114, D122, §G22.3).
+    --
+    -- The one field 'restrict' does not touch, because there is no such thing
+    -- as a private instance or an imported one — an instance holds for every
+    -- module that transitively depends on the one declaring it. Publishing the
+    -- __closure__ rather than the module's own is what makes that transitive
+    -- reach an ordinary union over direct imports, so nothing in the build
+    -- graph has to know that instances exist.
+    _instances :: Map.Map Can.InstanceKey Can.InstanceHead
   }
   deriving (Eq, Show)
 
@@ -76,15 +87,19 @@ data Binop = Binop
 
 -- FROM MODULE
 
-fromModule :: Pkg.Name -> Can.Module -> Map.Map Name.Name Can.Annotation -> Interface
-fromModule home (Can.Module _ exports _ _ unions aliases classes binops _) annotations =
+fromModule :: Pkg.Name -> Map.Map ModuleName.Raw Interface -> Can.Module -> Map.Map Name.Name Can.Annotation -> Interface
+fromModule home imports (Can.Module _ exports _ _ unions aliases classes instances binops _) annotations =
   Interface
     { _home = home,
       _values = restrict exports annotations,
       _unions = restrictUnions exports unions,
       _aliases = restrictAliases exports aliases,
       _binops = restrict exports (Map.map (toOp annotations) binops),
-      _classes = restrictClasses exports classes
+      _classes = restrictClasses exports classes,
+      _instances =
+        Map.union
+          (Map.map Can._in_head instances)
+          (Map.unions (map _instances (Map.elems imports)))
     }
 
 restrict :: Can.Exports -> Map.Map Name.Name a -> Map.Map Name.Name a
@@ -174,7 +189,7 @@ public =
   Public
 
 private :: Interface -> DependencyInterface
-private (Interface pkg _ unions aliases _ _) =
+private (Interface pkg _ unions aliases _ _ _) =
   Private pkg (Map.map extractUnion unions) (Map.map extractAlias aliases)
 
 extractUnion :: Union -> Can.Union
@@ -199,8 +214,8 @@ privatize di =
 -- BINARY
 
 instance Binary Interface where
-  get = Interface <$> get <*> get <*> get <*> get <*> get <*> get
-  put (Interface a b c d e f) = put a >> put b >> put c >> put d >> put e >> put f
+  get = Interface <$> get <*> get <*> get <*> get <*> get <*> get <*> get
+  put (Interface a b c d e f g) = put a >> put b >> put c >> put d >> put e >> put f >> put g
 
 instance Binary Union where
   put union =

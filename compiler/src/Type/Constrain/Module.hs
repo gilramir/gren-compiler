@@ -19,27 +19,53 @@ import Type.Type (Constraint (..), Type (..), mkFlexVar, nameToRigid, never, (==
 -- CONSTRAIN
 
 constrain :: Can.Module -> IO Constraint
-constrain (Can.Module home _ _ decls _ _ _ _ effects) =
-  case effects of
-    Can.NoEffects ->
-      constrainDecls decls CSaveTheEnvironment
-    Can.Ports ports ->
-      Map.foldrWithKey letPort (constrainDecls decls CSaveTheEnvironment) ports
-    Can.Manager r0 r1 r2 manager ->
-      case manager of
-        Can.Cmd cmdName ->
-          letCmd home cmdName
-            =<< constrainDecls decls
-            =<< constrainEffects home r0 r1 r2 manager
-        Can.Sub subName ->
-          letSub home subName
-            =<< constrainDecls decls
-            =<< constrainEffects home r0 r1 r2 manager
-        Can.Fx cmdName subName ->
-          letCmd home cmdName
-            =<< letSub home subName
-            =<< constrainDecls decls
-            =<< constrainEffects home r0 r1 r2 manager
+constrain (Can.Module home _ _ decls _ _ _ instances _ effects) =
+  do
+    final <- constrainInstances instances
+    case effects of
+      Can.NoEffects ->
+        constrainDecls decls final
+      Can.Ports ports ->
+        Map.foldrWithKey letPort (constrainDecls decls final) ports
+      Can.Manager r0 r1 r2 manager ->
+        case manager of
+          Can.Cmd cmdName ->
+            letCmd home cmdName
+              =<< constrainDecls decls
+              =<< constrainEffects home r0 r1 r2 manager
+          Can.Sub subName ->
+            letSub home subName
+              =<< constrainDecls decls
+              =<< constrainEffects home r0 r1 r2 manager
+          Can.Fx cmdName subName ->
+            letCmd home cmdName
+              =<< letSub home subName
+              =<< constrainDecls decls
+              =<< constrainEffects home r0 r1 r2 manager
+
+-- CONSTRAIN INSTANCES
+
+-- | Every instance method, checked where the module's own definitions are in
+-- scope and none of them bound (`docs/m1b-classes.md` §G22).
+--
+-- Each method is its own `CLet` with 'CTrue' under it, so the name it binds
+-- reaches nothing: two instances of one class define the same method name, and
+-- an instance method is not a top-level binding in the first place (§G19.2).
+-- That is also why none of them turns up in the annotations `Type.Solve`
+-- saves, which is where 'Gren.Interface._values' comes from.
+--
+-- It replaces 'CSaveTheEnvironment' as the innermost constraint rather than
+-- wrapping the declarations, because an instance body may call anything the
+-- module defines.
+constrainInstances :: Map.Map Can.InstanceKey Can.Instance -> IO Constraint
+constrainInstances instances =
+  case concatMap (Map.elems . Can._in_methods) (Map.elems instances) of
+    [] ->
+      return CSaveTheEnvironment
+    methods ->
+      do
+        cons <- traverse (\d -> Expr.constrainDef Map.empty d CTrue) methods
+        return (CAnd (cons ++ [CSaveTheEnvironment]))
 
 -- CONSTRAIN DECLARATIONS
 

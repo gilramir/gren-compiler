@@ -35,6 +35,11 @@ module AST.Canonical
     Alias (..),
     Binop (..),
     ClassDecl (..),
+    Instance (..),
+    InstanceHead (..),
+    InstanceKey (..),
+    instanceKey,
+    instanceType,
     Union (..),
     Ctor (..),
     Exports (..),
@@ -274,6 +279,14 @@ data Module = Module
     -- '_decls', because a method is not a top-level binding and nothing may
     -- ever ask one for a body (§G19.2).
     _classes :: Map.Map Name ClassDecl,
+    -- | The instances this module declares (`docs/m1b-classes.md` §G22).
+    --
+    -- Keyed rather than listed, because 'InstanceKey' is what makes two
+    -- instances the same instance and a map is the check: a second
+    -- @instance Eq Path@ has nowhere to go. The module's __own__ instances
+    -- only; what a module makes /visible/ is its imports' closure and lives in
+    -- 'Gren.Interface', which is where the closure can be assembled (D122).
+    _instances :: Map.Map InstanceKey Instance,
     _binops :: Map.Map Name Binop,
     _effects :: Effects
   }
@@ -298,6 +311,63 @@ data ClassDecl = ClassDecl
     _cl_methods :: Map.Map Name Annotation
   }
   deriving (Eq, Show)
+
+-- | What two instances have to differ in, and all resolution ever looks up.
+--
+-- The class and the head's __type constructor__. D11 keeps a class
+-- single-parameter, and §G22.1 keeps an instance head a constructor applied to
+-- arguments, so this pair identifies an instance exactly — which is what makes
+-- resolution a lookup rather than a search over a list, and makes overlap
+-- something a 'Map.Map' rejects rather than something a pass has to hunt for.
+data InstanceKey = InstanceKey !Class !ModuleName.Canonical !Name
+  deriving (Eq, Ord, Show)
+
+-- | @instance Eq a => Eq (Array a)@ without its bodies, which is everything a
+-- dependent module needs (D114): an instance is chosen by its head and
+-- discharged through its context, and nothing outside the declaring module
+-- ever reads a method's definition.
+--
+-- The head is stored split — a type constructor and its arguments — rather
+-- than as a 'Type'. §G22.1's rule is that an instance head /is/ a constructor
+-- applied to arguments, and storing it that way is the difference between a
+-- rule checked once and remembered and a rule the representation cannot
+-- express a violation of. 'instanceKey' is total because of it.
+data InstanceHead = InstanceHead
+  { -- | The module that declares it, so a witness can be named.
+    _ih_home :: ModuleName.Canonical,
+    _ih_class :: Class,
+    -- | The head's type constructor: @Array@ of @Eq (Array a)@.
+    _ih_con :: ModuleName.Canonical,
+    _ih_conName :: Name,
+    -- | Its arguments: @[a]@ of @Eq (Array a)@.
+    _ih_args :: [Type],
+    -- | @Eq a =>@, resolved onto the variables the head binds, exactly as an
+    -- annotation's context is resolved onto the ones its type binds.
+    _ih_context :: FreeVars
+  }
+  deriving (Eq, Show)
+
+-- | An instance declaration: its head and the methods under it.
+--
+-- Each method is a 'TypedDef' whose annotation is the class's published
+-- signature with the class parameter replaced by the head, so an instance body
+-- is checked by exactly the machinery a top-level annotated definition is
+-- checked by. They are not in '_decls': a method is not a top-level binding
+-- (§G19.2), and two instances of the same class define the same method name.
+data Instance = Instance
+  { _in_head :: InstanceHead,
+    _in_methods :: Map.Map Name Def
+  }
+  deriving (Show)
+
+instanceKey :: InstanceHead -> InstanceKey
+instanceKey (InstanceHead _ cls home name _ _) =
+  InstanceKey cls home name
+
+-- | The type the instance is for: @Array a@ of @Eq (Array a)@.
+instanceType :: InstanceHead -> Type
+instanceType (InstanceHead _ _ home name args _) =
+  TType home name args
 
 data Binop = Binop_ Binop.Associativity Binop.Precedence Name
   deriving (Eq, Show)
@@ -365,6 +435,14 @@ instance Binary Alias where
 instance Binary ClassDecl where
   get = liftM2 ClassDecl get get
   put (ClassDecl a b) = put a >> put b
+
+instance Binary InstanceKey where
+  get = liftM3 InstanceKey get get get
+  put (InstanceKey a b c) = put a >> put b >> put c
+
+instance Binary InstanceHead where
+  get = InstanceHead <$> get <*> get <*> get <*> get <*> get <*> get
+  put (InstanceHead a b c d e f) = put a >> put b >> put c >> put d >> put e >> put f
 
 instance Binary Union where
   put (Union a b c d) = put a >> put b >> put c >> put d

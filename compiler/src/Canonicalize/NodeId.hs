@@ -59,7 +59,16 @@ nodeId n =
 -- partially typed module, and "mostly typed" is exactly the state that would
 -- pass unnoticed until a backend hit the gap.
 nodes :: Can.Module -> [Node]
-nodes modul = declNodes (Can._decls modul)
+nodes modul =
+  declNodes (Can._decls modul)
+    ++ concatMap instanceNodes (Map.elems (Can._instances modul))
+
+-- | An instance's methods, in the order 'number' visits them: after every
+-- top-level definition, and among themselves in the key order the map already
+-- imposes, which is a class and a type constructor rather than anything a
+-- traversal chose.
+instanceNodes :: Can.Instance -> [Node]
+instanceNodes i = concatMap defNodes (Map.elems (Can._in_methods i))
 
 declNodes :: Can.Decls -> [Node]
 declNodes ds =
@@ -104,7 +113,17 @@ fresh = state (\n -> (Can.NodeId (n + 1), n + 1))
 -- | Number every node in a module.
 number :: Can.Module -> Can.Module
 number modul =
-  modul {Can._decls = fst (runState (decls (Can._decls modul)) 0)}
+  let numbered =
+        do
+          ds <- decls (Can._decls modul)
+          is <- traverse instanceMethods (Can._instances modul)
+          pure (ds, is)
+      ((ds', is'), _) = runState numbered 0
+   in modul {Can._decls = ds', Can._instances = is'}
+
+instanceMethods :: Can.Instance -> Numbering Can.Instance
+instanceMethods (Can.Instance head_ methods) =
+  Can.Instance head_ <$> traverse def methods
 
 -- | Number one expression, starting from zero. For tests, and for anything
 -- that needs a numbered subtree without a module around it.
