@@ -71,6 +71,7 @@ Library common
         Gren.Compiler.Type.Extract
         Gren.Constraint
         Gren.Docs
+        Gren.Fingerprint
         Gren.Int
         Gren.Float
         Gren.Interface

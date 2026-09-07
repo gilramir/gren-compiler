@@ -95,7 +95,7 @@ mainDecl opts m =
 -- | A @port@ declaration (C18): which way the payload crosses, whether it
 -- crosses as bytes, and the converters as ordinary Core.
 portDecl :: Options -> Port -> B.Builder
-portDecl opts (Port binder flow) =
+portDecl opts (Port portBinder flow) =
   case flow of
     PortOut c ->
       header "out" <> converter opts "encoder" c
@@ -110,9 +110,9 @@ portDecl opts (Port binder flow) =
       "port "
         <> dir
         <> " "
-        <> name (_binderName binder)
+        <> name (_binderName portBinder)
         <> " : "
-        <> typeToBuilder opts (_binderType binder)
+        <> typeToBuilder opts (_binderType portBinder)
         <> "\n"
 
 converter :: Options -> B.Builder -> Converter -> B.Builder

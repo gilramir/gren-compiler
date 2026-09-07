@@ -6,7 +6,6 @@ module Generate
 where
 
 import Build qualified
-import Control.Concurrent (readMVar)
 import Core.AST qualified as Core
 import Core.Dump qualified as Dump
 import Core.Low qualified as Low
@@ -78,19 +77,18 @@ prod details artifacts =
 -- project's own from the 'Build.Artifacts'. This is the plumbing the JS backend
 -- will read; nothing generates code from it yet.
 --
--- A 'Build.Cached' module contributes nothing, because @.greni@ holds an
--- interface and no Core. That branch cannot be reached
--- today — nothing reads @d.dat@ back, so every module is fresh
--- (@docs/upstream/compiler-artifact-cache-is-write-only.md@) — and the day the
--- cache is restored, Core needs a file beside those two and this function needs
--- to load it. Until then a missing entry would be a silently smaller program, so
--- 'dumpProgramCore' reports the count and @harness/core-golden.py@ compares the
--- module set against the frontend's own dump.
+-- __Every module contributes, cached or not__ (D98). A 'Build.Cached' module
+-- used to contribute nothing, because @.greni@ held an interface and no Core;
+-- the day the artifact cache came back was going to be the day that became a
+-- silently smaller program. It has a @.grenc@ beside it now, in C10's wire
+-- format, and "Build" reads it before it will call a module cached at all. The
+-- dependencies' side is the same change: 'Details.loadCores' was an
+-- @IO (MVar (Maybe _))@ with a @fromMaybe Map.empty@ standing here, and is a
+-- total function over a 'Details' that already holds them.
 programCore :: Details.Details -> Build.Artifacts -> IO (Map.Map ModuleName.Canonical Core.Module)
 programCore details artifacts@(Build.Artifacts pkg _ _ _) =
   do
-    maybeDeps <- readMVar =<< Details.loadCores details
-    let deps = Maybe.fromMaybe Map.empty maybeDeps
+    let deps = Details.loadCores details
     let own = Map.mapKeys (ModuleName.Canonical pkg) (ownCore artifacts)
     throughWire (Map.union own deps)
 
@@ -139,22 +137,18 @@ throughWire cores
 -- rejects a @Debug@ use in the project and not in a package it depends on — and
 -- wants the raw name, which is what the error prints.
 --
--- A 'Build.Cached' module contributes nothing, for the reason 'programCore'
--- gives and with a second consequence: a cached module's @Debug@ use would go
--- unreported, where reading its Core would have found it. That branch is
--- unreachable today — @d.dat@ is never read back, so @Details._locals@ is empty
--- and every module is 'Build.Fresh'
--- (@docs/upstream/compiler-artifact-cache-is-write-only.md@) — and restoring the
--- cache means giving Core a file beside @.greni@, which is the same
--- work 'programCore' is waiting on.
+-- A cached module contributes its Core like any other, which matters twice
+-- over here: 'checkForDebugUses' is @--optimize@'s check, and a cached
+-- module whose @Debug@ use went unreported would be a rejection that depended
+-- on whether the file happened to be in the cache.
 ownCore :: Build.Artifacts -> Map.Map ModuleName.Raw Core.Module
 ownCore (Build.Artifacts _ _ roots modules) =
-  Map.fromList (Maybe.mapMaybe moduleCore modules ++ Maybe.mapMaybe rootCore (NE.toList roots))
+  Map.fromList (map moduleCore modules ++ Maybe.mapMaybe rootCore (NE.toList roots))
   where
     moduleCore modul =
       case modul of
-        Build.Fresh name _ core -> Just (name, core)
-        Build.Cached _ _ _ -> Nothing
+        Build.Fresh name _ core -> (name, core)
+        Build.Cached name _ core -> (name, core)
 
     rootCore root =
       case root of
@@ -245,7 +239,7 @@ linkCore details artifacts kernels =
 -- that reached the backend.
 kernelChunks :: Details.Details -> Task (Map.Map N.Name [K.Chunk])
 kernelChunks details =
-  Task.io (Maybe.fromMaybe Map.empty <$> (readMVar =<< Details.loadKernels details))
+  return (Details.loadKernels details)
 
 -- | The program's roots, as Core names.
 --
@@ -389,21 +383,26 @@ repl details ansi artifacts@(Build.ReplArtifacts home _ localizer annotations) n
 --
 -- The modules are the REPL\'s own — the generated @Gren_Repl@ module and
 -- whatever it imports out of the project — plus the dependencies\' Core, exactly
--- as 'programCore' assembles them for a build. A 'Build.Cached' module
--- contributes nothing here for the reason 'programCore' gives.
+-- as 'programCore' assembles them for a build, and a cached module contributes
+-- its Core here too (D98).
 linkReplCore :: Details.Details -> Build.ReplArtifacts -> N.Name -> Map.Map N.Name [K.Chunk] -> Task Program.Program
 linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels =
   Task.io $
     do
-      maybeDeps <- readMVar =<< Details.loadCores details
-      let deps = Maybe.fromMaybe Map.empty maybeDeps
+      let deps = Details.loadCores details
       let own =
             Map.fromList
               [ (ModuleName.Canonical (ModuleName._package home) raw, core)
-              | Build.Fresh raw _ core <- modules
+              | (raw, core) <- map replModuleCore modules
               ]
       cores <- Pass.run <$> throughWire (Map.union own deps)
       return (Program.link (backendFor kernels cores) cores (replRoots home name))
+
+replModuleCore :: Build.Module -> (ModuleName.Raw, Core.Module)
+replModuleCore modul =
+  case modul of
+    Build.Fresh raw _ core -> (raw, core)
+    Build.Cached raw _ core -> (raw, core)
 
 -- | What a REPL entry reaches: the value being printed, and @Debug.toString@.
 --

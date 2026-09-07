@@ -1,7 +1,10 @@
 module Directories
   ( details,
     interfaces,
+    cores,
+    kernels,
     greni,
+    grenc,
     artifactKey,
     findRoot,
     PackageCache,
@@ -12,13 +15,11 @@ module Directories
   )
 where
 
-import Data.Bits (xor)
 import Data.List qualified as List
-import Data.Word (Word64)
+import Gren.Fingerprint qualified as Fingerprint
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Gren.Version qualified as V
-import Numeric qualified
 import System.Directory qualified as Dir
 import System.Environment qualified as Env
 import System.FilePath ((<.>), (</>))
@@ -35,9 +36,23 @@ details :: FilePath -> FilePath
 details root =
   projectCache root </> "d.dat"
 
+-- | The dependencies' interfaces, their Core and their kernel JavaScript.
+--
+-- One file each, all three written by 'Gren.Details.verifyDependencies' and all
+-- three required before @d.dat@ may be believed (D98). @i.dat@ had a reader and
+-- no writer until this landed; @c.dat@ and @k.dat@ are new, because Core and
+-- the kernel chunks did not travel this way before M1a re-targeted the backend.
 interfaces :: FilePath -> FilePath
 interfaces root =
   projectCache root </> "i.dat"
+
+cores :: FilePath -> FilePath
+cores root =
+  projectCache root </> "c.dat"
+
+kernels :: FilePath -> FilePath
+kernels root =
+  projectCache root </> "k.dat"
 
 compilerVersion :: FilePath
 compilerVersion =
@@ -80,29 +95,27 @@ artifactKey =
 -- not need to be: it names an executable the compiler just stat'ed, and the
 -- only thing it has to do is differ when the executable does.
 fingerprint :: String -> String
-fingerprint =
-  pad . flip Numeric.showHex "" . List.foldl' step 0xcbf29ce484222325
-  where
-    step :: Word64 -> Char -> Word64
-    step hash char =
-      (hash `xor` fromIntegral (fromEnum char)) * 0x100000001b3
+fingerprint identity =
+  Fingerprint.toHex (Fingerprint.chars identity Fingerprint.empty)
 
-    pad :: String -> String
-    pad hex =
-      replicate (16 - length hex) '0' ++ hex
+-- GRENI AND GRENC
 
--- GRENI
-
--- | A module's interface. There was a @.greno@ beside it holding that module's
--- @Opt.LocalGraph@, and an @o.dat@ holding the dependencies' folded into one
--- graph; both went with the pipeline that read them. Neither was ever read back
--- (@docs\/upstream\/compiler-artifact-cache-is-write-only.md@), so nothing that
--- worked stops working — but the day the cache is restored, what a module needs
--- beside its interface is its Core, which is C10's wire format and has its own
--- gate.
+-- | A module's interface, and its Core beside it.
+--
+-- There was a @.greno@ here holding the module's @Opt.LocalGraph@, and an
+-- @o.dat@ holding the dependencies' folded into one graph; both went with the
+-- pipeline that read them. What a module needs beside its interface now is its
+-- __Core__, and @.grenc@ is that file: C10's wire format, byte for byte the
+-- same thing @GENG_DUMP_WIRE@ writes and @harness/wire.py@ decodes (D98). The
+-- cache is the first thing in the compiler that reads the wire format back in
+-- anger, which is what D90 wanted for it.
 greni :: FilePath -> ModuleName.Raw -> FilePath
 greni root name =
   toArtifactPath root name "greni"
+
+grenc :: FilePath -> ModuleName.Raw -> FilePath
+grenc root name =
+  toArtifactPath root name "grenc"
 
 toArtifactPath :: FilePath -> ModuleName.Raw -> String -> FilePath
 toArtifactPath root name ext =

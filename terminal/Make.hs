@@ -73,7 +73,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
   Task.run $
     do
       desiredMode <- getMode optimize
-      details <- Task.eio Exit.MakeBadDetails (Details.load outline deps)
+      details <- Task.eio Exit.MakeBadDetails (Details.load root outline deps)
       let platform = getPlatform details
       case modules of
         [] ->
@@ -209,13 +209,24 @@ getMain modules root =
         then Just name
         else Nothing
 
+-- | __Both constructors ask Core__, and until the cache worked only one of them
+-- could.
+--
+-- A 'Build.Cached' module used to answer from a 'Bool' the builder had put in
+-- @d.dat@, set by a syntactic scan for a top-level value named @main@. That is
+-- not the same question 'Core._moduleMain' answers: C19 records @main@ as a
+-- declaration only when its /type/ makes it one, so a module with a @main@ that
+-- is an ordinary value would have been a program when it came from the cache
+-- and not one when it was freshly compiled. Nothing could hit it while the
+-- cache was unreachable. Carrying Core in the constructor makes the two cases
+-- one question again, and 'Gren.Details.Local' no longer stores the flag.
 isMain :: ModuleName.Raw -> Build.Module -> Bool
 isMain targetName modul =
   case modul of
     Build.Fresh name _ core ->
       Maybe.isJust (Core._moduleMain core) && name == targetName
-    Build.Cached name mainIsDefined _ ->
-      mainIsDefined && name == targetName
+    Build.Cached name _ core ->
+      Maybe.isJust (Core._moduleMain core) && name == targetName
 
 -- HAS ONE MAIN
 

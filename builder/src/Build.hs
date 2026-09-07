@@ -29,6 +29,7 @@ import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
 import Control.Monad (filterM)
 import Core.AST qualified as Core
+import Core.Wire qualified as Wire
 import Data.ByteString qualified as B
 import Data.ByteString.Internal (ByteString)
 import Data.Char qualified as Char
@@ -47,6 +48,7 @@ import Directories qualified as Dirs
 import File qualified
 import Gren.Details qualified as Details
 import Gren.Docs qualified as Docs
+import Gren.Fingerprint qualified as FP
 import Gren.Interface qualified as I
 import Gren.ModuleName qualified as ModuleName
 import Gren.Outline qualified as Outline
@@ -74,21 +76,22 @@ data Env = Env
     _project :: Parse.ProjectType,
     _platform :: P.Platform,
     _srcDirs :: [AbsoluteSrcDir],
+    _buildID :: Details.BuildID,
     _locals :: Map.Map ModuleName.Raw Details.Local,
     _foreigns :: Map.Map ModuleName.Raw Details.Foreign
   }
 
 makeEnv :: Reporting.BKey -> FilePath -> Details.Details -> IO Env
-makeEnv key root (Details.Details _ validOutline _ locals foreigns _) =
+makeEnv key root (Details.Details _ validOutline buildID locals foreigns _) =
   case validOutline of
     Details.ValidApp platform givenSrcDirs ->
       do
         srcDirs <- traverse (Outline.toAbsoluteSrcDir root) (NE.toList givenSrcDirs)
-        return $ Env key root Parse.Application platform srcDirs locals foreigns
+        return $ Env key root Parse.Application platform srcDirs buildID locals foreigns
     Details.ValidPkg platform pkg _ ->
       do
         srcDir <- Outline.toAbsoluteSrcDir root (Outline.RelativeSrcDir "src")
-        return $ Env key root (Parse.Package pkg) platform [srcDir] locals foreigns
+        return $ Env key root (Parse.Package pkg) platform [srcDir] buildID locals foreigns
 
 -- FORK
 
@@ -122,7 +125,6 @@ fromExposed style root details sources docsGoal exposed@(NE.List e es) =
   Reporting.trackBuild style $ \key ->
     do
       env <- makeEnv key root details
-      dmvar <- Details.loadInterfaces root details
 
       -- crawl
       mvar <- newEmptyMVar
@@ -133,8 +135,7 @@ fromExposed style root details sources docsGoal exposed@(NE.List e es) =
       statuses <- traverse readMVar =<< readMVar mvar
 
       -- compile
-      midpoint <- checkMidpoint dmvar statuses
-      case midpoint of
+      case checkMidpoint (Details.loadInterfaces details) statuses of
         Left problem ->
           return (Left (Exit.BuildProjectProblem problem))
         Right foreigns ->
@@ -157,17 +158,21 @@ data Artifacts = Artifacts
 
 -- | A module of the project being built.
 --
--- 'Fresh' carries the module's Core, on its way to
--- 'Generate': M1a re-targets the JS backend onto Core, and the backend is
--- handed a whole program rather than a module at a time. 'Cached' has none —
--- a cached module's artifacts come from @.greni@, which holds an interface
--- and no Core. That branch is unreachable
--- today (@docs/upstream/compiler-artifact-cache-is-write-only.md@); when the
--- cache is restored, Core needs a file of its own and this constructor needs
--- the field.
+-- __Both constructors carry the module's Core__, on its way to 'Generate': M1a
+-- re-targets the JS backend onto Core, and the backend is handed a whole
+-- program rather than a module at a time. 'Cached' carries it because a cached
+-- module now has a @.grenc@ beside its @.greni@ — C10's wire format, read back
+-- by "Core.Wire" (D98). It did not, and this constructor did not have the
+-- field, for as long as the cache was unreachable and the format did not
+-- exist; a 'Cached' module contributing nothing was a silently smaller
+-- program waiting to happen.
+--
+-- The interface is still an 'MVar', because a cached module's interface is
+-- needed only if something that is being recompiled imports it, and the Core is
+-- not, because everything that is linked needs it.
 data Module
   = Fresh ModuleName.Raw I.Interface Core.Module
-  | Cached ModuleName.Raw Bool (MVar CachedInterface)
+  | Cached ModuleName.Raw (MVar CachedInterface) Core.Module
 
 type Dependencies =
   Map.Map ModuleName.Canonical I.DependencyInterface
@@ -185,14 +190,12 @@ fromPaths style root details sources paths =
         Right lroots ->
           do
             -- crawl
-            dmvar <- Details.loadInterfaces root details
             smvar <- newMVar Map.empty
             srootMVars <- traverse (fork . crawlRoot env smvar sources) lroots
             sroots <- traverse readMVar srootMVars
             statuses <- traverse readMVar =<< readMVar smvar
 
-            midpoint <- checkMidpointAndRoots dmvar statuses sroots
-            case midpoint of
+            case checkMidpointAndRoots (Details.loadInterfaces details) statuses sroots of
               Left problem ->
                 return (Left (Exit.BuildProjectProblem problem))
               Right foreigns ->
@@ -213,14 +216,12 @@ fromMainModules style root details sources rootModules =
       env <- makeEnv key root details
 
       -- crawl
-      dmvar <- Details.loadInterfaces root details
       smvar <- newMVar Map.empty
       srootMVars <- traverse (fork . crawlRootModule env smvar sources) rootModules
       sroots <- traverse readMVar srootMVars
       statuses <- traverse readMVar =<< readMVar smvar
 
-      midpoint <- checkMidpointAndRoots dmvar statuses sroots
-      case midpoint of
+      case checkMidpointAndRoots (Details.loadInterfaces details) statuses sroots of
         Left problem ->
           return (Left (Exit.BuildProjectProblem problem))
         Right foreigns ->
@@ -273,21 +274,17 @@ crawlDeps env mvar sources deps blockedValue =
     crawlNew name () = fork (crawlModule env mvar sources (DocsNeed False) name)
 
 crawlRootModuleHelp :: Env -> MVar StatusDict -> Sources -> DocsNeed -> ModuleName.Raw -> IO Status
-crawlRootModuleHelp env@(Env _ _ _ _ _ locals _) mvar sources docsNeed name =
+crawlRootModuleHelp env mvar sources docsNeed name =
   case Map.lookup name sources of
     Just source ->
       if Name.isKernel name
         then return $ SBadImport Import.NotFound
-        else case Map.lookup name locals of
-          Nothing ->
-            crawlFile env mvar sources docsNeed name source
-          Just local@(Details.Local _ deps _) ->
-            crawlDeps env mvar sources deps (SCached local)
+        else crawlKnown env mvar sources docsNeed name source
     Nothing ->
       return $ SBadImport Import.NotFound
 
 crawlModule :: Env -> MVar StatusDict -> Sources -> DocsNeed -> ModuleName.Raw -> IO Status
-crawlModule env@(Env _ _ projectType _ _ locals foreigns) mvar sources docsNeed name =
+crawlModule env@(Env _ _ projectType _ _ _ _ foreigns) mvar sources docsNeed name =
   case Map.lookup name sources of
     Just source ->
       case Map.lookup name foreigns of
@@ -299,11 +296,7 @@ crawlModule env@(Env _ _ projectType _ _ locals foreigns) mvar sources docsNeed 
               if Parse.isKernel projectType
                 then return SKernel
                 else return $ SBadImport Import.NotFound
-            else case Map.lookup name locals of
-              Nothing ->
-                crawlFile env mvar sources docsNeed name source
-              Just local@(Details.Local _ deps _) ->
-                crawlDeps env mvar sources deps (SCached local)
+            else crawlKnown env mvar sources docsNeed name source
     Nothing ->
       case Map.lookup name foreigns of
         Just (Details.Foreign dep deps) ->
@@ -315,12 +308,30 @@ crawlModule env@(Env _ _ projectType _ _ locals foreigns) mvar sources docsNeed 
         Nothing ->
           return $ SBadImport Import.NotFound
 
+-- | A module the last build knew about, if the bytes are still the same ones
+-- (D96).
+--
+-- __The fingerprint is the whole of the freshness test here__, and it is asked
+-- of the source the frontend just handed us rather than of the file's
+-- modification time. 'Details.Local' says why that is two different questions
+-- and why the other one — an import's interface having moved since this module
+-- was last compiled — is answered later, in 'checkDepsHelp', where the results
+-- of this build are in scope.
+crawlKnown :: Env -> MVar StatusDict -> Sources -> DocsNeed -> ModuleName.Raw -> Source -> IO Status
+crawlKnown env mvar sources docsNeed name source@(Source _ bytes) =
+  case Map.lookup name (_locals env) of
+    Just local
+      | Details._source local == FP.ofBytes bytes ->
+          crawlDeps env mvar sources (Details._deps local) (SCached local)
+    _ ->
+      crawlFile env mvar sources docsNeed name source
+
 crawlFile :: Env -> MVar StatusDict -> Sources -> DocsNeed -> ModuleName.Raw -> Source -> IO Status
-crawlFile env@(Env _ _ projectType _ _ _ _) mvar sources docsNeed expectedName (Source path source) =
+crawlFile env@(Env _ _ projectType _ _ buildID locals _) mvar sources docsNeed expectedName (Source path source) =
   case Parse.fromByteString projectType source of
     Left err ->
       return $ SBadSyntax path source err
-    Right modul@(Src.Module maybeActualName _ _ imports values _ _ _ _ _ _) ->
+    Right modul@(Src.Module maybeActualName _ _ imports _ _ _ _ _ _ _) ->
       case maybeActualName of
         Nothing ->
           return $ SBadSyntax path source (Syntax.ModuleNameUnspecified expectedName)
@@ -328,13 +339,14 @@ crawlFile env@(Env _ _ projectType _ _ _ _) mvar sources docsNeed expectedName (
           if expectedName == actualName
             then
               let deps = map (Src.getImportName . snd) imports
-                  local = Details.Local path deps (any (isMain . snd) values)
+                  -- The interface has not been computed yet, so '_lastChange'
+                  -- stays where it was and 'compile' moves it if the interface
+                  -- comes out different. A module the cache has never seen
+                  -- starts at this build.
+                  lastChange = maybe buildID Details._lastChange (Map.lookup expectedName locals)
+                  local = Details.Local path (FP.ofBytes source) deps lastChange buildID
                in crawlDeps env mvar sources deps (SChanged local source modul docsNeed)
             else return $ SBadSyntax path source (Syntax.ModuleNameMismatch expectedName name)
-
-isMain :: A.Located Src.Value -> Bool
-isMain (A.At _ (Src.Value (A.At _ name) _ _ _ _)) =
-  name == Name._main
 
 -- CHECK MODULE
 
@@ -346,7 +358,10 @@ data Result
     -- code never forces the lowering.
     RNew !Details.Local !I.Interface Core.Module !(Maybe Docs.Module)
   | RSame !Details.Local !I.Interface Core.Module !(Maybe Docs.Module)
-  | RCached Bool (MVar CachedInterface)
+  | -- | Not compiled this time. The 'Details.Local' is last build's, which is
+    -- what carries the '_lastChange' a dependent has to compare itself
+    -- against, and the Core came off disk.
+    RCached !Details.Local !(MVar CachedInterface) Core.Module
   | RNotFound Import.Problem
   | RProblem Error.Module
   | RBlocked
@@ -359,12 +374,12 @@ data CachedInterface
   | Corrupted
 
 checkModule :: Env -> Dependencies -> MVar ResultDict -> ModuleName.Raw -> Status -> IO Result
-checkModule env@(Env _ root projectType _ _ _ _) foreigns resultsMVar name status =
+checkModule env@(Env _ root projectType _ _ _ _ _) foreigns resultsMVar name status =
   case status of
-    SCached local@(Details.Local path deps hasMain) ->
+    SCached local@(Details.Local path _ deps _ lastCompile) ->
       do
         results <- readMVar resultsMVar
-        depsStatus <- checkDeps root results deps
+        depsStatus <- checkDeps root results deps lastCompile
         case depsStatus of
           DepsChange ifaces ->
             do
@@ -375,10 +390,40 @@ checkModule env@(Env _ root projectType _ _ _ _) foreigns resultsMVar name statu
                   return $
                     RProblem $
                       Error.Module name path source (Error.BadSyntax err)
-          DepsSame _ _ ->
+          DepsSame same cached ->
             do
-              mvar <- newMVar Unneeded
-              return (RCached hasMain mvar)
+              -- The last thing that can send a cached module back to the
+              -- compiler, and the only one that is a property of the cache
+              -- rather than of the sources: @.grenc@ has to be there and has to
+              -- decode. A missing or corrupt one costs a recompile and nothing
+              -- else, which is what makes tampering with @.gren/@ a non-event --
+              -- and it is why this is read here rather than when the artifacts
+              -- are assembled, where the answer would arrive too late to act on.
+              --
+              -- __Recompiling here has to load the imports' interfaces__, which
+              -- is why @same@ and @cached@ are bound rather than discarded.
+              -- 'DepsSame' means no import changed, not that this module has
+              -- none.
+              maybeCore <- readCore root name
+              case maybeCore of
+                Just core ->
+                  do
+                    mvar <- newMVar Unneeded
+                    return (RCached local mvar core)
+                Nothing ->
+                  do
+                    source <- File.readUtf8 path
+                    case Parse.fromByteString projectType source of
+                      Left err ->
+                        return $
+                          RProblem $
+                            Error.Module name path source (Error.BadSyntax err)
+                      Right modul ->
+                        do
+                          maybeLoaded <- loadInterfaces root same cached
+                          case maybeLoaded of
+                            Nothing -> return RBlocked
+                            Just ifaces -> compile env (DocsNeed False) local source ifaces modul
           DepsBlock ->
             return RBlocked
           DepsNotFound problems ->
@@ -392,10 +437,10 @@ checkModule env@(Env _ root projectType _ _ _ _) foreigns resultsMVar name statu
                         Error.BadImports (toImportErrors env results imports problems)
                       Left err ->
                         Error.BadSyntax err
-    SChanged local@(Details.Local path deps _) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _) docsNeed ->
+    SChanged local@(Details.Local path _ deps _ lastCompile) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _) docsNeed ->
       do
         results <- readMVar resultsMVar
-        depsStatus <- checkDeps root results deps
+        depsStatus <- checkDeps root results deps lastCompile
         case depsStatus of
           DepsChange ifaces ->
             compile env docsNeed local source ifaces modul
@@ -434,37 +479,43 @@ data DepsStatus
   | DepsBlock
   | DepsNotFound (NE.List (ModuleName.Raw, Import.Problem))
 
-checkDeps :: FilePath -> ResultDict -> [ModuleName.Raw] -> IO DepsStatus
-checkDeps root results deps =
-  checkDepsHelp root results deps [] [] [] [] False
+checkDeps :: FilePath -> ResultDict -> [ModuleName.Raw] -> Details.BuildID -> IO DepsStatus
+checkDeps root results deps lastCompile =
+  checkDepsHelp root results deps [] [] [] [] False 0 lastCompile
 
 type Dep = (ModuleName.Raw, I.Interface)
 
 type CDep = (ModuleName.Raw, MVar CachedInterface)
 
-checkDepsHelp :: FilePath -> ResultDict -> [ModuleName.Raw] -> [Dep] -> [Dep] -> [CDep] -> [(ModuleName.Raw, Import.Problem)] -> Bool -> IO DepsStatus
-checkDepsHelp root results deps new same cached importProblems isBlocked =
+-- | @lastDepChange@ is the newest 'Details._lastChange' among the imports and
+-- @lastCompile@ is when this module was last compiled. A module whose imports
+-- all came back unchanged /in this build/ can still be stale, if one of them
+-- changed in a build this one was not part of — that is the second of the two
+-- reasons 'Details.Local' documents, and this pair of numbers is the whole of
+-- it.
+checkDepsHelp :: FilePath -> ResultDict -> [ModuleName.Raw] -> [Dep] -> [Dep] -> [CDep] -> [(ModuleName.Raw, Import.Problem)] -> Bool -> Details.BuildID -> Details.BuildID -> IO DepsStatus
+checkDepsHelp root results deps new same cached importProblems isBlocked lastDepChange lastCompile =
   case deps of
     dep : otherDeps ->
       do
         result <- readMVar (results ! dep)
         case result of
-          RNew _ iface _ _ ->
-            checkDepsHelp root results otherDeps ((dep, iface) : new) same cached importProblems isBlocked
-          RSame _ iface _ _ ->
-            checkDepsHelp root results otherDeps new ((dep, iface) : same) cached importProblems isBlocked
-          RCached _ mvar ->
-            checkDepsHelp root results otherDeps new same ((dep, mvar) : cached) importProblems isBlocked
+          RNew local iface _ _ ->
+            checkDepsHelp root results otherDeps ((dep, iface) : new) same cached importProblems isBlocked (max (Details._lastChange local) lastDepChange) lastCompile
+          RSame local iface _ _ ->
+            checkDepsHelp root results otherDeps new ((dep, iface) : same) cached importProblems isBlocked (max (Details._lastChange local) lastDepChange) lastCompile
+          RCached local mvar _ ->
+            checkDepsHelp root results otherDeps new same ((dep, mvar) : cached) importProblems isBlocked (max (Details._lastChange local) lastDepChange) lastCompile
           RNotFound prob ->
-            checkDepsHelp root results otherDeps new same cached ((dep, prob) : importProblems) True
+            checkDepsHelp root results otherDeps new same cached ((dep, prob) : importProblems) True lastDepChange lastCompile
           RProblem _ ->
-            checkDepsHelp root results otherDeps new same cached importProblems True
+            checkDepsHelp root results otherDeps new same cached importProblems True lastDepChange lastCompile
           RBlocked ->
-            checkDepsHelp root results otherDeps new same cached importProblems True
+            checkDepsHelp root results otherDeps new same cached importProblems True lastDepChange lastCompile
           RForeign iface ->
-            checkDepsHelp root results otherDeps new ((dep, iface) : same) cached importProblems isBlocked
+            checkDepsHelp root results otherDeps new ((dep, iface) : same) cached importProblems isBlocked lastDepChange lastCompile
           RKernel ->
-            checkDepsHelp root results otherDeps new same cached importProblems isBlocked
+            checkDepsHelp root results otherDeps new same cached importProblems isBlocked lastDepChange lastCompile
     [] ->
       case reverse importProblems of
         p : ps ->
@@ -473,7 +524,7 @@ checkDepsHelp root results deps new same cached importProblems isBlocked =
           if isBlocked
             then return DepsBlock
             else
-              if null new
+              if null new && lastDepChange <= lastCompile
                 then return $ DepsSame same cached
                 else do
                   maybeLoaded <- loadInterfaces root same cached
@@ -484,7 +535,7 @@ checkDepsHelp root results deps new same cached importProblems isBlocked =
 -- TO IMPORT ERROR
 
 toImportErrors :: Env -> ResultDict -> [([Src.Comment], Src.Import)] -> NE.List (ModuleName.Raw, Import.Problem) -> NE.List Import.Error
-toImportErrors (Env _ _ _ _ _ locals foreigns) results imports problems =
+toImportErrors (Env _ _ _ _ _ _ locals foreigns) results imports problems =
   let knownModules =
         Set.unions
           [ Map.keysSet foreigns,
@@ -543,39 +594,26 @@ loadInterface root (name, ciMvar) =
 
 -- CHECK PROJECT
 
-checkMidpoint :: MVar (Maybe Dependencies) -> Map.Map ModuleName.Raw Status -> IO (Either Exit.BuildProjectProblem Dependencies)
-checkMidpoint dmvar statuses =
+-- | The dependencies' interfaces arrive as a value rather than as an
+-- @MVar (Maybe _)@ now: 'Gren.Details.load' has already read or built them and
+-- fell back to building when it could not read them, so there is no longer a
+-- point in the build at which they might not be there.
+-- @Exit.BP_CannotLoadDependencies@ went with that.
+checkMidpoint :: Dependencies -> Map.Map ModuleName.Raw Status -> Either Exit.BuildProjectProblem Dependencies
+checkMidpoint foreigns statuses =
   case checkForCycles statuses of
-    Nothing ->
-      do
-        maybeForeigns <- readMVar dmvar
-        case maybeForeigns of
-          Nothing -> return (Left Exit.BP_CannotLoadDependencies)
-          Just fs -> return (Right fs)
-    Just (NE.List name names) ->
-      do
-        _ <- readMVar dmvar
-        return (Left (Exit.BP_Cycle name names))
+    Nothing -> Right foreigns
+    Just (NE.List name names) -> Left (Exit.BP_Cycle name names)
 
-checkMidpointAndRoots :: MVar (Maybe Dependencies) -> Map.Map ModuleName.Raw Status -> NE.List RootStatus -> IO (Either Exit.BuildProjectProblem Dependencies)
-checkMidpointAndRoots dmvar statuses sroots =
+checkMidpointAndRoots :: Dependencies -> Map.Map ModuleName.Raw Status -> NE.List RootStatus -> Either Exit.BuildProjectProblem Dependencies
+checkMidpointAndRoots foreigns statuses sroots =
   case checkForCycles statuses of
     Nothing ->
       case checkUniqueRoots statuses sroots of
-        Nothing ->
-          do
-            maybeForeigns <- readMVar dmvar
-            case maybeForeigns of
-              Nothing -> return (Left Exit.BP_CannotLoadDependencies)
-              Just fs -> return (Right fs)
-        Just problem ->
-          do
-            _ <- readMVar dmvar
-            return (Left problem)
+        Nothing -> Right foreigns
+        Just problem -> Left problem
     Just (NE.List name names) ->
-      do
-        _ <- readMVar dmvar
-        return (Left (Exit.BP_Cycle name names))
+      Left (Exit.BP_Cycle name names)
 
 -- CHECK FOR CYCLES
 
@@ -603,8 +641,8 @@ addToGraph :: ModuleName.Raw -> Status -> [Node] -> [Node]
 addToGraph name status graph =
   let dependencies =
         case status of
-          SCached (Details.Local _ deps _) -> deps
-          SChanged (Details.Local _ deps _) _ _ _ -> deps
+          SCached local -> Details._deps local
+          SChanged local _ _ _ -> Details._deps local
           SBadImport _ -> []
           SBadSyntax _ _ _ -> []
           SForeign _ -> []
@@ -639,8 +677,8 @@ checkOutside name paths =
 checkInside :: ModuleName.Raw -> FilePath -> Status -> Either Exit.BuildProjectProblem ()
 checkInside name p1 status =
   case status of
-    SCached (Details.Local p2 _ _) -> Left (Exit.BP_RootNameDuplicate name p1 p2)
-    SChanged (Details.Local p2 _ _) _ _ _ -> Left (Exit.BP_RootNameDuplicate name p1 p2)
+    SCached local -> Left (Exit.BP_RootNameDuplicate name p1 (Details._path local))
+    SChanged local _ _ _ -> Left (Exit.BP_RootNameDuplicate name p1 (Details._path local))
     SBadImport _ -> Right ()
     SBadSyntax _ _ _ -> Right ()
     SForeign _ -> Right ()
@@ -649,7 +687,7 @@ checkInside name p1 status =
 -- COMPILE MODULE
 
 compile :: Env -> DocsNeed -> Details.Local -> B.ByteString -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> IO Result
-compile (Env key root projectType platform _ _ _) docsNeed (Details.Local path deps main) source ifaces modul =
+compile (Env key root projectType platform _ buildID _ _) docsNeed (Details.Local path fingerprint deps lastChange _) source ifaces modul =
   let pkg = projectTypeToPkg projectType
    in case Compile.compile platform pkg ifaces modul of
         Right (Compile.Artifacts canonical annotations _nodeTypes core) ->
@@ -663,25 +701,59 @@ compile (Env key root projectType platform _ _ _) docsNeed (Details.Local path d
                 let name = Src.getName modul
                 let iface = I.fromModule pkg canonical annotations
                 let greni = Dirs.greni root name
+                writeCore root name core
                 maybeOldi <- File.readBinary greni
                 case maybeOldi of
                   Just oldi | oldi == iface ->
                     do
                       -- iface should be fully forced by equality check
                       Reporting.report key Reporting.BDone
-                      let local = Details.Local path deps main
+                      let local = Details.Local path fingerprint deps lastChange buildID
                       return (RSame local iface core docs)
                   _ ->
                     do
                       -- iface may be lazy still
                       File.writeBinary greni iface
                       Reporting.report key Reporting.BDone
-                      let local = Details.Local path deps main
+                      let local = Details.Local path fingerprint deps buildID buildID
                       return (RNew local iface core docs)
         Left err ->
           return $
             RProblem $
               Error.Module (Src.getName modul) path source err
+
+-- A MODULE'S CORE, ON DISK
+
+-- | @.grenc@ beside @.greni@: the module's Core in C10's wire format (D98).
+--
+-- __Writing it is what forces the lowering__, which used to be deferred — the
+-- 'Core.Module' in a 'Result' carries no bang so that a build generating no
+-- code never paid for it. It is paid here now, on every build of every module,
+-- and that is a trade the cache makes deliberately: @docs\/m1a-cache.md@ D99
+-- has the measurement, and what buys it back is that the next build does not
+-- compile the module at all.
+--
+-- D91's out-of-range 'Core.AST.LIntLegacy' is the one thing a user can write
+-- that will not encode. Such a module simply has no @.grenc@ and is recompiled
+-- next time, which is the same policy 'Gren.Details.writeArtifacts' applies to
+-- the dependencies: the cache is allowed to be slower and never allowed to
+-- refuse a program that would otherwise have compiled.
+writeCore :: FilePath -> ModuleName.Raw -> Core.Module -> IO ()
+writeCore root name core =
+  case Wire.encode core of
+    Left _ -> File.remove (Dirs.grenc root name)
+    Right encoded -> File.writeBytes (Dirs.grenc root name) encoded
+
+readCore :: FilePath -> ModuleName.Raw -> IO (Maybe Core.Module)
+readCore root name =
+  do
+    maybeEncoded <- File.readBytes (Dirs.grenc root name)
+    case maybeEncoded of
+      Nothing -> return Nothing
+      Just encoded ->
+        case Wire.decode encoded of
+          Right core -> return (Just core)
+          Left _ -> return Nothing
 
 projectTypeToPkg :: Parse.ProjectType -> Pkg.Name
 projectTypeToPkg projectType =
@@ -691,17 +763,22 @@ projectTypeToPkg projectType =
 
 -- WRITE DETAILS
 
+-- | @d.dat@, at the end of a successful build.
+--
+-- It is written last on purpose: it is the file that says the other four kinds
+-- may be believed, so a build that dies part way through leaves artifacts that
+-- nothing will trust rather than a claim it did not finish making good on.
 writeDetails :: FilePath -> Details.Details -> Map.Map ModuleName.Raw Result -> IO ()
-writeDetails root (Details.Details time outline buildID locals foreigns extras) results =
+writeDetails root details results =
   File.writeBinary (Dirs.details root) $
-    Details.Details time outline buildID (Map.foldrWithKey addNewLocal locals results) foreigns extras
+    Details.toHeader details {Details._locals = Map.foldrWithKey addNewLocal (Details._locals details) results}
 
 addNewLocal :: ModuleName.Raw -> Result -> Map.Map ModuleName.Raw Details.Local -> Map.Map ModuleName.Raw Details.Local
 addNewLocal name result locals =
   case result of
     RNew local _ _ _ -> Map.insert name local locals
     RSame local _ _ _ -> Map.insert name local locals
-    RCached _ _ -> locals
+    RCached local _ _ -> Map.insert name local locals
     RNotFound _ -> locals
     RProblem _ -> locals
     RBlocked -> locals
@@ -725,7 +802,7 @@ addErrors result errors =
   case result of
     RNew _ _ _ _ -> errors
     RSame _ _ _ _ -> errors
-    RCached _ _ -> errors
+    RCached _ _ _ -> errors
     RNotFound _ -> errors
     RProblem e -> e : errors
     RBlocked -> errors
@@ -737,7 +814,7 @@ addImportProblems results name problems =
   case results ! name of
     RNew _ _ _ _ -> problems
     RSame _ _ _ _ -> problems
-    RCached _ _ -> problems
+    RCached _ _ _ -> problems
     RNotFound p -> (name, p) : problems
     RProblem _ -> problems
     RBlocked -> problems
@@ -783,7 +860,7 @@ toDocs result =
   case result of
     RNew _ _ _ d -> d
     RSame _ _ _ d -> d
-    RCached _ _ -> Nothing
+    RCached _ _ _ -> Nothing
     RNotFound _ -> Nothing
     RProblem _ -> Nothing
     RBlocked -> Nothing
@@ -806,22 +883,19 @@ data ReplArtifacts = ReplArtifacts
 fromRepl :: FilePath -> Details.Details -> Sources -> B.ByteString -> IO (Either Exit.Repl ReplArtifacts)
 fromRepl root details rootSources source =
   do
-    env@(Env _ _ projectType _ _ _ _) <- makeEnv Reporting.ignorer root details
+    env@(Env _ _ projectType _ _ _ _ _) <- makeEnv Reporting.ignorer root details
     case Parse.fromByteString projectType source of
       Left syntaxError ->
         return $ Left $ Exit.ReplBadInput source $ Error.BadSyntax syntaxError
       Right modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _) ->
         do
-          dmvar <- Details.loadInterfaces root details
-
           let deps = map (Src.getImportName . snd) imports
           mvar <- newMVar Map.empty
           crawlDeps env mvar rootSources deps ()
 
           statuses <- traverse readMVar =<< readMVar mvar
-          midpoint <- checkMidpoint dmvar statuses
 
-          case midpoint of
+          case checkMidpoint (Details.loadInterfaces details) statuses of
             Left problem ->
               return $ Left $ Exit.ReplProjectProblem problem
             Right foreigns ->
@@ -831,11 +905,13 @@ fromRepl root details rootSources source =
                 putMVar rmvar resultMVars
                 results <- traverse readMVar resultMVars
                 writeDetails root details results
-                depsStatus <- checkDeps root resultMVars deps
+                -- The REPL's entry is new every time, so it has never been
+                -- compiled and nothing it imports can predate it.
+                depsStatus <- checkDeps root resultMVars deps (Details._buildID details)
                 finalizeReplArtifacts env source modul depsStatus resultMVars results
 
 finalizeReplArtifacts :: Env -> B.ByteString -> Src.Module -> DepsStatus -> ResultDict -> Map.Map ModuleName.Raw Result -> IO (Either Exit.Repl ReplArtifacts)
-finalizeReplArtifacts env@(Env _ root projectType platform _ _ _) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _) depsStatus resultMVars results =
+finalizeReplArtifacts env@(Env _ root projectType platform _ _ _ _) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _) depsStatus resultMVars results =
   let pkg =
         projectTypeToPkg projectType
 
@@ -918,7 +994,7 @@ getRootInfo env path =
       else return (Left (Exit.BP_PathUnknown path))
 
 getRootInfoHelp :: Env -> FilePath -> FilePath -> IO (Either Exit.BuildProjectProblem RootInfo)
-getRootInfoHelp (Env _ _ _ _ srcDirs _ _) path absolutePath =
+getRootInfoHelp (Env _ _ _ _ srcDirs _ _ _) path absolutePath =
   let (dirs, file) = FP.splitFileName absolutePath
       (final, ext) = FP.splitExtension file
    in if ext /= ".gren"
@@ -1019,7 +1095,7 @@ data Root
   | Outside ModuleName.Raw I.Interface Core.Module
 
 toArtifacts :: Env -> Dependencies -> Map.Map ModuleName.Raw Result -> NE.List RootResult -> Either Exit.BuildProblem Artifacts
-toArtifacts (Env _ root projectType _ _ _ _) foreigns results rootResults =
+toArtifacts (Env _ root projectType _ _ _ _ _) foreigns results rootResults =
   case gatherProblemsOrMains results rootResults of
     Left (NE.List e es) ->
       Left (Exit.BuildBadModules root e es)
@@ -1044,7 +1120,7 @@ addInside name result modules =
   case result of
     RNew _ iface core _ -> Fresh name iface core : modules
     RSame _ iface core _ -> Fresh name iface core : modules
-    RCached main mvar -> Cached name main mvar : modules
+    RCached _ mvar core -> Cached name mvar core : modules
     RNotFound _ -> error (badInside name)
     RProblem _ -> error (badInside name)
     RBlocked -> error (badInside name)

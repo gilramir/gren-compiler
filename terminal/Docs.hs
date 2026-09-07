@@ -54,7 +54,7 @@ runHelp :: Reporting.Style -> Flags -> IO (Either Exit.Docs ())
 runHelp style (Flags maybeOutput _ root outline sources dependencies) =
   Task.run $
     do
-      details <- Task.eio Exit.DocsBadDetails (Details.load outline dependencies)
+      details <- Task.eio Exit.DocsBadDetails (Details.load root outline dependencies)
       exposed <- getExposed details
       case maybeOutput of
         Just DevNull ->

@@ -3,6 +3,8 @@ module File
     zeroTime,
     writeBinary,
     readBinary,
+    writeBytes,
+    readBytes,
     writeUtf8,
     readUtf8,
     writeBuilder,
@@ -48,6 +50,23 @@ writeBinary path value =
     Dir.createDirectoryIfMissing True dir
     Binary.encodeFile path value
 
+-- | A cached artifact, or 'Nothing' if it is not there or will not decode.
+--
+-- __A file that will not decode is a recoverable condition and says so.__ It
+-- used to print eight lines ending in "Please report this to
+-- https:\/\/github.com\/gren-lang\/compiler\/issues", which was wrong on both
+-- counts: every caller of this function reads the artifact cache, and every one
+-- of them recompiles what it could not read, so the build is correct and
+-- complete whatever happened here. A truncated file is what a killed build, a
+-- full disk or a copied tree leaves behind, and asking the user to open an
+-- issue about it is
+-- @docs\/upstream\/compiler-artifact-cache-is-write-only.md@'s second
+-- consequence. It was harmless while nothing read the cache back; this is the
+-- change that makes it reachable, so it is the change that fixes it.
+--
+-- One line, still on stderr, because an artifact going bad under a key that
+-- names this exact compiler build ('Directories.artifactKey') is worth
+-- noticing even though nothing depends on it.
 readBinary :: (Binary.Binary a) => FilePath -> IO (Maybe a)
 readBinary path =
   do
@@ -61,17 +80,39 @@ readBinary path =
           Left (offset, message) ->
             do
               IO.hPutStrLn IO.stderr $
-                unlines $
-                  [ "+-------------------------------------------------------------------------------",
-                    "|  Corrupt File: " ++ path,
-                    "|   Byte Offset: " ++ show offset,
-                    "|       Message: " ++ message,
-                    "|",
-                    "| Please report this to https://github.com/gren-lang/compiler/issues",
-                    "| Trying to continue anyway.",
-                    "+-------------------------------------------------------------------------------"
-                  ]
+                "Ignoring an unreadable build artifact and recompiling: "
+                  ++ path
+                  ++ " (byte "
+                  ++ show offset
+                  ++ ": "
+                  ++ message
+                  ++ ")"
               return Nothing
+      else return Nothing
+
+-- RAW BYTES
+
+-- | A file that is neither @Data.Binary@ nor text.
+--
+-- @.grenc@ is the only one: C10's wire format, which has a schema, two codecs
+-- and a gate of its own, and which must reach the disk exactly as
+-- 'Core.Wire.encode' produced it. Going through 'writeUtf8' would work by
+-- accident — it is 'BS.hPut' under a handle whose encoding does not apply to
+-- it — and would be a lie about the file.
+writeBytes :: FilePath -> BS.ByteString -> IO ()
+writeBytes path content =
+  do
+    Dir.createDirectoryIfMissing True (FP.dropFileName path)
+    BS.writeFile path content
+
+-- | Nothing if the file is not there. A file that is there and unreadable
+-- throws, as it does everywhere else in this module.
+readBytes :: FilePath -> IO (Maybe BS.ByteString)
+readBytes path =
+  do
+    there <- Dir.doesFileExist path
+    if there
+      then Just <$> BS.readFile path
       else return Nothing
 
 -- WRITE UTF-8

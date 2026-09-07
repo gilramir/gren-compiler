@@ -284,13 +284,13 @@ mains modules roots =
 -- — it is a fact about Core.
 kernelRefs :: Map Core.QualName Core.QualName -> Kernel -> Refs
 kernelRefs ctorOwner k =
-  foldMap classify (Set.toAscList (_kernelGren k))
+  foldMap classifyRef (Set.toAscList (_kernelGren k))
     <> mempty
       { _refGlobals = Set.map kernelName (_kernelKernels k),
         _refFields = _kernelFields k
       }
   where
-    classify q
+    classifyRef q
       | Map.member q ctorOwner = ctor q
       | otherwise = global q
 

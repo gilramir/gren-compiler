@@ -399,7 +399,7 @@ attemptEval (Flags _ root outline sources deps) (Env interpreter ansi) oldState 
         do
           details <-
             Task.eio Exit.ReplBadDetails $
-              Details.load outline deps
+              Details.load root outline deps
 
           artifacts <-
             Task.eio id $

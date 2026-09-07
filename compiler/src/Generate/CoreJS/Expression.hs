@@ -145,14 +145,6 @@ codeToStmtList code =
     JsExpr expr -> [JS.Return expr]
     JsBlock stmts -> stmts
 
-codeToStmt :: Code -> JS.Stmt
-codeToStmt code =
-  case code of
-    JsExpr (JS.Call (JS.Function Nothing [] stmts) []) -> JS.Block stmts
-    JsExpr expr -> JS.Return expr
-    JsBlock [stmt] -> stmt
-    JsBlock stmts -> JS.Block stmts
-
 -- EXPRESSIONS
 
 jsExpr :: Env -> Core.Expr -> JS.Expr
@@ -288,8 +280,10 @@ generateField mode name =
 --
 -- __A nullary one is a reference__ to the @var@ 'ctorDefinition' emits, so that
 -- @Nothing@ is one object in dev mode rather than one per mention.
+-- The tag is not read: 'lookupCtor' already has it, from the env's ctor table,
+-- and taking the caller's would be a second source for one fact.
 ctor :: Env -> A.Position -> Core.QualName -> Int -> [Core.Expr] -> JS.Expr
-ctor env pos name@(Core.QualName _ short) tag args
+ctor env pos name@(Core.QualName _ short) _tag args
   | isBool name = JS.TrackedBool (_home env) pos (short == Name.true)
   | otherwise =
       let c = lookupCtor env name

@@ -62,7 +62,7 @@ buildProject root pkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _) sources soluti
   do
     details@(Details.Details _ outline _ _ _ _) <-
       Task.eio Exit.ValidateBadDetails $
-        Details.load (Outline.Pkg pkgOutline) solution
+        Details.load root (Outline.Pkg pkgOutline) solution
 
     exposed <-
       case outline of

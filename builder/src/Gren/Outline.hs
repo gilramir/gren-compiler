@@ -89,7 +89,7 @@ data Exposed
 data SrcDir
   = AbsoluteSrcDir FilePath
   | RelativeSrcDir FilePath
-  deriving (Show)
+  deriving (Eq, Show)
 
 -- DEFAULTS
 

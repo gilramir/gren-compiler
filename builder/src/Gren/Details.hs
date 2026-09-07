@@ -3,17 +3,21 @@
 
 module Gren.Details
   ( Details (..),
+    Artifacts (..),
+    Header (..),
     BuildID,
     ValidOutline (..),
     Dependency (..),
     Local (..),
     Foreign (..),
     load,
+    Interfaces,
     loadInterfaces,
     Cores,
     loadCores,
     Kernels,
     loadKernels,
+    toHeader,
   )
 where
 
@@ -21,12 +25,15 @@ import AST.Canonical qualified as Can
 import AST.Source qualified as Src
 import Compile qualified
 import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, readMVar, takeMVar)
 import Control.Monad (liftM2, liftM3)
 import Core.AST qualified as Core
+import Core.Wire qualified as Wire
 import Data.Binary (Binary, get, getWord8, put, putWord8)
+import Data.ByteString qualified as BS
 import Data.ByteString.Internal (ByteString)
 import Data.Either qualified as Either
+import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Map.Merge.Strict qualified as Map
@@ -35,11 +42,12 @@ import Data.Maybe qualified as Maybe
 import Data.Name qualified as Name
 import Data.NonEmptyList qualified as NE
 import Data.OneOrMore qualified as OneOrMore
-import Data.Set qualified as Set
 import Data.Word (Word64)
 import Directories qualified as Dirs
 import File qualified
 import Gren.Docs qualified as Docs
+import Gren.Fingerprint (Fingerprint)
+import Gren.Fingerprint qualified as FP
 import Gren.Interface qualified as I
 import Gren.Kernel qualified as Kernel
 import Gren.ModuleName qualified as ModuleName
@@ -55,20 +63,43 @@ import Reporting.Task qualified as Task
 
 -- DETAILS
 
+-- | Everything a build needs to know before it starts, and everything it
+-- learned last time.
+--
+-- __There is no @Binary Details@__, and that is deliberate (D98). A 'Details'
+-- holds the dependencies' artifacts, which live in three files of their own;
+-- what @d.dat@ holds is a 'Header', and the two types being different is what
+-- stops the artifacts from being written into it by accident or, worse, read
+-- back out of it as empty maps. Every 'ArtifactsCached' comment in this file and
+-- in "Generate" was about exactly that hazard.
 data Details = Details
-  { _outlineTime :: File.Time,
+  { _fingerprint :: Fingerprint,
     _outline :: ValidOutline,
     _buildID :: BuildID,
     _locals :: Map.Map ModuleName.Raw Local,
     _foreigns :: Map.Map ModuleName.Raw Foreign,
-    _extras :: Extras
+    _artifacts :: Artifacts
   }
+
+-- | What @d.dat@ holds: a 'Details' without its artifacts.
+data Header = Header
+  { _hFingerprint :: Fingerprint,
+    _hOutline :: ValidOutline,
+    _hBuildID :: BuildID,
+    _hLocals :: Map.Map ModuleName.Raw Local,
+    _hForeigns :: Map.Map ModuleName.Raw Foreign
+  }
+
+toHeader :: Details -> Header
+toHeader (Details fingerprint outline buildID locals foreigns _) =
+  Header fingerprint outline buildID locals foreigns
 
 type BuildID = Word64
 
 data ValidOutline
   = ValidApp P.Platform (NE.List Outline.SrcDir)
   | ValidPkg P.Platform Pkg.Name [ModuleName.Raw]
+  deriving (Eq)
 
 data Dependency = Dependency
   { _dep_outline :: Outline,
@@ -76,31 +107,46 @@ data Dependency = Dependency
   }
   deriving (Show)
 
--- NOTE: we need two ways to detect if a file must be recompiled:
+-- | What the last build knew about one of the project's own modules.
 --
--- (1) _time is the modification time from the last time we compiled the file.
--- By checking EQUALITY with the current modification time, we can detect file
--- saves and `git checkout` of previous versions. Both need a recompile.
+-- __Two independent reasons to recompile__, and a cache that keeps only one of
+-- them is wrong in a way no test of a single build can see:
 --
--- (2) _lastChange is the BuildID from the last time a new interface file was
--- generated, and _lastCompile is the BuildID from the last time the file was
--- compiled. These may be different if a file is recompiled but the interface
--- stayed the same. When the _lastCompile is LESS THAN the _lastChange of any
--- imports, we need to recompile. This can happen when a project has multiple
--- entrypoints and some modules are compiled less often than their imports.
+-- (1) '_source' is the fingerprint of the bytes the module was compiled from
+-- (D96). If the bytes the frontend hands us now differ, the module is
+-- recompiled. Stock keeps a modification time here and asks the same question
+-- of the clock; "Gren.Fingerprint" says why the bytes are the better witness.
 --
+-- (2) '_lastChange' is the 'BuildID' at which this module's __interface__ last
+-- changed, and '_lastCompile' the one at which it was last compiled. They
+-- differ when a module is recompiled and its interface comes out the same. A
+-- module must be recompiled when its '_lastCompile' is __less than__ the
+-- '_lastChange' of anything it imports — which is not the same question as (1),
+-- because the module's own source need not have moved. It happens whenever a
+-- project has more than one entrypoint: @gren make A@ then @gren make B@ then
+-- @gren make A@ again, where B's build changed an interface that A's modules
+-- had already been compiled against. Reason (1) sees nothing there at all.
 data Local = Local
   { _path :: FilePath,
+    _source :: Fingerprint,
     _deps :: [ModuleName.Raw],
-    _main :: Bool
+    _lastChange :: BuildID,
+    _lastCompile :: BuildID
   }
 
 data Foreign
   = Foreign Pkg.Name [Pkg.Name]
 
-data Extras
-  = ArtifactsCached
-  | ArtifactsFresh Interfaces Cores Kernels
+-- | The dependencies' artifacts, whether they were just built or just read.
+--
+-- One constructor, and it used to be two: 'ArtifactsCached' meant "they are on
+-- disk somewhere, ask again later", which is why every reader of it returned a
+-- 'Maybe' and why "Generate" had a @fromMaybe Map.empty@ standing where a
+-- missing dependency would have produced a silently smaller program. 'load'
+-- now reads the three files itself and falls back to building when any of them
+-- will not load, so by the time anything holds a 'Details' the artifacts are in
+-- hand. The hazard is gone as a type rather than as a comment.
+data Artifacts = Artifacts Interfaces Cores Kernels
 
 type Interfaces =
   Map.Map ModuleName.Canonical I.DependencyInterface
@@ -134,47 +180,129 @@ type Kernels =
   Map.Map Name.Name [Kernel.Chunk]
 
 -- LOAD ARTIFACTS
-
-loadInterfaces :: FilePath -> Details -> IO (MVar (Maybe Interfaces))
-loadInterfaces root (Details _ _ _ _ _ extras) =
-  case extras of
-    ArtifactsFresh i _ _ -> newMVar (Just i)
-    ArtifactsCached -> fork (File.readBinary (Dirs.interfaces root))
-
--- | The dependency modules' Core.
 --
--- 'ArtifactsCached' has nothing to offer and cannot be reached: nothing reads
--- @d.dat@ back, so '_extras' is always 'ArtifactsFresh'
--- (@docs/upstream/compiler-artifact-cache-is-write-only.md@). If that cache is
--- ever restored, Core needs a file of its own beside @i.dat@ and @o.dat@ — and
--- a project-cache key naming the compiler build, which
--- 'Directories.artifactKey' now is.
-loadCores :: Details -> IO (MVar (Maybe Cores))
-loadCores (Details _ _ _ _ _ extras) =
-  case extras of
-    ArtifactsFresh _ c _ -> newMVar (Just c)
-    ArtifactsCached -> newMVar Nothing
+-- Three accessors, all total. They were three readers returning a 'Maybe' each,
+-- because 'ArtifactsCached' meant the file had not been read yet and might not
+-- read; 'load' does that reading now.
 
--- | The kernel modules' JavaScript. 'loadCores'' caveat, for the same reason.
-loadKernels :: Details -> IO (MVar (Maybe Kernels))
-loadKernels (Details _ _ _ _ _ extras) =
-  case extras of
-    ArtifactsFresh _ _ k -> newMVar (Just k)
-    ArtifactsCached -> newMVar Nothing
+loadInterfaces :: Details -> Interfaces
+loadInterfaces (Details _ _ _ _ _ (Artifacts i _ _)) = i
+
+-- | The dependency modules' Core, on its way to the backend.
+loadCores :: Details -> Cores
+loadCores (Details _ _ _ _ _ (Artifacts _ c _)) = c
+
+-- | The kernel modules' JavaScript.
+loadKernels :: Details -> Kernels
+loadKernels (Details _ _ _ _ _ (Artifacts _ _ k)) = k
 
 -- LOAD -- used by Make, Docs, Repl
 
-load :: Outline.Outline -> Map.Map Pkg.Name Dependency -> IO (Either Exit.Details Details)
-load outline solution =
-  case outline of
-    Outline.Pkg (Outline.PkgOutline pkg _ _ _ exposed direct _ rootPlatform) ->
-      Task.run $
-        do
-          let exposedList = Outline.flattenExposed exposed
-          verifyDependencies (ValidPkg rootPlatform pkg exposedList) solution direct
-    Outline.App (Outline.AppOutline _ rootPlatform srcDirs direct _) ->
-      Task.run $
-        verifyDependencies (ValidApp rootPlatform srcDirs) solution direct
+-- | The project's details, from @d.dat@ when it still describes this build and
+-- from the dependency sources when it does not (D96).
+--
+-- __What makes @d.dat@ believable is three equalities and three files.__ The
+-- 'ValidOutline' it recorded must equal the one this build derives — the
+-- platform, the source directories, the exposed list — and its 'Fingerprint'
+-- must equal this build's dependency set, byte for byte, which is what
+-- 'dependencyFingerprint' computes. Then @i.dat@, @c.dat@ and @k.dat@ must all
+-- load. Any of the six failing means a fresh dependency build, which also
+-- rewrites all three files.
+--
+-- Two things upstream needed and this does not. There is no modification-time
+-- comparison, because the fingerprint is over the bytes. And there is no
+-- @containsLocalDeps@ guard refusing to cache a project with a filesystem-path
+-- dependency: a local dependency's sources arrive in the solution like any
+-- other's and are fingerprinted like any other's, so the case that had to be
+-- excluded is now just a case that invalidates when it changes.
+load :: FilePath -> Outline.Outline -> Map.Map Pkg.Name Dependency -> IO (Either Exit.Details Details)
+load root outline solution =
+  let (validOutline, directDeps) =
+        case outline of
+          Outline.Pkg (Outline.PkgOutline pkg _ _ _ exposed direct _ rootPlatform) ->
+            (ValidPkg rootPlatform pkg (Outline.flattenExposed exposed), Map.map (const ()) direct)
+          Outline.App (Outline.AppOutline _ rootPlatform srcDirs direct _) ->
+            (ValidApp rootPlatform srcDirs, Map.map (const ()) direct)
+      fingerprint = dependencyFingerprint solution
+   in do
+        reused <- reuse root validOutline fingerprint
+        case reused of
+          Just details -> return (Right details)
+          Nothing ->
+            Task.run (verifyDependencies root fingerprint validOutline solution directDeps)
+
+-- | @d.dat@ and the three artifact files, if all four are there and all four
+-- describe this build.
+reuse :: FilePath -> ValidOutline -> Fingerprint -> IO (Maybe Details)
+reuse root validOutline fingerprint =
+  do
+    maybeHeader <- File.readBinary (Dirs.details root)
+    case maybeHeader of
+      Just (Header oldFingerprint oldOutline buildID locals foreigns)
+        | oldFingerprint == fingerprint && oldOutline == validOutline ->
+            do
+              maybeArtifacts <- readArtifacts root
+              case maybeArtifacts of
+                Nothing -> return Nothing
+                Just artifacts ->
+                  return $ Just $ Details fingerprint validOutline (buildID + 1) locals foreigns artifacts
+      _ ->
+        return Nothing
+
+-- | The three files, or nothing if any of them is missing or will not decode.
+--
+-- All three or none. A build that had the interfaces and not the Core would
+-- link a program with modules missing from it, which is the failure §B11 of
+-- @docs\/m1a-wire.md@ named and could not do anything about while the cache was
+-- unreachable.
+readArtifacts :: FilePath -> IO (Maybe Artifacts)
+readArtifacts root =
+  do
+    ifacesMVar <- fork (File.readBinary (Dirs.interfaces root))
+    coresMVar <- fork (readCores root)
+    kernelsMVar <- fork (File.readBinary (Dirs.kernels root))
+    maybeIfaces <- readMVar ifacesMVar
+    maybeCores <- readMVar coresMVar
+    maybeKernels <- readMVar kernelsMVar
+    return (Artifacts <$> maybeIfaces <*> maybeCores <*> maybeKernels)
+
+-- | The dependencies' Core, from @c.dat@ (D98).
+--
+-- The file is a @Data.Binary@ map from module to __C10 wire bytes__, and the
+-- values are decoded by 'Core.Wire'. Core does not get a @Binary@ instance to
+-- suit this file: it has a format of record, a schema, and a gate that holds
+-- two codecs to it, and a second encoding written for the cache would be a
+-- format nobody checked. That was the standing reason this branch could not be
+-- written before C10 existed.
+readCores :: FilePath -> IO (Maybe Cores)
+readCores root =
+  do
+    maybeRaw <- File.readBinary (Dirs.cores root)
+    case maybeRaw of
+      Nothing -> return Nothing
+      Just raw -> return (traverse decodeCore raw)
+
+decodeCore :: BS.ByteString -> Maybe Core.Module
+decodeCore encoded =
+  case Wire.decode encoded of
+    Right core -> Just core
+    Left _ -> Nothing
+
+-- | The whole dependency set as one number: every package, every module, every
+-- byte of every source, each length-prefixed and in ascending order (D96).
+--
+-- Ascending order is C6's discipline and it is not decoration — @Map.toAscList@
+-- is the only thing that makes this reproducible across two runs that solved
+-- the dependency graph in different orders.
+dependencyFingerprint :: Map.Map Pkg.Name Dependency -> Fingerprint
+dependencyFingerprint solution =
+  List.foldl' onePackage FP.empty (Map.toAscList solution)
+  where
+    onePackage acc (pkg, Dependency _ sources) =
+      List.foldl' oneModule (FP.chars (Pkg.toChars pkg) acc) (Map.toAscList sources)
+
+    oneModule acc (name, source) =
+      FP.bytes source (FP.chars (ModuleName.toChars name) acc)
 
 type Task a = Task.Task Exit.Details a
 
@@ -189,8 +317,8 @@ fork work =
 
 -- VERIFY DEPENDENCIES
 
-verifyDependencies :: ValidOutline -> Map.Map Pkg.Name Dependency -> Map.Map Pkg.Name a -> Task Details
-verifyDependencies outline solution directDeps =
+verifyDependencies :: FilePath -> Fingerprint -> ValidOutline -> Map.Map Pkg.Name Dependency -> Map.Map Pkg.Name a -> Task Details
+verifyDependencies root fingerprint outline solution directDeps =
   Task.eio id $
     do
       mvar <- newEmptyMVar
@@ -212,30 +340,61 @@ verifyDependencies outline solution directDeps =
               cores = Map.foldrWithKey addCores Map.empty artifacts
               kernels = Map.foldr addKernels Map.empty artifacts
               foreigns = Map.map (OneOrMore.destruct Foreign) $ Map.foldrWithKey gatherForeigns Map.empty $ Map.intersection artifacts directDeps
-              details = Details File.zeroTime outline 0 Map.empty foreigns (ArtifactsFresh ifaces cores kernels)
-           in return $ Right details
+              details = Details fingerprint outline 0 Map.empty foreigns (Artifacts ifaces cores kernels)
+           in do
+                writeArtifacts root ifaces cores kernels
+                return $ Right details
 
-addCores :: Pkg.Name -> Artifacts -> Cores -> Cores
-addCores pkg (Artifacts _ cores _) acc =
+-- | The three files 'readArtifacts' will look for next time (D98).
+--
+-- __Written before @d.dat@ is, and that ordering is the whole of the crash
+-- safety here.__ @Build.writeDetails@ writes @d.dat@ at the end of a successful
+-- build, and @d.dat@ is what says the other three may be believed; a build
+-- killed between these writes and that one leaves a @d.dat@ that is older than
+-- the sources, which fails the fingerprint check and costs one rebuild.
+--
+-- __A module whose Core will not encode is not written and stops the file
+-- being written at all__, rather than being quietly left out. D91's
+-- out-of-range 'Core.AST.LIntLegacy' is the one thing a user can write that
+-- does that, and a program containing one still compiles to JavaScript today —
+-- so the cache must not be the thing that breaks it. No @c.dat@ means no reuse
+-- next time, which is the honest outcome: slower, never wrong.
+writeArtifacts :: FilePath -> Interfaces -> Cores -> Kernels -> IO ()
+writeArtifacts root ifaces cores kernels =
+  do
+    File.writeBinary (Dirs.interfaces root) ifaces
+    File.writeBinary (Dirs.kernels root) kernels
+    case traverse encodeCore cores of
+      Nothing -> File.remove (Dirs.cores root)
+      Just encoded -> File.writeBinary (Dirs.cores root) encoded
+
+encodeCore :: Core.Module -> Maybe BS.ByteString
+encodeCore core =
+  case Wire.encode core of
+    Right bytes -> Just bytes
+    Left _ -> Nothing
+
+addCores :: Pkg.Name -> DepArtifacts -> Cores -> Cores
+addCores pkg (DepArtifacts _ cores _) acc =
   Map.union acc (Map.mapKeysMonotonic (ModuleName.Canonical pkg) cores)
 
 -- | A kernel module's short name is its whole identity — @Gren.Kernel.Array@ is
 -- @Array@ in every package that could define one — so these merge by name and
 -- not by package.
-addKernels :: Artifacts -> Kernels -> Kernels
-addKernels (Artifacts _ _ kernels) acc =
+addKernels :: DepArtifacts -> Kernels -> Kernels
+addKernels (DepArtifacts _ _ kernels) acc =
   Map.union acc kernels
 
-addInterfaces :: Map.Map Pkg.Name a -> Pkg.Name -> Artifacts -> Interfaces -> Interfaces
-addInterfaces directDeps pkg (Artifacts ifaces _ _) dependencyInterfaces =
+addInterfaces :: Map.Map Pkg.Name a -> Pkg.Name -> DepArtifacts -> Interfaces -> Interfaces
+addInterfaces directDeps pkg (DepArtifacts ifaces _ _) dependencyInterfaces =
   Map.union dependencyInterfaces $
     Map.mapKeysMonotonic (ModuleName.Canonical pkg) $
       if Map.member pkg directDeps
         then ifaces
         else Map.map I.privatize ifaces
 
-gatherForeigns :: Pkg.Name -> Artifacts -> Map.Map ModuleName.Raw (OneOrMore.OneOrMore Pkg.Name) -> Map.Map ModuleName.Raw (OneOrMore.OneOrMore Pkg.Name)
-gatherForeigns pkg (Artifacts ifaces _ _) foreigns =
+gatherForeigns :: Pkg.Name -> DepArtifacts -> Map.Map ModuleName.Raw (OneOrMore.OneOrMore Pkg.Name) -> Map.Map ModuleName.Raw (OneOrMore.OneOrMore Pkg.Name)
+gatherForeigns pkg (DepArtifacts ifaces _ _) foreigns =
   let isPublic di =
         case di of
           I.Public _ -> Just (OneOrMore.one pkg)
@@ -244,24 +403,16 @@ gatherForeigns pkg (Artifacts ifaces _ _) foreigns =
 
 -- VERIFY DEPENDENCY
 
-data Artifacts = Artifacts
+-- | One dependency's artifacts, keyed by raw module name. 'Artifacts' is the
+-- whole set, keyed canonically.
+data DepArtifacts = DepArtifacts
   { _ifaces :: Map.Map ModuleName.Raw I.DependencyInterface,
     _cores :: Map.Map ModuleName.Raw Core.Module,
     _kernels :: Kernels
   }
 
 type Dep =
-  Either (Maybe Exit.DetailsBadDep) Artifacts
-
--- ARTIFACT CACHE
-
-data ArtifactCache = ArtifactCache
-  { _fingerprints :: Set.Set Fingerprint,
-    _artifacts :: Artifacts
-  }
-
-type Fingerprint =
-  Map.Map Pkg.Name V.Version
+  Either (Maybe Exit.DetailsBadDep) DepArtifacts
 
 -- BUILD
 
@@ -311,7 +462,7 @@ build depsMVar pkg (Dependency outline sources) =
                         let ifaces = gatherInterfaces exposedDict results
                             cores = gatherCores results
                             kernels = gatherKernels results
-                            artifacts = Artifacts ifaces cores kernels
+                            artifacts = DepArtifacts ifaces cores kernels
                          in do
                               return (Right artifacts)
 
@@ -361,7 +512,7 @@ data ForeignInterface
   = ForeignAmbiguous
   | ForeignSpecific I.Interface
 
-gatherForeignInterfaces :: Map.Map Pkg.Name Artifacts -> Map.Map ModuleName.Raw ForeignInterface
+gatherForeignInterfaces :: Map.Map Pkg.Name DepArtifacts -> Map.Map ModuleName.Raw ForeignInterface
 gatherForeignInterfaces directArtifacts =
   Map.map (OneOrMore.destruct finalize) $
     Map.foldrWithKey gather Map.empty directArtifacts
@@ -372,8 +523,8 @@ gatherForeignInterfaces directArtifacts =
         [] -> ForeignSpecific i
         _ : _ -> ForeignAmbiguous
 
-    gather :: Pkg.Name -> Artifacts -> Map.Map ModuleName.Raw (OneOrMore.OneOrMore I.Interface) -> Map.Map ModuleName.Raw (OneOrMore.OneOrMore I.Interface)
-    gather _ (Artifacts ifaces _ _) buckets =
+    gather :: Pkg.Name -> DepArtifacts -> Map.Map ModuleName.Raw (OneOrMore.OneOrMore I.Interface) -> Map.Map ModuleName.Raw (OneOrMore.OneOrMore I.Interface)
+    gather _ (DepArtifacts ifaces _ _) buckets =
       Map.unionWith OneOrMore.more buckets (Map.mapMaybe isPublic ifaces)
 
     isPublic :: I.DependencyInterface -> Maybe (OneOrMore.OneOrMore I.Interface)
@@ -517,8 +668,9 @@ makeDocs status modul =
 
 -- BINARY
 
-instance Binary Details where
-  put (Details a b c d e _) = put a >> put b >> put c >> put d >> put e
+-- | @d.dat@'s. 'Details' has none, on purpose — see its own comment.
+instance Binary Header where
+  put (Header a b c d e) = put a >> put b >> put c >> put d >> put e
   get =
     do
       a <- get
@@ -526,7 +678,7 @@ instance Binary Details where
       c <- get
       d <- get
       e <- get
-      return (Details a b c d e ArtifactsCached)
+      return (Header a b c d e)
 
 instance Binary ValidOutline where
   put outline =
@@ -543,35 +695,25 @@ instance Binary ValidOutline where
         _ -> fail "binary encoding of ValidOutline was corrupted"
 
 instance Binary Local where
-  put (Local a b c) = put a >> put b >> put c
+  put (Local a b c d e) = put a >> put b >> put c >> put d >> put e
   get =
     do
       a <- get
       b <- get
       c <- get
-      return (Local a b c)
+      d <- get
+      e <- get
+      return (Local a b c d e)
 
 instance Binary Foreign where
   get = liftM2 Foreign get get
   put (Foreign a b) = put a >> put b
 
--- | Unreachable, and now total in the one field it can afford to be.
+-- | 'DepArtifacts' has no 'Binary' instance and does not need one.
 --
--- The only thing that holds an 'Artifacts' in a serialized form is
--- 'ArtifactCache', which nothing constructs and nothing reads — see
--- @docs/upstream/compiler-artifact-cache-is-write-only.md@. So '_cores' is
--- dropped on the way out and comes back empty rather than being given an
--- encoding that no reader would exercise: a Core wire format is C10's job and
--- has its own gate. Writing one here to satisfy a dead instance would be a
--- format nobody checked.
---
--- '_kernels' is not in that position: a 'Kernel.Chunk' has had a 'Binary'
--- instance all along. So it is written, and a restored cache would find it there
--- instead of silently splicing nothing.
-instance Binary Artifacts where
-  get = liftM3 Artifacts get (pure Map.empty) get
-  put (Artifacts a _ c) = put a >> put c
-
-instance Binary ArtifactCache where
-  get = liftM2 ArtifactCache get get
-  put (ArtifactCache a b) = put a >> put b
+-- It used to have one that dropped '_cores' on the way out and returned an
+-- empty map on the way in, because Core had no format and inventing one for a
+-- dead 'ArtifactCache' would have been a format nobody checked. Core has a
+-- format now (C10) and the three fields go to three files, each written by
+-- 'writeArtifacts' in the encoding that suits it — @Data.Binary@ for the
+-- interfaces and the kernel chunks, C10's wire format for the Core.

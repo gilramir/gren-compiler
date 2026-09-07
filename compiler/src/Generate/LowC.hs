@@ -800,6 +800,11 @@ repOfExpr expr =
     XPayload _ _ _ _ r -> r
     XJoin _ _ _ rest -> repOfExpr rest
     XJump _ _ -> RInt
+    -- A trampoline jump goes in tail position and nowhere else ('bounce' puts
+    -- it there), so it is emitted as a statement and never asked what it is
+    -- worth. 'XJump' answers 'RInt' above for the same shape of reason and is
+    -- reachable, since a join point's body ends in one.
+    XBounce _ _ -> RInt
     XCrash _ r -> r
 
 -- | A constant, printed at the representation it is used at.

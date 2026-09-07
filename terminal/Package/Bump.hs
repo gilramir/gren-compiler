@@ -100,7 +100,7 @@ generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _) sources sol
   do
     details <-
       Task.eio Exit.BumpBadDetails $
-        Details.load (Outline.Pkg outline) solution
+        Details.load root (Outline.Pkg outline) solution
 
     case Outline.flattenExposed exposed of
       [] ->
