@@ -19,6 +19,7 @@ import Reporting.Annotation qualified as A
 import Reporting.Error.Type qualified as Error
 import Reporting.Render.Type qualified as RT
 import Reporting.Render.Type.Localizer qualified as L
+import Type.Class qualified as Class
 import Type.Error qualified as ET
 import Type.Occurs qualified as Occurs
 import Type.Type as Type
@@ -454,12 +455,8 @@ emptyRecord1 =
 
 srcTypeToVariable :: Int -> Pools -> Map.Map Name.Name () -> Can.Type -> IO Variable
 srcTypeToVariable rank pools freeVars srcType =
-  let nameToContent name
-        | Name.isNumberType name = FlexSuper Number (Just name)
-        | Name.isComparableType name = FlexSuper Comparable (Just name)
-        | Name.isAppendableType name = FlexSuper Appendable (Just name)
-        | Name.isCompappendType name = FlexSuper CompAppend (Just name)
-        | otherwise = FlexVar (Just name)
+  let nameToContent name =
+        maybe (FlexVar (Just name)) (\classes -> FlexSuper classes (Just name)) (Class.fromName name)
 
       makeVar name _ =
         UF.fresh (Descriptor (nameToContent name) rank noMark Nothing)

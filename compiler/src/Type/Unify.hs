@@ -11,6 +11,7 @@ where
 import Data.Map.Strict qualified as Map
 import Data.Name qualified as Name
 import Gren.ModuleName qualified as ModuleName
+import Type.Class qualified as Class
 import Type.Error qualified as Error
 import Type.Occurs qualified as Occurs
 import Type.Type as Type
@@ -191,15 +192,15 @@ unifyFlex context content otherContent =
 
 -- UNIFY RIGID VARIABLES
 
-unifyRigid :: Context -> Maybe SuperType -> Content -> Content -> Unify ()
-unifyRigid context maybeSuper content otherContent =
+unifyRigid :: Context -> Maybe Class.Classes -> Content -> Content -> Unify ()
+unifyRigid context maybeClasses content otherContent =
   case otherContent of
     FlexVar _ ->
       merge context content
-    FlexSuper otherSuper _ ->
-      case maybeSuper of
-        Just super ->
-          if combineRigidSupers super otherSuper
+    FlexSuper wanted _ ->
+      case maybeClasses of
+        Just have ->
+          if Class.entailedBy have wanted
             then merge context content
             else mismatch
         Nothing ->
@@ -217,98 +218,74 @@ unifyRigid context maybeSuper content otherContent =
 
 -- UNIFY SUPER VARIABLES
 
-unifyFlexSuper :: Context -> SuperType -> Content -> Content -> Unify ()
-unifyFlexSuper context super content otherContent =
+unifyFlexSuper :: Context -> Class.Classes -> Content -> Content -> Unify ()
+unifyFlexSuper context classes content otherContent =
   case otherContent of
     Structure flatType ->
-      unifyFlexSuperStructure context super flatType
+      unifyFlexSuperStructure context classes flatType
     RigidVar _ ->
       mismatch
-    RigidSuper otherSuper _ ->
-      if combineRigidSupers otherSuper super
+    RigidSuper have _ ->
+      if Class.entailedBy have classes
         then merge context otherContent
         else mismatch
     FlexVar _ ->
       merge context content
-    FlexSuper otherSuper _ ->
-      case super of
-        Number ->
-          case otherSuper of
-            Number -> merge context content
-            Comparable -> merge context content
-            Appendable -> mismatch
-            CompAppend -> mismatch
-        Comparable ->
-          case otherSuper of
-            Comparable -> merge context otherContent
-            Number -> merge context otherContent
-            Appendable -> merge context (Type.unnamedFlexSuper CompAppend)
-            CompAppend -> merge context otherContent
-        Appendable ->
-          case otherSuper of
-            Appendable -> merge context otherContent
-            Comparable -> merge context (Type.unnamedFlexSuper CompAppend)
-            CompAppend -> merge context otherContent
-            Number -> mismatch
-        CompAppend ->
-          case otherSuper of
-            Comparable -> merge context content
-            Appendable -> merge context content
-            CompAppend -> merge context content
-            Number -> mismatch
+    FlexSuper otherClasses _ ->
+      -- Everything both sides demand. The old enum had one slot, so this was a
+      -- 4×4 table computing a meet and a fourth constructor naming the one
+      -- pair that had no single answer; a set makes it a union and the
+      -- constructor unnecessary (`Type.Class`).
+      --
+      -- The union can be a set no type satisfies — `number` and `appendable`
+      -- have nothing in common — where the enum simply had no constructor for
+      -- it and reported the mismatch here. So the check is made here too,
+      -- deliberately: a variable that can never be satisfied is wrong where it
+      -- is created, not wherever it happens to meet a structure later.
+      let merged = Class.union classes otherClasses
+       in if not (Class.inhabited merged)
+            then mismatch
+            else
+              -- Keep whichever side the union turned out to be, so that its
+              -- name comes along: a variable the author called `number` stays
+              -- `number` in every message about it. Only a union strictly
+              -- larger than both sides is nameless, which is what the old
+              -- table did when it reached for `CompAppend`.
+              if merged == classes
+                then merge context content
+                else
+                  if merged == otherClasses
+                    then merge context otherContent
+                    else merge context (Type.unnamedFlexSuper merged)
     Alias _ _ _ realVar ->
       subUnify (_first context) realVar
     Error ->
       merge context Error
 
-combineRigidSupers :: SuperType -> SuperType -> Bool
-combineRigidSupers rigid flex =
-  rigid == flex
-    || (rigid == Number && flex == Comparable)
-    || (rigid == CompAppend && (flex == Comparable || flex == Appendable))
-
-atomMatchesSuper :: SuperType -> ModuleName.Canonical -> Name.Name -> Bool
-atomMatchesSuper super home name =
-  case super of
-    Number ->
-      isNumber home name
-    Comparable ->
-      isNumber home name
-        || Error.isString home name
-        || Error.isChar home name
-    Appendable ->
-      Error.isString home name
-    CompAppend ->
-      Error.isString home name
-
-isNumber :: ModuleName.Canonical -> Name.Name -> Bool
-isNumber home name =
-  home == ModuleName.basics
-    && (name == Name.int || name == Name.float)
-
-unifyFlexSuperStructure :: Context -> SuperType -> FlatType -> Unify ()
-unifyFlexSuperStructure context super flatType =
+unifyFlexSuperStructure :: Context -> Class.Classes -> FlatType -> Unify ()
+unifyFlexSuperStructure context classes flatType =
   case flatType of
     App1 home name [] ->
-      if atomMatchesSuper super home name
+      if all (\c -> Class.admitsAtom c home name) (Class.toList classes)
         then merge context (Structure flatType)
         else mismatch
     App1 home name [variable] | home == ModuleName.array && name == Name.array ->
-      case super of
-        Number ->
+      -- Every class in the set has to admit an `Array`, and what it costs the
+      -- element is the class's own obligation — `Ord` again for `Ord`, nothing
+      -- for `Appendable`. Collecting the obligations across the set is what
+      -- the old `Comparable`/`CompAppend` duplication was doing by hand.
+      case traverse Class.arrayObligations (Class.toList classes) of
+        Nothing ->
           mismatch
-        Appendable ->
-          merge context (Structure flatType)
-        Comparable ->
-          do
-            comparableOccursCheck context
-            unifyComparableRecursive variable
-            merge context (Structure flatType)
-        CompAppend ->
-          do
-            comparableOccursCheck context
-            unifyComparableRecursive variable
-            merge context (Structure flatType)
+        Just obligations ->
+          case Class.fromList (concat obligations) of
+            Nothing ->
+              merge context (Structure flatType)
+            Just elementClasses ->
+              do
+                comparableOccursCheck context
+                unifyElementRecursive elementClasses variable
+                merge context (Structure flatType)
     _ ->
       mismatch
 
@@ -323,13 +300,13 @@ comparableOccursCheck (Context _ _ var _) =
         then err vars ()
         else ok vars ()
 
-unifyComparableRecursive :: Variable -> Unify ()
-unifyComparableRecursive var =
+unifyElementRecursive :: Class.Classes -> Variable -> Unify ()
+unifyElementRecursive classes var =
   do
     compVar <- register $
       do
         (Descriptor _ rank _ _) <- UF.get var
-        UF.fresh $ Descriptor (Type.unnamedFlexSuper Comparable) rank noMark Nothing
+        UF.fresh $ Descriptor (Type.unnamedFlexSuper classes) rank noMark Nothing
     guardedUnify compVar var
 
 -- UNIFY ALIASES

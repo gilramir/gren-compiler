@@ -183,6 +183,7 @@ Library common
         Type.Constrain.Expression
         Type.Constrain.Module
         Type.Constrain.Pattern
+        Type.Class
         Type.Error
         Type.Instantiate
         Type.Occurs
@@ -289,6 +290,7 @@ Test-Suite gren-tests
         Parse.MultilineStringSpec
         Parse.DeclSpec
         Reporting.Error.ImportSpec
+        Type.ClassSpec
 
     Build-Depends:
         gren:common,

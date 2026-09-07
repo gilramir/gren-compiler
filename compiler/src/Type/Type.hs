@@ -9,7 +9,6 @@ module Type.Type
     Type (..),
     Descriptor (Descriptor),
     Content (..),
-    SuperType (..),
     noRank,
     outermostRank,
     Mark,
@@ -45,6 +44,7 @@ import Data.Word (Word32)
 import Gren.ModuleName qualified as ModuleName
 import Reporting.Annotation qualified as A
 import Reporting.Error.Type qualified as E
+import Type.Class qualified as Class
 import Type.Error qualified as ET
 import Type.UnionFind qualified as UF
 
@@ -109,19 +109,12 @@ data Descriptor = Descriptor
 
 data Content
   = FlexVar (Maybe Name.Name)
-  | FlexSuper SuperType (Maybe Name.Name)
+  | FlexSuper Class.Classes (Maybe Name.Name)
   | RigidVar Name.Name
-  | RigidSuper SuperType Name.Name
+  | RigidSuper Class.Classes Name.Name
   | Structure FlatType
   | Alias ModuleName.Canonical Name.Name [(Name.Name, Variable)] Variable
   | Error
-
-data SuperType
-  = Number
-  | Comparable
-  | Appendable
-  | CompAppend
-  deriving (Eq)
 
 makeDescriptor :: Content -> Descriptor
 makeDescriptor content =
@@ -208,11 +201,11 @@ mkFlexNumber =
 
 flexNumberDescriptor :: Descriptor
 flexNumberDescriptor =
-  makeDescriptor (unnamedFlexSuper Number)
+  makeDescriptor (unnamedFlexSuper (Class.singleton Class.Num))
 
-unnamedFlexSuper :: SuperType -> Content
-unnamedFlexSuper super =
-  FlexSuper super Nothing
+unnamedFlexSuper :: Class.Classes -> Content
+unnamedFlexSuper classes =
+  FlexSuper classes Nothing
 
 -- MAKE NAMED VARIABLES
 
@@ -220,28 +213,13 @@ nameToFlex :: Name.Name -> IO Variable
 nameToFlex name =
   UF.fresh $
     makeDescriptor $
-      maybe FlexVar FlexSuper (toSuper name) (Just name)
+      maybe FlexVar FlexSuper (Class.fromName name) (Just name)
 
 nameToRigid :: Name.Name -> IO Variable
 nameToRigid name =
   UF.fresh $
     makeDescriptor $
-      maybe RigidVar RigidSuper (toSuper name) name
-
-toSuper :: Name.Name -> Maybe SuperType
-toSuper name =
-  if Name.isNumberType name
-    then Just Number
-    else
-      if Name.isComparableType name
-        then Just Comparable
-        else
-          if Name.isAppendableType name
-            then Just Appendable
-            else
-              if Name.isCompappendType name
-                then Just CompAppend
-                else Nothing
+      maybe RigidVar RigidSuper (Class.fromName name) name
 
 -- TO TYPE ANNOTATION
 
@@ -422,16 +400,16 @@ contentToErrorType variable content =
     FlexSuper super maybeName ->
       case maybeName of
         Just name ->
-          return (ET.FlexSuper (superToSuper super) name)
+          return (ET.FlexSuper (classesToSuper super) name)
         Nothing ->
           do
             name <- getFreshSuperName super
             liftIO $ UF.modify variable (\desc -> desc {_content = FlexSuper super (Just name)})
-            return (ET.FlexSuper (superToSuper super) name)
+            return (ET.FlexSuper (classesToSuper super) name)
     RigidVar name ->
       return (ET.RigidVar name)
     RigidSuper super name ->
-      return (ET.RigidSuper (superToSuper super) name)
+      return (ET.RigidSuper (classesToSuper super) name)
     Alias home name args realVariable ->
       do
         errArgs <- traverse (traverse variableToErrorType) args
@@ -440,13 +418,23 @@ contentToErrorType variable content =
     Error ->
       return ET.Error
 
-superToSuper :: SuperType -> ET.Super
-superToSuper super =
-  case super of
-    Number -> ET.Number
-    Comparable -> ET.Comparable
-    Appendable -> ET.Appendable
-    CompAppend -> ET.CompAppend
+-- | The error layer keeps its own four-constructor vocabulary, and this is the
+-- seam that lets it: `number`, `comparable`, `appendable` and `compappend` are
+-- what a Gren programmer has written and what every error message says, so
+-- they go on meaning that until D13 and the `core` rewrite change what a
+-- programmer writes. `Reporting/Error/Type.hs` is untouched by verb 2 for
+-- exactly this reason.
+--
+-- The reduction in `Class.union` is what makes this total in practice: the
+-- only sets that reach here are the four the old enum could hold.
+classesToSuper :: Class.Classes -> ET.Super
+classesToSuper classes =
+  case Class.toList classes of
+    [Class.Num] -> ET.Number
+    [Class.Ord] -> ET.Comparable
+    [Class.Appendable] -> ET.Appendable
+    [Class.Ord, Class.Appendable] -> ET.CompAppend
+    _ -> ET.Comparable
 
 termToErrorType :: FlatType -> StateT NameState IO ET.Type
 termToErrorType term =
@@ -516,17 +504,20 @@ getFreshVarNameHelp index taken =
 
 -- FRESH SUPER NAMES
 
-getFreshSuperName :: (Monad m) => SuperType -> StateT NameState m Name.Name
-getFreshSuperName super =
-  case super of
-    Number ->
+-- | The name a constrained variable is shown under, which is the name the
+-- author would have written for it. Same seam as `classesToSuper`, and it goes
+-- the same way when `core` stops writing `number`.
+getFreshSuperName :: (Monad m) => Class.Classes -> StateT NameState m Name.Name
+getFreshSuperName classes =
+  case Class.toList classes of
+    [Class.Num] ->
       getFreshSuper "number" _numbers (\index state -> state {_numbers = index})
-    Comparable ->
-      getFreshSuper "comparable" _comparables (\index state -> state {_comparables = index})
-    Appendable ->
+    [Class.Appendable] ->
       getFreshSuper "appendable" _appendables (\index state -> state {_appendables = index})
-    CompAppend ->
+    [Class.Ord, Class.Appendable] ->
       getFreshSuper "compappend" _compAppends (\index state -> state {_compAppends = index})
+    _ ->
+      getFreshSuper "comparable" _comparables (\index state -> state {_comparables = index})
 
 getFreshSuper :: (Monad m) => Name.Name -> (NameState -> Int) -> (Int -> NameState -> NameState) -> StateT NameState m Name.Name
 getFreshSuper prefix getter setter =
