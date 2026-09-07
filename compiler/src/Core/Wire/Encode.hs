@@ -2,7 +2,7 @@
 {-# LANGUAGE NoPolyKinds #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Core to bytes, against @schema/geng/core/v4.proto@.
+-- | Core to bytes, against @schema/geng/core/v5.proto@.
 --
 -- Read this beside the schema; each function below is one message, in the
 -- schema's order, and each field is one line in the schema's tag order. That
@@ -101,16 +101,49 @@ instance Semigroup Piece where
 instance Monoid Piece where
   mempty = Piece 0 mempty [] [] []
 
-newtype Enc = Enc {runEnc :: Table -> Piece}
+-- | What an encoder reads: the module's tables, and where it is.
+--
+-- The tables are D92\'s, D93\'s and D94\'s. '_enclosing' is D95\'s and is a
+-- different kind of thing: every table is a property of the module\'s
+-- /content/, and the enclosing span is the first thing this format writes whose
+-- meaning depends on __where in the message tree the field sits__. It is still
+-- not a property of a /traversal/ — only 'Expr' and 'Binder' carry a span and a
+-- 'Binder' has no submessage under it, so "the innermost 'Expr' this sits
+-- inside" is the same node whatever order a frontend walks in, which is what
+-- C6 asks of anything a second frontend has to reproduce.
+data Env = Env
+  { _table :: !Table,
+    _enclosing :: !(Maybe Span)
+  }
+
+newtype Enc = Enc {runEnc :: Env -> Piece}
 
 instance Semigroup Enc where
-  Enc f <> Enc g = Enc (\t -> f t <> g t)
+  Enc f <> Enc g = Enc (\e -> f e <> g e)
 
 instance Monoid Enc where
   mempty = Enc (const mempty)
 
 lift :: Piece -> Enc
 lift = Enc . const
+
+-- | Encode @what@ with @sp@ as the enclosing span (D95).
+--
+-- 'exprEnc' is the only caller: an 'Expr' is the enclosing span of everything
+-- under it, and a 'Binder' encloses nothing.
+within :: Span -> Enc -> Enc
+within sp (Enc f) = Enc (\e -> f e {_enclosing = Just sp})
+
+-- | The three coordinates of the enclosing span that a span is written against
+-- — its start row, its start column and its /end/ column — or the origin for a
+-- span that has no enclosing one, a top-level binding\'s value or a method
+-- body. Writing those against zero is what makes them absolute, and it is one
+-- rule rather than two.
+enclosingBases :: Env -> (Word32, Word32, Word32)
+enclosingBases env =
+  case _enclosing env of
+    Nothing -> (0, 0, 0)
+    Just (Span _ startRow startCol _ endCol) -> (startRow, startCol, endCol)
 
 -- | The bytes, or what stopped them.
 --
@@ -119,13 +152,13 @@ lift = Enc . const
 -- been walked.
 run :: Enc -> Either [String] B.Builder
 run enc =
-  case runEnc enc Collecting of
+  case runEnc enc (Env Collecting Nothing) of
     Bad problems -> Left problems
     Piece _ _ strings quals types ->
       let stringTbl = Map.fromList (zip (Set.toAscList (Set.fromList strings)) [1 ..])
           qualTbl = Map.fromList (zip (List.sortBy qualOrder (Set.toList (Set.fromList quals))) [1 ..])
           typeTbl = buildTypes stringTbl qualTbl types
-       in case runEnc enc (Resolved stringTbl qualTbl typeTbl) of
+       in case runEnc enc (Env (Resolved stringTbl qualTbl typeTbl) Nothing) of
             Bad problems -> Left problems
             Piece _ builder _ _ _ -> Right builder
 
@@ -257,6 +290,13 @@ u32 :: Word32 -> Word32 -> Enc
 u32 _ 0 = mempty
 u32 tag n = key tag WVarint <> varint (fromIntegral n)
 
+-- | @sint32@, implicit presence. Zigzag, and a zero delta is absent — which is
+-- the whole of what D95 buys, since 91.6% of @span_end_row@ and 75.3% of
+-- @span_start_row@ are zero.
+s32 :: Word32 -> Int32 -> Enc
+s32 _ 0 = mempty
+s32 tag n = key tag WVarint <> varint (zigzag32 n)
+
 -- | @bool@, implicit presence.
 bool_ :: Word32 -> Bool -> Enc
 bool_ _ False = mempty
@@ -293,14 +333,14 @@ indexOf table s
 withIndex :: Utf8.Utf8 t -> (Word32 -> Enc) -> Enc
 withIndex s0 what =
   let s = str s0
-   in Enc $ \table ->
-        case table of
+   in Enc $ \env ->
+        case _table env of
           Collecting ->
             let collected = if Utf8.size s == 0 then [] else [s]
-             in case runEnc (what 0) Collecting of
+             in case runEnc (what 0) env of
                   Bad problems -> Bad problems
                   Piece _ _ more quals types -> Piece 0 mempty (collected ++ more) quals types
-          Resolved m _ _ -> runEnc (what (indexOf m s)) table
+          Resolved m _ _ -> runEnc (what (indexOf m s)) env
 
 -- QUALIFIED NAMES
 --
@@ -313,15 +353,15 @@ withIndex s0 what =
 -- the second.
 withQual :: QualName -> (Word32 -> Enc) -> Enc
 withQual q what =
-  Enc $ \table ->
-    case table of
+  Enc $ \env ->
+    case _table env of
       Collecting ->
-        case runEnc (what 0) Collecting of
+        case runEnc (what 0) env of
           Bad problems -> Bad problems
           Piece _ _ strings more types -> Piece 0 mempty (qualStrings q ++ strings) (q : more) types
       Resolved _ m _ ->
         case Map.lookup q m of
-          Just i -> runEnc (what (fromIntegral i)) table
+          Just i -> runEnc (what (fromIntegral i)) env
           Nothing ->
             -- Unreachable, for 'indexOf'\'s reason: one 'Enc', run twice.
             Bad ["Core.Wire.Encode: a qualified name is not in the name table"]
@@ -375,19 +415,19 @@ repQual tag qs = go qs mempty
 -- pass has to have reported.
 withType :: Type -> (Word32 -> Enc) -> Enc
 withType t what =
-  Enc $ \table ->
-    case table of
+  Enc $ \env ->
+    case _table env of
       Collecting ->
-        case runEnc (typeEnc t) Collecting of
+        case runEnc (typeEnc t) env of
           Bad problems -> Bad problems
           Piece _ _ strings quals inner ->
-            case runEnc (what 0) Collecting of
+            case runEnc (what 0) env of
               Bad problems -> Bad problems
               Piece _ _ strings' quals' more ->
                 Piece 0 mempty (strings ++ strings') (quals ++ quals') (t : inner ++ more)
       Resolved _ _ m ->
         case Map.lookup t m of
-          Just i -> runEnc (what (fromIntegral i)) table
+          Just i -> runEnc (what (fromIntegral i)) env
           Nothing ->
             -- Unreachable, for 'indexOf'\'s reason: one 'Enc', run twice.
             Bad ["Core.Wire.Encode: a type is not in the type table"]
@@ -433,20 +473,20 @@ repText tag ss = go ss mempty
 -- | A packed payload: its own length, then the varints.
 packedRun :: Enc -> Enc
 packedRun inner =
-  Enc $ \table ->
-    case runEnc inner table of
+  Enc $ \env ->
+    case runEnc inner env of
       Bad problems -> Bad problems
       Piece n b more quals types ->
-        runEnc (varint (fromIntegral n)) table <> Piece n b more quals types
+        runEnc (varint (fromIntegral n)) env <> Piece n b more quals types
 
 -- | The table itself, written at tag 1 so that rule 1 puts it on the wire ahead
 -- of everything that indexes into it.
 stringTable :: Enc
 stringTable =
-  Enc $ \table ->
-    case table of
+  Enc $ \env ->
+    case _table env of
       Collecting -> mempty
-      Resolved m _ _ -> runEnc (foldMap rawText (Map.keys m)) table
+      Resolved m _ _ -> runEnc (foldMap rawText (Map.keys m)) env
   where
     rawText s =
       let n = Utf8.size s
@@ -456,13 +496,13 @@ stringTable =
 -- table, which is why that one is tag 1.
 qualTable :: Enc
 qualTable =
-  Enc $ \table ->
-    case table of
+  Enc $ \env ->
+    case _table env of
       Collecting -> mempty
       Resolved _ m _ ->
         runEnc
           (foldMap (msg 2 . rawQual) (List.sortBy qualOrder (Map.keys m)))
-          table
+          env
   where
     rawQual (QualName home name) = msg 1 (moduleNameEnc home) <> text 2 name
 
@@ -471,22 +511,22 @@ qualTable =
 -- the three.
 typeTable :: Enc
 typeTable =
-  Enc $ \table ->
-    case table of
+  Enc $ \env ->
+    case _table env of
       Collecting -> mempty
       Resolved _ _ m ->
-        runEnc (foldMap (msg 3 . typeEnc) (map fst (List.sortOn snd (Map.toList m)))) table
+        runEnc (foldMap (msg 3 . typeEnc) (map fst (List.sortOn snd (Map.toList m)))) env
 
 -- MESSAGES
 
 -- | A submessage: always written, because a message field has explicit presence.
 msg :: Word32 -> Enc -> Enc
 msg tag inner =
-  Enc $ \table ->
-    case runEnc inner table of
+  Enc $ \env ->
+    case runEnc inner env of
       Bad problems -> Bad problems
       Piece n b more quals types ->
-        runEnc (key tag WBytes <> varint (fromIntegral n)) table <> Piece n b more quals types
+        runEnc (key tag WBytes <> varint (fromIntegral n)) env <> Piece n b more quals types
 
 -- | An @optional@ submessage.
 optMsg :: Word32 -> (a -> Enc) -> Maybe a -> Enc
@@ -513,13 +553,47 @@ moduleNameEnc (ModuleName.Canonical (Pkg.Name author project) modul) =
 
 -- SPANS
 
-spanEnc :: Span -> Enc
-spanEnc (Span (FileId file) sr sc er ec) =
-  u32 1 (fromIntegral file)
-    <> u32 2 sr
-    <> u32 3 sc
-    <> u32 4 er
-    <> u32 5 ec
+-- | A span, as the five fields it became in version 5, at five consecutive tags
+-- (D95).
+--
+-- The tag is the first of the five because the two carriers put them in
+-- different places: an 'Expr' has its type at tag 1 and so spans tags 2 to 6, a
+-- 'Binder' has a name and a type and so spans tags 3 to 7. Both are __below__
+-- the fields that hold children, which is what lets a reader have the enclosing
+-- span in hand before anything needs it.
+--
+-- @file@ stays absolute: it is an index into 'Core.AST.FileTable' and not a
+-- position, so there is nothing for it to be relative to. Each of the other
+-- four is written against __whatever predicts it best__, which the corpus was
+-- asked and which is not the same answer for rows as for columns:
+--
+--   * the start, against the enclosing span's start — 75.3% of rows and 26.3%
+--     of columns are then zero;
+--   * @end_row@, against __this span's own start row__, because 91.6% of spans
+--     begin and end on one row and only 74.1% end on the row the enclosing span
+--     ends on;
+--   * @end_col@, against the __enclosing span's end column__, because a span's
+--     width in columns is almost never zero (0.3%) and 29.0% of spans end in
+--     the column the enclosing span ends in — a last argument, a last field, a
+--     body that runs to the end of the thing containing it.
+--
+-- 'enclosingBases' is what makes the outermost span in a module a special case
+-- of the ordinary rule rather than a second one.
+spanEnc :: Word32 -> Span -> Enc
+spanEnc tag (Span (FileId file) sr sc er ec) =
+  Enc $ \env ->
+    let (prow, pcol, pend) = enclosingBases env
+     in runEnc
+          ( u32 tag (fromIntegral file)
+              <> s32 (tag + 1) (delta sr prow)
+              <> s32 (tag + 2) (delta sc pcol)
+              <> s32 (tag + 3) (delta er sr)
+              <> s32 (tag + 4) (delta ec pend)
+          )
+          env
+  where
+    delta :: Word32 -> Word32 -> Int32
+    delta a b = fromIntegral a - fromIntegral b
 
 fileEntryEnc :: (FileId, ModuleName.Canonical) -> Enc
 fileEntryEnc (FileId i, home) =
@@ -663,36 +737,38 @@ converterEnc (Converter isBytes code) =
 exprEnc :: Expr -> Enc
 exprEnc (Expr node t s) =
   typ 1 t
-    <> msg 2 (spanEnc s)
-    <> nodeEnc node
+    <> spanEnc 2 s
+    <> within s (nodeEnc node)
 
+-- | The @oneof@, at tags 7 to 27: D95 inlined a span into 'Expr' and every
+-- member moved up by four to make room for it.
 nodeEnc :: Expr_ -> Enc
 nodeEnc node =
   case node of
-    EVar n -> oneofText 3 n
-    EGlobal q -> withQual q (\i -> key 4 WVarint <> varint (fromIntegral i))
-    ELit l -> msg 5 (literalEnc l)
-    ELam binders body -> msg 6 (absEnc binders body)
-    EApp fn args -> msg 7 (appEnc fn args)
-    ELet binds body -> msg 8 (bindsEnc binds body)
-    ELetRec binds body -> msg 9 (bindsEnc binds body)
+    EVar n -> oneofText 7 n
+    EGlobal q -> withQual q (\i -> key 8 WVarint <> varint (fromIntegral i))
+    ELit l -> msg 9 (literalEnc l)
+    ELam binders body -> msg 10 (absEnc binders body)
+    EApp fn args -> msg 11 (appEnc fn args)
+    ELet binds body -> msg 12 (bindsEnc binds body)
+    ELetRec binds body -> msg 13 (bindsEnc binds body)
     ECase scrut alts fallback ->
-      msg 10 (msg 1 (exprEnc scrut) <> rep 2 altEnc alts <> optMsg 3 exprEnc fallback)
+      msg 14 (msg 1 (exprEnc scrut) <> rep 2 altEnc alts <> optMsg 3 exprEnc fallback)
     ECtor name tag args ->
-      msg 11 (qual 1 name <> u32 2 (fromIntegral tag) <> rep 3 exprEnc args)
-    ERecord fields -> msg 12 (rep 1 fieldExprEnc fields)
-    EUpdate base fields -> msg 13 (msg 1 (exprEnc base) <> rep 2 fieldExprEnc fields)
-    EAccess base field -> msg 14 (msg 1 (exprEnc base) <> text 2 field)
-    EArray items -> msg 15 (rep 1 exprEnc items)
+      msg 15 (qual 1 name <> u32 2 (fromIntegral tag) <> rep 3 exprEnc args)
+    ERecord fields -> msg 16 (rep 1 fieldExprEnc fields)
+    EUpdate base fields -> msg 17 (msg 1 (exprEnc base) <> rep 2 fieldExprEnc fields)
+    EAccess base field -> msg 18 (msg 1 (exprEnc base) <> text 2 field)
+    EArray items -> msg 19 (rep 1 exprEnc items)
     EPrim op args ->
-      msg 16 (u32 1 (fromIntegral (Prim.primCode op)) <> rep 2 exprEnc args)
-    EJoin binds body -> msg 17 (bindsEnc binds body)
-    EJump j args -> msg 18 (text 1 j <> rep 2 exprEnc args)
-    ETyLam vars body -> msg 19 (repText 1 vars <> msg 2 (exprEnc body))
-    ETyApp fn args -> msg 20 (msg 1 (exprEnc fn) <> repType 2 args)
-    EWitLam binders body -> msg 21 (absEnc binders body)
-    EWitApp fn args -> msg 22 (appEnc fn args)
-    ECrash kind -> msg 23 (crashEnc kind)
+      msg 20 (u32 1 (fromIntegral (Prim.primCode op)) <> rep 2 exprEnc args)
+    EJoin binds body -> msg 21 (bindsEnc binds body)
+    EJump j args -> msg 22 (text 1 j <> rep 2 exprEnc args)
+    ETyLam vars body -> msg 23 (repText 1 vars <> msg 2 (exprEnc body))
+    ETyApp fn args -> msg 24 (msg 1 (exprEnc fn) <> repType 2 args)
+    EWitLam binders body -> msg 25 (absEnc binders body)
+    EWitApp fn args -> msg 26 (appEnc fn args)
+    ECrash kind -> msg 27 (crashEnc kind)
 
 absEnc :: [Binder] -> Expr -> Enc
 absEnc binders body = rep 1 binderEnc binders <> msg 2 (exprEnc body)
@@ -718,7 +794,7 @@ binderEnc :: Binder -> Enc
 binderEnc (Binder name t s) =
   text 1 name
     <> typ 2 t
-    <> msg 3 (spanEnc s)
+    <> spanEnc 3 s
 
 bindEnc :: Bind -> Enc
 bindEnc (Bind binder value) =

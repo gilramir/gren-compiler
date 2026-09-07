@@ -31,6 +31,7 @@ import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Data.Utf8 qualified as Utf8
+import Data.Word (Word32)
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Test.Hspec
@@ -39,11 +40,11 @@ spec :: Spec
 spec = do
   describe "the file" $ do
     it "starts with the magic and the schema version" $
-      -- The literal 4 is deliberate. A version bump is meant to be a visible
+      -- The literal 5 is deliberate. A version bump is meant to be a visible
       -- event, and this failing is what one looks like.
       case Wire.encode (moduleWith []) of
         Left problems -> expectationFailure (unwords problems)
-        Right bytes -> BS.take 9 bytes `shouldBe` Wire.magic <> BS.singleton 4
+        Right bytes -> BS.take 9 bytes `shouldBe` Wire.magic <> BS.singleton 5
 
     it "refuses a file that is not Core" $
       isLeft (Wire.decode "not core at all, not even close") `shouldBe` True
@@ -115,6 +116,41 @@ spec = do
     it "carries an empty string, which is index zero and not a table entry" $
       roundTrip (moduleWith [bindOf (lit (LString (utf8 "")))])
 
+  describe "spans (D95)" $ do
+    it "carries a tree whose every span differs from the one enclosing it" $
+      -- Every other test in this file gives each node the same 'span_', so
+      -- every delta it writes is zero and a broken reconstruction would round-
+      -- trip anyway. This one moves in both directions: `g` is far below its
+      -- enclosing span and `x` is above and to the left of it, which is the
+      -- sign the corpus never exercises -- 0 of its 15,732 rows go backwards,
+      -- and 58 of its columns do.
+      roundTrip nestedSpans
+
+    it "carries the span that writes no bytes at all, and it is not its parent" $
+      -- Every delta is zero, so rule 5 omits all five fields — which under D95's
+      -- three bases means "starts where the enclosing span starts, one row long,
+      -- ending in the column the enclosing span ends in". It must come back as
+      -- itself and not as the span enclosing it.
+      --
+      -- __This is what B22's candidate C would have cost.__ C proposed that an
+      -- absent span mean "the same as the enclosing one". Inlined into 'Expr',
+      -- absence already means the span below, 1,327 of the corpus's 17,793 spans
+      -- are it and write nothing, and 5 of those are not their enclosing span.
+      -- The rule would not have been a reinterpretation of rule 5 so much as
+      -- five values the format could no longer write down.
+      roundTrip (moduleWith [Bind (binder "f") (accessAt (at 3 7 9 20) (at 3 7 3 20))])
+
+    it "pays for the distance between a span and the one enclosing it" $
+      -- Both modules are the same shape and both are written at row 5000, so
+      -- every absolute row in either is a two-byte varint and an encoding that
+      -- wrote them out would make the two files the same size. Under D95 the
+      -- one whose spans agree with their enclosing span writes nothing at all
+      -- for four of the five fields.
+      case (encodeOf (chain 0), encodeOf (chain 1000)) of
+        (Right together, Right apart) ->
+          BS.length together `shouldSatisfy` (< BS.length apart)
+        _ -> expectationFailure "did not encode"
+
   describe "D91" $ do
     it "carries an integer literal at the edge of the range" $
       roundTrip (moduleWith [bindOf (lit (LIntLegacy 9223372036854775807))])
@@ -185,6 +221,47 @@ utf8 = Utf8.fromChars
 
 span_ :: Span
 span_ = Span (FileId 0) 1 2 3 4
+
+-- | A span in the module's one file.
+at :: Word32 -> Word32 -> Word32 -> Word32 -> Span
+at = Span (FileId 0)
+
+-- | An 'EAccess' at @outer@ whose base is an 'EVar' at @inner@ — the shallowest
+-- way to put one span inside another.
+accessAt :: Span -> Span -> Expr
+accessAt outer inner =
+  Expr (EAccess (Expr (EVar "x") intType inner) "field") intType outer
+
+-- | Four spans, none of them the same, and two of them moving backwards.
+nestedSpans :: Module
+nestedSpans =
+  moduleWith
+    [ Bind
+        (Binder "f" intType (at 12 5 12 9))
+        ( Expr
+            ( ELam
+                [Binder "x" intType (at 12 7 12 8)]
+                ( Expr
+                    ( EApp
+                        (Expr (EVar "g") intType (at 40 3 41 80))
+                        [Expr (EVar "x") intType (at 12 1 12 2)]
+                    )
+                    intType
+                    (at 13 9 15 4)
+                )
+            )
+            intType
+            (at 12 5 20 1)
+        )
+    ]
+
+-- | Ten nested accesses at row 5000, each @gap@ rows below the one enclosing it.
+chain :: Word32 -> Expr
+chain gap =
+  List.foldl'
+    (\inner i -> Expr (EAccess inner "field") intType (at (5000 + i * gap) 1 (5000 + i * gap) 9))
+    (Expr (EVar "x") intType (at (5000 + 10 * gap) 1 (5000 + 10 * gap) 9))
+    [9, 8 .. 0]
 
 intType :: Type
 intType = TCon (qual "Int") []

@@ -2,7 +2,7 @@
 {-# LANGUAGE NoPolyKinds #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Bytes to Core, against @schema/geng/core/v4.proto@.
+-- | Bytes to Core, against @schema/geng/core/v5.proto@.
 --
 -- __The reader enforces the canonical profile__ (§B7). C10 writes its seven
 -- rules as properties of the writer; making them properties of the reader too
@@ -43,6 +43,7 @@ import Data.Bits (shiftL, testBit, (.&.), (.|.))
 import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe qualified as BS
 import Data.Coerce qualified as Coerce
+import Data.Int (Int32, Int64)
 import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Data.Utf8 qualified as Utf8
@@ -61,17 +62,24 @@ data Input = Input
     _base :: !Int
   }
 
--- | The path an error will name, and the module's string table (D92).
+-- | The path an error will name, the module's three tables (D92, D93, D94), and
+-- the span a span is written against (D95).
 --
--- The table is in the environment rather than threaded as an argument because
--- every string in the module is an index into it and there are thirty fields
--- that hold one; it is empty until 'withTable' sets it, which 'moduleP' does
--- the moment it has read tag 1.
+-- The tables are in the environment rather than threaded as arguments because
+-- every string in the module is an index into one and there are thirty fields
+-- that hold one; they are empty until 'withTable' and its two successors set
+-- them, which 'moduleP' does the moment it has read tags 1, 2 and 3.
+--
+-- '_enclosing' is in the environment for the same reason and __costs the reader
+-- nothing else__: rule 1 puts an 'Expr'\'s span at tags 2 to 6, ahead of the
+-- @oneof@ that holds its children, so by the time a child is read the span it
+-- is written against has already been reconstructed. One pass, as before.
 data Env = Env
   { _path :: ![String],
     _strings :: !(Map.Map Int Str),
     _quals :: !(Map.Map Int QualName),
-    _types :: !(Map.Map Int Type)
+    _types :: !(Map.Map Int Type),
+    _enclosing :: !(Maybe Span)
   }
 
 -- | Every string in a module, as one type. 'Core.Wire.Encode' says why the
@@ -108,11 +116,31 @@ instance Monad P where
 
 runP :: P a -> BS.ByteString -> Int -> Either Error a
 runP p buf base =
-  fmap fst (unP p (Env [] Map.empty Map.empty Map.empty) (Input buf base))
+  fmap fst (unP p (Env [] Map.empty Map.empty Map.empty Nothing) (Input buf base))
 
 -- | Push a field name onto the path an error will name.
 inField :: String -> P a -> P a
 inField name (P g) = P (\env i -> g env {_path = name : _path env} i)
+
+-- | Read @body@ with @sp@ as the enclosing span (D95). 'exprP' is the only
+-- caller, for 'Core.Wire.Encode.within'\'s reason.
+within :: Span -> P a -> P a
+within sp (P g) = P (\env i -> g env {_enclosing = Just sp} i)
+
+-- | The three coordinates of the enclosing span that a span is written against
+-- — its start row, its start column and its end column — or the origin when
+-- there is none.
+enclosingBases :: P (Word32, Word32, Word32)
+enclosingBases =
+  P
+    ( \env i ->
+        Right
+          ( case _enclosing env of
+              Nothing -> (0, 0, 0)
+              Just (Span _ startRow startCol _ endCol) -> (startRow, startCol, endCol),
+            i
+          )
+    )
 
 failAt :: Int -> String -> P a
 failAt at why = P (\env _ -> Left (Error at (_path env) why))
@@ -256,6 +284,11 @@ defaulted name tag wire dflt body =
 
 u32 :: String -> Word32 -> P Word32
 u32 name tag = fromIntegral <$> defaulted name tag WVarint (0 :: Word64) varint
+
+-- | @sint32@, implicit presence. Absent is a zero delta, and a zero written out
+-- is rule 5's violation — zigzag maps 0 to 0, so the raw varint is the test.
+s32 :: String -> Word32 -> P Int32
+s32 name tag = unzigzag32 <$> defaulted name tag WVarint (0 :: Word64) varint
 
 -- | @bool@, implicit presence. Absent is 'False'; @False@ written out is rule
 -- 5's violation, and anything but 0 or 1 is not a boolean at all.
@@ -672,16 +705,48 @@ moduleNameP =
 
 -- SPANS
 
-spanP :: P Span
-spanP =
-  message "Span" 5 $
-    do
-      file <- u32 "file" 1
-      sr <- u32 "start_row" 2
-      sc <- u32 "start_col" 3
-      er <- u32 "end_row" 4
-      ec <- u32 "end_col" 5
-      pure (Span (FileId (fromIntegral file)) sr sc er ec)
+-- | A span, as version 5 writes it: not a message at all but five fields
+-- inlined into whichever of 'Expr' and 'Binder' carries it, at five consecutive
+-- tags starting at @tag@ (D95).
+--
+-- @file@ is absolute. The start is a delta against the enclosing span's start,
+-- @end_row@ against this span's own start row and @end_col@ against the
+-- enclosing span's end column — three bases rather than two, because the corpus
+-- says rows and columns are predicted by different things and
+-- 'Core.Wire.Encode.spanEnc' says by what. Nothing here needs a second pass:
+-- 'within' has already put the enclosing span in the environment, because rule
+-- 1 delivered it before this message's children existed.
+spanP :: Word32 -> P Span
+spanP tag =
+  do
+    file <- u32 "span_file" tag
+    dsr <- s32 "span_start_row" (tag + 1)
+    dsc <- s32 "span_start_col" (tag + 2)
+    der <- s32 "span_end_row" (tag + 3)
+    dec <- s32 "span_end_col" (tag + 4)
+    (prow, pcol, pend) <- enclosingBases
+    sr <- coord "span_start_row" prow dsr
+    sc <- coord "span_start_col" pcol dsc
+    er <- coord "span_end_row" sr der
+    ec <- coord "span_end_col" pend dec
+    pure (Span (FileId (fromIntegral file)) sr sc er ec)
+
+-- | A coordinate, from the base it was written against and the delta that was
+-- written. A row and a column are 'Word32' and a delta is signed, so a file
+-- that drives one out of range is refused here rather than wrapping round to
+-- four billion.
+--
+-- __This is the check @harness\/wire.py@ cannot make__, and it is D92's blind
+-- spot one step further along: the schema says @sint32@ and cannot say that the
+-- field is a delta, let alone what it is a delta from. The second codec
+-- round-trips the number it finds and is right to; only this reader knows what
+-- it means.
+coord :: String -> Word32 -> Int32 -> P Word32
+coord name base d =
+  let n = fromIntegral base + fromIntegral d :: Int64
+   in if n < 0 || n > 0xFFFFFFFF
+        then failP (name ++ " resolves to " ++ show n ++ ", which is not a position")
+        else pure (fromIntegral n)
 
 -- | Rule 4: a map is a repeated key-value message sorted by key, and "sorted"
 -- is checked rather than assumed. Two frontends that disagreed about the order
@@ -975,38 +1040,40 @@ converterP =
 
 exprP :: P Expr
 exprP =
-  message "Expr" 23 $
+  message "Expr" 27 $
     do
       t <- typ "type" 1
-      s <- msg "span" 2 spanP
-      node <- nodeP
+      s <- spanP 2
+      node <- within s nodeP
       pure (Expr node t s)
 
+-- | The @oneof@, at tags 7 to 27: D95 inlined a span into 'Expr' and every
+-- member moved up by four to make room for it.
 nodeP :: P Expr_
 nodeP =
   oneof
     "node"
-    [ (3, WVarint, EVar <$> indexText),
-      (4, WVarint, EGlobal <$> (resolveQual =<< varint)),
-      (5, WBytes, ELit <$> submessage literalP),
-      (6, WBytes, submessage (absP ELam)),
-      (7, WBytes, submessage (appP EApp)),
-      (8, WBytes, submessage (bindsP ELet)),
-      (9, WBytes, submessage (bindsP ELetRec)),
-      (10, WBytes, submessage caseP),
-      (11, WBytes, submessage ctorExprP),
-      (12, WBytes, submessage recordP),
-      (13, WBytes, submessage updateP),
-      (14, WBytes, submessage accessP),
-      (15, WBytes, submessage arrayP),
-      (16, WBytes, submessage primP),
-      (17, WBytes, submessage (bindsP EJoin)),
-      (18, WBytes, submessage jumpP),
-      (19, WBytes, submessage tyLamP),
-      (20, WBytes, submessage tyAppP),
-      (21, WBytes, submessage (absP EWitLam)),
-      (22, WBytes, submessage (appP EWitApp)),
-      (23, WBytes, submessage crashP)
+    [ (7, WVarint, EVar <$> indexText),
+      (8, WVarint, EGlobal <$> (resolveQual =<< varint)),
+      (9, WBytes, ELit <$> submessage literalP),
+      (10, WBytes, submessage (absP ELam)),
+      (11, WBytes, submessage (appP EApp)),
+      (12, WBytes, submessage (bindsP ELet)),
+      (13, WBytes, submessage (bindsP ELetRec)),
+      (14, WBytes, submessage caseP),
+      (15, WBytes, submessage ctorExprP),
+      (16, WBytes, submessage recordP),
+      (17, WBytes, submessage updateP),
+      (18, WBytes, submessage accessP),
+      (19, WBytes, submessage arrayP),
+      (20, WBytes, submessage primP),
+      (21, WBytes, submessage (bindsP EJoin)),
+      (22, WBytes, submessage jumpP),
+      (23, WBytes, submessage tyLamP),
+      (24, WBytes, submessage tyAppP),
+      (25, WBytes, submessage (absP EWitLam)),
+      (26, WBytes, submessage (appP EWitApp)),
+      (27, WBytes, submessage crashP)
     ]
 
 absP :: ([Binder] -> Expr -> Expr_) -> P Expr_
@@ -1136,11 +1203,11 @@ crashP =
 
 binderP :: P Binder
 binderP =
-  message "Binder" 3 $
+  message "Binder" 7 $
     do
       name <- text "name" 1
       t <- typ "type" 2
-      s <- msg "span" 3 spanP
+      s <- spanP 3
       pure (Binder name t s)
 
 bindP :: P Bind
