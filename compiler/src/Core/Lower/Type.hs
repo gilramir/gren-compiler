@@ -33,6 +33,7 @@ import AST.Canonical qualified as Can
 import AST.Utils.Type qualified as Type
 import Core.AST qualified as Core
 import Data.Index qualified as Index
+import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name (Name)
 import Gren.ModuleName qualified as ModuleName
@@ -75,8 +76,12 @@ lowerType tipe =
 -- resolve to. Both go together when `core` declares its classes, and this
 -- function does not change again when they do.
 --
--- Ordered by variable, then by the order the constraints were written, so that
--- two compilations of the same source emit the same bytes (`docs/core.md` C2).
+-- Ordered by variable and then by class, both ascending, which is C2's
+-- canonical order rather than the author's. `Can` keeps the order the context
+-- was written in, because an error message may want to echo it; Core sorts,
+-- because Core is where two types are compared and `(Eq a, Ord a) =>` and
+-- `(Ord a, Eq a) =>` are the same type. It is the same split `TRecord` makes,
+-- where `Can` carries a source-order index and this module drops it.
 lowerAnnotation :: Can.Annotation -> Core.Type
 lowerAnnotation (Can.Forall freeVars tipe) =
   case Map.toAscList freeVars of
@@ -86,7 +91,7 @@ lowerAnnotation (Can.Forall freeVars tipe) =
         (map fst vars)
         [ Core.CClass (Core.QualName home name) (Core.TVar var)
         | (var, classes) <- vars,
-          Can.Class home name <- classes
+          Can.Class home name <- List.sort classes
         ]
         (lowerType tipe)
 

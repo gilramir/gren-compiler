@@ -197,8 +197,7 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
           )
     Just (Src.Annotation maybeContext srcType _) ->
       do
-        Type.checkContext maybeContext
-        (Can.Forall freeVars tipe) <- Type.toAnnotation env srcType
+        (Can.Forall freeVars tipe) <- Type.toAnnotation env maybeContext srcType
 
         ((args, resultType), argBindings) <-
           Pattern.verify (Error.DPFuncArgs name) $

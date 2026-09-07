@@ -38,11 +38,14 @@ data Error
   | AmbiguousType A.Region (Maybe Name.Name) Name.Name ModuleName.Canonical (OneOrMore.OneOrMore ModuleName.Canonical)
   | AmbiguousVariant A.Region (Maybe Name.Name) Name.Name ModuleName.Canonical (OneOrMore.OneOrMore ModuleName.Canonical)
   | AmbiguousBinop A.Region Name.Name ModuleName.Canonical (OneOrMore.OneOrMore ModuleName.Canonical)
+  | AmbiguousClass A.Region (Maybe Name.Name) Name.Name ModuleName.Canonical (OneOrMore.OneOrMore ModuleName.Canonical)
   | BadArity A.Region BadArityContext Name.Name Int Int
   | ClassDeclThirdParty A.Region Name.Name
   | ClassMethodUnsupported A.Region Name.Name Name.Name
   | ClassMethodWithoutParam A.Region Name.Name Name.Name Name.Name
-  | ConstraintUnsolved A.Region Name.Name
+  | ConstraintDuplicate A.Region Name.Name Name.Name
+  | ConstraintNotAClass A.Region Name.Name
+  | ConstraintVarUnbound A.Region Name.Name Name.Name
   | DeriveUnsupported A.Region Name.Name
   | InstanceDeclUnsupported A.Region
   | Binop A.Region Name.Name Name.Name
@@ -69,6 +72,7 @@ data Error
   | ImportMethodByName A.Region Name.Name Name.Name
   | ImportExposingNotFound A.Region ModuleName.Canonical Name.Name [Name.Name]
   | NotFoundVar A.Region (Maybe Name.Name) Name.Name PossibleNames
+  | NotFoundClass A.Region (Maybe Name.Name) Name.Name PossibleNames
   | NotFoundType A.Region (Maybe Name.Name) Name.Name PossibleNames
   | NotFoundVariant A.Region (Maybe Name.Name) Name.Name PossibleNames
   | NotFoundBinop A.Region Name.Name (Set.Set Name.Name)
@@ -168,6 +172,8 @@ toReport source err =
       ambiguousName source region maybePrefix name h hs "type"
     AmbiguousVariant region maybePrefix name h hs ->
       ambiguousName source region maybePrefix name h hs "variant"
+    AmbiguousClass region maybePrefix name h hs ->
+      ambiguousName source region maybePrefix name h hs "class"
     AmbiguousBinop region name h hs ->
       ambiguousName source region Nothing name h hs "operator"
     BadArity region badArityContext name expected actual ->
@@ -403,20 +409,54 @@ toReport source err =
               \ whose type never mentions the parameter can never be called: there would be\
               \ nothing at the call to say which instance is meant."
           )
-    ConstraintUnsolved region name ->
-      Report.Report "UNSOLVED CONSTRAINT" region [] $
+    ConstraintDuplicate region className var ->
+      Report.Report "DUPLICATE CONSTRAINT" region [] $
         Code.toSnippet
           source
           region
           Nothing
           ( D.reflow $
-              "I can read the `"
-                ++ Name.toChars name
-                ++ "` constraint on this annotation, but I cannot check it yet:",
+              "This annotation says `"
+                ++ Name.toChars var
+                ++ "` is a `"
+                ++ Name.toChars className
+                ++ "` more than once:",
+            D.reflow
+              "Saying it twice says nothing the first one did not. Remove one of them."
+          )
+    ConstraintNotAClass region name ->
+      Report.Report "NOT A CLASS" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`" ++ Name.toChars name ++ "` is a type, and a constraint has to name a class:",
             D.reflow $
-              "Constraints parse in this version but are not solved yet, so accepting one\
-              \ would mean compiling an annotation whose promise nothing checks. Remove\
-              \ the constraint for now."
+              "A class and a type share the same namespace here, so I can tell you which one\
+              \ this is. `"
+                ++ Name.toChars name
+                ++ " a` on the left of a `=>` means \"whatever `a` turns out to be, it is one\
+                   \ of these\", and only a class says that."
+          )
+    ConstraintVarUnbound region className var ->
+      Report.Report "CONSTRAINT ON NOTHING" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This annotation constrains `"
+                ++ Name.toChars var
+                ++ "` to be a `"
+                ++ Name.toChars className
+                ++ "`, and its type never mentions `"
+                ++ Name.toChars var
+                ++ "`:",
+            D.reflow
+              "A constraint says something about a variable the type binds, so one on a\
+              \ variable that does not appear says nothing at all. Either use it in the type\
+              \ or drop the constraint."
           )
     DeriveUnsupported region name ->
       Report.Report "UNSUPPORTED ATTRIBUTE" region [] $
@@ -634,6 +674,8 @@ toReport source err =
               )
     NotFoundVar region prefix name possibleNames ->
       notFound source region prefix name "variable" possibleNames
+    NotFoundClass region prefix name possibleNames ->
+      notFound source region prefix name "class" possibleNames
     NotFoundType region prefix name possibleNames ->
       notFound source region prefix name "type" possibleNames
     NotFoundVariant region prefix name possibleNames ->

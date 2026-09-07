@@ -294,8 +294,7 @@ addDefNodes env nodes (A.At _ def) =
             logLetLocals args freeLocals (node : nodes)
         Just (Src.Annotation maybeContext tipe _) ->
           do
-            Type.checkContext maybeContext
-            (Can.Forall freeVars ctipe) <- Type.toAnnotation env tipe
+            (Can.Forall freeVars ctipe) <- Type.toAnnotation env maybeContext tipe
             ((args, resultType), argBindings) <-
               Pattern.verify (Error.DPFuncArgs name) $
                 gatherTypedArgs env name (fmap snd srcArgs) ctipe Index.first []

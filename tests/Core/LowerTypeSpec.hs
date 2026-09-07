@@ -109,15 +109,17 @@ spec = do
           [Core.CClass (Core.QualName ModuleName.basics "Eq") (Core.TVar "a")]
           (Core.TVar "a")
 
-    it "orders constraints by variable, then by how they were written" $
+    it "orders constraints by variable and then by class, both ascending" $
       -- Two compilations of the same source have to emit the same bytes
       -- (`docs/core.md` C2), and a `Map` is only ascending if it is asked to
-      -- be.
+      -- be. The classes are sorted rather than left as written, for C2's other
+      -- reason: `(Ord a, Eq a) =>` and `(Eq a, Ord a) =>` are the same type,
+      -- and Core is where two types are compared.
       lowerAnnotation
         ( Can.Forall
             ( Map.fromList
                 [ ("b", [Can.Class ModuleName.basics "Ord"]),
-                  ("a", [Can.Class ModuleName.basics "Eq", Can.Class ModuleName.basics "Inspect"])
+                  ("a", [Can.Class ModuleName.basics "Inspect", Can.Class ModuleName.basics "Eq"])
                 ]
             )
             (Can.TLambda (Can.TVar "a") (Can.TVar "b"))
@@ -129,6 +131,24 @@ spec = do
             Core.CClass (Core.QualName ModuleName.basics "Ord") (Core.TVar "b")
           ]
           (Core.TFun [Core.TVar "a"] (Core.TVar "b"))
+
+    it "sorts by the class's module before its name" $
+      -- `Can.Class` is a module and a name, and two classes may share a name.
+      -- The order is the pair's, which is what `Core.QualName`'s own `Ord`
+      -- would give and what a reader of a dump can predict.
+      lowerAnnotation
+        ( Can.Forall
+            ( Map.fromList
+                [("a", [Can.Class ModuleName.string "Zed", Can.Class ModuleName.basics "Zed"])]
+            )
+            (Can.TVar "a")
+        )
+        `shouldBe` Core.TForall
+          ["a"]
+          [ Core.CClass (Core.QualName ModuleName.basics "Zed") (Core.TVar "a"),
+            Core.CClass (Core.QualName ModuleName.string "Zed") (Core.TVar "a")
+          ]
+          (Core.TVar "a")
 
   describe "classes" $ do
     it "publishes each method with the class's own constraint on it" $

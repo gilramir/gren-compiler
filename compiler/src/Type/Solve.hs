@@ -456,11 +456,17 @@ emptyRecord1 =
 -- | An annotation's bound variables become unification variables, and this is
 -- where a constraint on one would become a `Class.Classes`.
 --
--- It reads the variable's *name* rather than its constraint list, because the
--- list is empty everywhere: `Canonicalize.Type` still rejects the constraint an
--- author writes, so `number` is the only way to say `Num` and `Class.fromName`
--- is how it is said. When a class declaration gives the list something to hold,
--- it is read here, and the name bridge goes with the rest of verb 7.
+-- It still reads the variable's *name* rather than its constraint list, and
+-- the reason moved (`docs/m1b-classes.md` §G21). The list is no longer empty —
+-- `Canonicalize.Type` resolves `Eq a =>` onto it — but `Class.Class` is a
+-- three-constructor enum, `Num`/`Ord`/`Appendable`, and a declared class is
+-- not one of them and cannot be until `core` declares them. So the constraint
+-- is __recorded and not enforced__, and what unblocks it is verb 7's change to
+-- the unifier's vocabulary rather than anything else in the front end.
+--
+-- Nothing can depend on the unenforced promise in the meantime: the only thing
+-- a constraint buys is calling a method, and a method call is rejected in
+-- `Canonicalize.Expression` for want of an instance (§G20.3).
 srcTypeToVariable :: Int -> Pools -> Can.FreeVars -> Can.Type -> IO Variable
 srcTypeToVariable rank pools freeVars srcType =
   let nameToContent name =

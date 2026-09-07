@@ -12,6 +12,8 @@ module Canonicalize.Environment
     Ctor (..),
     Method (..),
     addLocals,
+    findClass,
+    findClassQual,
     findType,
     findTypeQual,
     findCtor,
@@ -161,6 +163,44 @@ addLocalBoth name region var =
       Result.throw (Error.Shadowing name parentRegion region)
     TopLevel parentRegion ->
       Result.throw (Error.Shadowing name parentRegion region)
+
+-- FIND CLASS
+
+-- | The class a constraint or an instance head names.
+--
+-- What comes back is the __reference__ — 'Can.Class', a name and the module
+-- that declares it — rather than the declaration, because that is all a
+-- constraint carries (D111). The declaration is in the same table for when
+-- instances need it.
+--
+-- A class and a type share the upper-case namespace (`docs/m1b-classes.md`
+-- §G20.2) and are stored apart, so a name that is a type here is a specific
+-- mistake rather than a missing name, and is reported as one.
+findClass :: A.Region -> Env -> Name.Name -> Result i w Can.Class
+findClass region (Env _ _ ts _ _ cls _ _ _ _ qcls _) name =
+  case Map.lookup name cls of
+    Just (Specific home _) ->
+      Result.ok (Can.Class home name)
+    Just (Ambiguous h hs) ->
+      Result.throw (Error.AmbiguousClass region Nothing name h hs)
+    Nothing ->
+      if Map.member name ts
+        then Result.throw (Error.ConstraintNotAClass region name)
+        else Result.throw (Error.NotFoundClass region Nothing name (toPossibleNames cls qcls))
+
+findClassQual :: A.Region -> Env -> Name.Name -> Name.Name -> Result i w Can.Class
+findClassQual region (Env _ _ _ _ _ cls _ _ _ _ qcls _) prefix name =
+  case Map.lookup prefix qcls of
+    Just qualified ->
+      case Map.lookup name qualified of
+        Just (Specific home _) ->
+          Result.ok (Can.Class home name)
+        Just (Ambiguous h hs) ->
+          Result.throw (Error.AmbiguousClass region (Just prefix) name h hs)
+        Nothing ->
+          Result.throw (Error.NotFoundClass region (Just prefix) name (toPossibleNames cls qcls))
+    Nothing ->
+      Result.throw (Error.NotFoundClass region (Just prefix) name (toPossibleNames cls qcls))
 
 -- FIND TYPE
 

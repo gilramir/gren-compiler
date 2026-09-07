@@ -1,7 +1,6 @@
 module Canonicalize.Type
   ( toAnnotation,
     canonicalize,
-    checkContext,
   )
 where
 
@@ -9,6 +8,7 @@ import AST.Canonical qualified as Can
 import AST.Source qualified as Src
 import Canonicalize.Environment qualified as Env
 import Canonicalize.Environment.Dups qualified as Dups
+import Control.Monad (foldM)
 import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name qualified as Name
@@ -23,35 +23,59 @@ type Result i w a =
 
 -- TO ANNOTATION
 
-toAnnotation :: Env.Env -> Src.Type -> Result i w Can.Annotation
-toAnnotation env srcType =
+-- | An annotation: the type, the variables it binds, and what each is
+-- constrained by (D111).
+--
+-- The context is taken here rather than checked separately because it is part
+-- of what an annotation is — `Src.Annotation` already pairs them — and because
+-- a constraint has no meaning apart from the variables the type binds. A port
+-- has no context and passes `Nothing`.
+toAnnotation :: Env.Env -> Maybe Src.Context -> Src.Type -> Result i w Can.Annotation
+toAnnotation env maybeContext srcType =
   do
     tipe <- canonicalize env srcType
-    Result.ok $ Can.Forall (addFreeVars Map.empty tipe) tipe
+    freeVars <- addContext env (addFreeVars Map.empty tipe) maybeContext
+    Result.ok $ Can.Forall freeVars tipe
 
 -- CONTEXT
 
--- | A constraint context parses (D111) and has nowhere to go yet: `Can` still
--- carries no constraint for it to become, and there is no instance environment
--- for a
--- class name to resolve against until verb 3 of `docs/m1b-classes.md`. Until
--- then an annotation that carries one is rejected rather than silently
--- stripped, so that no program can compile with a promise nothing checks.
-checkContext :: Maybe Src.Context -> Result i w ()
-checkContext maybeContext =
+-- | `(Eq a, Ord b) =>`, resolved onto the variables the type binds.
+--
+-- Two things are checked and both are about the annotation rather than about
+-- the class. __The variable has to be one the type binds__: `Eq b => a -> a`
+-- has nowhere to put the constraint, because D111 keys the constraint list off
+-- `FreeVars`, and a promise about a variable that does not occur is a promise
+-- about nothing. And __a constraint may not be written twice__ on the same
+-- variable; the second one says nothing the first did not.
+--
+-- The order the author wrote is kept. It is not Core's order — `lowerAnnotation`
+-- sorts, because that is where types are compared — and keeping it here is the
+-- same split `Can.TRecord` already makes, carrying a source-order index that
+-- `lowerType` drops.
+addContext :: Env.Env -> Can.FreeVars -> Maybe Src.Context -> Result i w Can.FreeVars
+addContext env freeVars maybeContext =
   case maybeContext of
     Nothing ->
-      Result.ok ()
+      Result.ok freeVars
     Just (Src.Context entries _) ->
-      case entries of
-        [] ->
-          Result.ok ()
-        (A.At region constraint, _) : _ ->
-          Result.throw $
-            Error.ConstraintUnsolved region $
-              case constraint of
-                Src.Constraint _ name _ -> name
-                Src.ConstraintQual _ _ name _ -> name
+      foldM (addConstraint env) freeVars entries
+
+addConstraint :: Env.Env -> Can.FreeVars -> Src.ContextEntry -> Result i w Can.FreeVars
+addConstraint env freeVars (A.At region constraint, _) =
+  do
+    (className, cls, A.At varRegion var) <-
+      case constraint of
+        Src.Constraint _ name varName ->
+          (,,) name <$> Env.findClass region env name <*> pure varName
+        Src.ConstraintQual _ home name varName ->
+          (,,) name <$> Env.findClassQual region env home name <*> pure varName
+    case Map.lookup var freeVars of
+      Nothing ->
+        Result.throw (Error.ConstraintVarUnbound varRegion className var)
+      Just classes ->
+        if cls `elem` classes
+          then Result.throw (Error.ConstraintDuplicate region className var)
+          else Result.ok (Map.insert var (classes ++ [cls]) freeVars)
 
 -- CANONICALIZE TYPES
 
@@ -109,10 +133,9 @@ checkArity expected region name args answer =
 
 -- | The annotation's bound variables, each with an empty constraint list.
 --
--- Empty because a constraint has nowhere to come from yet: `checkContext`
--- above rejects the one the author could have written, and it goes on doing so
--- until a class declaration gives `Eq` something to resolve to. The payload
--- exists now so that the shape is right when it does (D111).
+-- Empty here and filled by `addContext` above, which is the only thing that
+-- may fill it: a constraint is written on the annotation, and a variable the
+-- author said nothing about is unconstrained.
 addFreeVars :: Map.Map Name.Name [Can.Class] -> Can.Type -> Map.Map Name.Name [Can.Class]
 addFreeVars freeVars tipe =
   case tipe of

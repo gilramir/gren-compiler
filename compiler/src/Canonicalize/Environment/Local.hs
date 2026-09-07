@@ -112,18 +112,55 @@ toEffectDups effects =
 --
 -- __A class declaration is self-contained__ (§G19.1). `class Eq a where
 -- eq : a -> a -> Bool` publishes `eq : Eq a => a -> a -> Bool`, and the class
--- that constraint names is the one being declared, so there is no class
--- environment to consult and no ordering among the declarations to work out.
--- That is why this can run before anything resolves a class name, which is the
--- only order the rest of verb 3 can be built in.
+-- that constraint names is the one being declared, so nothing has to be
+-- resolved to put it on. That is why this can run before anything else
+-- resolves a class name, which is the only order the rest of verb 3 can be
+-- built in.
+--
+-- A method's __own__ context is not self-contained — `sortBy : Ord b => …` has
+-- to find `Ord` — but all it needs is a class's name and home, so two passes
+-- over this module's declarations settle it and the declarations stay
+-- unordered with respect to each other (§G21).
 addClasses :: Src.Module -> Env.Env -> Result i w (Env.Env, Classes)
-addClasses (Src.Module _ _ _ _ _ classes _ _ _ _ _ _ _) env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
+addClasses (Src.Module _ _ _ _ _ classes _ _ _ _ _ _ _) env =
   do
-    canClasses <- traverse (canonicalizeClass env) (fmap snd classes)
-    let decls = Map.fromList canClasses
-    let cls2 = Map.union (Map.map (Env.Specific home) decls) cls
-    let ms2 = Map.union (Map.map (Env.Specific home) (methodIndex decls)) ms
-    Result.ok (Env.Env home vs ts cs bs cls2 ms2 qvs qts qcs qcls qms, decls)
+    canClasses <- traverse (canonicalizeClass (withClassNames env (fmap snd classes))) (fmap snd classes)
+    Result.ok (withClasses env (Map.fromList canClasses))
+
+-- | The module's class __names__ in scope, with no methods yet.
+--
+-- A method's own annotation may carry a context — @class Sortable a where
+-- sortBy : Ord b => (a -> b) -> a -> a@ — and the class it names may be one of
+-- this module's, including the one being declared. Resolving a constraint
+-- needs the class's name and home and nothing else, so a pass that puts the
+-- names up first is enough, and it is what makes the declarations in a module
+-- unordered with respect to each other.
+withClassNames :: Env.Env -> [A.Located Src.Class] -> Env.Env
+withClassNames env classes =
+  fst $
+    withClasses env $
+      Map.fromList
+        [ (name, Can.ClassDecl param Map.empty)
+        | A.At _ (Src.Class (A.At _ name) (A.At _ param) _ _) <- classes
+        ]
+
+withClasses :: Env.Env -> Classes -> (Env.Env, Classes)
+withClasses (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) decls =
+  ( Env.Env
+      home
+      vs
+      ts
+      cs
+      bs
+      (Map.union (Map.map (Env.Specific home) decls) cls)
+      (Map.union (Map.map (Env.Specific home) (methodIndex decls)) ms)
+      qvs
+      qts
+      qcs
+      qcls
+      qms,
+    decls
+  )
 
 -- | The same declarations keyed by method name, which is the question an
 -- expression asks. `Canonicalize.Environment.Foreign.methodsOf` builds it for
@@ -162,8 +199,7 @@ canonicalizeMethod ::
   Result i w (Name.Name, Can.Annotation)
 canonicalizeMethod env home className param (_, A.At region methodName, Src.Annotation maybeContext srcType _) =
   do
-    Type.checkContext maybeContext
-    (Can.Forall freeVars tipe) <- Type.toAnnotation env srcType
+    (Can.Forall freeVars tipe) <- Type.toAnnotation env maybeContext srcType
     if Map.member param freeVars
       then Result.ok (methodName, Can.Forall (Map.insert param [Can.Class home className] freeVars) tipe)
       else Result.throw (Error.ClassMethodWithoutParam region className param methodName)
