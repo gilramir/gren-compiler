@@ -7,6 +7,8 @@ import Data.ByteString.UTF8 qualified as Utf8
 import Data.Name qualified as Name
 import Helpers.Instances ()
 import Parse.Declaration (Decl (..), declaration)
+import Gren.Package qualified as Pkg
+import Parse.Module qualified as Module
 import Parse.Primitives qualified as P
 import Reporting.Annotation qualified as A
 import Test.Hspec (Spec, describe, it, shouldBe)
@@ -29,6 +31,19 @@ spec = do
         \    eq : a -> a -> Bool\n\
         \    ne : a -> a -> Bool\n"
         `shouldBe` Right (AClass "Eq" "a" ["eq", "ne"])
+
+    it "the body ends where the indentation does" $
+      -- A top-level annotation below the class is not another method,
+      -- however well it parses as one. Read through the module parser,
+      -- because the point of the test is what comes *after* the class.
+      moduleClasses
+        "module M exposing (x)\n\
+        \class Eq a where\n\
+        \    eq : a -> a -> Bool\n\
+        \x : Int\n\
+        \x =\n\
+        \    1\n"
+        `shouldBe` Right [AClass "Eq" "a" ["eq"]]
 
     it "a method whose own annotation carries a context" $
       declKind
@@ -77,6 +92,17 @@ declKind str =
             AnAlias (Name.toChars name)
           _ ->
             Other
+
+moduleClasses :: String -> Either String [Kind]
+moduleClasses str =
+  case Module.fromByteString (Module.Package Pkg.dummyName) (Utf8.fromString str) of
+    Left _ ->
+      Left "did not parse"
+    Right modul ->
+      Right
+        [ AClass (Name.toChars name) (Name.toChars var) (map methodName methods)
+        | (_, A.At _ (Src.Class (A.At _ name) (A.At _ var) methods _)) <- Src._classes modul
+        ]
 
 methodName :: Src.ClassMethod -> String
 methodName (_, A.At _ name, _) =
