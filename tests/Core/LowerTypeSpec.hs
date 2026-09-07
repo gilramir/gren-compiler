@@ -78,7 +78,7 @@ spec = do
 
   describe "annotations" $ do
     it "wraps a polymorphic type in a forall" $
-      lowerAnnotation (Can.Forall (Map.fromList [("a", ())]) (Can.TVar "a"))
+      lowerAnnotation (Can.Forall (Map.fromList [("a", [])]) (Can.TVar "a"))
         `shouldBe` Core.TForall ["a"] [] (Core.TVar "a")
 
     it "leaves a monomorphic type unwrapped" $
@@ -86,12 +86,49 @@ spec = do
       -- node in the wire format.
       lowerAnnotation (Can.Forall Map.empty intT) `shouldBe` core intT
 
-    it "records no constraints" $
-      -- Empty until M1b. Gren's `number` arrives here as a type variable whose
-      -- name happens to be special, and turning it into a class constraint is
-      -- the `SuperType` work, not a guess this pass should make.
-      lowerAnnotation (Can.Forall (Map.fromList [("number", ())]) (Can.TVar "number"))
+    it "records no constraint for a magic type variable" $
+      -- `number` still arrives here as a type variable whose name happens to
+      -- be special. `Type.Class.fromName` is what reads it, and it goes on
+      -- doing so until `core` declares the classes; turning the name into a
+      -- class constraint here would be inventing a reference to something
+      -- nothing declares.
+      lowerAnnotation (Can.Forall (Map.fromList [("number", [])]) (Can.TVar "number"))
         `shouldBe` Core.TForall ["number"] [] (Core.TVar "number")
+
+    it "carries a constraint the annotation was given" $
+      -- The shape D111 asks for, exercised ahead of anything that produces
+      -- one: the payload is the constraint list, and `TForall` already had
+      -- somewhere to put it.
+      lowerAnnotation
+        ( Can.Forall
+            (Map.fromList [("a", [Can.Class ModuleName.basics "Eq"])])
+            (Can.TVar "a")
+        )
+        `shouldBe` Core.TForall
+          ["a"]
+          [Core.CClass (Core.QualName ModuleName.basics "Eq") (Core.TVar "a")]
+          (Core.TVar "a")
+
+    it "orders constraints by variable, then by how they were written" $
+      -- Two compilations of the same source have to emit the same bytes
+      -- (`docs/core.md` C2), and a `Map` is only ascending if it is asked to
+      -- be.
+      lowerAnnotation
+        ( Can.Forall
+            ( Map.fromList
+                [ ("b", [Can.Class ModuleName.basics "Ord"]),
+                  ("a", [Can.Class ModuleName.basics "Eq", Can.Class ModuleName.basics "Inspect"])
+                ]
+            )
+            (Can.TLambda (Can.TVar "a") (Can.TVar "b"))
+        )
+        `shouldBe` Core.TForall
+          ["a", "b"]
+          [ Core.CClass (Core.QualName ModuleName.basics "Eq") (Core.TVar "a"),
+            Core.CClass (Core.QualName ModuleName.basics "Inspect") (Core.TVar "a"),
+            Core.CClass (Core.QualName ModuleName.basics "Ord") (Core.TVar "b")
+          ]
+          (Core.TFun [Core.TVar "a"] (Core.TVar "b"))
 
   describe "custom types" $ do
     it "carries the constructor tags" $

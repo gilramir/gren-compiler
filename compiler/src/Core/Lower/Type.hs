@@ -62,16 +62,32 @@ lowerType tipe =
 
 -- | A top-level definition's generalized type.
 --
--- The constraint list is empty and stays empty until M1b: D10's constraints do
--- not exist in the language yet, and Gren's @number@, @comparable@ and
--- @appendable@ arrive here as ordinary type variables whose names happen to
--- be special. Turning those into `Core.CClass` is M1b's `SuperType` work, not
--- something to guess at now.
+-- The constraint list is `Can.FreeVars`' payload, carried straight through:
+-- D111 makes a constraint qualify the annotation rather than sit inside the
+-- type, which is the shape `Core.TForall` already had.
+--
+-- It is empty on every annotation today, and that is a fact about the front
+-- end rather than about this function. Gren's @number@, @comparable@ and
+-- @appendable@ still arrive as ordinary type variables whose names happen to
+-- be special, and `Type.Class.fromName` reads them; a constraint an author
+-- writes is still rejected in `Canonicalize.Type` for want of a class to
+-- resolve to. Both go together when `core` declares its classes, and this
+-- function does not change again when they do.
+--
+-- Ordered by variable, then by the order the constraints were written, so that
+-- two compilations of the same source emit the same bytes (`docs/core.md` C2).
 lowerAnnotation :: Can.Annotation -> Core.Type
 lowerAnnotation (Can.Forall freeVars tipe) =
-  case Map.keys freeVars of
+  case Map.toAscList freeVars of
     [] -> lowerType tipe
-    vars -> Core.TForall vars [] (lowerType tipe)
+    vars ->
+      Core.TForall
+        (map fst vars)
+        [ Core.CClass (Core.QualName home name) (Core.TVar var)
+          | (var, classes) <- vars,
+            Can.Class home name <- classes
+        ]
+        (lowerType tipe)
 
 -- | A custom type declaration.
 --

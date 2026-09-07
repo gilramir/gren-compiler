@@ -453,12 +453,20 @@ emptyRecord1 =
 
 -- SOURCE TYPE TO VARIABLE
 
-srcTypeToVariable :: Int -> Pools -> Map.Map Name.Name () -> Can.Type -> IO Variable
+-- | An annotation's bound variables become unification variables, and this is
+-- where a constraint on one would become a `Class.Classes`.
+--
+-- It reads the variable's *name* rather than its constraint list, because the
+-- list is empty everywhere: `Canonicalize.Type` still rejects the constraint an
+-- author writes, so `number` is the only way to say `Num` and `Class.fromName`
+-- is how it is said. When a class declaration gives the list something to hold,
+-- it is read here, and the name bridge goes with the rest of verb 7.
+srcTypeToVariable :: Int -> Pools -> Can.FreeVars -> Can.Type -> IO Variable
 srcTypeToVariable rank pools freeVars srcType =
   let nameToContent name =
         maybe (FlexVar (Just name)) (\classes -> FlexSuper classes (Just name)) (Class.fromName name)
 
-      makeVar name _ =
+      makeVar name _constraints =
         UF.fresh (Descriptor (nameToContent name) rank noMark Nothing)
    in do
         flexVars <- Map.traverseWithKey makeVar freeVars

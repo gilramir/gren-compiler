@@ -24,6 +24,8 @@ module AST.Canonical
     PatternCtorArg (..),
     -- types
     Annotation (..),
+    FreeVars,
+    Class (..),
     Type (..),
     AliasType (..),
     FieldType (..),
@@ -217,7 +219,18 @@ data PatternCtorArg = PatternCtorArg
 data Annotation = Forall FreeVars Type
   deriving (Eq, Show)
 
-type FreeVars = Map.Map Name ()
+-- | The variables an annotation binds, and what each is constrained by.
+--
+-- The payload is where a constraint lives (D111): `Eq a =>` says something
+-- about the binder `a`, not about any type written to its right, so it
+-- qualifies the annotation rather than appearing inside `Type`. `[]` is an
+-- unconstrained variable, which is every variable until a class declaration
+-- gives one something to point at.
+type FreeVars = Map.Map Name [Class]
+
+-- | A class named in a constraint, resolved to the module that declares it.
+data Class = Class ModuleName.Canonical Name
+  deriving (Eq, Ord, Show)
 
 data Type
   = TLambda Type Type
@@ -353,6 +366,10 @@ instance Binary CtorOpts where
 instance Binary Annotation where
   get = liftM2 Forall get get
   put (Forall a b) = put a >> put b
+
+instance Binary Class where
+  get = liftM2 Class get get
+  put (Class a b) = put a >> put b
 
 instance Binary Type where
   put tipe =

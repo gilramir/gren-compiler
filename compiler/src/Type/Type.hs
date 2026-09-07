@@ -229,7 +229,14 @@ toAnnotation variable =
     userNames <- getVarNames variable Map.empty
     (tipe, NameState freeVars _ _ _ _ _) <-
       State.runStateT (variableToCanType variable) (makeNameState userNames)
-    return $ Can.Forall freeVars tipe
+    -- Every variable comes out unconstrained, including the ones the unifier
+    -- knows are constrained. `Class.Classes` is the unifier's own three-way
+    -- enum and has no module to name — `Basics.Num` is not declared anywhere
+    -- until `core` is rewritten — so pointing `Can.Class` at it here would be
+    -- inventing a reference. The name still carries the meaning in the
+    -- meantime: `number` comes back as `number`, and `Class.fromName` reads it
+    -- again on the way in. Both halves of that bridge go together, in verb 7.
+    return $ Can.Forall (Map.map (const []) freeVars) tipe
 
 -- | Zonk a whole map of recorded node types at once.
 --

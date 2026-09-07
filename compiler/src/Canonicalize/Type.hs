@@ -32,7 +32,8 @@ toAnnotation env srcType =
 -- CONTEXT
 
 -- | A constraint context parses (D111) and has nowhere to go yet: `Can` still
--- carries `FreeVars = Map Name ()`, and there is no instance environment for a
+-- carries no constraint for it to become, and there is no instance environment
+-- for a
 -- class name to resolve against until verb 3 of `docs/m1b-classes.md`. Until
 -- then an annotation that carries one is rejected rather than silently
 -- stripped, so that no program can compile with a promise nothing checks.
@@ -106,22 +107,28 @@ checkArity expected region name args answer =
 
 -- ADD FREE VARS
 
-addFreeVars :: Map.Map Name.Name () -> Can.Type -> Map.Map Name.Name ()
+-- | The annotation's bound variables, each with an empty constraint list.
+--
+-- Empty because a constraint has nowhere to come from yet: `checkContext`
+-- above rejects the one the author could have written, and it goes on doing so
+-- until a class declaration gives `Eq` something to resolve to. The payload
+-- exists now so that the shape is right when it does (D111).
+addFreeVars :: Map.Map Name.Name [Can.Class] -> Can.Type -> Map.Map Name.Name [Can.Class]
 addFreeVars freeVars tipe =
   case tipe of
     Can.TLambda arg result ->
       addFreeVars (addFreeVars freeVars result) arg
     Can.TVar var ->
-      Map.insert var () freeVars
+      Map.insert var [] freeVars
     Can.TType _ _ args ->
       List.foldl' addFreeVars freeVars args
     Can.TRecord fields Nothing ->
       Map.foldl addFieldFreeVars freeVars fields
     Can.TRecord fields (Just ext) ->
-      Map.foldl addFieldFreeVars (Map.insert ext () freeVars) fields
+      Map.foldl addFieldFreeVars (Map.insert ext [] freeVars) fields
     Can.TAlias _ _ args _ ->
       List.foldl' (\fvs (_, arg) -> addFreeVars fvs arg) freeVars args
 
-addFieldFreeVars :: Map.Map Name.Name () -> Can.FieldType -> Map.Map Name.Name ()
+addFieldFreeVars :: Map.Map Name.Name [Can.Class] -> Can.FieldType -> Map.Map Name.Name [Can.Class]
 addFieldFreeVars freeVars (Can.FieldType _ tipe) =
   addFreeVars freeVars tipe
