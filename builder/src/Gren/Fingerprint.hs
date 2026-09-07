@@ -38,8 +38,10 @@ module Gren.Fingerprint
     bytes,
     chars,
     word64,
+    fingerprint,
     ofBytes,
     toHex,
+    toName,
   )
 where
 
@@ -89,6 +91,17 @@ word64 :: Word64 -> Fingerprint -> Fingerprint
 word64 n fp =
   List.foldl' step fp [fromIntegral ((n `shiftR` (8 * i)) .&. 0xff) | i <- [0 .. 7 :: Int]]
 
+-- | Feed another fingerprint, both halves.
+--
+-- This is what makes a package's fingerprint cover its dependencies without
+-- walking their sources again (D101): a package feeds in its own bytes and then
+-- the fingerprints of the packages it was compiled against, so the number is a
+-- Merkle hash over the part of the solution that can change its artifacts, and
+-- nothing else.
+fingerprint :: Fingerprint -> Fingerprint -> Fingerprint
+fingerprint (Fingerprint count hash) fp =
+  word64 hash (word64 count fp)
+
 step :: Fingerprint -> Word8 -> Fingerprint
 step (Fingerprint count hash) w =
   Fingerprint (count + 1) ((hash `xor` fromIntegral w) * 0x100000001b3)
@@ -99,11 +112,23 @@ ofBytes bs =
   bytes bs empty
 
 -- | The hash alone, as sixteen hex digits, for somewhere a name is wanted
--- rather than a comparison — 'Directories.artifactKey' is the one caller.
+-- rather than a comparison — 'Directories.artifactKey' is the one caller, and
+-- it is hashing a string it made up rather than naming a build artifact.
 toHex :: Fingerprint -> String
 toHex (Fingerprint _ hash) =
   let hex = Numeric.showHex hash ""
    in replicate (16 - length hex) '0' ++ hex
+
+-- | The whole fingerprint as a file name: the count and then the hash.
+--
+-- 'toHex' would lose the count, and the count is half of what this type is
+-- (D97). A file name in the shared artifact cache is the /only/ thing that says
+-- which sources an artifact was compiled from — there is no second check inside
+-- the file — so it has to carry everything the comparison would have used.
+toName :: Fingerprint -> String
+toName fp@(Fingerprint count _) =
+  let hex = Numeric.showHex count ""
+   in replicate (16 - length hex) '0' ++ hex ++ "-" ++ toHex fp
 
 instance Binary Fingerprint where
   put (Fingerprint a b) = put a >> put b

@@ -2,6 +2,7 @@ module File
   ( Time,
     zeroTime,
     writeBinary,
+    writeBinaryAtomic,
     readBinary,
     writeBytes,
     readBytes,
@@ -14,11 +15,12 @@ module File
   )
 where
 
-import Control.Exception (catch)
+import Control.Exception (catch, onException)
 import Data.Binary qualified as Binary
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as B
 import Data.ByteString.Internal qualified as BS
+import Data.ByteString.Lazy qualified as BSL
 import Data.Fixed qualified as Fixed
 import Foreign.ForeignPtr qualified as FPtr
 import GHC.IO.Exception (IOErrorType (InvalidArgument), IOException)
@@ -49,6 +51,32 @@ writeBinary path value =
     let dir = FP.dropFileName path
     Dir.createDirectoryIfMissing True dir
     Binary.encodeFile path value
+
+-- | Write to a temporary file in the same directory and rename it into place.
+--
+-- __For the shared artifact cache, and only for it__ (D101). Everything under
+-- @<project>\/.gren\/@ belongs to one project, and two builds of one project at
+-- once were already a race that nothing here pretends to settle. The package
+-- cache is different: it is one directory that every project on the machine
+-- writes, so two unrelated builds compiling the same package version at the
+-- same moment is ordinary rather than a mistake, and the loser of that race
+-- must leave a whole file behind rather than a truncated one. @rename@ within a
+-- directory is atomic on every filesystem this compiler runs on, and both
+-- writers are writing the same bytes anyway — the file name is the fingerprint
+-- of what went into it.
+writeBinaryAtomic :: (Binary.Binary a) => FilePath -> a -> IO ()
+writeBinaryAtomic path value =
+  do
+    let dir = FP.dropFileName path
+    Dir.createDirectoryIfMissing True dir
+    (temp, handle) <- IO.openBinaryTempFile dir (FP.takeFileName path ++ ".tmp")
+    onException
+      ( do
+          BSL.hPut handle (Binary.encode value)
+          IO.hClose handle
+          Dir.renameFile temp path
+      )
+      (IO.hClose handle >> remove temp)
 
 -- | A cached artifact, or 'Nothing' if it is not there or will not decode.
 --
