@@ -94,6 +94,16 @@ data ValueTypeComments = ValueTypeComments
   }
   deriving (Show)
 
+-- Class declarations
+
+data ClassComments = ClassComments
+  { _afterClassKeyword :: [Comment],
+    _afterClassName :: [Comment],
+    _afterClassVar :: [Comment],
+    _afterClassWhere :: [Comment]
+  }
+  deriving (Show)
+
 -- Constraint context
 
 -- | One constraint in a context: what sits between the delimiter before it

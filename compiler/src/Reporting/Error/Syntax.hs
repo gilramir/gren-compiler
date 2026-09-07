@@ -8,6 +8,7 @@ module Reporting.Error.Syntax
     Exposing (..),
     --
     Decl (..),
+    DeclClass (..),
     DeclType (..),
     TypeAlias (..),
     CustomType (..),
@@ -127,6 +128,7 @@ data Decl
   | DeclSpace Space Row Col
   | --
     Port Port Row Col
+  | DeclClass DeclClass Row Col
   | DeclType DeclType Row Col
   | DeclDef Name.Name DeclDef Row Col
   | --
@@ -155,6 +157,26 @@ data Port
   | PortIndentName Row Col
   | PortIndentColon Row Col
   | PortIndentType Row Col
+  deriving (Show)
+
+-- CLASS DECLARATIONS
+
+data DeclClass
+  = ClassSpace Space Row Col
+  | ClassName Row Col
+  | ClassVar Row Col
+  | ClassWhere Row Col
+  | ClassMethodName Row Col
+  | ClassMethodColon Row Col
+  | ClassMethodType Name.Name Type Row Col
+  | --
+    ClassIndentName Row Col
+  | ClassIndentVar Row Col
+  | ClassIndentWhere Row Col
+  | ClassIndentBody Row Col
+  | ClassIndentMethodColon Row Col
+  | ClassIndentMethodType Row Col
+  | ClassMethodAlignment Word16 Row Col
   deriving (Show)
 
 -- TYPE DECLARATIONS
@@ -1462,6 +1484,8 @@ toDeclarationsReport source decl =
       toSpaceReport source space row col
     Port port_ row col ->
       toPortReport source port_ row col
+    DeclClass declClass row col ->
+      toDeclClassReport source declClass row col
     DeclType declType row col ->
       toDeclTypeReport source declType row col
     DeclDef name declDef row col ->
@@ -1641,6 +1665,94 @@ toDeclStartReport source row col =
                       \ supposed to be a declaration, try adding some spaces before it?"
                   ]
               )
+
+-- CLASS
+
+toDeclClassReport :: Code.Source -> DeclClass -> Row -> Col -> Report.Report
+toDeclClassReport source declClass startRow startCol =
+  let stuck row col title what =
+        let surroundings = A.Region (A.Position startRow startCol) (A.Position row col)
+            region = toRegion row col
+         in Report.Report title region [] $
+              Code.toSnippet
+                source
+                surroundings
+                (Just region)
+                ( D.reflow "I am partway through a `class` declaration, but I got stuck here:",
+                  D.stack
+                    [ what,
+                      D.reflow "A class declaration looks like this:",
+                      D.indent 4 $
+                        D.vcat
+                          [ D.cyan "class" <> " Eq a " <> D.cyan "where",
+                            "    eq : a -> a -> Bool"
+                          ]
+                    ]
+                )
+   in case declClass of
+        ClassSpace space row col ->
+          toSpaceReport source space row col
+        ClassName row col ->
+          stuck row col "PROBLEM IN CLASS DECLARATION" $
+            D.reflow
+              "I was expecting the name of the class next, starting with an upper-case letter."
+        ClassVar row col ->
+          stuck row col "PROBLEM IN CLASS DECLARATION" $
+            D.reflow
+              "I was expecting a type variable next, starting with a lower-case letter. A class\
+              \ constrains exactly one of them."
+        ClassWhere row col ->
+          stuck row col "PROBLEM IN CLASS DECLARATION" $
+            D.fillSep
+              [ "I",
+                "was",
+                "expecting",
+                D.cyan "where",
+                "next,",
+                "and",
+                "then",
+                "the",
+                "methods",
+                "of",
+                "the",
+                "class."
+              ]
+        ClassMethodName row col ->
+          stuck row col "PROBLEM IN CLASS DECLARATION" $
+            D.reflow
+              "I was expecting the name of a method next, starting with a lower-case letter."
+        ClassMethodColon row col ->
+          stuck row col "PROBLEM IN CLASS DECLARATION" $
+            D.reflow
+              "I was expecting a colon next. A method of a class is an annotation and nothing\
+              \ else: it has a type here and its implementations live in the instances."
+        ClassMethodType name tipe row col ->
+          toTypeReport source (TC_Annotation name) tipe row col
+        ClassIndentName row col ->
+          stuck row col "UNFINISHED CLASS DECLARATION" $
+            D.reflow "I was expecting the name of the class next."
+        ClassIndentVar row col ->
+          stuck row col "UNFINISHED CLASS DECLARATION" $
+            D.reflow "I was expecting a type variable next."
+        ClassIndentWhere row col ->
+          stuck row col "UNFINISHED CLASS DECLARATION" $
+            D.fillSep ["I", "was", "expecting", D.cyan "where", "next."]
+        ClassIndentBody row col ->
+          stuck row col "UNFINISHED CLASS DECLARATION" $
+            D.reflow
+              "I was expecting the methods of the class next, indented under it. A class with\
+              \ no methods has nothing for an instance to implement."
+        ClassIndentMethodColon row col ->
+          stuck row col "UNFINISHED CLASS DECLARATION" $
+            D.reflow "I was expecting a colon and then this method's type."
+        ClassIndentMethodType row col ->
+          stuck row col "UNFINISHED CLASS DECLARATION" $
+            D.reflow "I was expecting this method's type next."
+        ClassMethodAlignment _ row col ->
+          stuck row col "PROBLEM IN CLASS DECLARATION" $
+            D.reflow
+              "I was expecting the next method to start in the same column as the one before\
+              \ it. Everything in the class lines up."
 
 -- PORT
 

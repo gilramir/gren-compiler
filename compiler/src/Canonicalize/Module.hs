@@ -35,8 +35,10 @@ type Result i w a =
 -- MODULES
 
 canonicalize :: Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Result i [W.Warning] Can.Module
-canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder _ _ (_, binops) _ _ effects) =
+canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes _ _ (_, binops) _ _ effects) =
   do
+    checkClasses (fmap snd classes)
+
     let values = fmap snd valuesWithSourceOrder
     let home = ModuleName.Canonical pkg (Src.getName modul)
     let cbinops = Map.fromList (map canonicalizeBinop binops)
@@ -50,6 +52,21 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
     cexports <- canonicalizeExports values cunions caliases cbinops ceffects exports
 
     return $ Can.Module home cexports docs cvalues cunions caliases cbinops ceffects
+
+-- CLASS DECLARATIONS
+
+-- | A `class` declaration parses (`docs/m1b-classes.md` §G15) and there is
+-- nothing downstream of the parser to receive it yet: no class environment, no
+-- instance environment, and `Can.Module` has no field for one. Rejecting is
+-- what keeps the shape honest until verb 3 builds those — a class the compiler
+-- silently forgot would be a class nothing could ever be an instance of.
+checkClasses :: [A.Located Src.Class] -> Result i w ()
+checkClasses classes =
+  case classes of
+    [] ->
+      Result.ok ()
+    A.At region (Src.Class (A.At _ name) _ _ _) : _ ->
+      Result.throw (Error.ClassDeclUnsupported region name)
 
 -- CANONICALIZE BINOP
 

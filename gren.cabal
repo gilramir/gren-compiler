@@ -280,6 +280,7 @@ Test-Suite gren-tests
         Generate.VLQSpec
         Nitpick.PatternMatchesSpec
         Parse.AliasSpec
+        Parse.ClassSpec
         Parse.ConstraintSpec
         Parse.RecordUpdateSpec
         Parse.SpaceSpec

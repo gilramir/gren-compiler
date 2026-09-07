@@ -34,6 +34,7 @@ import Reporting.Error.Syntax qualified as E
 
 data Decl
   = Value (Maybe Src.DocComment) (A.Located Src.Value)
+  | Class (Maybe Src.DocComment) (A.Located Src.Class)
   | Union (Maybe Src.DocComment) (A.Located Src.Union)
   | Alias (Maybe Src.DocComment) (A.Located Src.Alias)
   | Port (Maybe Src.DocComment) Src.Port
@@ -49,6 +50,7 @@ declaration =
       E.DeclStart
       [ typeDecl maybeDocs start,
         portDecl maybeDocs,
+        classDecl maybeDocs start,
         valueDecl maybeDocs start
       ]
 
@@ -123,6 +125,82 @@ chompMatchingName expectedName =
                 then eok (A.At (A.Region (A.Position sr sc) (A.Position er ec)) name) newState
                 else eerr sr sc (E.DeclDefNameMatch name)
          in parserL state cokL eokL cerr eerr
+
+-- CLASS DECLARATIONS
+
+-- | @class Eq a where@ and the annotations under it.
+--
+-- `class` is a contextual keyword (D117), so this has to establish that the
+-- declaration really is one before committing to it: `class` followed by an
+-- upper-case name is a class, and `class` followed by anything else is a value
+-- named `class`, which `Html.Attributes` and `Svg.Attributes` both are. The
+-- test is the whole head, read once under `lookAhead` and then read again for
+-- real, which is the same shape `Parse.Type.annotation` uses and for the same
+-- reason.
+classDecl :: Maybe Src.DocComment -> A.Position -> Space.Parser E.Decl (Decl, [Src.Comment])
+classDecl maybeDocs start =
+  do
+    _ <- lookAhead classDeclAhead
+    inContext E.DeclClass (Keyword.class_ E.DeclStart) $
+      do
+        commentsAfterKeyword <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentName
+        name <- addLocation (Var.upper E.ClassName)
+        commentsAfterName <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentVar
+        var <- addLocation (Var.lower E.ClassVar)
+        commentsAfterVar <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentWhere
+        Keyword.where_ E.ClassWhere
+        commentsAfterWhere <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentBody
+        ((methods, commentsAfter), end) <-
+          withIndent $
+            do
+              ((method, commentsAfterMethod), methodEnd) <- chompClassMethod []
+              chompClassMethods (NonEmpty.singleton method) commentsAfterMethod methodEnd
+        let comments = SC.ClassComments commentsAfterKeyword commentsAfterName commentsAfterVar commentsAfterWhere
+        let class_ = A.at start end (Src.Class name var methods comments)
+        return ((Class maybeDocs class_, commentsAfter), end)
+
+-- | `class` and then an upper-case name, consumed and thrown away by
+-- `lookAhead` so that only a real class declaration commits.
+classDeclAhead :: Parser E.Decl ()
+classDeclAhead =
+  do
+    Keyword.class_ E.DeclStart
+    Space.chompAndCheckIndent E.DeclSpace E.DeclStart
+    _ <- Var.upper E.DeclStart
+    return ()
+
+chompClassMethods :: NonEmpty Src.ClassMethod -> [Src.Comment] -> A.Position -> Space.Parser E.DeclClass ([Src.ClassMethod], [Src.Comment])
+chompClassMethods methods@(lastMethod :| rest) commentsBefore end =
+  oneOfWithFallback
+    [ do
+        Space.checkAligned E.ClassMethodAlignment
+        ((method, commentsAfter), newEnd) <- chompClassMethod commentsBefore
+        chompClassMethods (NonEmpty.cons method methods) commentsAfter newEnd
+    ]
+    ( let (commentsAfterLastMethod, commentsAfter) = List.span (A.isIndentedMoreThan 1) commentsBefore
+       in ((reverse (withTrailingComments lastMethod commentsAfterLastMethod : rest), commentsAfter), end)
+    )
+
+-- | The comments after the last method belong to it when they are indented
+-- under the class, and to whatever follows the declaration when they are not
+-- -- the same split `chompVariants` makes for a custom type's last variant.
+withTrailingComments :: Src.ClassMethod -> [Src.Comment] -> Src.ClassMethod
+withTrailingComments (commentsBefore, name, Src.Annotation context tipe typeComments) trailing =
+  ( commentsBefore,
+    name,
+    Src.Annotation context tipe typeComments {SC._afterValueType = trailing}
+  )
+
+chompClassMethod :: [Src.Comment] -> Space.Parser E.DeclClass (Src.ClassMethod, [Src.Comment])
+chompClassMethod commentsBefore =
+  do
+    name@(A.At _ methodName) <- addLocation (Var.lower E.ClassMethodName)
+    commentsAfterName <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentMethodColon
+    word1 0x3A {-:-} E.ClassMethodColon
+    commentsAfterColon <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentMethodType
+    ((maybeContext, tipe, commentsAfterTipe), end) <- specialize (E.ClassMethodType methodName) Type.annotation
+    let typeComments = SC.ValueTypeComments commentsAfterName commentsAfterColon []
+    return (((commentsBefore, name, Src.Annotation maybeContext tipe typeComments), commentsAfterTipe), end)
 
 -- TYPE DECLARATIONS
 

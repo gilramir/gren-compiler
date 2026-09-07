@@ -86,15 +86,15 @@ chompModule projectType =
 
 checkModule :: ProjectType -> Module -> Either E.Error Src.Module
 checkModule projectType (Module maybeHeader imports infixes decls) =
-  let (values, unions, aliases, ports, topLevelComments) = categorizeDecls [] [] [] [] [] 0 decls
+  let (values, classes, unions, aliases, ports, topLevelComments) = categorizeDecls [] [] [] [] [] [] 0 decls
    in case maybeHeader of
         Just (Header name effects exports docs comments) ->
-          Src.Module (Just name) exports (toDocs docs decls) imports values unions aliases infixes topLevelComments comments
+          Src.Module (Just name) exports (toDocs docs decls) imports values classes unions aliases infixes topLevelComments comments
             <$> checkEffects projectType ports effects
         Nothing ->
           let comments = SC.HeaderComments [] [] [] [] [] []
            in Right $
-                Src.Module Nothing (A.At A.one Src.Open) (Src.NoDocs A.one) imports values unions aliases infixes topLevelComments comments $
+                Src.Module Nothing (A.At A.one Src.Open) (Src.NoDocs A.one) imports values classes unions aliases infixes topLevelComments comments $
                   case ports of
                     [] -> Src.NoEffects
                     _ : _ -> Src.Ports ports (SC.PortsComments [])
@@ -127,6 +127,7 @@ checkEffects projectType ports effects =
 
 categorizeDecls ::
   [(Src.SourceOrder, A.Located Src.Value)] ->
+  [(Src.SourceOrder, A.Located Src.Class)] ->
   [(Src.SourceOrder, A.Located Src.Union)] ->
   [(Src.SourceOrder, A.Located Src.Alias)] ->
   [(Src.SourceOrder, Src.Port)] ->
@@ -134,22 +135,24 @@ categorizeDecls ::
   Src.SourceOrder ->
   [Decl.Decl] ->
   ( [(Src.SourceOrder, A.Located Src.Value)],
+    [(Src.SourceOrder, A.Located Src.Class)],
     [(Src.SourceOrder, A.Located Src.Union)],
     [(Src.SourceOrder, A.Located Src.Alias)],
     [(Src.SourceOrder, Src.Port)],
     [(Src.SourceOrder, NonEmpty Src.Comment)]
   )
-categorizeDecls values unions aliases ports topLevelComments index decls =
+categorizeDecls values classes unions aliases ports topLevelComments index decls =
   case decls of
     [] ->
-      (values, unions, aliases, ports, topLevelComments)
+      (values, classes, unions, aliases, ports, topLevelComments)
     decl : otherDecls ->
       case decl of
-        Decl.Value _ value -> categorizeDecls ((index, value) : values) unions aliases ports topLevelComments (index + 1) otherDecls
-        Decl.Union _ union -> categorizeDecls values ((index, union) : unions) aliases ports topLevelComments (index + 1) otherDecls
-        Decl.Alias _ alias -> categorizeDecls values unions ((index, alias) : aliases) ports topLevelComments (index + 1) otherDecls
-        Decl.Port _ port_ -> categorizeDecls values unions aliases ((index, port_) : ports) topLevelComments (index + 1) otherDecls
-        Decl.TopLevelComments comments -> categorizeDecls values unions aliases ports ((index, comments) : topLevelComments) (index + 1) otherDecls
+        Decl.Value _ value -> categorizeDecls ((index, value) : values) classes unions aliases ports topLevelComments (index + 1) otherDecls
+        Decl.Class _ class_ -> categorizeDecls values ((index, class_) : classes) unions aliases ports topLevelComments (index + 1) otherDecls
+        Decl.Union _ union -> categorizeDecls values classes ((index, union) : unions) aliases ports topLevelComments (index + 1) otherDecls
+        Decl.Alias _ alias -> categorizeDecls values classes unions ((index, alias) : aliases) ports topLevelComments (index + 1) otherDecls
+        Decl.Port _ port_ -> categorizeDecls values classes unions aliases ((index, port_) : ports) topLevelComments (index + 1) otherDecls
+        Decl.TopLevelComments comments -> categorizeDecls values classes unions aliases ports ((index, comments) : topLevelComments) (index + 1) otherDecls
 
 -- TO DOCS
 
@@ -169,6 +172,7 @@ getDocComments decls comments =
     decl : otherDecls ->
       case decl of
         Decl.Value c (A.At _ (Src.Value n _ _ _ _)) -> getDocComments otherDecls (addComment c n comments)
+        Decl.Class c (A.At _ (Src.Class n _ _ _)) -> getDocComments otherDecls (addComment c n comments)
         Decl.Union c (A.At _ (Src.Union n _ _ _)) -> getDocComments otherDecls (addComment c n comments)
         Decl.Alias c (A.At _ (Src.Alias n _ _)) -> getDocComments otherDecls (addComment c n comments)
         Decl.Port c (Src.Port n _) -> getDocComments otherDecls (addComment c n comments)

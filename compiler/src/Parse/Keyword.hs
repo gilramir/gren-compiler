@@ -5,6 +5,8 @@ module Parse.Keyword
   ( type_,
     alias_,
     port_,
+    class_,
+    instance_,
     if_,
     then_,
     else_,
@@ -45,6 +47,18 @@ alias_ tx = k5 0x61 0x6C 0x69 0x61 0x73 tx
 
 port_ :: (Row -> Col -> x) -> Parser x ()
 port_ tx = k4 0x70 0x6F 0x72 0x74 tx
+
+-- | `class` and `instance` are contextual keywords, not reserved words
+-- (D117): they begin a declaration only at the start of one and only when an
+-- uppercase name follows, so `class : String -> Attribute msg` is still a
+-- value and `{ class = "notice" }` is still a record. `alias` has always been
+-- read this way; these two are read the same way, with the extra uppercase
+-- test that tells a declaration from a definition.
+class_ :: (Row -> Col -> x) -> Parser x ()
+class_ tx = k5 0x63 0x6C 0x61 0x73 0x73 tx
+
+instance_ :: (Row -> Col -> x) -> Parser x ()
+instance_ tx = k8 0x69 0x6E 0x73 0x74 0x61 0x6E 0x63 0x65 tx
 
 -- IF EXPRESSIONS
 

@@ -33,6 +33,8 @@ module AST.Source
     getImportName,
     Import (..),
     Value (..),
+    Class (..),
+    ClassMethod,
     Union (..),
     UnionVariant,
     Alias (..),
@@ -193,6 +195,7 @@ data Module = Module
     _docs :: Docs,
     _imports :: [([Comment], Import)],
     _values :: [(SourceOrder, A.Located Value)],
+    _classes :: [(SourceOrder, A.Located Class)],
     _unions :: [(SourceOrder, A.Located Union)],
     _aliases :: [(SourceOrder, A.Located Alias)],
     _binops :: ([Comment], [A.Located Infix]),
@@ -203,7 +206,7 @@ data Module = Module
   deriving (Show)
 
 getName :: Module -> Name
-getName (Module maybeName _ _ _ _ _ _ _ _ _ _) =
+getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _) =
   case maybeName of
     Just (A.At _ name) ->
       name
@@ -225,6 +228,19 @@ data Import = Import
 
 data Value = Value (A.Located Name) [([Comment], Pattern)] Expr (Maybe Annotation) SC.ValueComments
   deriving (Show)
+
+-- | @class Eq a where@ and the annotations under it.
+--
+-- Methods are annotations and nothing else: a default implementation would be
+-- a decision `classes.md` has not taken, and there is no shape here to put one
+-- in by accident. There is no superclass context either — §1.3 has none among
+-- the open classes, and the closed ones need no entailment because their
+-- membership is a table.
+data Class = Class (A.Located Name) (A.Located Name) [ClassMethod] SC.ClassComments
+  deriving (Show)
+
+type ClassMethod =
+  ([Comment], A.Located Name, Annotation)
 
 data Union = Union (A.Located Name) [([Comment], A.Located Name)] [UnionVariant] SC.UnionComments
   deriving (Show)

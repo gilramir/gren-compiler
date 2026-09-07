@@ -39,6 +39,7 @@ data Error
   | AmbiguousVariant A.Region (Maybe Name.Name) Name.Name ModuleName.Canonical (OneOrMore.OneOrMore ModuleName.Canonical)
   | AmbiguousBinop A.Region Name.Name ModuleName.Canonical (OneOrMore.OneOrMore ModuleName.Canonical)
   | BadArity A.Region BadArityContext Name.Name Int Int
+  | ClassDeclUnsupported A.Region Name.Name
   | ConstraintUnsolved A.Region Name.Name
   | Binop A.Region Name.Name Name.Name
   | CustomTypeTooManyParams A.Region Name.Name Int
@@ -342,6 +343,21 @@ toReport source err =
                             D.indent 4 $ D.vcat $ map D.dullyellow alts
                           ]
                   ]
+    ClassDeclUnsupported region name ->
+      Report.Report "UNSUPPORTED CLASS DECLARATION" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "I can read the `"
+                ++ Name.toChars name
+                ++ "` class declaration, but I have nowhere to put it yet:",
+            D.reflow $
+              "Class declarations parse in this version and nothing downstream of the parser\
+              \ can receive one, so a class here would be a class nothing could ever be an\
+              \ instance of. Remove it for now."
+          )
     ConstraintUnsolved region name ->
       Report.Report "UNSOLVED CONSTRAINT" region [] $
         Code.toSnippet

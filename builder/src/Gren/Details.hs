@@ -675,7 +675,7 @@ crawlModule foreignDeps sources mvar pkg docsStatus authorizedForKernelCode name
 crawlFile :: Map.Map ModuleName.Raw ForeignInterface -> Map.Map ModuleName.Raw ByteString -> MVar StatusDict -> Pkg.Name -> DocsStatus -> Bool -> ModuleName.Raw -> ByteString -> IO (Either CrawlError Status)
 crawlFile foreignDeps sources mvar pkg docsStatus authorizedForKernelCode expectedName bytes =
   case Parse.fromByteString (Parse.Package pkg) bytes of
-    Right modul@(Src.Module (Just (A.At _ actualName)) _ _ imports _ _ _ _ _ _ _) | expectedName == actualName ->
+    Right modul@(Src.Module (Just (A.At _ actualName)) _ _ imports _ _ _ _ _ _ _ _) | expectedName == actualName ->
       do
         deps <- crawlImports foreignDeps sources mvar pkg authorizedForKernelCode (fmap snd imports)
         return (Right (SLocal docsStatus deps modul))
