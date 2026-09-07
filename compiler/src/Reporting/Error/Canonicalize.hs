@@ -39,7 +39,9 @@ data Error
   | AmbiguousVariant A.Region (Maybe Name.Name) Name.Name ModuleName.Canonical (OneOrMore.OneOrMore ModuleName.Canonical)
   | AmbiguousBinop A.Region Name.Name ModuleName.Canonical (OneOrMore.OneOrMore ModuleName.Canonical)
   | BadArity A.Region BadArityContext Name.Name Int Int
-  | ClassDeclUnsupported A.Region Name.Name
+  | ClassDeclThirdParty A.Region Name.Name
+  | ClassMethodUnsupported A.Region Name.Name Name.Name
+  | ClassMethodWithoutParam A.Region Name.Name Name.Name Name.Name
   | ConstraintUnsolved A.Region Name.Name
   | DeriveUnsupported A.Region Name.Name
   | InstanceDeclUnsupported A.Region
@@ -58,9 +60,13 @@ data Error
   | ExportDuplicate Name.Name A.Region A.Region
   | ExportNotFound A.Region VarKind Name.Name [Name.Name]
   | ExportOpenAlias A.Region Name.Name
+  | ExportOpenClass A.Region Name.Name
+  | ExportMethodByName A.Region Name.Name Name.Name
   | ImportCtorByName A.Region Name.Name Name.Name
   | ImportNotFound A.Region Name.Name [ModuleName.Canonical]
   | ImportOpenAlias A.Region Name.Name
+  | ImportOpenClass A.Region Name.Name
+  | ImportMethodByName A.Region Name.Name Name.Name
   | ImportExposingNotFound A.Region ModuleName.Canonical Name.Name [Name.Name]
   | NotFoundVar A.Region (Maybe Name.Name) Name.Name PossibleNames
   | NotFoundType A.Region (Maybe Name.Name) Name.Name PossibleNames
@@ -345,20 +351,57 @@ toReport source err =
                             D.indent 4 $ D.vcat $ map D.dullyellow alts
                           ]
                   ]
-    ClassDeclUnsupported region name ->
-      Report.Report "UNSUPPORTED CLASS DECLARATION" region [] $
+    ClassDeclThirdParty region name ->
+      Report.Report "CLASS DECLARATION NOT ALLOWED HERE" region [] $
         Code.toSnippet
           source
           region
           Nothing
           ( D.reflow $
-              "I can read the `"
+              "The `"
                 ++ Name.toChars name
-                ++ "` class declaration, but I have nowhere to put it yet:",
+                ++ "` class is declared in a package that is not allowed to declare one:",
             D.reflow $
-              "Class declarations parse in this version and nothing downstream of the parser\
-              \ can receive one, so a class here would be a class nothing could ever be an\
-              \ instance of. Remove it for now."
+              "Only the packages the toolchain ships may declare classes and instances for\
+              \ now. The restriction is on who writes the declaration, not on what it says,\
+              \ and it lifts when user-defined classes open up."
+          )
+    ClassMethodUnsupported region className methodName ->
+      Report.Report "UNSUPPORTED CLASS METHOD" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`"
+                ++ Name.toChars methodName
+                ++ "` is a method of the `"
+                ++ Name.toChars className
+                ++ "` class, and I cannot call one yet:",
+            D.reflow $
+              "A class declares what a method's type is and the instances say what it does,\
+              \ so a call needs an instance to resolve against and instance declarations do\
+              \ not work in this version. Accepting the call would compile a program with\
+              \ nothing behind this name."
+          )
+    ClassMethodWithoutParam region className param methodName ->
+      Report.Report "BAD CLASS METHOD" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "The type of `"
+                ++ Name.toChars methodName
+                ++ "` does not mention `"
+                ++ Name.toChars param
+                ++ "`, which is what the `"
+                ++ Name.toChars className
+                ++ "` class is about:",
+            D.reflow $
+              "A method is picked by what its class parameter turns out to be, so a method\
+              \ whose type never mentions the parameter can never be called: there would be\
+              \ nothing at the call to say which instance is meant."
           )
     ConstraintUnsolved region name ->
       Report.Report "UNSOLVED CONSTRAINT" region [] $
@@ -416,6 +459,49 @@ toReport source err =
                 ++ "` though.",
             D.reflow $
               "Remove the (..) and you should be fine!"
+          )
+    ExportOpenClass region name ->
+      Report.Report "BAD EXPORT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "The (..) syntax is for exposing variants of a custom type. It cannot be used with a class like `"
+                ++ Name.toChars name
+                ++ "` though.",
+            D.reflow $
+              "Remove the (..). A class always exposes its methods, so there is nothing the\
+              \ dots could add."
+          )
+    ExportMethodByName region method className ->
+      Report.Report "BAD EXPORT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "You are trying to expose `"
+                ++ Name.toChars method
+                ++ "`, which is a method of the `"
+                ++ Name.toChars className
+                ++ "` class:",
+            D.fillSep
+              [ "Expose",
+                D.green (D.fromName className),
+                "instead.",
+                "A",
+                "method",
+                "travels",
+                "with",
+                "its",
+                "class",
+                "rather",
+                "than",
+                "on",
+                "its",
+                "own."
+              ]
           )
     ImportCtorByName region ctor tipe ->
       Report.Report "BAD IMPORT" region [] $
@@ -476,6 +562,48 @@ toReport source err =
               "The `" <> Name.toChars name <> "` type alias cannot be followed by (..) like this:",
             D.reflow $
               "Remove the (..) and it should work."
+          )
+    ImportOpenClass region name ->
+      Report.Report "BAD IMPORT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "The `" <> Name.toChars name <> "` class cannot be followed by (..) like this:",
+            D.reflow $
+              "Remove the (..). A class always brings its methods with it, so there is\
+              \ nothing the dots could add."
+          )
+    ImportMethodByName region method className ->
+      Report.Report "BAD IMPORT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "You are trying to import `"
+                <> Name.toChars method
+                <> "`, which is a method of the `"
+                <> Name.toChars className
+                <> "` class:",
+            D.fillSep
+              [ "Try",
+                "importing",
+                D.green (D.fromName className),
+                "instead.",
+                "A",
+                "method",
+                "comes",
+                "with",
+                "its",
+                "class",
+                "rather",
+                "than",
+                "on",
+                "its",
+                "own."
+              ]
           )
     ImportExposingNotFound region (ModuleName.Canonical _ home) value possibleNames ->
       let suggestions =

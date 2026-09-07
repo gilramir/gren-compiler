@@ -42,6 +42,7 @@ data NameProblem
 data DefProblem
   = NoComment Name.Name A.Region
   | NoAnnotation Name.Name A.Region
+  | ClassNotDocumentable Name.Name A.Region
 
 -- TO REPORTS
 
@@ -201,6 +202,22 @@ toDefProblemReport source problem =
                   "Add documentation with nice examples of how to use it!",
                 D.link "Note" "Read" "docs" "for more advice on writing great docs. There are a couple important tricks!"
               ]
+          )
+    ClassNotDocumentable name region ->
+      Report.Report "CLASS IN DOCS" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "The `"
+                <> Name.toChars name
+                <> "` class is exposed, and the documentation format has no\
+                   \ place to put a class yet.",
+            D.reflow
+              "`classes.md` §2.4 makes a type's class set part of what a package publishes, so this\
+              \ is a docs format question rather than a missing case, and it is still open. Until it\
+              \ is settled a package that declares a class cannot generate docs."
           )
     NoAnnotation name region ->
       Report.Report "NO TYPE ANNOTATION" region [] $

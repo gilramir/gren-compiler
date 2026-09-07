@@ -10,6 +10,7 @@ module Canonicalize.Environment
     Var (..),
     Type (..),
     Ctor (..),
+    Method (..),
     addLocals,
     findType,
     findTypeQual,
@@ -45,9 +46,21 @@ data Env = Env
     _types :: Exposed Type,
     _ctors :: Exposed Ctor,
     _binops :: Exposed Binop,
+    -- | The classes a constraint or an instance head may name.
+    _classes :: Exposed Can.ClassDecl,
+    -- | The class methods in scope, indexed by the __method's__ name.
+    --
+    -- The same declarations as '_classes', keyed the other way, because the
+    -- two questions are asked from opposite ends: a constraint knows the class
+    -- and wants the declaration, and an expression knows the method and wants
+    -- the class. One index cannot answer both without a scan, and a scan per
+    -- variable lookup is not a thing to build.
+    _methods :: Exposed Method,
     _q_vars :: Qualified Can.Annotation,
     _q_types :: Qualified Type,
-    _q_ctors :: Qualified Ctor
+    _q_ctors :: Qualified Ctor,
+    _q_classes :: Qualified Can.ClassDecl,
+    _q_methods :: Qualified Method
   }
 
 type Exposed a =
@@ -88,6 +101,15 @@ data Type
   = Alias Int ModuleName.Canonical [Name.Name] Can.Type
   | Union Int ModuleName.Canonical
 
+-- METHODS
+
+-- | A class method: the class that declares it, and the method's published
+-- signature. The class's home is the 'Info' this is wrapped in.
+data Method = Method
+  { _m_class :: Name.Name,
+    _m_annotation :: Can.Annotation
+  }
+
 -- CTORS
 
 data Ctor = Ctor
@@ -112,7 +134,7 @@ data Binop = Binop
 -- VARIABLE -- ADD LOCALS
 
 addLocals :: Map.Map Name.Name A.Region -> Env -> Result i w Env
-addLocals names (Env home vars ts cs bs qvs qts qcs) =
+addLocals names (Env home vars ts cs bs cls ms qvs qts qcs qcls qms) =
   do
     newVars <-
       Map.mergeA
@@ -122,7 +144,7 @@ addLocals names (Env home vars ts cs bs qvs qts qcs) =
         names
         vars
 
-    Result.ok (Env home newVars ts cs bs qvs qts qcs)
+    Result.ok (Env home newVars ts cs bs cls ms qvs qts qcs qcls qms)
 
 addLocalLeft :: Name.Name -> A.Region -> Var
 addLocalLeft _ region =
@@ -143,7 +165,7 @@ addLocalBoth name region var =
 -- FIND TYPE
 
 findType :: A.Region -> Env -> Name.Name -> Result i w Type
-findType region (Env _ _ ts _ _ _ qts _) name =
+findType region (Env _ _ ts _ _ _ _ _ qts _ _ _) name =
   case Map.lookup name ts of
     Just (Specific _ tipe) ->
       Result.ok tipe
@@ -153,7 +175,7 @@ findType region (Env _ _ ts _ _ _ qts _) name =
       Result.throw (Error.NotFoundType region Nothing name (toPossibleNames ts qts))
 
 findTypeQual :: A.Region -> Env -> Name.Name -> Name.Name -> Result i w Type
-findTypeQual region (Env _ _ ts _ _ _ qts _) prefix name =
+findTypeQual region (Env _ _ ts _ _ _ _ _ qts _ _ _) prefix name =
   case Map.lookup prefix qts of
     Just qualified ->
       case Map.lookup name qualified of
@@ -169,7 +191,7 @@ findTypeQual region (Env _ _ ts _ _ _ qts _) prefix name =
 -- FIND CTOR
 
 findCtor :: A.Region -> Env -> Name.Name -> Result i w Ctor
-findCtor region (Env _ _ _ cs _ _ _ qcs) name =
+findCtor region (Env _ _ _ cs _ _ _ _ _ qcs _ _) name =
   case Map.lookup name cs of
     Just (Specific _ ctor) ->
       Result.ok ctor
@@ -179,7 +201,7 @@ findCtor region (Env _ _ _ cs _ _ _ qcs) name =
       Result.throw (Error.NotFoundVariant region Nothing name (toPossibleNames cs qcs))
 
 findCtorQual :: A.Region -> Env -> Name.Name -> Name.Name -> Result i w Ctor
-findCtorQual region (Env _ _ _ cs _ _ _ qcs) prefix name =
+findCtorQual region (Env _ _ _ cs _ _ _ _ _ qcs _ _) prefix name =
   case Map.lookup prefix qcs of
     Just qualified ->
       case Map.lookup name qualified of
@@ -195,7 +217,7 @@ findCtorQual region (Env _ _ _ cs _ _ _ qcs) prefix name =
 -- FIND BINOP
 
 findBinop :: A.Region -> Env -> Name.Name -> Result i w Binop
-findBinop region (Env _ _ _ _ binops _ _ _) name =
+findBinop region (Env _ _ _ _ binops _ _ _ _ _ _ _) name =
   case Map.lookup name binops of
     Just (Specific _ binop) ->
       Result.ok binop

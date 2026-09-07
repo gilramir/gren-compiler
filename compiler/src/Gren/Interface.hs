@@ -3,9 +3,11 @@ module Gren.Interface
     Union (..),
     Alias (..),
     Binop (..),
+    Class (..),
     fromModule,
     toPublicUnion,
     toPublicAlias,
+    toPublicClass,
     DependencyInterface (..),
     public,
     private,
@@ -17,7 +19,7 @@ where
 
 import AST.Canonical qualified as Can
 import AST.Utils.Binop qualified as Binop
-import Control.Monad (liftM, liftM3, liftM4, liftM5)
+import Control.Monad (liftM, liftM3, liftM4)
 import Data.Binary
 import Data.Map.Merge.Strict qualified as Map
 import Data.Map.Strict ((!))
@@ -33,7 +35,15 @@ data Interface = Interface
     _values :: Map.Map Name.Name Can.Annotation,
     _unions :: Map.Map Name.Name Union,
     _aliases :: Map.Map Name.Name Alias,
-    _binops :: Map.Map Name.Name Binop
+    _binops :: Map.Map Name.Name Binop,
+    -- | The classes this module declares (`docs/m1b-classes.md` §G20).
+    --
+    -- A fifth map rather than entries in '_values', because a class has a name
+    -- and is exported like a type, and its methods travel with it (D121). It
+    -- is D114's field's opposite number: an __instance__ has no name and is
+    -- global, so it can never live in a map keyed by name and cut down by an
+    -- export list, and conflating the two would export instances by accident.
+    _classes :: Map.Map Name.Name Class
   }
   deriving (Eq, Show)
 
@@ -48,6 +58,14 @@ data Alias
   | PrivateAlias Can.Alias
   deriving (Eq, Show)
 
+-- | A private class is kept for the same reason a private alias is: an exposed
+-- value's annotation may be constrained by a class the module does not expose,
+-- and reading that annotation means resolving the name.
+data Class
+  = PublicClass Can.ClassDecl
+  | PrivateClass Can.ClassDecl
+  deriving (Eq, Show)
+
 data Binop = Binop
   { _op_name :: Name.Name,
     _op_annotation :: Can.Annotation,
@@ -59,13 +77,14 @@ data Binop = Binop
 -- FROM MODULE
 
 fromModule :: Pkg.Name -> Can.Module -> Map.Map Name.Name Can.Annotation -> Interface
-fromModule home (Can.Module _ exports _ _ unions aliases binops _) annotations =
+fromModule home (Can.Module _ exports _ _ unions aliases classes binops _) annotations =
   Interface
     { _home = home,
       _values = restrict exports annotations,
       _unions = restrictUnions exports unions,
       _aliases = restrictAliases exports aliases,
-      _binops = restrict exports (Map.map (toOp annotations) binops)
+      _binops = restrict exports (Map.map (toOp annotations) binops),
+      _classes = restrictClasses exports classes
     }
 
 restrict :: Can.Exports -> Map.Map Name.Name a -> Map.Map Name.Name a
@@ -108,6 +127,18 @@ restrictAliases exports aliases =
         onRight = Map.mapMissing (\_ a -> PrivateAlias a)
         onBoth = Map.zipWithMatched (\_ _ a -> PublicAlias a)
 
+restrictClasses :: Can.Exports -> Map.Map Name.Name Can.ClassDecl -> Map.Map Name.Name Class
+restrictClasses exports classes =
+  case exports of
+    Can.ExportEverything _ ->
+      Map.map PublicClass classes
+    Can.Export explicitExports ->
+      Map.merge onLeft onRight onBoth explicitExports classes
+      where
+        onLeft = Map.dropMissing
+        onRight = Map.mapMissing (\_ c -> PrivateClass c)
+        onBoth = Map.zipWithMatched (\_ _ c -> PublicClass c)
+
 -- TO PUBLIC
 
 toPublicUnion :: Union -> Maybe Can.Union
@@ -123,6 +154,12 @@ toPublicAlias iAlias =
     PublicAlias alias -> Just alias
     PrivateAlias _ -> Nothing
 
+toPublicClass :: Class -> Maybe Can.ClassDecl
+toPublicClass iClass =
+  case iClass of
+    PublicClass decl -> Just decl
+    PrivateClass _ -> Nothing
+
 -- DEPENDENCY INTERFACE
 
 data DependencyInterface
@@ -137,7 +174,7 @@ public =
   Public
 
 private :: Interface -> DependencyInterface
-private (Interface pkg _ unions aliases _) =
+private (Interface pkg _ unions aliases _ _) =
   Private pkg (Map.map extractUnion unions) (Map.map extractAlias aliases)
 
 extractUnion :: Union -> Can.Union
@@ -162,8 +199,8 @@ privatize di =
 -- BINARY
 
 instance Binary Interface where
-  get = liftM5 Interface get get get get get
-  put (Interface a b c d e) = put a >> put b >> put c >> put d >> put e
+  get = Interface <$> get <*> get <*> get <*> get <*> get <*> get
+  put (Interface a b c d e f) = put a >> put b >> put c >> put d >> put e >> put f
 
 instance Binary Union where
   put union =
@@ -194,6 +231,20 @@ instance Binary Alias where
         0 -> liftM PublicAlias get
         1 -> liftM PrivateAlias get
         _ -> fail "binary encoding of Alias was corrupted"
+
+instance Binary Class where
+  put c =
+    case c of
+      PublicClass a -> putWord8 0 >> put a
+      PrivateClass a -> putWord8 1 >> put a
+
+  get =
+    do
+      n <- getWord8
+      case n of
+        0 -> liftM PublicClass get
+        1 -> liftM PrivateClass get
+        _ -> fail "binary encoding of Class was corrupted"
 
 instance Binary Binop where
   get =

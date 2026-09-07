@@ -256,7 +256,7 @@ precDecoder =
 -- FROM MODULE
 
 fromModule :: Can.Module -> Either E.Error Module
-fromModule modul@(Can.Module _ exports docs _ _ _ _ _) =
+fromModule modul@(Can.Module _ exports docs _ _ _ _ _ _) =
   case exports of
     Can.ExportEverything region ->
       Left (E.ImplicitExposing region)
@@ -395,7 +395,7 @@ onlyInExports name (A.At region _) =
 -- CHECK DEFS
 
 checkDefs :: Map.Map Name.Name (A.Located Can.Export) -> Src.DocComment -> Map.Map Name.Name Src.DocComment -> Can.Module -> Either E.Error Module
-checkDefs exportDict overview comments (Can.Module name _ _ decls unions aliases infixes effects) =
+checkDefs exportDict overview comments (Can.Module name _ _ decls unions aliases _ infixes effects) =
   let types = gatherTypes decls Map.empty
       info = Info comments types unions aliases infixes effects
    in case Result.run (Map.traverseWithKey (checkExport info) exportDict) of
@@ -431,6 +431,8 @@ checkExport info name (A.At region export) =
         comment <- getComment region realName info
         Result.ok $ \m ->
           m {_binops = Map.insert name (Binop comment tipe assoc prec) (_binops m)}
+    Can.ExportClass ->
+      Result.throw (E.ClassNotDocumentable name region)
     Can.ExportAlias ->
       do
         let (Can.Alias tvars tipe) = _iAliases info ! name

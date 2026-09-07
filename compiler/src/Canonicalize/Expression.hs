@@ -538,7 +538,7 @@ delayedUsage (Result.Result k) =
 -- FIND VARIABLE
 
 findVar :: A.Region -> Env.Env -> Name.Name -> Result FreeLocals w Can.Expr_
-findVar region (Env.Env localHome vs _ _ _ qvs _ _) name =
+findVar region (Env.Env localHome vs _ _ _ _ ms qvs _ _ _ _) name =
   case Map.lookup name vs of
     Just var ->
       case var of
@@ -554,10 +554,11 @@ findVar region (Env.Env localHome vs _ _ _ qvs _ _) name =
         Env.Foreigns h hs ->
           Result.throw (Error.AmbiguousVar region Nothing name h hs)
     Nothing ->
-      Result.throw (Error.NotFoundVar region Nothing name (toPossibleNames vs qvs))
+      methodOrNotFound region ms Nothing name $
+        Result.throw (Error.NotFoundVar region Nothing name (toPossibleNames vs qvs))
 
 findVarQual :: A.Region -> Env.Env -> Name.Name -> Name.Name -> Result FreeLocals w Can.Expr_
-findVarQual region (Env.Env localHome vs _ _ _ qvs _ _) prefix name =
+findVarQual region (Env.Env localHome vs _ _ _ _ _ qvs _ _ _ qms) prefix name =
   case Map.lookup prefix qvs of
     Just qualified ->
       case Map.lookup name qualified of
@@ -569,11 +570,39 @@ findVarQual region (Env.Env localHome vs _ _ _ qvs _ _) prefix name =
         Just (Env.Ambiguous h hs) ->
           Result.throw (Error.AmbiguousVar region (Just prefix) name h hs)
         Nothing ->
-          Result.throw (Error.NotFoundVar region (Just prefix) name (toPossibleNames vs qvs))
+          methodOrNotFound region (Map.findWithDefault Map.empty prefix qms) (Just prefix) name $
+            Result.throw (Error.NotFoundVar region (Just prefix) name (toPossibleNames vs qvs))
     Nothing ->
+      -- No import under this prefix at all, so there is no class under it
+      -- either: `Foreign.addImport` puts every import in `_q_vars`, empty or
+      -- not, and the only prefix that never reaches it is a kernel one.
       if Name.isKernel prefix && Pkg.isKernel (ModuleName._package localHome)
         then Result.ok $ Can.VarKernel (Name.getKernel prefix) name
         else Result.throw (Error.NotFoundVar region (Just prefix) name (toPossibleNames vs qvs))
+
+-- | A name that is not a value may still be a class method, and that is worth
+-- saying rather than reporting it as missing.
+--
+-- The rejection is temporary and is the fourth of its kind (§G16.1): a class
+-- declares a method's type and the __instances__ say what it does, so until
+-- instance declarations work there is nothing behind the name. A call that
+-- typechecked here would lower to a reference nothing defines, which is the
+-- one outcome worse than an error.
+methodOrNotFound ::
+  A.Region ->
+  Env.Exposed Env.Method ->
+  Maybe Name.Name ->
+  Name.Name ->
+  Result FreeLocals w Can.Expr_ ->
+  Result FreeLocals w Can.Expr_
+methodOrNotFound region methods prefix name notFound =
+  case Map.lookup name methods of
+    Just (Env.Specific _ (Env.Method className _)) ->
+      Result.throw (Error.ClassMethodUnsupported region className name)
+    Just (Env.Ambiguous h hs) ->
+      Result.throw (Error.AmbiguousVar region prefix name h hs)
+    Nothing ->
+      notFound
 
 toPossibleNames :: Map.Map Name.Name Env.Var -> Env.Qualified Can.Annotation -> Error.PossibleNames
 toPossibleNames exposed qualified =

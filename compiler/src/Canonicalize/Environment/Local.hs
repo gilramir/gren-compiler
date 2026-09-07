@@ -31,26 +31,60 @@ type Unions = Map.Map Name.Name Can.Union
 
 type Aliases = Map.Map Name.Name Can.Alias
 
-add :: Src.Module -> Env.Env -> Result i w (Env.Env, Unions, Aliases)
+type Classes = Map.Map Name.Name Can.ClassDecl
+
+-- | The local module's own names, added to an environment that already holds
+-- the imported ones.
+--
+-- Classes go in between the types and the values, and it has to be there.
+-- After the types, because a method's signature may name one; before the
+-- values, because a method name and a top-level name are the same name and one
+-- 'Dups.detect' has to see both (§G20).
+add :: Src.Module -> Env.Env -> Result i w (Env.Env, Unions, Aliases, Classes)
 add module_ env =
-  addCtors module_ =<< addVars module_ =<< addTypes module_ env
+  do
+    envWithTypes <- addTypes module_ env
+    (envWithClasses, classes) <- addClasses module_ envWithTypes
+    envWithVars <- addVars module_ classes envWithClasses
+    (envWithCtors, unions, aliases) <- addCtors module_ envWithVars
+    Result.ok (envWithCtors, unions, aliases, classes)
 
 -- ADD VARS
 
-addVars :: Src.Module -> Env.Env -> Result i w Env.Env
-addVars module_ (Env.Env home vs ts cs bs qvs qts qcs) =
+addVars :: Src.Module -> Classes -> Env.Env -> Result i w Env.Env
+addVars module_ classes (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
   do
-    topLevelVars <- collectVars module_
-    let vs2 = Map.union topLevelVars vs
-    -- Use union to overwrite foreign stuff.
-    Result.ok $ Env.Env home vs2 ts cs bs qvs qts qcs
+    topLevelVars <- collectVars module_ classes
+    -- Use union to overwrite foreign stuff. A local method overwrites it too,
+    -- and has to: it is a local declaration of that name, so an imported value
+    -- called `size` cannot go on answering for it once this module declares a
+    -- `size` method.
+    let vs2 = Map.union topLevelVars (Map.difference vs (methodIndex classes))
+    Result.ok $ Env.Env home vs2 ts cs bs cls ms qvs qts qcs qcls qms
 
-collectVars :: Src.Module -> Result i w (Map.Map Name.Name Env.Var)
-collectVars (Src.Module _ _ _ _ values _ _ _ _ _ _ _ effects) =
+-- | The module's top-level value names, with its methods among them.
+--
+-- A method is not a top-level binding (§G19.2) and does not end up in
+-- 'Env._vars', but it does occupy the name: a module cannot declare
+-- @class Eq a where eq : ...@ and define @eq@ as well, because a use of @eq@
+-- would then have two answers. So the duplicate check runs over both and only
+-- the values are kept.
+collectVars :: Src.Module -> Classes -> Result i w (Map.Map Name.Name Env.Var)
+collectVars (Src.Module _ _ _ _ values classes _ _ _ _ _ _ effects) canClasses =
   let addDecl dict (A.At _ (Src.Value (A.At region name) _ _ _ _)) =
         Dups.insert name region (Env.TopLevel region) dict
-   in Dups.detect Error.DuplicateDecl $
-        List.foldl' addDecl (toEffectDups effects) (fmap snd values)
+      addMethod dict (A.At _ (Src.Class _ _ methods _)) =
+        List.foldl' addOneMethod dict methods
+      addOneMethod dict (_, A.At region name, _) =
+        Dups.insert name region (Env.TopLevel region) dict
+      dups =
+        List.foldl'
+          addDecl
+          (List.foldl' addMethod (toEffectDups effects) (fmap snd classes))
+          (fmap snd values)
+   in do
+        both <- Dups.detect Error.DuplicateDecl dups
+        Result.ok (Map.difference both (methodIndex canClasses))
 
 toEffectDups :: Src.Effects -> Dups.Dict Env.Var
 toEffectDups effects =
@@ -72,18 +106,92 @@ toEffectDups effects =
             (Dups.one "command" regionCmd (Env.TopLevel regionCmd))
             (Dups.one "subscription" regionSub (Env.TopLevel regionSub))
 
+-- ADD CLASSES
+
+-- | The module's class declarations, canonicalized and put in scope.
+--
+-- __A class declaration is self-contained__ (§G19.1). `class Eq a where
+-- eq : a -> a -> Bool` publishes `eq : Eq a => a -> a -> Bool`, and the class
+-- that constraint names is the one being declared, so there is no class
+-- environment to consult and no ordering among the declarations to work out.
+-- That is why this can run before anything resolves a class name, which is the
+-- only order the rest of verb 3 can be built in.
+addClasses :: Src.Module -> Env.Env -> Result i w (Env.Env, Classes)
+addClasses (Src.Module _ _ _ _ _ classes _ _ _ _ _ _ _) env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
+  do
+    canClasses <- traverse (canonicalizeClass env) (fmap snd classes)
+    let decls = Map.fromList canClasses
+    let cls2 = Map.union (Map.map (Env.Specific home) decls) cls
+    let ms2 = Map.union (Map.map (Env.Specific home) (methodIndex decls)) ms
+    Result.ok (Env.Env home vs ts cs bs cls2 ms2 qvs qts qcs qcls qms, decls)
+
+-- | The same declarations keyed by method name, which is the question an
+-- expression asks. `Canonicalize.Environment.Foreign.methodsOf` builds it for
+-- the imported ones.
+methodIndex :: Classes -> Map.Map Name.Name Env.Method
+methodIndex classes =
+  Map.fromList
+    [ (methodName, Env.Method className annotation)
+    | (className, Can.ClassDecl _ methods) <- Map.toList classes,
+      (methodName, annotation) <- Map.toList methods
+    ]
+
+canonicalizeClass :: Env.Env -> A.Located Src.Class -> Result i w (Name.Name, Can.ClassDecl)
+canonicalizeClass env@(Env.Env home _ _ _ _ _ _ _ _ _ _ _) (A.At _ (Src.Class (A.At _ name) (A.At _ param) methods _)) =
+  do
+    canMethods <- traverse (canonicalizeMethod env home name param) methods
+    Result.ok (name, Can.ClassDecl param (Map.fromList canMethods))
+
+-- | One method's __published__ signature.
+--
+-- What the author wrote is unqualified — @eq : a -> a -> Bool@ — and what the
+-- class publishes is @eq : Eq a => a -> a -> Bool@. The constraint is put on
+-- here rather than written out there because it could not say anything else:
+-- it names the class being declared, and a class whose methods were not
+-- constrained by it would have no way to pick an instance.
+--
+-- The class parameter must appear in the signature, for the same reason: a
+-- method whose type does not mention @a@ has nothing for a call site to
+-- resolve against, and no program could ever use it.
+canonicalizeMethod ::
+  Env.Env ->
+  ModuleName.Canonical ->
+  Name.Name ->
+  Name.Name ->
+  Src.ClassMethod ->
+  Result i w (Name.Name, Can.Annotation)
+canonicalizeMethod env home className param (_, A.At region methodName, Src.Annotation maybeContext srcType _) =
+  do
+    Type.checkContext maybeContext
+    (Can.Forall freeVars tipe) <- Type.toAnnotation env srcType
+    if Map.member param freeVars
+      then Result.ok (methodName, Can.Forall (Map.insert param [Can.Class home className] freeVars) tipe)
+      else Result.throw (Error.ClassMethodWithoutParam region className param methodName)
+
 -- ADD TYPES
 
+-- | The type names a module declares, and the classes among them.
+--
+-- A class name is checked here rather than beside the values because a class
+-- shares the upper-case namespace with the types: an instance head is written
+-- as a type (`Eq (Array a)`, §G16's reason for parsing one that way), so `Eq`
+-- naming both a class and a custom type would be a name with two answers in
+-- one position. They are checked together and stored apart — a class is not a
+-- type and cannot appear where one does.
 addTypes :: Src.Module -> Env.Env -> Result i w Env.Env
-addTypes (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _) (Env.Env home vs ts cs bs qvs qts qcs) =
+addTypes (Src.Module _ _ _ _ _ classes _ unions aliases _ _ _ _) (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
   let addAliasDups dups (A.At _ (Src.Alias (A.At region name) _ _)) = Dups.insert name region () dups
       addUnionDups dups (A.At _ (Src.Union (A.At region name) _ _ _ _)) = Dups.insert name region () dups
+      addClassDups dups (A.At _ (Src.Class (A.At region name) _ _ _)) = Dups.insert name region () dups
       typeNameDups =
-        List.foldl' addUnionDups (List.foldl' addAliasDups Dups.none (fmap snd aliases)) (fmap snd unions)
+        List.foldl'
+          addClassDups
+          (List.foldl' addUnionDups (List.foldl' addAliasDups Dups.none (fmap snd aliases)) (fmap snd unions))
+          (fmap snd classes)
    in do
         _ <- Dups.detect Error.DuplicateType typeNameDups
         ts1 <- foldM (addUnion home) ts (fmap snd unions)
-        addAliases (fmap snd aliases) (Env.Env home vs ts1 cs bs qvs qts qcs)
+        addAliases (fmap snd aliases) (Env.Env home vs ts1 cs bs cls ms qvs qts qcs qcls qms)
 
 addUnion :: ModuleName.Canonical -> Env.Exposed Env.Type -> A.Located Src.Union -> Result i w (Env.Exposed Env.Type)
 addUnion home types union@(A.At _ (Src.Union (A.At _ name) _ _ _ _)) =
@@ -101,7 +209,7 @@ addAliases aliases env =
    in foldM addAlias env sccs
 
 addAlias :: Env.Env -> Graph.SCC (A.Located Src.Alias) -> Result i w Env.Env
-addAlias env@(Env.Env home vs ts cs bs qvs qts qcs) scc =
+addAlias env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) scc =
   case scc of
     Graph.AcyclicSCC alias@(A.At _ (Src.Alias (A.At _ name) _ tipe)) ->
       do
@@ -109,7 +217,7 @@ addAlias env@(Env.Env home vs ts cs bs qvs qts qcs) scc =
         ctype <- Type.canonicalize env tipe
         let one = Env.Specific home (Env.Alias (length args) home args ctype)
         let ts1 = Map.insert name one ts
-        Result.ok $ Env.Env home vs ts1 cs bs qvs qts qcs
+        Result.ok $ Env.Env home vs ts1 cs bs cls ms qvs qts qcs qcls qms
     Graph.CyclicSCC [] ->
       Result.ok env
     Graph.CyclicSCC (alias@(A.At _ (Src.Alias (A.At region name1) _ tipe)) : others) ->
@@ -203,7 +311,7 @@ addFreeVars freeVars (A.At region tipe) =
 -- ADD CTORS
 
 addCtors :: Src.Module -> Env.Env -> Result i w (Env.Env, Unions, Aliases)
-addCtors (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _) env@(Env.Env home vs ts cs bs qvs qts qcs) =
+addCtors (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _) env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
   do
     unionInfo <- traverse (canonicalizeUnion env) (fmap snd unions)
     aliasInfo <- traverse (canonicalizeAlias env) (fmap snd aliases)
@@ -217,7 +325,7 @@ addCtors (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _) env@(Env.Env home vs 
     let cs2 = Map.union ctors cs
 
     Result.ok
-      ( Env.Env home vs ts cs2 bs qvs qts qcs,
+      ( Env.Env home vs ts cs2 bs cls ms qvs qts qcs qcls qms,
         Map.fromList (map fst unionInfo),
         Map.fromList (map fst aliasInfo)
       )
@@ -237,7 +345,7 @@ canonicalizeAlias env (A.At _ (Src.Alias (A.At _ name) args tipe)) =
 -- CANONICALIZE UNION
 
 canonicalizeUnion :: Env.Env -> A.Located Src.Union -> Result i w ((Name.Name, Can.Union), CtorDups)
-canonicalizeUnion env@(Env.Env home _ _ _ _ _ _ _) (A.At _ (Src.Union (A.At _ name) avars ctors _ _)) =
+canonicalizeUnion env@(Env.Env home _ _ _ _ _ _ _ _ _ _ _) (A.At _ (Src.Union (A.At _ name) avars ctors _ _)) =
   do
     cctors <- Index.indexedTraverse (canonicalizeCtor env) ctors
     let vars = map (A.toValue . snd) avars

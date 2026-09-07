@@ -9,7 +9,7 @@ module Core.LowerTypeSpec where
 
 import AST.Canonical qualified as Can
 import Core.AST qualified as Core
-import Core.Lower.Type (lowerAnnotation, lowerType, lowerUnion)
+import Core.Lower.Type (lowerAnnotation, lowerClass, lowerType, lowerUnion)
 import Data.Index qualified as Index
 import Data.Map qualified as Map
 import Data.Name qualified as Name
@@ -130,6 +130,54 @@ spec = do
           ]
           (Core.TFun [Core.TVar "a"] (Core.TVar "b"))
 
+  describe "classes" $ do
+    it "publishes each method with the class's own constraint on it" $
+      -- §G19.1: `class Sizey a where size : a -> Int` publishes
+      -- `size : Sizey a => a -> Int`, and the class that constraint names is
+      -- the one being declared. `Canonicalize.Environment.Local` is what puts
+      -- it on; this is the shape it has to arrive in.
+      lowerClass
+        home
+        "Sizey"
+        ( Can.ClassDecl
+            "a"
+            (Map.fromList [("size", sizey "a" (Can.TLambda (Can.TVar "a") intT))])
+        )
+        `shouldBe` Core.ClassDecl
+          { Core._classNameC = qual "Sizey",
+            Core._classParam = "a",
+            Core._classOpenness = Core.Open,
+            Core._classMethods =
+              [ ( "size",
+                  Core.TForall
+                    ["a"]
+                    [Core.CClass (qual "Sizey") (Core.TVar "a")]
+                    (Core.TFun [Core.TVar "a"] (core intT))
+                )
+              ]
+          }
+
+    it "orders the methods alphabetically, not by how they were written" $
+      -- C2's determinism, met the way record fields meet it: `Can.ClassDecl`
+      -- keeps a `Map`, so two frontends agree without agreeing on a traversal.
+      map
+        fst
+        ( Core._classMethods
+            ( lowerClass
+                home
+                "Sizey"
+                ( Can.ClassDecl
+                    "a"
+                    ( Map.fromList
+                        [ ("size", sizey "a" (Can.TLambda (Can.TVar "a") intT)),
+                          ("isEmpty", sizey "a" (Can.TLambda (Can.TVar "a") intT))
+                        ]
+                    )
+                )
+            )
+        )
+        `shouldBe` ["isEmpty", "size"]
+
   describe "custom types" $ do
     it "carries the constructor tags" $
       let union =
@@ -174,3 +222,9 @@ field i t = Can.FieldType (fromIntegral i) t
 
 core :: Can.Type -> Core.Type
 core = lowerType
+
+-- | A method's published signature: the class parameter constrained by
+-- `Sizey`, which is what a class declaration puts on each of its methods.
+sizey :: Name.Name -> Can.Type -> Can.Annotation
+sizey param tipe =
+  Can.Forall (Map.fromList [(param, [Can.Class home "Sizey"])]) tipe

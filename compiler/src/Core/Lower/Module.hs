@@ -44,7 +44,7 @@ import Canonicalize.Effects qualified as Effects
 import Core.AST qualified as Core
 import Core.Lower.Expression qualified as Expr
 import Core.Lower.Port qualified as Port
-import Core.Lower.Type (lowerUnion)
+import Core.Lower.Type (lowerClass, lowerUnion)
 import Core.Order qualified as Order
 import Core.Refs qualified as Refs
 import Data.List qualified as List
@@ -72,8 +72,10 @@ lower platform annotations types modul =
           Core._moduleFiles = Map.singleton selfFile home,
           Core._moduleData =
             [lowerUnion home name union | (name, union) <- Map.toAscList (Can._unions modul)],
-          -- Classes and instances are M1b; there is no syntax for either yet.
-          Core._moduleClasses = [],
+          Core._moduleClasses =
+            [lowerClass home name decl | (name, decl) <- Map.toAscList (Can._classes modul)],
+          -- An instance declaration is still rejected in `Canonicalize.Module`,
+          -- so there is nothing here to lower yet (§G20).
           Core._moduleInstances = [],
           Core._moduleDefs = concat defs,
           Core._moduleDefsRec =

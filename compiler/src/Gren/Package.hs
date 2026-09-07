@@ -9,6 +9,7 @@ module Gren.Package
     Project,
     Canonical (..),
     isKernel,
+    isFirstParty,
     toChars,
     toUrl,
     toFilePath,
@@ -76,6 +77,20 @@ data Canonical = Canonical
 
 isKernel :: Name -> Bool
 isKernel (Name author _) =
+  author == gren
+
+-- | Whether a package may declare classes and instances (`classes.md` §8.3).
+--
+-- Today this asks exactly what 'isKernel' asks, and it is written separately
+-- because the two mean different things and part company at K7: a first-party
+-- package is one whose identifier begins with @github.com/geng-lang/@, which
+-- is not something a package name of this shape can yet say. Until it can, the
+-- toolchain-distributed packages are the ones @gren-lang@ authors.
+--
+-- §8.4 gates classes and instances __together__, and the gate lifts when D10
+-- opens rather than when any verb lands.
+isFirstParty :: Name -> Bool
+isFirstParty (Name author _) =
   author == gren
 
 toChars :: Name -> String

@@ -30,8 +30,8 @@ type Result i w a =
 createInitialEnv :: ModuleName.Canonical -> Map.Map ModuleName.Raw I.Interface -> [Src.Import] -> Result i w Env.Env
 createInitialEnv home ifaces imports =
   do
-    (State vs ts cs bs qvs qts qcs) <- foldM (addImport ifaces) emptyState (toSafeImports home imports)
-    Result.ok (Env.Env home (Map.map infoToVar vs) ts cs bs qvs qts qcs)
+    (State vs ts cs bs cls ms qvs qts qcs qcls qms) <- foldM (addImport ifaces) emptyState (toSafeImports home imports)
+    Result.ok (Env.Env home (Map.map infoToVar vs) ts cs bs cls ms qvs qts qcs qcls qms)
 
 infoToVar :: Env.Info Can.Annotation -> Env.Var
 infoToVar info =
@@ -46,14 +46,18 @@ data State = State
     _types :: Env.Exposed Env.Type,
     _ctors :: Env.Exposed Env.Ctor,
     _binops :: Env.Exposed Env.Binop,
+    _classes :: Env.Exposed Can.ClassDecl,
+    _methods :: Env.Exposed Env.Method,
     _q_vars :: Env.Qualified Can.Annotation,
     _q_types :: Env.Qualified Env.Type,
-    _q_ctors :: Env.Qualified Env.Ctor
+    _q_ctors :: Env.Qualified Env.Ctor,
+    _q_classes :: Env.Qualified Can.ClassDecl,
+    _q_methods :: Env.Qualified Env.Method
   }
 
 emptyState :: State
 emptyState =
-  State Map.empty emptyTypes Map.empty Map.empty Map.empty Map.empty Map.empty
+  State Map.empty emptyTypes Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty
 
 emptyTypes :: Env.Exposed Env.Type
 emptyTypes =
@@ -78,8 +82,8 @@ isNormal (Src.Import (A.At _ name) maybeAlias _ _ _) =
 -- ADD IMPORTS
 
 addImport :: Map.Map ModuleName.Raw I.Interface -> State -> Src.Import -> Result i w State
-addImport ifaces (State vs ts cs bs qvs qts qcs) (Src.Import (A.At _ name) maybeAlias exposing _ _) =
-  let (I.Interface pkg defs unions aliases binops) = ifaces ! name
+addImport ifaces (State vs ts cs bs cls ms qvs qts qcs qcls qms) (Src.Import (A.At _ name) maybeAlias exposing _ _) =
+  let (I.Interface pkg defs unions aliases binops iClasses) = ifaces ! name
       !prefix = maybe name id (fmap fst maybeAlias)
       !home = ModuleName.Canonical pkg name
 
@@ -88,25 +92,50 @@ addImport ifaces (State vs ts cs bs qvs qts qcs) (Src.Import (A.At _ name) maybe
           (Map.mapMaybeWithKey (unionToType home) unions)
           (Map.mapMaybeWithKey (aliasToType home) aliases)
 
+      !rawClasses = Map.mapMaybe I.toPublicClass iClasses
+
       !vars = Map.map (Env.Specific home) defs
       !types = Map.map (Env.Specific home . fst) rawTypeInfo
       !ctors = Map.foldr (addExposed . snd) Map.empty rawTypeInfo
+      !classes = Map.map (Env.Specific home) rawClasses
+      !methods = methodsOf home rawClasses
 
       !qvs2 = addQualified prefix vars qvs
       !qts2 = addQualified prefix types qts
       !qcs2 = addQualified prefix ctors qcs
+      !qcls2 = addQualified prefix classes qcls
+      !qms2 = addQualified prefix methods qms
    in case exposing of
         Src.Open ->
           let !vs2 = addExposed vs vars
               !ts2 = addExposed ts types
               !cs2 = addExposed cs ctors
               !bs2 = addExposed bs (Map.mapWithKey (binopToBinop home) binops)
-           in Result.ok (State vs2 ts2 cs2 bs2 qvs2 qts2 qcs2)
+              !cls2 = addExposed cls classes
+              !ms2 = addExposed ms methods
+           in Result.ok (State vs2 ts2 cs2 bs2 cls2 ms2 qvs2 qts2 qcs2 qcls2 qms2)
         Src.Explicit exposedList ->
           foldM
-            (addExposedValue home vars rawTypeInfo binops)
-            (State vs ts cs bs qvs2 qts2 qcs2)
+            (addExposedValue home vars rawTypeInfo binops rawClasses)
+            (State vs ts cs bs cls ms qvs2 qts2 qcs2 qcls2 qms2)
             exposedList
+
+-- CLASS
+
+-- | A module's public classes, indexed by method name rather than class name.
+--
+-- Both indexes are built here because both are asked for: `Canonicalize.Type`
+-- resolves a constraint by class name and `Canonicalize.Expression` resolves a
+-- variable by method name, and neither can afford the other's scan. A class
+-- that is not public contributes neither, which is what makes a private class
+-- private: `I.toPublicClass` is the only door.
+methodsOf :: ModuleName.Canonical -> Map.Map Name.Name Can.ClassDecl -> Env.Exposed Env.Method
+methodsOf home classes =
+  Map.fromList
+    [ (methodName, Env.Specific home (Env.Method className annotation))
+    | (className, Can.ClassDecl _ methods) <- Map.toList classes,
+      (methodName, annotation) <- Map.toList methods
+    ]
 
 addExposed :: Env.Exposed a -> Env.Exposed a -> Env.Exposed a
 addExposed =
@@ -153,17 +182,22 @@ addExposedValue ::
   Env.Exposed Can.Annotation ->
   Map.Map Name.Name (Env.Type, Env.Exposed Env.Ctor) ->
   Map.Map Name.Name I.Binop ->
+  Map.Map Name.Name Can.ClassDecl ->
   State ->
   Src.Exposed ->
   Result i w State
-addExposedValue home vars types binops (State vs ts cs bs qvs qts qcs) exposed =
+addExposedValue home vars types binops classes (State vs ts cs bs cls ms qvs qts qcs qcls qms) exposed =
   case exposed of
     Src.Lower (A.At region name) ->
       case Map.lookup name vars of
         Just info ->
-          Result.ok (State (Map.insertWith Env.mergeInfo name info vs) ts cs bs qvs qts qcs)
+          Result.ok (State (Map.insertWith Env.mergeInfo name info vs) ts cs bs cls ms qvs qts qcs qcls qms)
         Nothing ->
-          Result.throw (Error.ImportExposingNotFound region home name (Map.keys vars))
+          case classOf name classes of
+            Just className ->
+              Result.throw (Error.ImportMethodByName region name className)
+            Nothing ->
+              Result.throw (Error.ImportExposingNotFound region home name (Map.keys vars))
     Src.Upper (A.At region name) privacy ->
       case privacy of
         Src.Private ->
@@ -172,17 +206,23 @@ addExposedValue home vars types binops (State vs ts cs bs qvs qts qcs) exposed =
               case tipe of
                 Env.Union _ _ ->
                   let !ts2 = Map.insert name (Env.Specific home tipe) ts
-                   in Result.ok (State vs ts2 cs bs qvs qts qcs)
+                   in Result.ok (State vs ts2 cs bs cls ms qvs qts qcs qcls qms)
                 Env.Alias _ _ _ _ ->
                   let !ts2 = Map.insert name (Env.Specific home tipe) ts
                       !cs2 = addExposed cs ctors
-                   in Result.ok (State vs ts2 cs2 bs qvs qts qcs)
+                   in Result.ok (State vs ts2 cs2 bs cls ms qvs qts qcs qcls qms)
             Nothing ->
-              case checkForCtorMistake name types of
-                tipe : _ ->
-                  Result.throw $ Error.ImportCtorByName region name tipe
-                [] ->
-                  Result.throw $ Error.ImportExposingNotFound region home name (Map.keys types)
+              case Map.lookup name classes of
+                Just decl ->
+                  let !cls2 = Map.insert name (Env.Specific home decl) cls
+                      !ms2 = addExposed ms (methodsOf home (Map.singleton name decl))
+                   in Result.ok (State vs ts cs bs cls2 ms2 qvs qts qcs qcls qms)
+                Nothing ->
+                  case checkForCtorMistake name types of
+                    tipe : _ ->
+                      Result.throw $ Error.ImportCtorByName region name tipe
+                    [] ->
+                      Result.throw $ Error.ImportExposingNotFound region home name (Map.keys types ++ Map.keys classes)
         Src.Public dotDotRegion ->
           case Map.lookup name types of
             Just (tipe, ctors) ->
@@ -190,18 +230,31 @@ addExposedValue home vars types binops (State vs ts cs bs qvs qts qcs) exposed =
                 Env.Union _ _ ->
                   let !ts2 = Map.insert name (Env.Specific home tipe) ts
                       !cs2 = addExposed cs ctors
-                   in Result.ok (State vs ts2 cs2 bs qvs qts qcs)
+                   in Result.ok (State vs ts2 cs2 bs cls ms qvs qts qcs qcls qms)
                 Env.Alias _ _ _ _ ->
                   Result.throw (Error.ImportOpenAlias dotDotRegion name)
             Nothing ->
-              Result.throw (Error.ImportExposingNotFound region home name (Map.keys types))
+              if Map.member name classes
+                then Result.throw (Error.ImportOpenClass dotDotRegion name)
+                else Result.throw (Error.ImportExposingNotFound region home name (Map.keys types ++ Map.keys classes))
     Src.Operator region op ->
       case Map.lookup op binops of
         Just binop ->
           let !bs2 = Map.insert op (binopToBinop home op binop) bs
-           in Result.ok (State vs ts cs bs2 qvs qts qcs)
+           in Result.ok (State vs ts cs bs2 cls ms qvs qts qcs qcls qms)
         Nothing ->
           Result.throw (Error.ImportExposingNotFound region home op (Map.keys binops))
+
+-- | The class a method name belongs to, if it is a method at all.
+--
+-- @import Basics exposing (eq)@ is the mistake this exists for: a method is
+-- exposed by its class rather than on its own (D121), and the fix is to name
+-- the class. `checkForCtorMistake` is the same shape for the same reason.
+classOf :: Name.Name -> Map.Map Name.Name Can.ClassDecl -> Maybe Name.Name
+classOf name classes =
+  case [className | (className, Can.ClassDecl _ methods) <- Map.toList classes, Map.member name methods] of
+    className : _ -> Just className
+    [] -> Nothing
 
 checkForCtorMistake :: Name.Name -> Map.Map Name.Name (Env.Type, Env.Exposed Env.Ctor) -> [Name.Name]
 checkForCtorMistake givenName types =

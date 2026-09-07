@@ -5,9 +5,9 @@ module Parse.ClassSpec where
 import AST.Source qualified as Src
 import Data.ByteString.UTF8 qualified as Utf8
 import Data.Name qualified as Name
+import Gren.Package qualified as Pkg
 import Helpers.Instances ()
 import Parse.Declaration (Decl (..), declaration)
-import Gren.Package qualified as Pkg
 import Parse.Module qualified as Module
 import Parse.Primitives qualified as P
 import Reporting.Annotation qualified as A

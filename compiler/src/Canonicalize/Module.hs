@@ -37,7 +37,7 @@ type Result i w a =
 canonicalize :: Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Result i [W.Warning] Can.Module
 canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ effects) =
   do
-    checkClasses (fmap snd classes)
+    checkClassesAreFirstParty pkg (fmap snd classes)
     checkInstances (fmap snd instances)
     checkDerives (fmap snd unions)
 
@@ -45,30 +45,35 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
     let home = ModuleName.Canonical pkg (Src.getName modul)
     let cbinops = Map.fromList (map canonicalizeBinop binops)
 
-    (env, cunions, caliases) <-
+    (env, cunions, caliases, cclasses) <-
       Local.add modul
         =<< Foreign.createInitialEnv home ifaces (fmap snd imports)
 
     cvalues <- canonicalizeValues env values
     ceffects <- Effects.canonicalize env values cunions effects
-    cexports <- canonicalizeExports values cunions caliases cbinops ceffects exports
+    cexports <- canonicalizeExports values cunions caliases cclasses cbinops ceffects exports
 
-    return $ Can.Module home cexports docs cvalues cunions caliases cbinops ceffects
+    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cbinops ceffects
 
 -- CLASS DECLARATIONS
 
--- | A `class` declaration parses (`docs/m1b-classes.md` §G15) and there is
--- nothing downstream of the parser to receive it yet: no class environment, no
--- instance environment, and `Can.Module` has no field for one. Rejecting is
--- what keeps the shape honest until verb 3 builds those — a class the compiler
--- silently forgot would be a class nothing could ever be an instance of.
-checkClasses :: [A.Located Src.Class] -> Result i w ()
-checkClasses classes =
-  case classes of
-    [] ->
-      Result.ok ()
-    A.At region (Src.Class (A.At _ name) _ _ _) : _ ->
-      Result.throw (Error.ClassDeclUnsupported region name)
+-- | `classes.md` §8.3's gate: only a first-party package may declare a class.
+--
+-- Not a temporary rejection like the two below it, but the restriction §8.4
+-- decided M1b ships with, and it lifts when D10 opens rather than when the
+-- next verb lands. Classes and instances are gated __together__ and always
+-- will be: structural derivation is defined for `Eq`, `Ord` and `Inspect`
+-- only, so a user class nobody may write an instance for has no instances at
+-- all and is inert.
+checkClassesAreFirstParty :: Pkg.Name -> [A.Located Src.Class] -> Result i w ()
+checkClassesAreFirstParty pkg classes
+  | Pkg.isFirstParty pkg = Result.ok ()
+  | otherwise =
+      case classes of
+        [] ->
+          Result.ok ()
+        A.At region (Src.Class (A.At _ name) _ _ _) : _ ->
+          Result.throw (Error.ClassDeclThirdParty region name)
 
 -- | An `instance` declaration parses (§G15) and, like a class, has nowhere to
 -- go: the instance environment D114 describes is verb 3's, and `Can.Module`
@@ -232,18 +237,19 @@ canonicalizeExports ::
   [A.Located Src.Value] ->
   Map.Map Name.Name union ->
   Map.Map Name.Name alias ->
+  Map.Map Name.Name Can.ClassDecl ->
   Map.Map Name.Name binop ->
   Can.Effects ->
   A.Located Src.Exposing ->
   Result i w Can.Exports
-canonicalizeExports values unions aliases binops effects (A.At region exposing) =
+canonicalizeExports values unions aliases classes binops effects (A.At region exposing) =
   case exposing of
     Src.Open ->
       Result.ok (Can.ExportEverything region)
     Src.Explicit exposeds ->
       do
         let names = Map.fromList (map valueToName values)
-        infos <- traverse (checkExposed names unions aliases binops effects) exposeds
+        infos <- traverse (checkExposed names unions aliases classes binops effects) exposeds
         Can.Export <$> Dups.detect Error.ExportDuplicate (Dups.unions infos)
 
 valueToName :: A.Located Src.Value -> (Name.Name, ())
@@ -254,11 +260,12 @@ checkExposed ::
   Map.Map Name.Name value ->
   Map.Map Name.Name union ->
   Map.Map Name.Name alias ->
+  Map.Map Name.Name Can.ClassDecl ->
   Map.Map Name.Name binop ->
   Can.Effects ->
   Src.Exposed ->
   Result i w (Dups.Dict (A.Located Can.Export))
-checkExposed values unions aliases binops effects exposed =
+checkExposed values unions aliases classes binops effects exposed =
   case exposed of
     Src.Lower (A.At region name) ->
       if Map.member name values
@@ -267,9 +274,13 @@ checkExposed values unions aliases binops effects exposed =
           Nothing ->
             ok name region Can.ExportPort
           Just ports ->
-            Result.throw $
-              Error.ExportNotFound region Error.BadVar name $
-                ports ++ Map.keys values
+            case classOf name classes of
+              Just className ->
+                Result.throw (Error.ExportMethodByName region name className)
+              Nothing ->
+                Result.throw $
+                  Error.ExportNotFound region Error.BadVar name $
+                    ports ++ Map.keys values
     Src.Operator region name ->
       if Map.member name binops
         then ok name region Can.ExportBinop
@@ -284,9 +295,12 @@ checkExposed values unions aliases binops effects exposed =
           if Map.member name aliases
             then Result.throw $ Error.ExportOpenAlias dotDotRegion name
             else
-              Result.throw $
-                Error.ExportNotFound region Error.BadType name $
-                  Map.keys unions ++ Map.keys aliases
+              if Map.member name classes
+                then Result.throw $ Error.ExportOpenClass dotDotRegion name
+                else
+                  Result.throw $
+                    Error.ExportNotFound region Error.BadType name $
+                      Map.keys unions ++ Map.keys aliases ++ Map.keys classes
     Src.Upper (A.At region name) Src.Private ->
       if Map.member name unions
         then ok name region Can.ExportUnionClosed
@@ -294,9 +308,23 @@ checkExposed values unions aliases binops effects exposed =
           if Map.member name aliases
             then ok name region Can.ExportAlias
             else
-              Result.throw $
-                Error.ExportNotFound region Error.BadType name $
-                  Map.keys unions ++ Map.keys aliases
+              if Map.member name classes
+                then ok name region Can.ExportClass
+                else
+                  Result.throw $
+                    Error.ExportNotFound region Error.BadType name $
+                      Map.keys unions ++ Map.keys aliases ++ Map.keys classes
+
+-- | The class a method name belongs to, if it is a method at all.
+--
+-- @exposing (eq)@ where `eq` is a method is the mistake this exists for: a
+-- method travels with its class (D121), so the fix is to name the class rather
+-- than the method.
+classOf :: Name.Name -> Map.Map Name.Name Can.ClassDecl -> Maybe Name.Name
+classOf name classes =
+  case [className | (className, Can.ClassDecl _ methods) <- Map.toList classes, Map.member name methods] of
+    className : _ -> Just className
+    [] -> Nothing
 
 checkPorts :: Can.Effects -> Name.Name -> Maybe [Name.Name]
 checkPorts effects name =

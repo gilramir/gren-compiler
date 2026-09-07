@@ -34,6 +34,7 @@ module AST.Canonical
     Module (..),
     Alias (..),
     Binop (..),
+    ClassDecl (..),
     Union (..),
     Ctor (..),
     Exports (..),
@@ -269,12 +270,33 @@ data Module = Module
     _decls :: Decls,
     _unions :: Map.Map Name Union,
     _aliases :: Map.Map Name Alias,
+    -- | The classes this module declares (`docs/m1b-classes.md` §G20). Not in
+    -- '_decls', because a method is not a top-level binding and nothing may
+    -- ever ask one for a body (§G19.2).
+    _classes :: Map.Map Name ClassDecl,
     _binops :: Map.Map Name Binop,
     _effects :: Effects
   }
   deriving (Show)
 
 data Alias = Alias [Name] Type
+  deriving (Eq, Show)
+
+-- | @class Eq a where eq : a -> a -> Bool@, canonicalized.
+--
+-- The methods are a 'Map.Map' rather than a list because two of them may not
+-- share a name and because ascending order is the one Core wants: C2 asks for
+-- an order that two frontends agree on without having to agree on a traversal,
+-- and alphabetical is the same answer record fields get.
+--
+-- Each method's 'Annotation' is its __published signature__, not the type
+-- written in the class body: the class parameter carries a constraint naming
+-- the class being declared, which is §G19.1's reason a class declaration needs
+-- no environment to canonicalize.
+data ClassDecl = ClassDecl
+  { _cl_param :: Name,
+    _cl_methods :: Map.Map Name Annotation
+  }
   deriving (Eq, Show)
 
 data Binop = Binop_ Binop.Associativity Binop.Precedence Name
@@ -308,6 +330,7 @@ data Export
   = ExportValue
   | ExportBinop
   | ExportAlias
+  | ExportClass
   | ExportUnionOpen
   | ExportUnionClosed
   | ExportPort
@@ -338,6 +361,10 @@ data Manager
 instance Binary Alias where
   get = liftM2 Alias get get
   put (Alias a b) = put a >> put b
+
+instance Binary ClassDecl where
+  get = liftM2 ClassDecl get get
+  put (ClassDecl a b) = put a >> put b
 
 instance Binary Union where
   put (Union a b c d) = put a >> put b >> put c >> put d

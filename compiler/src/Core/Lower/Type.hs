@@ -25,6 +25,7 @@ module Core.Lower.Type
   ( lowerType,
     lowerAnnotation,
     lowerUnion,
+    lowerClass,
   )
 where
 
@@ -84,10 +85,31 @@ lowerAnnotation (Can.Forall freeVars tipe) =
       Core.TForall
         (map fst vars)
         [ Core.CClass (Core.QualName home name) (Core.TVar var)
-          | (var, classes) <- vars,
-            Can.Class home name <- classes
+        | (var, classes) <- vars,
+          Can.Class home name <- classes
         ]
         (lowerType tipe)
+
+-- | A class declaration (@docs/m1b-classes.md@ §G20).
+--
+-- The methods come out alphabetically because `Can.ClassDecl` keeps them in a
+-- 'Map.Map', which is C2's requirement met the same way record fields meet it:
+-- an order two frontends agree on without having to agree on a traversal.
+--
+-- Every declared class is 'Core.Open'. `classes.md` §1.2's closed four are
+-- __compiler-known__ — their membership is a table in "Type.Class" and there is
+-- no source syntax that says @closed@ — so nothing a module can write is one.
+-- What marks them when `core` declares them is verb 7's question, and guessing
+-- at it here would put an answer in the field a backend reads.
+lowerClass :: ModuleName.Canonical -> Name -> Can.ClassDecl -> Core.ClassDecl
+lowerClass home name (Can.ClassDecl param methods) =
+  Core.ClassDecl
+    { Core._classNameC = Core.QualName home name,
+      Core._classParam = param,
+      Core._classOpenness = Core.Open,
+      Core._classMethods =
+        [(methodName, lowerAnnotation annotation) | (methodName, annotation) <- Map.toAscList methods]
+    }
 
 -- | A custom type declaration.
 --

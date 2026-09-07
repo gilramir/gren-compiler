@@ -143,6 +143,11 @@ data Input
   = Import ModuleName.Raw BS.ByteString
   | Type N.Name BS.ByteString
   | Port
+  | -- | A `class` or `instance` declaration, which the REPL declines rather
+    -- than crashes on. Both parse (`docs/m1b-classes.md` §G17) and neither can
+    -- work here: a REPL session is a third-party package, and §8.3 gates class
+    -- and instance declarations to first-party ones.
+    ClassOrInstance
   | Decl N.Name BS.ByteString
   | Expr BS.ByteString
   | --
@@ -268,6 +273,8 @@ attemptDeclOrExpr lines =
             PD.Value _ (A.At _ (Src.Value (A.At _ name) _ _ _ _)) -> ifDone lines (Decl name src)
             PD.Union _ (A.At _ (Src.Union (A.At _ name) _ _ _ _)) -> ifDone lines (Type name src)
             PD.Alias _ (A.At _ (Src.Alias (A.At _ name) _ _)) -> ifDone lines (Type name src)
+            PD.Class _ _ -> Done ClassOrInstance
+            PD.Instance _ _ -> Done ClassOrInstance
             PD.Port _ _ -> Done Port
             PD.TopLevelComments _ -> Done Skip
         Left declPosition
@@ -376,6 +383,10 @@ eval flags env state@(State imports types decls) input =
       Port ->
         do
           putStrLn "I cannot handle port declarations."
+          return (Loop state)
+      ClassOrInstance ->
+        do
+          putStrLn "I cannot handle class or instance declarations."
           return (Loop state)
       Decl name src ->
         do
