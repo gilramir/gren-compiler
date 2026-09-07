@@ -94,6 +94,27 @@ data ValueTypeComments = ValueTypeComments
   }
   deriving (Show)
 
+-- Constraint context
+
+-- | One constraint in a context: what sits between the delimiter before it
+-- (@(@ or @,@) and the one after it (@,@, @)@ or @=>@).
+data ConstraintComments = ConstraintComments
+  { _beforeConstraint :: [Comment],
+    _afterConstraintClass :: [Comment],
+    _afterConstraint :: [Comment]
+  }
+  deriving (Show)
+
+-- | A context has one comment slot of its own, after the @=>@. There is no
+-- slot for the parentheses because the formatter decides those rather than
+-- preserving them (D116): they are written when there is more than one
+-- constraint and dropped when there is one.
+data ContextComments = ContextComments
+  { _beforeContextArrow :: [Comment],
+    _afterContextArrow :: [Comment]
+  }
+  deriving (Show)
+
 data UnionComments = UnionComments
   { _beforeUnionTypeName :: [Comment],
     _afterUnionTypeArgs :: [Comment]

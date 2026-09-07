@@ -81,16 +81,16 @@ valueDecl maybeDocs start =
               word1 0x3A {-:-} E.DeclDefEquals
               let commentsBeforeColon = commentsAfterName
               commentsAfterColon <- Space.chompAndCheckIndent E.DeclDefSpace E.DeclDefIndentType
-              ((tipe, commentsAfterTipe), _) <- specialize E.DeclDefType Type.expression
+              ((maybeContext, tipe, commentsAfterTipe), _) <- specialize E.DeclDefType Type.annotation
               Space.checkFreshLine E.DeclDefNameRepeat
               defName <- chompMatchingName name
               commentsAfterMatchingName <- Space.chompAndCheckIndent E.DeclDefSpace E.DeclDefIndentEquals
               let tipeComments = SC.ValueTypeComments commentsBeforeColon commentsAfterColon commentsAfterTipe
-              chompDefArgsAndBody maybeDocs start defName (Just (tipe, tipeComments)) [] commentsAfterMatchingName,
+              chompDefArgsAndBody maybeDocs start defName (Just (Src.Annotation maybeContext tipe tipeComments)) [] commentsAfterMatchingName,
             chompDefArgsAndBody maybeDocs start (A.at start end name) Nothing [] commentsAfterName
           ]
 
-chompDefArgsAndBody :: Maybe Src.DocComment -> A.Position -> A.Located Name.Name -> Maybe (Src.Type, SC.ValueTypeComments) -> [([Src.Comment], Src.Pattern)] -> [Src.Comment] -> Space.Parser E.DeclDef (Decl, [Src.Comment])
+chompDefArgsAndBody :: Maybe Src.DocComment -> A.Position -> A.Located Name.Name -> Maybe Src.Annotation -> [([Src.Comment], Src.Pattern)] -> [Src.Comment] -> Space.Parser E.DeclDef (Decl, [Src.Comment])
 chompDefArgsAndBody maybeDocs start name tipe revArgs commentsBefore =
   oneOf
     E.DeclDefEquals

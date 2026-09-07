@@ -141,8 +141,9 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
             name,
             Map.keys freeLocals
           )
-    Just (srcType, _) ->
+    Just (Src.Annotation maybeContext srcType _) ->
       do
+        Type.checkContext maybeContext
         (Can.Forall freeVars tipe) <- Type.toAnnotation env srcType
 
         ((args, resultType), argBindings) <-

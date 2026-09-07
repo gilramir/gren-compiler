@@ -11,6 +11,7 @@ module Parse.Primitives
     Col,
     oneOf,
     oneOfWithFallback,
+    lookAhead,
     inContext,
     specialize,
     getPosition,
@@ -126,6 +127,25 @@ oneOfHelp state cok eok cerr eerr toError parsers =
        in eerr row col toError
 
 -- ONE OF WITH FALLBACK
+
+-- | Run a parser for its answer without consuming anything and without
+-- committing to it: on success the input is rewound, and any failure is
+-- reported as though nothing had been read, so an enclosing `oneOf` moves on
+-- to the next alternative instead of stopping here.
+--
+-- This is the one piece of backtracking in the parser and it is deliberate.
+-- Two constructs added by M1b's classes cannot be told apart from what they
+-- shadow until several tokens in: `Eq a =>` from the type `Eq a` (D111), and
+-- a `class`/`instance` declaration from a value named `class` or `instance`,
+-- which stay ordinary identifiers (D117). Both look ahead over a bounded,
+-- tiny amount of input and then parse it again for real, so the cost is a
+-- second pass over a handful of tokens and no error position moves.
+lookAhead :: Parser x a -> Parser x a
+lookAhead (Parser parser) =
+  Parser $ \state@(State _ _ _ _ row col) _ eok _ eerr ->
+    let rewindOk a _ = eok a state
+        rewindErr _ _ toError = eerr row col toError
+     in parser state rewindOk rewindOk rewindErr rewindErr
 
 oneOfWithFallback :: [Parser x a] -> a -> Parser x a -- PERF is this function okay? Worried about allocation/laziness with fallback values.
 oneOfWithFallback parsers fallback =

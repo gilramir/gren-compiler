@@ -1,6 +1,7 @@
 module Canonicalize.Type
   ( toAnnotation,
     canonicalize,
+    checkContext,
   )
 where
 
@@ -27,6 +28,29 @@ toAnnotation env srcType =
   do
     tipe <- canonicalize env srcType
     Result.ok $ Can.Forall (addFreeVars Map.empty tipe) tipe
+
+-- CONTEXT
+
+-- | A constraint context parses (D111) and has nowhere to go yet: `Can` still
+-- carries `FreeVars = Map Name ()`, and there is no instance environment for a
+-- class name to resolve against until verb 3 of `docs/m1b-classes.md`. Until
+-- then an annotation that carries one is rejected rather than silently
+-- stripped, so that no program can compile with a promise nothing checks.
+checkContext :: Maybe Src.Context -> Result i w ()
+checkContext maybeContext =
+  case maybeContext of
+    Nothing ->
+      Result.ok ()
+    Just (Src.Context entries _) ->
+      case entries of
+        [] ->
+          Result.ok ()
+        (A.At region constraint, _) : _ ->
+          Result.throw $
+            Error.ConstraintUnsolved region $
+              case constraint of
+                Src.Constraint _ name _ -> name
+                Src.ConstraintQual _ _ name _ -> name
 
 -- CANONICALIZE TYPES
 

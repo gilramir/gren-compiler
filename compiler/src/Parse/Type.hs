@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Parse.Type
-  ( expression,
+  ( annotation,
+    expression,
     variant,
   )
 where
@@ -9,7 +10,7 @@ where
 import AST.Source qualified as Src
 import AST.SourceComments qualified as SC
 import Data.Name qualified as Name
-import Parse.Primitives (Parser, addEnd, addLocation, getPosition, inContext, oneOf, oneOfWithFallback, specialize, word1, word2)
+import Parse.Primitives (Parser, addEnd, addLocation, getPosition, inContext, lookAhead, oneOf, oneOfWithFallback, specialize, word1, word2)
 import Parse.Space qualified as Space
 import Parse.Variable qualified as Var
 import Reporting.Annotation qualified as A
@@ -81,6 +82,96 @@ term =
                     ]
               ]
       ]
+
+-- ANNOTATIONS
+
+-- | A type, optionally qualified by a constraint context: @Eq a => a -> Bool@.
+--
+-- The context has to be recognized before it can be parsed, because both of
+-- its shapes are already something else. @Eq a@ is a perfectly good type, and
+-- @(@ opens a parenthesized type as readily as a multi-constraint list; the
+-- only thing that separates them is the @=>@ several tokens later, and by then
+-- an ordinary `oneOf` has committed. So the context is parsed once under
+-- `lookAhead` to find out whether there is one at all, and then parsed again
+-- for real. It is at most a handful of tokens and it happens once per
+-- annotation.
+--
+-- The cost of that shape, worth knowing: a *malformed* context is not a
+-- context, so @(Eq a, Ord) => …@ rewinds and is reported as a bad type rather
+-- than as a bad constraint. The error is in the right place and says the wrong
+-- thing, which is the trade for having no committed prefix to report from.
+annotation :: Space.Parser E.Type (Maybe Src.Context, Src.Type, [Src.Comment])
+annotation =
+  do
+    maybeContext <-
+      oneOfWithFallback
+        [ do
+            _ <- lookAhead context
+            Just <$> context
+        ]
+        Nothing
+    ((tipe, commentsAfter), end) <- expression
+    return ((maybeContext, tipe, commentsAfter), end)
+
+context :: Parser E.Type Src.Context
+context =
+  do
+    (entries, commentsBeforeArrow) <-
+      oneOf
+        E.TStart
+        [ do
+            word1 0x28 {-(-} E.TStart
+            commentsAfterOpen <- Space.chompAndCheckIndent E.TSpace E.TIndentStart
+            entries <- chompContextEntries commentsAfterOpen []
+            commentsAfterClose <- Space.chompAndCheckIndent E.TSpace E.TIndentStart
+            return (entries, commentsAfterClose),
+          do
+            entry <- chompConstraint []
+            return ([entry], [])
+        ]
+    word2 0x3D 0x3E {-=>-} E.TStart
+    commentsAfterArrow <- Space.chompAndCheckIndent E.TSpace E.TIndentStart
+    return (Src.Context entries (SC.ContextComments commentsBeforeArrow commentsAfterArrow))
+
+chompContextEntries :: [Src.Comment] -> [Src.ContextEntry] -> Parser E.Type [Src.ContextEntry]
+chompContextEntries commentsBefore revEntries =
+  do
+    entry <- chompConstraint commentsBefore
+    oneOf
+      E.TStart
+      [ do
+          word1 0x2C {-,-} E.TStart
+          commentsAfterComma <- Space.chompAndCheckIndent E.TSpace E.TIndentStart
+          chompContextEntries commentsAfterComma (entry : revEntries),
+        do
+          word1 0x29 {-)-} E.TStart
+          return (reverse (entry : revEntries))
+      ]
+
+-- | @Eq a@ — a class applied to a type variable, and only to a variable. An
+-- argument that is not a variable is an instance head rather than a
+-- constraint, and there is nowhere for it to go: D111 keys the constraint list
+-- off the annotation's bound variables.
+chompConstraint :: [Src.Comment] -> Parser E.Type Src.ContextEntry
+chompConstraint commentsBefore =
+  do
+    start <- getPosition
+    upper <- Var.foreignUpper E.TStart
+    commentsAfterClass <- Space.chompAndCheckIndent E.TSpace E.TIndentStart
+    var <- addLocation (Var.lower E.TStart)
+    end <- getPosition
+    commentsAfter <- Space.chomp E.TSpace
+    let region = A.Region start end
+    let constraint =
+          case upper of
+            Var.Unqualified name ->
+              Src.Constraint region name var
+            Var.Qualified home name ->
+              Src.ConstraintQual region home name var
+    return
+      ( A.At region constraint,
+        SC.ConstraintComments commentsBefore commentsAfterClass commentsAfter
+      )
 
 -- TYPE EXPRESSIONS
 

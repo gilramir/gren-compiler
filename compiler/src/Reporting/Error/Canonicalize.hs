@@ -39,6 +39,7 @@ data Error
   | AmbiguousVariant A.Region (Maybe Name.Name) Name.Name ModuleName.Canonical (OneOrMore.OneOrMore ModuleName.Canonical)
   | AmbiguousBinop A.Region Name.Name ModuleName.Canonical (OneOrMore.OneOrMore ModuleName.Canonical)
   | BadArity A.Region BadArityContext Name.Name Int Int
+  | ConstraintUnsolved A.Region Name.Name
   | Binop A.Region Name.Name Name.Name
   | CustomTypeTooManyParams A.Region Name.Name Int
   | DuplicateDecl Name.Name A.Region A.Region
@@ -341,6 +342,21 @@ toReport source err =
                             D.indent 4 $ D.vcat $ map D.dullyellow alts
                           ]
                   ]
+    ConstraintUnsolved region name ->
+      Report.Report "UNSOLVED CONSTRAINT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "I can read the `"
+                ++ Name.toChars name
+                ++ "` constraint on this annotation, but I cannot check it yet:",
+            D.reflow $
+              "Constraints parse in this version but are not solved yet, so accepting one\
+              \ would mean compiling an annotation whose promise nothing checks. Remove\
+              \ the constraint for now."
+          )
     ExportOpenAlias region name ->
       Report.Report "BAD EXPORT" region [] $
         Code.toSnippet

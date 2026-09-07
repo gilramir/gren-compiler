@@ -292,8 +292,9 @@ addDefNodes env nodes (A.At _ def) =
             let cdef = Can.Def Can.unnumbered aname args cbody
             let node = (Define cdef, name, Map.keys freeLocals)
             logLetLocals args freeLocals (node : nodes)
-        Just (tipe, _) ->
+        Just (Src.Annotation maybeContext tipe _) ->
           do
+            Type.checkContext maybeContext
             (Can.Forall freeVars ctipe) <- Type.toAnnotation env tipe
             ((args, resultType), argBindings) <-
               Pattern.verify (Error.DPFuncArgs name) $

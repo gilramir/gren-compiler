@@ -22,6 +22,11 @@ module AST.Source
     Type,
     Type_ (..),
     TRecordField,
+    Annotation (..),
+    Context (..),
+    ContextEntry,
+    Constraint,
+    Constraint_ (..),
     SourceOrder,
     Module (..),
     getName,
@@ -103,7 +108,7 @@ type RecordField =
 -- DEFINITIONS
 
 data Def
-  = Define (A.Located Name) [([Comment], Pattern)] Expr (Maybe (Type, SC.ValueTypeComments)) SC.ValueComments
+  = Define (A.Located Name) [([Comment], Pattern)] Expr (Maybe Annotation) SC.ValueComments
   | Destruct Pattern Expr SC.ValueComments
   deriving (Show)
 
@@ -147,6 +152,37 @@ data Type_
 
 type TRecordField = (A.Located Name, Type, SC.RecordFieldComments)
 
+-- ANNOTATION
+
+-- | A type, optionally qualified by a constraint context.
+--
+-- The context lives here rather than inside `Type_` because a constraint is
+-- not a type — it qualifies one (D111). `Eq a =>` says something about the
+-- binder `a`, and there is no position in the language where a constraint
+-- could stand as a type: `Array (Eq a => a)` is not a thing to be written, and
+-- a constructor inside `Type_` would make it parse.
+data Annotation = Annotation (Maybe Context) Type SC.ValueTypeComments
+  deriving (Show)
+
+-- | The @(Eq a, Ord b) =>@ in front of an annotation.
+--
+-- There is no empty context — @() =>@ does not parse — so a `Context` always
+-- holds at least one entry and `Nothing` is the only way to say "unqualified".
+data Context = Context [ContextEntry] SC.ContextComments
+  deriving (Show)
+
+type ContextEntry = (Constraint, SC.ConstraintComments)
+
+type Constraint = A.Located Constraint_
+
+-- | A class applied to a bound type variable, and only to a variable: `Eq a`
+-- is a context and `Eq (Array a)` is an instance head. Keeping the argument a
+-- variable is what lets D111 key the constraint list off `FreeVars`.
+data Constraint_
+  = Constraint A.Region Name (A.Located Name)
+  | ConstraintQual A.Region Name Name (A.Located Name)
+  deriving (Show)
+
 -- MODULE
 
 type SourceOrder = Int
@@ -187,7 +223,7 @@ data Import = Import
   }
   deriving (Show)
 
-data Value = Value (A.Located Name) [([Comment], Pattern)] Expr (Maybe (Type, SC.ValueTypeComments)) SC.ValueComments
+data Value = Value (A.Located Name) [([Comment], Pattern)] Expr (Maybe Annotation) SC.ValueComments
   deriving (Show)
 
 data Union = Union (A.Located Name) [([Comment], A.Located Name)] [UnionVariant] SC.UnionComments
