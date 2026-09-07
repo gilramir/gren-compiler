@@ -2,7 +2,7 @@
 {-# LANGUAGE NoPolyKinds #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Bytes to Core, against @schema/geng/core/v3.proto@.
+-- | Bytes to Core, against @schema/geng/core/v4.proto@.
 --
 -- __The reader enforces the canonical profile__ (§B7). C10 writes its seven
 -- rules as properties of the writer; making them properties of the reader too
@@ -70,7 +70,8 @@ data Input = Input
 data Env = Env
   { _path :: ![String],
     _strings :: !(Map.Map Int Str),
-    _quals :: !(Map.Map Int QualName)
+    _quals :: !(Map.Map Int QualName),
+    _types :: !(Map.Map Int Type)
   }
 
 -- | Every string in a module, as one type. 'Core.Wire.Encode' says why the
@@ -107,7 +108,7 @@ instance Monad P where
 
 runP :: P a -> BS.ByteString -> Int -> Either Error a
 runP p buf base =
-  fmap fst (unP p (Env [] Map.empty Map.empty) (Input buf base))
+  fmap fst (unP p (Env [] Map.empty Map.empty Map.empty) (Input buf base))
 
 -- | Push a field name onto the path an error will name.
 inField :: String -> P a -> P a
@@ -438,6 +439,45 @@ repQual name tag =
       Just [] -> failAt here ("field " ++ show tag ++ " is present holding its default []")
       Just indices -> mapM resolveQual indices
 
+-- TYPES (D94)
+
+-- | A 1-based index into the module's type table. Zero is absent, and no type
+-- field in the schema is optional, so a zero is always an error.
+resolveType :: Word64 -> P Type
+resolveType 0 = failP "a type field is absent"
+resolveType i =
+  do
+    table <- P (\env input -> Right (_types env, input))
+    case Map.lookup (fromIntegral i) table of
+      Just t -> pure t
+      Nothing -> failP ("type index " ++ show i ++ " is past the end of the table")
+
+-- | A type field. Every one is required where it appears.
+--
+-- __A forward reference inside the table itself lands here__, and says the same
+-- thing: while the table is being read the environment holds only the entries
+-- already read, so an entry that names a later one is "past the end of the
+-- table". That is the whole cost of hash-consing to the reader, and it is why
+-- D94 orders entries by height.
+typ :: String -> Word32 -> P Type
+typ name tag =
+  do
+    got <- next name tag WVarint varint
+    case got of
+      Nothing -> failP ("field " ++ show tag ++ " (" ++ name ++ ") is missing")
+      Just i -> resolveType i
+
+-- | @repeated uint32@ of types, packed like 'repText'.
+repType :: String -> Word32 -> P [Type]
+repType name tag =
+  do
+    here <- offset
+    got <- next name tag WBytes (submessage packedVarints)
+    case got of
+      Nothing -> pure []
+      Just [] -> failAt here ("field " ++ show tag ++ " is present holding its default []")
+      Just indices -> mapM resolveType indices
+
 qualTable :: P [QualName]
 qualTable = go id
   where
@@ -481,6 +521,82 @@ sortKey (QualName (ModuleName.Canonical (Pkg.Name author project) modul) name) =
 
 asStr :: Utf8.Utf8 t -> Str
 asStr = Coerce.coerce
+
+-- | The type table (D94), read one entry at a time with the entries before it
+-- already in scope.
+--
+-- That is what hash-consing costs the reader and the whole of it: an entry's
+-- nested types are indices into this same table, so the environment has to grow
+-- as the table is read. It stays one pass because D94 orders entries by height
+-- and a type is taller than everything inside it.
+typeTable :: P [Type]
+typeTable = go Map.empty (1 :: Int) id
+  where
+    go table n acc =
+      do
+        got <- withSoFar table (next "types" 3 WBytes (submessage typeEntryP))
+        case got of
+          Nothing -> pure (acc [])
+          Just t -> go (Map.insert n t table) (n + 1) (acc . (t :))
+
+    withSoFar table p = P (\env input -> unP p env {_types = table} input)
+
+-- | D94\'s order, checked over the content the way it is stated: by height,
+-- then the constructor\'s tag, then the member\'s fields left to right, each
+-- list by its length and then element by element, and every leaf as its index
+-- in the table it points into.
+--
+-- __This is a second statement of the order, not a shared one__, and that is
+-- deliberate for the reason D93\'s @sortKey@ is: the encoder sorts and the
+-- reader checks, so a drift between them fails every module in the corpus
+-- rather than producing two files with the same meaning and different bytes.
+-- The reverse maps below are what make the two statements comparable by eye —
+-- the encoder looks an index up, and this looks the same index up backwards.
+withTypeTable :: [Str] -> [QualName] -> [Type] -> P a -> P a
+withTypeTable strings quals types body =
+  do
+    let strIx = Map.fromList (zip strings [1 :: Int ..])
+        qualIx = Map.fromList (zip quals [1 :: Int ..])
+        typeIx = Map.fromList (zip types [1 :: Int ..])
+        keys = map (\t -> (typeHeight t, typeSortKey strIx qualIx typeIx t)) types
+    unless (and (zipWith (<) keys (drop 1 keys))) $
+      failP "the type table is not in ascending (height, content) order"
+    let table = Map.fromList (zip [1 ..] types)
+    P (\env input -> unP body env {_types = table} input)
+
+-- | One more than the tallest type inside it; a 'TVar' is 1.
+typeHeight :: Type -> Int
+typeHeight t =
+  case t of
+    TVar _ -> 1
+    TCon _ args -> 1 + tallest args
+    TFun args result -> 1 + tallest (result : args)
+    TRecord fields _ -> 1 + tallest (map snd fields)
+    TForall _ constraints body -> 1 + tallest (body : [c | CClass _ c <- constraints])
+  where
+    tallest = foldr (max . typeHeight) 0
+
+typeSortKey :: Map.Map Str Int -> Map.Map QualName Int -> Map.Map Type Int -> Type -> [Int]
+typeSortKey strings quals types = keyOf
+  where
+    keyOf t =
+      case t of
+        TVar name -> [1, strIx name]
+        TCon name args -> 2 : qualIx name : counted [[typeIx a] | a <- args]
+        TFun args result -> 3 : counted [[typeIx a] | a <- args] ++ [typeIx result]
+        TRecord fields row ->
+          4 : counted [[strIx f, typeIx ft] | (f, ft) <- fields] ++ maybe [0] (\r -> [1, strIx r]) row
+        TForall vars constraints body ->
+          5
+            : counted [[strIx v] | v <- vars]
+            ++ counted [[qualIx c, typeIx ct] | CClass c ct <- constraints]
+            ++ [typeIx body]
+
+    counted xs = length xs : concat xs
+
+    strIx s = if Utf8.size s == 0 then 0 else Map.findWithDefault 0 (asStr s) strings
+    qualIx q = Map.findWithDefault 0 q quals
+    typeIx t = Map.findWithDefault 0 t types
 
 -- | A @oneof@: exactly one member, and it is written even when it holds its
 -- type's default, so there is no rule 5 here.
@@ -589,8 +705,10 @@ fileEntryP =
 
 -- TYPES
 
-typeP :: P Type
-typeP =
+-- | One entry of the table, and the only place a type is spelled out. Every
+-- other appearance is an index, including the ones inside this message.
+typeEntryP :: P Type
+typeEntryP =
   message "Type" 5 $
     oneof
       "type"
@@ -606,15 +724,15 @@ tconP =
   message "TCon" 2 $
     do
       name <- qual "name" 1
-      args <- rep "args" 2 typeP
+      args <- repType "args" 2
       pure (TCon name args)
 
 tfunP :: P Type
 tfunP =
   message "TFun" 2 $
     do
-      args <- rep "args" 1 typeP
-      result <- msg "result" 2 typeP
+      args <- repType "args" 1
+      result <- typ "result" 2
       pure (TFun args result)
 
 trecordP :: P Type
@@ -630,7 +748,7 @@ fieldTypeP =
   message "FieldType" 2 $
     do
       field <- text "field" 1
-      t <- msg "type" 2 typeP
+      t <- typ "type" 2
       pure (field, t)
 
 tforallP :: P Type
@@ -639,7 +757,7 @@ tforallP =
     do
       vars <- repText "vars" 1
       constraints <- rep "constraints" 2 constraintP
-      body <- msg "body" 3 typeP
+      body <- typ "body" 3
       pure (TForall vars constraints body)
 
 constraintP :: P Constraint
@@ -647,7 +765,7 @@ constraintP =
   message "Constraint" 2 $
     do
       cls <- qual "class_name" 1
-      t <- msg "type" 2 typeP
+      t <- typ "type" 2
       pure (CClass cls t)
 
 -- DECLARATIONS
@@ -669,7 +787,7 @@ ctorP =
     do
       name <- qual "name" 1
       tag <- u32 "tag" 2
-      fields <- rep "fields" 3 typeP
+      fields <- repType "fields" 3
       pure (Ctor name (fromIntegral tag) fields)
 
 transparencyFromCode :: Word32 -> Maybe Transparency
@@ -708,7 +826,7 @@ methodSigP =
   message "MethodSig" 2 $
     do
       name <- text "name" 1
-      t <- msg "type" 2 typeP
+      t <- typ "type" 2
       pure (name, t)
 
 instanceDeclP :: P InstanceDecl
@@ -716,7 +834,7 @@ instanceDeclP =
   message "InstanceDecl" 4 $
     do
       cls <- qual "class_name" 1
-      head_ <- msg "head" 2 typeP
+      head_ <- typ "head" 2
       origin <- enum_ "origin" 3 originFromCode
       methods <- rep "methods" 4 methodImplP
       pure (InstanceDecl cls head_ origin methods)
@@ -733,29 +851,32 @@ methodImplP =
 
 moduleP :: P Module
 moduleP =
-  message "Module" 13 $
+  message "Module" 14 $
     do
       strings <- stringTable
       withTable strings $
         do
           quals <- qualTable
-          withQualTable quals moduleBodyP
+          withQualTable quals $
+            do
+              types <- typeTable
+              withTypeTable strings quals types moduleBodyP
 
 moduleBodyP :: P Module
 moduleBodyP =
   do
-    name <- msg "name" 3 moduleNameP
-    entries <- rep "files" 4 fileEntryP
+    name <- msg "name" 4 moduleNameP
+    entries <- rep "files" 5 fileEntryP
     files <- fileTable entries
-    dataDecls <- rep "data_decls" 5 dataDeclP
-    classes <- rep "classes" 6 classDeclP
-    instances <- rep "instances" 7 instanceDeclP
-    defs <- rep "defs" 8 bindP
-    defsRec <- rep "defs_rec" 9 recGroupP
-    exports <- repQual "exports" 10
-    manager <- optMsg "manager" 11 managerP
-    ports <- rep "ports" 12 portP
-    main_ <- optMsg "main" 13 mainP
+    dataDecls <- rep "data_decls" 6 dataDeclP
+    classes <- rep "classes" 7 classDeclP
+    instances <- rep "instances" 8 instanceDeclP
+    defs <- rep "defs" 9 bindP
+    defsRec <- rep "defs_rec" 10 recGroupP
+    exports <- repQual "exports" 11
+    manager <- optMsg "manager" 12 managerP
+    ports <- rep "ports" 13 portP
+    main_ <- optMsg "main" 14 mainP
     pure
       Module
         { _moduleName = name,
@@ -856,7 +977,7 @@ exprP :: P Expr
 exprP =
   message "Expr" 23 $
     do
-      t <- msg "type" 1 typeP
+      t <- typ "type" 1
       s <- msg "span" 2 spanP
       node <- nodeP
       pure (Expr node t s)
@@ -992,7 +1113,7 @@ tyAppP =
   message "ETyApp" 2 $
     do
       fn <- msg "fn" 1 exprP
-      args <- rep "args" 2 typeP
+      args <- repType "args" 2
       pure (ETyApp fn args)
 
 -- | The third well-formedness rule the schema cannot state: @todo@ is present
@@ -1018,7 +1139,7 @@ binderP =
   message "Binder" 3 $
     do
       name <- text "name" 1
-      t <- msg "type" 2 typeP
+      t <- typ "type" 2
       s <- msg "span" 3 spanP
       pure (Binder name t s)
 

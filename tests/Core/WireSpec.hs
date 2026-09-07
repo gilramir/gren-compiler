@@ -39,11 +39,11 @@ spec :: Spec
 spec = do
   describe "the file" $ do
     it "starts with the magic and the schema version" $
-      -- The literal 3 is deliberate. A version bump is meant to be a visible
+      -- The literal 4 is deliberate. A version bump is meant to be a visible
       -- event, and this failing is what one looks like.
       case Wire.encode (moduleWith []) of
         Left problems -> expectationFailure (unwords problems)
-        Right bytes -> BS.take 9 bytes `shouldBe` Wire.magic <> BS.singleton 3
+        Right bytes -> BS.take 9 bytes `shouldBe` Wire.magic <> BS.singleton 4
 
     it "refuses a file that is not Core" $
       isLeft (Wire.decode "not core at all, not even close") `shouldBe` True

@@ -2,7 +2,7 @@
 {-# LANGUAGE NoPolyKinds #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Core to bytes, against @schema/geng/core/v3.proto@.
+-- | Core to bytes, against @schema/geng/core/v4.proto@.
 --
 -- Read this beside the schema; each function below is one message, in the
 -- schema's order, and each field is one line in the schema's tag order. That
@@ -78,7 +78,7 @@ str = Coerce.coerce
 -- encode time or, worse, a table that a second frontend would not reproduce.
 data Table
   = Collecting
-  | Resolved !(Map.Map Str Int) !(Map.Map QualName Int)
+  | Resolved !(Map.Map Str Int) !(Map.Map QualName Int) !(Map.Map Type Int)
 
 -- | Bytes and how many of them there are — or the strings they would need, or
 -- the reasons there are none.
@@ -88,18 +88,18 @@ data Table
 -- messages rather than stopping at the first means a module with three
 -- out-of-range literals reports three, which is what a person fixing them wants.
 data Piece
-  = Piece !Int B.Builder ![Str] ![QualName]
+  = Piece !Int B.Builder ![Str] ![QualName] ![Type]
   | Bad [String]
 
 instance Semigroup Piece where
   Bad a <> Bad b = Bad (a ++ b)
   Bad a <> _ = Bad a
   _ <> Bad b = Bad b
-  Piece n1 b1 s1 q1 <> Piece n2 b2 s2 q2 =
-    Piece (n1 + n2) (b1 <> b2) (s1 ++ s2) (q1 ++ q2)
+  Piece n1 b1 s1 q1 t1 <> Piece n2 b2 s2 q2 t2 =
+    Piece (n1 + n2) (b1 <> b2) (s1 ++ s2) (q1 ++ q2) (t1 ++ t2)
 
 instance Monoid Piece where
-  mempty = Piece 0 mempty [] []
+  mempty = Piece 0 mempty [] [] []
 
 newtype Enc = Enc {runEnc :: Table -> Piece}
 
@@ -121,12 +121,13 @@ run :: Enc -> Either [String] B.Builder
 run enc =
   case runEnc enc Collecting of
     Bad problems -> Left problems
-    Piece _ _ strings quals ->
+    Piece _ _ strings quals types ->
       let stringTbl = Map.fromList (zip (Set.toAscList (Set.fromList strings)) [1 ..])
           qualTbl = Map.fromList (zip (List.sortBy qualOrder (Set.toList (Set.fromList quals))) [1 ..])
-       in case runEnc enc (Resolved stringTbl qualTbl) of
+          typeTbl = buildTypes stringTbl qualTbl types
+       in case runEnc enc (Resolved stringTbl qualTbl typeTbl) of
             Bad problems -> Left problems
-            Piece _ builder _ _ -> Right builder
+            Piece _ builder _ _ _ -> Right builder
 
 -- | The order D93 states, and it is __not__ the derived one.
 --
@@ -148,10 +149,84 @@ qualOrder (QualName (ModuleName.Canonical (Pkg.Name a1 p1) m1) n1) (QualName (Mo
     <> compare (str m1) (str m2)
     <> compare (str n1) (str n2)
 
+-- | The type table's order, D94's, and the reason it is built one height at a
+-- time.
+--
+-- __By height, then by content: the constructor's tag, then the member's fields
+-- left to right, each list compared by its length and then element by element,
+-- and every leaf compared as its index in the table it points into.__
+--
+-- Height first is not a preference, it is what hash-consing needs. A type is
+-- taller than every type inside it, so ordering by height puts each entry after
+-- everything it references — which is what lets the reader resolve an entry the
+-- moment it has read it, and makes a forward reference a hard error rather than
+-- a second pass. Within one height, every child already has an index, so the
+-- rest of the key is integers and 'typeSortKey' can build it without recursing.
+--
+-- __Comparing a leaf by its index is still an order stated over the content__,
+-- which is what D93 said a sort rule has to be. Index order in the string table
+-- /is/ UTF-8 byte order and index order in the name table /is/
+-- (author, project, module, name), because each of those tables is itself
+-- sorted by its content. The indirection buys the shorter key and costs nothing
+-- a second frontend has to know beyond the two orders it already knows.
+--
+-- The key is injective, which is what stops the sort below leaking the order
+-- @Set.toList@ happened to produce: the tag says which constructor, the counted
+-- lists say where each field ends, and an index determines its entry, so two
+-- types with the same key are the same type.
+buildTypes :: Map.Map Str Int -> Map.Map QualName Int -> [Type] -> Map.Map Type Int
+buildTypes strings quals types =
+  List.foldl' assign Map.empty (Map.elems byHeight)
+  where
+    byHeight :: Map.Map Int [Type]
+    byHeight = Map.fromListWith (++) [(typeHeight t, [t]) | t <- Set.toList (Set.fromList types)]
+
+    assign table group =
+      List.foldl'
+        (\m (i, t) -> Map.insert t i m)
+        table
+        (zip [Map.size table + 1 ..] (List.sortOn (typeSortKey strings quals table) group))
+
+-- | One more than the tallest type inside it; a 'TVar' is 1.
+typeHeight :: Type -> Int
+typeHeight t =
+  case t of
+    TVar _ -> 1
+    TCon _ args -> 1 + tallest args
+    TFun args result -> 1 + tallest (result : args)
+    TRecord fields _ -> 1 + tallest (map snd fields)
+    TForall _ constraints body -> 1 + tallest (body : [c | CClass _ c <- constraints])
+  where
+    tallest = foldr (max . typeHeight) 0
+
+-- | The rest of 'buildTypes'\' key, over a table that already holds every type
+-- shorter than this one.
+typeSortKey :: Map.Map Str Int -> Map.Map QualName Int -> Map.Map Type Int -> Type -> [Int]
+typeSortKey strings quals table = keyOf
+  where
+    keyOf t =
+      case t of
+        TVar name -> [1, strIx name]
+        TCon name args -> 2 : qualIx name : counted [[typeIx a] | a <- args]
+        TFun args result -> 3 : counted [[typeIx a] | a <- args] ++ [typeIx result]
+        TRecord fields row ->
+          4 : counted [[strIx f, typeIx ft] | (f, ft) <- fields] ++ maybe [0] (\r -> [1, strIx r]) row
+        TForall vars constraints body ->
+          5
+            : counted [[strIx v] | v <- vars]
+            ++ counted [[qualIx c, typeIx ct] | CClass c ct <- constraints]
+            ++ [typeIx body]
+
+    counted xs = length xs : concat xs
+
+    strIx s = fromIntegral (indexOf strings (str s))
+    qualIx q = Map.findWithDefault 0 q quals
+    typeIx t = Map.findWithDefault 0 t table
+
 -- PRIMITIVES
 
 varintP :: Word64 -> Piece
-varintP n = Piece (varintSize n) (go n) [] []
+varintP n = Piece (varintSize n) (go n) [] [] []
   where
     go w =
       if w < 0x80
@@ -168,7 +243,7 @@ key :: Word32 -> WireType -> Enc
 key tag wire = lift (keyP tag wire)
 
 bytes :: Int -> B.Builder -> Enc
-bytes n b = lift (Piece n b [] [])
+bytes n b = lift (Piece n b [] [] [])
 
 -- FIELDS
 --
@@ -224,8 +299,8 @@ withIndex s0 what =
             let collected = if Utf8.size s == 0 then [] else [s]
              in case runEnc (what 0) Collecting of
                   Bad problems -> Bad problems
-                  Piece _ _ more quals -> Piece 0 mempty (collected ++ more) quals
-          Resolved m _ -> runEnc (what (indexOf m s)) table
+                  Piece _ _ more quals types -> Piece 0 mempty (collected ++ more) quals types
+          Resolved m _ _ -> runEnc (what (indexOf m s)) table
 
 -- QUALIFIED NAMES
 --
@@ -243,8 +318,8 @@ withQual q what =
       Collecting ->
         case runEnc (what 0) Collecting of
           Bad problems -> Bad problems
-          Piece _ _ strings more -> Piece 0 mempty (qualStrings q ++ strings) (q : more)
-      Resolved _ m ->
+          Piece _ _ strings more types -> Piece 0 mempty (qualStrings q ++ strings) (q : more) types
+      Resolved _ m _ ->
         case Map.lookup q m of
           Just i -> runEnc (what (fromIntegral i)) table
           Nothing ->
@@ -280,6 +355,56 @@ repQual tag qs = go qs mempty
     go [] acc = key tag WBytes <> packedRun acc
     go (q : rest) acc = withQual q (\i -> go rest (acc <> varint (fromIntegral i)))
 
+-- TYPES
+--
+-- D94: a `Type` is a 1-based index into the module's type table, and the table
+-- is hash-consed -- a type nested inside another is an index into the same
+-- table rather than bytes inside its parent's entry. Version 3 had already made
+-- a `TCon`'s head one varint; what was left was that 83,566 type occurrences in
+-- the corpus were 4,084 distinct types, each written out at every occurrence.
+
+-- | Collect a type on the first pass, and do @what@ with its index on the
+-- second.
+--
+-- The collecting side runs @typeEnc t@ rather than inspecting the type, which
+-- is what makes the recursion free: 'typeEnc' writes a nested type through
+-- 'typ' or 'repType', so running it collects every type inside @t@, along with
+-- every string and qualified name any of them mentions. That is D93's bug in
+-- its deeper form — a table's entries index into the tables before it — and
+-- the fix is the same shape: whatever the entry would write, the collecting
+-- pass has to have reported.
+withType :: Type -> (Word32 -> Enc) -> Enc
+withType t what =
+  Enc $ \table ->
+    case table of
+      Collecting ->
+        case runEnc (typeEnc t) Collecting of
+          Bad problems -> Bad problems
+          Piece _ _ strings quals inner ->
+            case runEnc (what 0) Collecting of
+              Bad problems -> Bad problems
+              Piece _ _ strings' quals' more ->
+                Piece 0 mempty (strings ++ strings') (quals ++ quals') (t : inner ++ more)
+      Resolved _ _ m ->
+        case Map.lookup t m of
+          Just i -> runEnc (what (fromIntegral i)) table
+          Nothing ->
+            -- Unreachable, for 'indexOf'\'s reason: one 'Enc', run twice.
+            Bad ["Core.Wire.Encode: a type is not in the type table"]
+
+-- | A type field. Every one of them is required where it appears, so there is
+-- no index 0 to write and rule 5 has nothing to skip.
+typ :: Word32 -> Type -> Enc
+typ tag t = withType t (u32 tag)
+
+-- | @repeated uint32@ of types, packed like 'repText'.
+repType :: Word32 -> [Type] -> Enc
+repType _ [] = mempty
+repType tag ts = go ts mempty
+  where
+    go [] acc = key tag WBytes <> packedRun acc
+    go (t : rest) acc = withType t (\i -> go rest (acc <> varint (fromIntegral i)))
+
 -- | A string field, implicit presence: index 0 is omitted, exactly as an empty
 -- string was in version 1.
 text :: Word32 -> Utf8.Utf8 t -> Enc
@@ -311,8 +436,8 @@ packedRun inner =
   Enc $ \table ->
     case runEnc inner table of
       Bad problems -> Bad problems
-      Piece n b more quals ->
-        runEnc (varint (fromIntegral n)) table <> Piece n b more quals
+      Piece n b more quals types ->
+        runEnc (varint (fromIntegral n)) table <> Piece n b more quals types
 
 -- | The table itself, written at tag 1 so that rule 1 puts it on the wire ahead
 -- of everything that indexes into it.
@@ -321,7 +446,7 @@ stringTable =
   Enc $ \table ->
     case table of
       Collecting -> mempty
-      Resolved m _ -> runEnc (foldMap rawText (Map.keys m)) table
+      Resolved m _ _ -> runEnc (foldMap rawText (Map.keys m)) table
   where
     rawText s =
       let n = Utf8.size s
@@ -334,12 +459,23 @@ qualTable =
   Enc $ \table ->
     case table of
       Collecting -> mempty
-      Resolved _ m ->
+      Resolved _ m _ ->
         runEnc
           (foldMap (msg 2 . rawQual) (List.sortBy qualOrder (Map.keys m)))
           table
   where
     rawQual (QualName home name) = msg 1 (moduleNameEnc home) <> text 2 name
+
+-- | The type table at tag 3, in the order 'buildTypes' assigned. Its entries
+-- index into both tables before it and into itself, which is why it is last of
+-- the three.
+typeTable :: Enc
+typeTable =
+  Enc $ \table ->
+    case table of
+      Collecting -> mempty
+      Resolved _ _ m ->
+        runEnc (foldMap (msg 3 . typeEnc) (map fst (List.sortOn snd (Map.toList m)))) table
 
 -- MESSAGES
 
@@ -349,8 +485,8 @@ msg tag inner =
   Enc $ \table ->
     case runEnc inner table of
       Bad problems -> Bad problems
-      Piece n b more quals ->
-        runEnc (key tag WBytes <> varint (fromIntegral n)) table <> Piece n b more quals
+      Piece n b more quals types ->
+        runEnc (key tag WBytes <> varint (fromIntegral n)) table <> Piece n b more quals types
 
 -- | An @optional@ submessage.
 optMsg :: Word32 -> (a -> Enc) -> Maybe a -> Enc
@@ -396,18 +532,18 @@ typeEnc :: Type -> Enc
 typeEnc t =
   case t of
     TVar n -> oneofText 1 n
-    TCon name args -> msg 2 (qual 1 name <> rep 2 typeEnc args)
-    TFun args result -> msg 3 (rep 1 typeEnc args <> msg 2 (typeEnc result))
+    TCon name args -> msg 2 (qual 1 name <> repType 2 args)
+    TFun args result -> msg 3 (repType 1 args <> typ 2 result)
     TRecord fields row ->
       msg 4 (rep 1 fieldTypeEnc fields <> optText 2 row)
     TForall vars constraints body ->
-      msg 5 (repText 1 vars <> rep 2 constraintEnc constraints <> msg 3 (typeEnc body))
+      msg 5 (repText 1 vars <> rep 2 constraintEnc constraints <> typ 3 body)
 
 fieldTypeEnc :: (Field, Type) -> Enc
-fieldTypeEnc (field, t) = text 1 field <> msg 2 (typeEnc t)
+fieldTypeEnc (field, t) = text 1 field <> typ 2 t
 
 constraintEnc :: Constraint -> Enc
-constraintEnc (CClass cls t) = qual 1 cls <> msg 2 (typeEnc t)
+constraintEnc (CClass cls t) = qual 1 cls <> typ 2 t
 
 -- DECLARATIONS
 
@@ -423,7 +559,7 @@ ctorEnc :: Ctor -> Enc
 ctorEnc (Ctor name tag fields) =
   qual 1 name
     <> u32 2 (fromIntegral tag)
-    <> rep 3 typeEnc fields
+    <> repType 3 fields
 
 -- | C10 and §B10: an enum's wire codes come from a table in the source, so that
 -- reordering a data declaration cannot silently reinterpret a serialized
@@ -453,12 +589,12 @@ classDeclEnc (ClassDecl name param openness methods) =
     <> rep 4 methodSigEnc methods
 
 methodSigEnc :: (Name.Name, Type) -> Enc
-methodSigEnc (name, t) = text 1 name <> msg 2 (typeEnc t)
+methodSigEnc (name, t) = text 1 name <> typ 2 t
 
 instanceDeclEnc :: InstanceDecl -> Enc
 instanceDeclEnc (InstanceDecl cls head_ origin methods) =
   qual 1 cls
-    <> msg 2 (typeEnc head_)
+    <> typ 2 head_
     <> enum_ 3 (originCode origin)
     <> rep 4 methodImplEnc methods
 
@@ -471,17 +607,18 @@ moduleEnc :: Module -> Enc
 moduleEnc m =
   stringTable
     <> qualTable
-    <> msg 3 (moduleNameEnc (_moduleName m))
-    <> rep 4 fileEntryEnc (Map.toAscList (_moduleFiles m))
-    <> rep 5 dataDeclEnc (_moduleData m)
-    <> rep 6 classDeclEnc (_moduleClasses m)
-    <> rep 7 instanceDeclEnc (_moduleInstances m)
-    <> rep 8 bindEnc (_moduleDefs m)
-    <> rep 9 recGroupEnc (_moduleDefsRec m)
-    <> repQual 10 (_moduleExports m)
-    <> optMsg 11 managerEnc (_moduleManager m)
-    <> rep 12 portEnc (_modulePorts m)
-    <> optMsg 13 mainEnc (_moduleMain m)
+    <> typeTable
+    <> msg 4 (moduleNameEnc (_moduleName m))
+    <> rep 5 fileEntryEnc (Map.toAscList (_moduleFiles m))
+    <> rep 6 dataDeclEnc (_moduleData m)
+    <> rep 7 classDeclEnc (_moduleClasses m)
+    <> rep 8 instanceDeclEnc (_moduleInstances m)
+    <> rep 9 bindEnc (_moduleDefs m)
+    <> rep 10 recGroupEnc (_moduleDefsRec m)
+    <> repQual 11 (_moduleExports m)
+    <> optMsg 12 managerEnc (_moduleManager m)
+    <> rep 13 portEnc (_modulePorts m)
+    <> optMsg 14 mainEnc (_moduleMain m)
 
 recGroupEnc :: [QualName] -> Enc
 recGroupEnc names = repQual 1 names
@@ -525,7 +662,7 @@ converterEnc (Converter isBytes code) =
 
 exprEnc :: Expr -> Enc
 exprEnc (Expr node t s) =
-  msg 1 (typeEnc t)
+  typ 1 t
     <> msg 2 (spanEnc s)
     <> nodeEnc node
 
@@ -552,7 +689,7 @@ nodeEnc node =
     EJoin binds body -> msg 17 (bindsEnc binds body)
     EJump j args -> msg 18 (text 1 j <> rep 2 exprEnc args)
     ETyLam vars body -> msg 19 (repText 1 vars <> msg 2 (exprEnc body))
-    ETyApp fn args -> msg 20 (msg 1 (exprEnc fn) <> rep 2 typeEnc args)
+    ETyApp fn args -> msg 20 (msg 1 (exprEnc fn) <> repType 2 args)
     EWitLam binders body -> msg 21 (absEnc binders body)
     EWitApp fn args -> msg 22 (appEnc fn args)
     ECrash kind -> msg 23 (crashEnc kind)
@@ -580,7 +717,7 @@ crashEnc kind =
 binderEnc :: Binder -> Enc
 binderEnc (Binder name t s) =
   text 1 name
-    <> msg 2 (typeEnc t)
+    <> typ 2 t
     <> msg 3 (spanEnc s)
 
 bindEnc :: Bind -> Enc
