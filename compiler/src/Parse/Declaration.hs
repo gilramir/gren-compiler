@@ -198,7 +198,7 @@ chompMatchingName expectedName =
 
 -- CLASS DECLARATIONS
 
--- | @class Eq a where@ and the annotations under it.
+-- | @class Eq a where@ and the annotations under it, or @class Num a@ alone.
 --
 -- `class` is a contextual keyword (D117), so this has to establish that the
 -- declaration really is one before committing to it: `class` followed by an
@@ -207,6 +207,18 @@ chompMatchingName expectedName =
 -- test is the whole head, read once under `lookAhead` and then read again for
 -- real, which is the same shape `Parse.Type.annotation` uses and for the same
 -- reason.
+--
+-- __The body is optional__ (D133). A class with no methods is not a degenerate
+-- case to be tolerated: `classes.md` §1.2's closed classes have none — their
+-- membership is a table in "Type.Class" and there is nothing for an instance to
+-- implement — and `core` has to be able to write `class Num a` for the
+-- constraint to be nameable at all. §1.2 writes it that way itself.
+--
+-- The same `lookAhead` does the work again: `where` is read once without
+-- committing, so a declaration that has no body ends at its variable and the
+-- space after it belongs to whatever comes next. Its cost is the same one
+-- §G14 already pays -- a misindented `where` is now "no body" rather than an
+-- indentation error.
 classDecl :: Maybe Src.DocComment -> A.Position -> Space.Parser E.Decl (Decl, [Src.Comment])
 classDecl maybeDocs start =
   do
@@ -216,15 +228,22 @@ classDecl maybeDocs start =
         commentsAfterKeyword <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentName
         name <- addLocation (Var.upper E.ClassName)
         commentsAfterName <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentVar
-        var <- addLocation (Var.lower E.ClassVar)
-        commentsAfterVar <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentWhere
-        Keyword.where_ E.ClassWhere
-        commentsAfterWhere <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentBody
-        ((methods, commentsAfter), end) <-
-          withIndent $
-            do
-              ((method, commentsAfterMethod), methodEnd) <- chompClassMethod []
-              chompClassMethods (NonEmpty.singleton method) commentsAfterMethod methodEnd
+        var@(A.At (A.Region _ varEnd) _) <- addLocation (Var.lower E.ClassVar)
+        ((methods, commentsAfterVar, commentsAfterWhere, commentsAfter), end) <-
+          oneOfWithFallback
+            [ do
+                _ <- lookAhead classBodyAhead
+                afterVar <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentWhere
+                Keyword.where_ E.ClassWhere
+                afterWhere <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentBody
+                ((ms, after), bodyEnd) <-
+                  withIndent $
+                    do
+                      ((method, commentsAfterMethod), methodEnd) <- chompClassMethod []
+                      chompClassMethods (NonEmpty.singleton method) commentsAfterMethod methodEnd
+                return ((ms, afterVar, afterWhere, after), bodyEnd)
+            ]
+            (([], [], [], []), varEnd)
         let comments = SC.ClassComments commentsAfterKeyword commentsAfterName commentsAfterVar commentsAfterWhere
         let class_ = A.at start end (Src.Class name var methods comments)
         return ((Class maybeDocs class_, commentsAfter), end)
@@ -238,6 +257,14 @@ classDeclAhead =
     Space.chompAndCheckIndent E.DeclSpace E.DeclStart
     _ <- Var.upper E.DeclStart
     return ()
+
+-- | `where`, after the class variable, read without committing so that a class
+-- with no body is not an indentation error.
+classBodyAhead :: Parser E.DeclClass ()
+classBodyAhead =
+  do
+    _ <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentWhere
+    Keyword.where_ E.ClassWhere
 
 chompClassMethods :: NonEmpty Src.ClassMethod -> [Src.Comment] -> A.Position -> Space.Parser E.DeclClass ([Src.ClassMethod], [Src.Comment])
 chompClassMethods methods@(lastMethod :| rest) commentsBefore end =
