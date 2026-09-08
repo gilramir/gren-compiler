@@ -5,7 +5,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "prepublishOnly": "scripts/prod_build.sh",
-    "build": "npx --package=gren-lang@0.6.3 gren make Main --output=app",
+    "build": "./build_front_end.sh",
     "build:sourcemaps": "npx --package=gren-lang@0.6.3 gren make Main --output=app --sourcemaps",
     "prettier": "prettier -w index.js",
     "prettier:check": "prettier -c index.js"

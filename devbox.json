@@ -16,8 +16,8 @@
         "npm ci"
       ],
       "build": [
-        "npm run build",
-        "./build_dev_bin.sh"
+        "./build_dev_bin.sh",
+        "./build_front_end.sh"
       ],
       "test": [
         "cabal test -f dev"
