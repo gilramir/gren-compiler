@@ -74,7 +74,7 @@ derive ::
 derive home boolDecl region typeName union cls@(Can.Class classHome className) decl witness =
   let Can.ClassDecl param published = decl
       ctx = Ctx home boolDecl region typeName cls param
-      head_ = instanceHead ctx union witness
+      head_ = instanceHead ctx decl union witness
    in if classHome /= ModuleName.basics || className /= Name.fromChars "Eq"
         then
           -- §8.3: structural derivation is defined for `Eq`, `Ord` and
@@ -91,17 +91,25 @@ derive home boolDecl region typeName union cls@(Can.Class classHome className) d
 -- The context is every one of the type's variables constrained by the class
 -- being derived, which is exactly §2.1's rule — @T a@ derives @C@ when @a@
 -- does — written as the head a resolver reads.
-instanceHead :: Ctx -> Can.Union -> Name.Name -> Can.InstanceHead
-instanceHead ctx (Can.Union vars _ _ _) witness =
-  Can.InstanceHead
-    { Can._ih_home = _home ctx,
-      Can._ih_class = _class ctx,
-      Can._ih_con = _home ctx,
-      Can._ih_conName = _typeName ctx,
-      Can._ih_args = map Can.TVar vars,
-      Can._ih_witness = witness,
-      Can._ih_context = Map.fromList [(v, [_class ctx]) | v <- vars]
-    }
+instanceHead :: Ctx -> Can.ClassDecl -> Can.Union -> Name.Name -> Can.InstanceHead
+instanceHead ctx (Can.ClassDecl param published) (Can.Union vars _ _ _) witness =
+  let withoutMethods =
+        Can.InstanceHead
+          { Can._ih_home = _home ctx,
+            Can._ih_class = _class ctx,
+            Can._ih_con = _home ctx,
+            Can._ih_conName = _typeName ctx,
+            Can._ih_args = map Can.TVar vars,
+            Can._ih_witness = witness,
+            Can._ih_context = Map.fromList [(v, [_class ctx]) | v <- vars],
+            Can._ih_methods = Map.empty
+          }
+   in withoutMethods
+        { Can._ih_methods =
+            Map.map
+              (\annotation -> let Can.Forall _ tipe = Instance.specialize withoutMethods param annotation in tipe)
+              published
+        }
 
 -- | A method definition, with the signature the class published for it
 -- specialized at this head — the same 'Canonicalize.Instance.specialize' a
@@ -171,7 +179,8 @@ eqBranch ctx union ctor@(Can.Ctor _ _ _ argTypes) =
       let lefts = [Name.fromChars ("$l" ++ show i) | i <- [0 .. length argTypes - 1]]
           rights = [Name.fromChars ("$r" ++ show i) | i <- [0 .. length argTypes - 1]]
           matched =
-            conjunction ctx
+            conjunction
+              ctx
               [ compare_ (local ctx l) (local ctx r)
               | (compare_, l, r) <- zip3 comparisons lefts rights
               ]
@@ -203,7 +212,8 @@ eqField ctx (index, tipe) =
         comparisons <- traverse (eqField ctx) (zip (repeat index) (map fieldType (Map.elems fields)))
         let names = Map.keys fields
         Result.ok $ \left right ->
-          conjunction ctx
+          conjunction
+            ctx
             [ compare_ (access ctx left field) (access ctx right field)
             | (compare_, field) <- zip comparisons names
             ]
@@ -212,14 +222,12 @@ eqField ctx (index, tipe) =
       -- variable is a component whose type nothing knows.
       Result.throw $
         Error.DeriveComponentIsFunction (_region ctx) (_typeName ctx) index
-    Can.TVar name ->
-      -- @Eq a => Eq (Box a)@ is a correct instance and its body is a call at a
-      -- variable, which is the witness case (§G23.4). Reported here rather than
-      -- left to the resolver because the resolver's message is about a call the
-      -- author did not write, at a variable they cannot see.
-      Result.throw $
-        Error.DeriveNeedsWitness (_region ctx) (_typeName ctx) name
     _ ->
+      -- A component at a type variable is the same call as one at a type:
+      -- @Eq a => Eq (Box a)@ is the head 'instanceHead' already writes, the
+      -- variable is in its context, and the witness for it is the one the
+      -- instance was passed (§G26). Until verb 6 this was
+      -- @CANNOT DERIVE THIS YET@.
       Result.ok $ \left right ->
         at ctx (Can.Call (method ctx) [left, right])
 

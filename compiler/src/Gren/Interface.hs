@@ -8,6 +8,7 @@ module Gren.Interface
     toPublicUnion,
     toPublicAlias,
     toPublicClass,
+    classDecl,
     DependencyInterface (..),
     public,
     private,
@@ -174,6 +175,16 @@ toPublicClass iClass =
   case iClass of
     PublicClass decl -> Just decl
     PrivateClass _ -> Nothing
+
+-- | The declaration, whether or not the module exposes it.
+--
+-- Exposure decides whether the class can be /named/; a witness for a
+-- constraint is built out of what the class declares either way (§G26).
+classDecl :: Class -> Can.ClassDecl
+classDecl iClass =
+  case iClass of
+    PublicClass decl -> decl
+    PrivateClass decl -> decl
 
 -- DEPENDENCY INTERFACE
 

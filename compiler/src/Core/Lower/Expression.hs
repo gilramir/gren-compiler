@@ -59,7 +59,7 @@ where
 import AST.Canonical qualified as Can
 import Core.AST qualified as Core
 import Core.Lower.Literal qualified as Literal
-import Core.Lower.Type (lowerType)
+import Core.Lower.Type (lowerAnnotation, lowerType)
 import Core.Order qualified as Order
 import Core.Refs qualified as Refs
 import Data.Index qualified as Index
@@ -73,6 +73,7 @@ import Data.Word (Word32)
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Reporting.Annotation qualified as A
+import Type.Resolve qualified as Resolve
 import Prelude hiding (span)
 
 -- ENVIRONMENT
@@ -85,10 +86,13 @@ data Env = Env
     _file :: !Core.FileId,
     -- | One entry per node, from the solver.
     _types :: Map.Map Can.NodeId Can.Type,
-    -- | Where each class-method call goes, from `Type.Resolve` (§G23). Total
-    -- for the same reason '_types' is: every use resolved or the module did
-    -- not get here.
-    _resolutions :: Map.Map Can.NodeId (ModuleName.Canonical, Name)
+    -- | What each use of a constrained name elaborates to, from
+    -- `Type.Resolve` (§G23, §G26). Total for the same reason '_types' is:
+    -- every use elaborated or the module did not get here.
+    _uses :: Resolve.Uses,
+    -- | The witness parameters each definition binds, keyed by the node id of
+    -- its body.
+    _params :: Resolve.Params
   }
 
 -- | The Core type recorded for a node.
@@ -102,16 +106,61 @@ typeOf env nid =
           ++ show nid
           ++ " has no recorded type. See docs/m1a-node-types.md."
 
--- | The instance a class-method call was resolved to.
-resolutionOf :: Env -> Can.NodeId -> (ModuleName.Canonical, Name)
-resolutionOf env nid =
-  case Map.lookup nid (_resolutions env) of
-    Just answer -> answer
-    Nothing ->
-      error $
-        "Core.Lower.Expression: class-method node "
-          ++ show nid
-          ++ " was not resolved. See docs/m1b-classes.md §G23."
+-- | What a use of a constrained name elaborates to, or nothing if the name is
+-- not constrained.
+useOf :: Env -> Can.NodeId -> Maybe Resolve.Use
+useOf env nid = Map.lookup nid (_uses env)
+
+-- | The witness parameters a definition binds, found by its body's node id.
+paramsOf :: Env -> Can.NodeId -> [(Name, Can.Type)]
+paramsOf env nid = Map.findWithDefault [] nid (_params env)
+
+-- WITNESSES
+
+-- | A witness, as the value it is (§G26).
+--
+-- A witness for @C t@ is a record with one field per method of @C@; the one an
+-- instance supplies is the binding D125 gives that instance, applied to
+-- witnesses for its own context. So the two nodes R1 keeps for the semantics —
+-- 'Core.AST.EWitLam' and 'Core.AST.EWitApp' — are a lambda and a call that
+-- specialization is allowed to erase, and every other node here is one a
+-- backend already emits.
+witness :: Core.Span -> Resolve.Witness -> Core.Expr
+witness sp w =
+  case w of
+    Resolve.FromParam name tipe ->
+      Core.Expr (Core.EVar name) (lowerType tipe) sp
+    Resolve.FromInstance home name args tipe ->
+      let table = lowerType tipe
+          global = Core.Expr (Core.EGlobal (Core.QualName home name)) table sp
+       in case args of
+            [] -> global
+            _ -> Core.Expr (Core.EWitApp global (map (witness sp) args)) table sp
+
+-- | A use of a constrained name, applied to the witnesses it needs.
+applied :: Env -> Can.NodeId -> Core.Span -> Core.Expr -> Core.Expr
+applied env nid sp fn =
+  case useOf env nid of
+    Just (Resolve.Applied args) -> witnessApp sp fn args
+    _ -> fn
+
+-- | Apply a constrained name to the witnesses its constraints need.
+witnessApp :: Core.Span -> Core.Expr -> [Resolve.Witness] -> Core.Expr
+witnessApp sp fn args =
+  case args of
+    [] -> fn
+    _ -> Core.Expr (Core.EWitApp fn (map (witness sp) args)) (Core.typeOf fn) sp
+
+-- | Bind a definition's witness parameters around its body.
+witnessLam :: Env -> Core.Span -> Can.NodeId -> Core.Expr -> Core.Expr
+witnessLam env sp bodyNid body =
+  case paramsOf env bodyNid of
+    [] -> body
+    params ->
+      Core.Expr
+        (Core.EWitLam [Core.Binder name (lowerType tipe) sp | (name, tipe) <- params] body)
+        (Core.typeOf body)
+        sp
 
 span :: Env -> A.Region -> Core.Span
 span env (A.Region (A.Position startRow startCol) (A.Position endRow endCol)) =
@@ -131,18 +180,30 @@ expr env (Can.Expr nid region value) =
       node v = Core.Expr v tipe sp
    in case value of
         Can.VarLocal name ->
-          node (Core.EVar name)
+          applied env nid sp (node (Core.EVar name))
         Can.VarTopLevel home name ->
-          node (Core.EGlobal (Core.QualName home name))
+          applied env nid sp (node (Core.EGlobal (Core.QualName home name)))
         Can.VarForeign home name _ ->
-          node (Core.EGlobal (Core.QualName home name))
+          applied env nid sp (node (Core.EGlobal (Core.QualName home name)))
         Can.VarMethod _ _ _ _ ->
           -- The instance was picked before the lowering ran, because picking
           -- it needs the solved type and reporting that there is none needs a
-          -- phase that reports (§G23). What is left here is the reference.
-          node (Core.EGlobal (uncurry Core.QualName (resolutionOf env nid)))
+          -- phase that reports (§G23). What is left here is the reference, or
+          -- — when the class parameter is a variable the definition is
+          -- constrained on — the method taken out of the witness it was
+          -- handed (§G26).
+          case useOf env nid of
+            Just (Resolve.Instantiated home name args) ->
+              witnessApp sp (Core.Expr (Core.EGlobal (Core.QualName home name)) tipe sp) args
+            Just (Resolve.Projected w name) ->
+              node (Core.EAccess (witness sp w) name)
+            _ ->
+              error $
+                "Core.Lower.Expression: class-method node "
+                  ++ show nid
+                  ++ " was not resolved. See docs/m1b-classes.md §G23."
         Can.VarOperator _ home name _ ->
-          node (Core.EGlobal (Core.QualName home name))
+          applied env nid sp (node (Core.EGlobal (Core.QualName home name)))
         Can.VarKernel home name ->
           -- @AST.Optimized.toKernelGlobal@ already gave a kernel function a
           -- module: the `gren/kernel` pseudo-package, one module per kernel
@@ -172,10 +233,12 @@ expr env (Can.Expr nid region value) =
               (Core.Expr (Core.EGlobal (Core.QualName ModuleName.basics Name.negate)) (negateType tipe) sp)
               [expr env inner]
         Can.Binop _ home name _ left right ->
-          node $
-            Core.EApp
-              (Core.Expr (Core.EGlobal (Core.QualName home name)) (binopType env left right tipe) sp)
-              [expr env left, expr env right]
+          let opType = binopType env left right tipe
+              op = Core.Expr (Core.EGlobal (Core.QualName home name)) opType sp
+           in node $
+                Core.EApp
+                  (applied env nid sp op)
+                  [expr env left, expr env right]
         Can.Lambda args body ->
           node (lambda env tipe sp args (expr env body))
         Can.Call func args ->
@@ -407,21 +470,38 @@ def env d =
   case d of
     Can.Def nid (A.At region name) args body ->
       bind env (span env region) name (typeOf env nid) args (expr env body)
-    Can.TypedDef (A.At region name) _ args body result ->
-      let tipe = lowerType (foldr (Can.TLambda . snd) result args)
-       in bind env (span env region) name tipe (map fst args) (expr env body)
+    Can.TypedDef (A.At region name) freeVars args body result ->
+      -- __A definition is quantified in Core exactly when it is constrained__
+      -- (§G26). The witness parameters are real binders and the 'Core.TForall'
+      -- that names them is a real type; an unconstrained definition keeps L2's
+      -- unquantified type, because a `TForall` with nothing to bind it is
+      -- decoration and type abstraction is specialization's half of verb 6.
+      let declared = foldr (Can.TLambda . snd) result args
+          sp = span env region
+          value = bindValue env sp (lowerType declared) (map fst args) (expr env body)
+       in case Can.contextOrder freeVars of
+            [] ->
+              Core.Bind (Core.Binder name (lowerType declared) sp) value
+            _ ->
+              Core.Bind
+                (Core.Binder name (lowerAnnotation (Can.Forall freeVars declared)) sp)
+                (witnessLam env sp (nodeIdOf body) value)
 
 bind :: Env -> Core.Span -> Name -> Core.Type -> [Can.Pattern] -> Core.Expr -> Core.Bind
 bind env sp name tipe args body =
-  Core.Bind
-    (Core.Binder name tipe sp)
-    ( case args of
-        [] -> body
-        _ ->
-          let (argTypes, result) = arguments (length args) tipe
-              (binders, wrap) = binderList env sp argTypes args
-           in Core.Expr (Core.ELam binders (wrap body)) (Core.TFun argTypes result) sp
-    )
+  Core.Bind (Core.Binder name tipe sp) (bindValue env sp tipe args body)
+
+bindValue :: Env -> Core.Span -> Core.Type -> [Can.Pattern] -> Core.Expr -> Core.Expr
+bindValue env sp tipe args body =
+  case args of
+    [] -> body
+    _ ->
+      let (argTypes, result) = arguments (length args) tipe
+          (binders, wrap) = binderList env sp argTypes args
+       in Core.Expr (Core.ELam binders (wrap body)) (Core.TFun argTypes result) sp
+
+nodeIdOf :: Can.Expr -> Can.NodeId
+nodeIdOf (Can.Expr nid _ _) = nid
 
 -- | Turn argument patterns into binders, plus the wrapping the ones that are
 -- not simply names need.

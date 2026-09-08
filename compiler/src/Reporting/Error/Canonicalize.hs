@@ -47,7 +47,6 @@ data Error
   | ConstraintVarUnbound A.Region Name.Name Name.Name
   | DeriveComponentIsFunction A.Region Name.Name Int
   | DeriveMethodMissing A.Region Name.Name Name.Name
-  | DeriveNeedsWitness A.Region Name.Name Name.Name
   | DeriveMethodShape A.Region Name.Name Name.Name
   | DeriveNotStructural A.Region Name.Name Name.Name
   | DeriveOnTransparent A.Region Name.Name Name.Name
@@ -469,24 +468,6 @@ toReport source err =
               \ nothing to derive from. This type exposes its constructors, so its structure\
               \ is already public and deriving from it is what that structure means. Expose\
               \ fewer constructors, or drop the attribute."
-          )
-    DeriveNeedsWitness region typeName varName ->
-      Report.Report "CANNOT DERIVE THIS YET" region [] $
-        Code.toSnippet
-          source
-          region
-          Nothing
-          ( D.reflow $
-              "`"
-                ++ Name.toChars typeName
-                ++ "` holds a value of type `"
-                ++ Name.toChars varName
-                ++ "`, and I cannot derive a type with a variable in it yet:",
-            D.reflow $
-              "The instance I would write compares that field with whatever instance `"
-                ++ Name.toChars varName
-                ++ "` turns out to have, and passing an instance in is something I cannot do\
-                   \ in this version. A type with no variables in it derives fine."
           )
     DeriveNotStructural region typeName className ->
       Report.Report "CANNOT DERIVE THIS" region [] $

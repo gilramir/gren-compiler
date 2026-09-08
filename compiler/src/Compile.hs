@@ -21,6 +21,7 @@ import Gren.Package qualified as Pkg
 import Gren.Platform qualified as P
 import Nitpick.Main qualified as NitpickMain
 import Nitpick.PatternMatches qualified as PatternMatches
+import Reporting.Annotation qualified as A
 import Reporting.Error qualified as E
 import Reporting.Render.Type.Localizer qualified as Localizer
 import Reporting.Result qualified as R
@@ -52,14 +53,54 @@ compile platform pkg ifaces modul =
     -- the checker records a type per node id (`docs/m1a-node-types.md`) and
     -- everything downstream of it must see the same ids.
     canonical <- NodeId.number <$> canonicalize pkg ifaces modul
-    Type.Solved annotations nodeTypes methodUses <- typeCheck modul canonical
+    Type.Solved solved nodeTypes <- typeCheck modul canonical
+    let annotations = withContexts canonical solved
     () <- checkNodeTypes canonical nodeTypes
-    resolutions <- resolveInstances modul ifaces canonical methodUses
+    elaboration <- resolveInstances modul ifaces canonical nodeTypes
     () <- nitpick canonical
     () <- checkMain platform modul annotations canonical
-    let core = Lower.lower platform annotations nodeTypes resolutions canonical
+    let core = Lower.lower platform annotations nodeTypes elaboration canonical
     () <- dumpCore canonical core
     return (Artifacts canonical annotations nodeTypes core)
+
+-- | Put each written context back on the annotation the solver produced.
+--
+-- `Type.Type.toAnnotation` returns every variable unconstrained, and has to:
+-- the unifier's classes are its own three-way enum and @Basics.Num@ is not
+-- declared anywhere until @core@ is rewritten, so pointing a 'Can.Class' at one
+-- would be inventing a reference (verb 7). What a module /wrote/ is a
+-- 'Can.Class' already, and it is what an importer needs: a constrained
+-- signature that publishes no constraint is a signature whose callers pass no
+-- witness, which compiles and is wrong (§G26).
+--
+-- Only the payloads move. The variables and the type are the solved
+-- annotation's, and the two agree about names because a rigid variable comes
+-- back from the solver under the name the signature gave it.
+withContexts :: Can.Module -> Map.Map Name.Name Can.Annotation -> Map.Map Name.Name Can.Annotation
+withContexts canonical annotations =
+  let written = writtenContexts (Can._decls canonical)
+      apply name (Can.Forall freeVars tipe) =
+        case Map.lookup name written of
+          Nothing -> Can.Forall freeVars tipe
+          Just context ->
+            Can.Forall (Map.mapWithKey (\var _ -> Map.findWithDefault [] var context) freeVars) tipe
+   in Map.mapWithKey apply annotations
+
+writtenContexts :: Can.Decls -> Map.Map Name.Name Can.FreeVars
+writtenContexts ds =
+  case ds of
+    Can.Declare d rest -> Map.union (contextOf d) (writtenContexts rest)
+    Can.DeclareRec d others rest ->
+      Map.unions (map contextOf (d : others) ++ [writtenContexts rest])
+    Can.SaveTheEnvironment -> Map.empty
+
+contextOf :: Can.Def -> Map.Map Name.Name Can.FreeVars
+contextOf d =
+  case d of
+    Can.Def {} -> Map.empty
+    Can.TypedDef (A.At _ name) freeVars _ _ _
+      | all null (Map.elems freeVars) -> Map.empty
+      | otherwise -> Map.singleton name freeVars
 
 -- PHASES
 
@@ -92,18 +133,43 @@ resolveInstances ::
   Src.Module ->
   Map.Map ModuleName.Raw I.Interface ->
   Can.Module ->
-  Map.Map Can.NodeId Type.MethodUse ->
-  Either E.Error Resolve.Resolutions
-resolveInstances modul ifaces canonical uses =
+  Map.Map Can.NodeId Can.Type ->
+  Either E.Error Resolve.Elaboration
+resolveInstances modul ifaces canonical nodeTypes =
   let visible =
         Map.union
           (Map.map Can._in_head (Can._instances canonical))
           (Canonicalize.importedInstances ifaces)
-   in case Resolve.run visible uses of
-        Right resolutions ->
-          Right resolutions
+      classes =
+        Map.union
+          (ownClasses canonical)
+          (importedClasses ifaces)
+   in case Resolve.run (Resolve.Env visible classes nodeTypes) canonical of
+        Right elaboration ->
+          Right elaboration
         Left errors ->
           Left (E.BadInstances (Localizer.fromModule modul) errors)
+
+-- | The classes this module declares, keyed the way a constraint names one.
+ownClasses :: Can.Module -> Map.Map Can.Class Can.ClassDecl
+ownClasses canonical =
+  Map.fromList
+    [ (Can.Class (Can._name canonical) name, decl)
+    | (name, decl) <- Map.toList (Can._classes canonical)
+    ]
+
+-- | The classes this module's imports declare, private ones included.
+--
+-- A private class is kept for the reason 'Gren.Interface' keeps it: an exposed
+-- value's annotation may be constrained by a class the declaring module does
+-- not expose, and a use of that value still needs a witness for it.
+importedClasses :: Map.Map ModuleName.Raw I.Interface -> Map.Map Can.Class Can.ClassDecl
+importedClasses ifaces =
+  Map.fromList
+    [ (Can.Class (ModuleName.Canonical (I._home iface) raw) name, I.classDecl iClass)
+    | (raw, iface) <- Map.toList ifaces,
+      (name, iClass) <- Map.toList (I._classes iface)
+    ]
 
 -- | Assert that the type checker recorded a usable type for every node.
 --

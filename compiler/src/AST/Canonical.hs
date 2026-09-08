@@ -41,6 +41,7 @@ module AST.Canonical
     instanceKey,
     instanceType,
     instanceMethodName,
+    contextOrder,
     Origin (..),
     isAbstract,
     Union (..),
@@ -368,7 +369,18 @@ data InstanceHead = InstanceHead
     _ih_witness :: Name,
     -- | @Eq a =>@, resolved onto the variables the head binds, exactly as an
     -- annotation's context is resolved onto the ones its type binds.
-    _ih_context :: FreeVars
+    _ih_context :: FreeVars,
+    -- | The class's methods at this head: @eq : Array a -> Array a -> Bool@
+    -- for @instance Eq a => Eq (Array a)@, which is 'Canonicalize.Instance'
+    -- specializing the class's published signature and is the same type the
+    -- method's own definition is checked against.
+    --
+    -- Carried here rather than looked up in the class, because building a
+    -- witness for this instance is something a module that cannot /name/ the
+    -- class still has to do: an instance is global (§G6) and its context may
+    -- mention a class private to somewhere else, so the head has to be
+    -- self-sufficient in the way the class table is not.
+    _ih_methods :: Map.Map Name Type
   }
   deriving (Eq, Show)
 
@@ -415,6 +427,22 @@ instanceType head_ =
 instanceMethodName :: InstanceHead -> Name -> Name
 instanceMethodName head_ method =
   Name.sepBy 0x24 (_ih_witness head_) method
+
+-- | A context's constraints, in the one order everything downstream uses:
+-- by variable and then by class, both ascending.
+--
+-- Three lists have to agree about it and none of them can see the others: the
+-- constraint list Core writes on a quantified type (@Core.Lower.Type@), the
+-- witness parameters a constrained definition binds, and the witness arguments
+-- a use site passes. They agree because they are this function rather than
+-- three traversals that happen to sort the same way — the same reason C2 fixes
+-- an order for record fields instead of trusting a `Map`.
+contextOrder :: FreeVars -> [(Name, Class)]
+contextOrder freeVars =
+  [ (var, cls)
+  | (var, classes) <- Map.toAscList freeVars,
+    cls <- List.sort classes
+  ]
 
 data Binop = Binop_ Binop.Associativity Binop.Precedence Name
   deriving (Eq, Show)
@@ -509,8 +537,8 @@ instance Binary InstanceKey where
   put (InstanceKey a b c) = put a >> put b >> put c
 
 instance Binary InstanceHead where
-  get = InstanceHead <$> get <*> get <*> get <*> get <*> get <*> get <*> get
-  put (InstanceHead a b c d e f g) = put a >> put b >> put c >> put d >> put e >> put f >> put g
+  get = InstanceHead <$> get <*> get <*> get <*> get <*> get <*> get <*> get <*> get
+  put (InstanceHead a b c d e f g h) = put a >> put b >> put c >> put d >> put e >> put f >> put g >> put h
 
 instance Binary Union where
   put (Union a b c d) = put a >> put b >> put c >> put d

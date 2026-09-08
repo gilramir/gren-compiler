@@ -74,7 +74,7 @@ expectedType expected =
     FromAnnotation _ _ _ tipe -> tipe
 
 constrainHelp :: RTV -> Can.NodeId -> A.Region -> Can.Expr_ -> Expected Type -> IO Constraint
-constrainHelp rtv nid region expression expected =
+constrainHelp rtv _nid region expression expected =
   case expression of
     Can.VarLocal name ->
       return (CLocal region name expected)
@@ -84,8 +84,13 @@ constrainHelp rtv nid region expression expected =
       return CTrue
     Can.VarForeign _ name annotation ->
       return $ CForeign region name annotation expected
-    Can.VarMethod cls param name annotation ->
-      return $ CMethod region nid cls param name annotation expected
+    Can.VarMethod _ _ name annotation ->
+      -- Checked exactly as any other published signature is. What the class
+      -- parameter came out as is read off the node's recorded type in
+      -- `Type.Resolve`, which is the one rule that also covers a use of a
+      -- constrained function — where the solver copies a generalized variable
+      -- and never names its parts (§G26).
+      return $ CForeign region name annotation expected
     Can.VarCtor _ _ name _ annotation ->
       return $ CForeign region name annotation expected
     Can.VarDebug _ name annotation ->

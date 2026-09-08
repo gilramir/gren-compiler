@@ -5,71 +5,79 @@ module Type.ResolveSpec where
 import AST.Canonical qualified as Can
 import Data.Map qualified as Map
 import Data.Name qualified as Name
-import Data.NonEmptyList qualified as NE
 import Gren.ModuleName qualified as ModuleName
 import Reporting.Annotation qualified as A
 import Reporting.Error.Instance qualified as E
 import Test.Hspec
 import Type.Resolve qualified as Resolve
-import Type.Solve qualified as Solve
 
--- | Picking an instance at a call site (`docs/m1b-classes.md` §G23).
+-- | Building the witness for one constraint (`docs/m1b-classes.md` §G23, §G26).
 --
--- The whole of resolution is here, because the solver has already reduced the
--- question to "what did the class parameter come out as": a type constructor
--- is a key, and anything else is one of the two ways there is no answer.
+-- The whole of resolution is here. The traversal around it only decides which
+-- constraints to ask about; what an answer *is* — an instance, an instance
+-- applied to the witnesses its own context needs, or the parameter the
+-- enclosing definition was handed — is this function.
 spec :: Spec
 spec = do
-  describe "Resolution" $ do
+  describe "An instance" $ do
     it "a concrete type picks the instance declared for it" $
-      resolve (Can.TType ModuleName.basics "Int" [])
-        `shouldBe` Right (ModuleName.basics, "$i$Sizey$Int$size")
-
-    it "the instance's arguments do not have to match, because the key is the constructor" $
-      -- `instance Sizey (Array a)` answers for `Array Int` and for
-      -- `Array String` alike: §G22.1 makes (class, head constructor) the whole
-      -- of the index, so resolution is a lookup and never a search.
-      resolveIn
-        [instanceHead arrayHome "Array" "$i$Sizey$Array"]
-        (Can.TType arrayHome "Array" [Can.TType ModuleName.basics "Int" []])
-        `shouldBe` Right (ModuleName.basics, "$i$Sizey$Array$size")
+      witness (Can.TType ModuleName.basics "Int" [])
+        `shouldBe` Right (Instance "$i$Sizey$Int" [])
 
     it "an alias resolves as the type it stands for" $
       -- An alias is refused as an instance head (§G22.1), so the instance is
-      -- keyed by the constructor underneath and the use site has to be read
-      -- the same way.
-      resolve
+      -- keyed by the constructor underneath and the use site is read the same
+      -- way.
+      witness
         ( Can.TAlias
             ModuleName.basics
             "Count"
             []
             (Can.Filled (Can.TType ModuleName.basics "Int" []))
         )
-        `shouldBe` Right (ModuleName.basics, "$i$Sizey$Int$size")
+        `shouldBe` Right (Instance "$i$Sizey$Int" [])
 
-  describe "No answer" $ do
     it "a type with no instance is a fact about the program" $
-      resolve (Can.TType ModuleName.string "String" []) `shouldBe` Left NoInstance
+      witness (Can.TType ModuleName.string "String" []) `shouldBe` Left NoInstance
 
     it "so is a function type, which no head can ever be" $
-      resolve (Can.TLambda unitT unitT) `shouldBe` Left NoInstance
+      witness (Can.TLambda unitT unitT) `shouldBe` Left NoInstance
 
-    it "a type variable is a fact about this compiler, not about the program" $
-      -- The call needs the instance passed in rather than picked here, which
-      -- is verb 6's. Reported apart from `NoInstance` because the two are
-      -- different questions and only one of them is the program's fault.
-      resolve (Can.TVar "a") `shouldBe` Left NotResolved
+  describe "An instance with a context" $ do
+    it "is applied to a witness for each constraint it carries" $
+      -- @instance Sizey a => Sizey (Array a)@ at @Array Int@ is the recursive
+      -- case §G23.6 left open: the witness is the array instance's table
+      -- applied to the integer instance's.
+      witness (arrayOf (Can.TType ModuleName.basics "Int" []))
+        `shouldBe` Right (Instance "$i$Sizey$Array" [Instance "$i$Sizey$Int" []])
 
-    it "every unresolvable use is reported, not just the first" $
-      let uses =
-            Map.fromList
-              [ (Can.NodeId 1, use (Can.TVar "a")),
-                (Can.NodeId 2, use (Can.TType ModuleName.string "String" [])),
-                (Can.NodeId 3, use (Can.TType ModuleName.basics "Int" []))
-              ]
-       in case Resolve.run environment uses of
-            Right _ -> expectationFailure "expected two errors" >> return ()
-            Left errors -> length (NE.toList errors) `shouldBe` 2
+    it "nests as deeply as the type does" $
+      witness (arrayOf (arrayOf (Can.TType ModuleName.basics "Int" [])))
+        `shouldBe` Right
+          ( Instance
+              "$i$Sizey$Array"
+              [Instance "$i$Sizey$Array" [Instance "$i$Sizey$Int" []]]
+          )
+
+    it "does not answer for an argument its context cannot be discharged at" $
+      -- Measured in §G23.6 as answering anyway, because the key is the head's
+      -- constructor and nothing looked at the context. This is what closes it.
+      witness (arrayOf (Can.TType ModuleName.string "String" []))
+        `shouldBe` Left NoInstance
+
+  describe "A constrained variable" $ do
+    it "takes the witness the enclosing definition was handed" $
+      witnessWith (Map.singleton (sizey, "a") "$w0") (Can.TVar "a")
+        `shouldBe` Right (Param "$w0")
+
+    it "is an error when nothing constrains it" $
+      -- Not "this compiler cannot", which is what it meant before verb 6, but
+      -- "the signature does not say": the fix is in the source.
+      witness (Can.TVar "a") `shouldBe` Left NotConstrained
+
+    it "is matched by class as well as by name" $
+      witnessWith (Map.singleton (Can.Class ModuleName.basics "Other", "a") "$w0") (Can.TVar "a")
+        `shouldBe` Left NotConstrained
 
 -- FIXTURES
 
@@ -82,53 +90,69 @@ arrayHome = ModuleName.Canonical (ModuleName._package ModuleName.basics) "Array"
 unitT :: Can.Type
 unitT = Can.TRecord Map.empty Nothing
 
--- | One instance of `Sizey`, as `Canonicalize.Instance` would leave it.
-instanceHead :: ModuleName.Canonical -> Name.Name -> Name.Name -> Can.InstanceHead
-instanceHead conHome conName witness =
+arrayOf :: Can.Type -> Can.Type
+arrayOf item = Can.TType arrayHome "Array" [item]
+
+-- | @instance Sizey Int@, as `Canonicalize.Instance` would leave it.
+plain :: ModuleName.Canonical -> Name.Name -> Name.Name -> Can.InstanceHead
+plain conHome conName name =
   Can.InstanceHead
     { Can._ih_home = ModuleName.basics,
       Can._ih_class = sizey,
       Can._ih_con = conHome,
       Can._ih_conName = conName,
       Can._ih_args = [],
-      Can._ih_witness = witness,
-      Can._ih_context = Map.empty
+      Can._ih_witness = name,
+      Can._ih_context = Map.empty,
+      Can._ih_methods = Map.singleton "size" (Can.TType ModuleName.basics "Int" [])
     }
 
-environment :: Map.Map Can.InstanceKey Can.InstanceHead
+-- | @instance Sizey a => Sizey (Array a)@.
+recursive :: Can.InstanceHead
+recursive =
+  (plain arrayHome "Array" "$i$Sizey$Array")
+    { Can._ih_args = [Can.TVar "a"],
+      Can._ih_context = Map.singleton "a" [sizey]
+    }
+
+environment :: Resolve.Env
 environment =
-  keyed [instanceHead ModuleName.basics "Int" "$i$Sizey$Int"]
+  Resolve.Env
+    (Map.fromList [(Can.instanceKey h, h) | h <- [plain ModuleName.basics "Int" "$i$Sizey$Int", recursive]])
+    Map.empty
+    Map.empty
 
-keyed :: [Can.InstanceHead] -> Map.Map Can.InstanceKey Can.InstanceHead
-keyed heads =
-  Map.fromList [(Can.instanceKey h, h) | h <- heads]
-
-use :: Can.Type -> Solve.MethodUse
-use param =
-  Solve.MethodUse (A.Region (A.Position 1 1) (A.Position 1 5)) sizey "size" param
-
--- | Which of the two ways there is no answer, since the error itself carries
--- a region and a type that say nothing this file is asking about.
-data Outcome
-  = NoInstance
-  | NotResolved
+-- | A witness, with only what this file is asking about: an instance's name and
+-- what it was applied to, or a parameter's name. The types and modules on the
+-- real thing are the lowering's business.
+data Shape
+  = Instance Name.Name [Shape]
+  | Param Name.Name
   deriving (Eq, Show)
 
-resolve :: Can.Type -> Either Outcome (ModuleName.Canonical, Name.Name)
-resolve = resolveWith environment
+-- | Which of the two ways there is no answer, since the error itself carries a
+-- region and a type that say nothing this file is asking about.
+data Outcome
+  = NoInstance
+  | NotConstrained
+  deriving (Eq, Show)
 
-resolveIn :: [Can.InstanceHead] -> Can.Type -> Either Outcome (ModuleName.Canonical, Name.Name)
-resolveIn heads = resolveWith (keyed heads)
+witness :: Can.Type -> Either Outcome Shape
+witness = witnessWith Map.empty
 
-resolveWith ::
-  Map.Map Can.InstanceKey Can.InstanceHead ->
-  Can.Type ->
-  Either Outcome (ModuleName.Canonical, Name.Name)
-resolveWith instances param =
-  case Resolve.run instances (Map.singleton (Can.NodeId 1) (use param)) of
-    Left (NE.List (E.NoInstance _ _ _ _) _) -> Left NoInstance
-    Left (NE.List (E.NotResolved _ _ _ _) _) -> Left NotResolved
-    Right answers ->
-      case Map.lookup (Can.NodeId 1) answers of
-        Just answer -> Right answer
-        Nothing -> error "Type.ResolveSpec: the use was neither resolved nor reported"
+witnessWith :: Resolve.Bound -> Can.Type -> Either Outcome Shape
+witnessWith bound tipe =
+  case Resolve.witnessFor environment bound region (E.ForMethod "size") [] sizey tipe of
+    Right w -> Right (shapeOf w)
+    Left (E.NoInstance {}) -> Left NoInstance
+    Left (E.NotConstrained {}) -> Left NotConstrained
+    Left (E.MethodContext {}) -> Left NotConstrained
+
+shapeOf :: Resolve.Witness -> Shape
+shapeOf w =
+  case w of
+    Resolve.FromParam name _ -> Param name
+    Resolve.FromInstance _ name args _ -> Instance name (map shapeOf args)
+
+region :: A.Region
+region = A.Region (A.Position 1 1) (A.Position 1 5)

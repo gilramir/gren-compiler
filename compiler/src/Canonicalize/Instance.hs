@@ -118,15 +118,22 @@ addInstance pkg imported env sofar (A.At region (Src.Instance maybeContext srcHe
       case canArgType of
         Can.TType home name args ->
           Result.ok $
-            Can.InstanceHead
-              { Can._ih_home = Env._home env,
-                Can._ih_class = cls,
-                Can._ih_con = home,
-                Can._ih_conName = name,
-                Can._ih_args = args,
-                Can._ih_witness = witnessNameOf sofar className name,
-                Can._ih_context = context
-              }
+            let withoutMethods =
+                  Can.InstanceHead
+                    { Can._ih_home = Env._home env,
+                      Can._ih_class = cls,
+                      Can._ih_con = home,
+                      Can._ih_conName = name,
+                      Can._ih_args = args,
+                      Can._ih_witness = witnessNameOf sofar className name,
+                      Can._ih_context = context,
+                      Can._ih_methods = Map.empty
+                    }
+             in -- 'specialize' reads the context and the head type, both of
+                -- which are already set, so filling the field in afterwards
+                -- computes the same types the method definitions below are
+                -- checked against rather than a second opinion about them.
+                withoutMethods {Can._ih_methods = methodTypes withoutMethods decl}
         Can.TAlias _ name _ _ ->
           Result.throw (Error.InstanceHeadIsAlias (A.toRegion srcArg) className name)
         _ ->
@@ -138,6 +145,15 @@ addInstance pkg imported env sofar (A.At region (Src.Instance maybeContext srcHe
       else do
         canMethods <- canonicalizeMethods env region className decl head_ methods
         Result.ok (Map.insert key (Can.Instance head_ Can.Written canMethods) sofar)
+
+-- | The class's methods at this head, which is what a witness for the instance
+-- has to hold (§G26).
+--
+-- The same 'specialize' the method definitions are checked with, so the table
+-- a witness carries and the bodies that fill it cannot disagree about a type.
+methodTypes :: Can.InstanceHead -> Can.ClassDecl -> Map.Map Name.Name Can.Type
+methodTypes head_ (Can.ClassDecl param published) =
+  Map.map (\annotation -> let Can.Forall _ tipe = specialize head_ param annotation in tipe) published
 
 -- | What this instance is called, so that a call resolved to it has something
 -- to name (§G23).

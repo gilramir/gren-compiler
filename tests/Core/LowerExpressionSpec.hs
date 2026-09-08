@@ -22,6 +22,7 @@ import Gren.Package qualified as Pkg
 import Gren.String qualified as ES
 import Reporting.Annotation qualified as A
 import Test.Hspec
+import Type.Resolve qualified as Resolve
 
 spec :: Spec
 spec = do
@@ -255,16 +256,41 @@ spec = do
       -- §G23. The node names its class and never its instance: which instance
       -- it is was decided by the solved type, before the lowering ran, and
       -- what is left here is the reference D123 gave the instance's method.
-      let method =
-            Can.VarMethod (Can.Class ModuleName.basics "Sizey") "a" "size" plusAnnotation
-       in Core._exprValue
-            ( Lower.expr
-                (env [(1, intT)]) {Lower._resolutions = Map.singleton (Can.NodeId 1) (home, "$i$Sizey$Int$size")}
-                (at 1 method)
+      Core._exprValue (lowered (Resolve.Instantiated home "$i$Sizey$Int$size" []))
+        `shouldBe` Core.EGlobal (qual "$i$Sizey$Int$size")
+
+    it "takes a method out of the witness when the class parameter is a variable" $
+      -- §G26. There is no instance to name, so the call reads the one the
+      -- enclosing definition was handed.
+      Core._exprValue (lowered (Resolve.Projected (Resolve.FromParam "$w0" intT) "size"))
+        `shouldBe` Core.EAccess (expr (core intT) (Core.EVar "$w0")) "size"
+
+    it "applies an instance's own witnesses to the method it resolved to" $
+      -- An instance with a context is a table built from tables, so the method
+      -- it supplies is witness-abstracted and the call site applies it.
+      case Core._exprValue
+        ( lowered
+            ( Resolve.Instantiated
+                home
+                "$i$Sizey$Array$size"
+                [Resolve.FromInstance home "$i$Sizey$Int" [] intT]
             )
-            `shouldBe` Core.EGlobal (qual "$i$Sizey$Int$size")
+        ) of
+        Core.EWitApp (Core.Expr (Core.EGlobal name) _ _) [arg] ->
+          do
+            name `shouldBe` qual "$i$Sizey$Array$size"
+            Core._exprValue arg `shouldBe` Core.EGlobal (qual "$i$Sizey$Int")
+        other ->
+          expectationFailure ("unexpected shape: " ++ show other)
 
 -- FIXTURES
+
+-- | A class-method node, lowered under one elaboration.
+lowered :: Resolve.Use -> Core.Expr
+lowered use =
+  Lower.expr
+    (env [(1, intT)]) {Lower._uses = Map.singleton (Can.NodeId 1) use}
+    (at 1 (Can.VarMethod (Can.Class ModuleName.basics "Sizey") "a" "size" plusAnnotation))
 
 home :: ModuleName.Canonical
 home = ModuleName.Canonical Pkg.core "Maybe"
@@ -335,7 +361,7 @@ recordField name p = A.At here' (Can.PRFieldPattern name (A.At here' p))
 
 env :: [(Int, Can.Type)] -> Lower.Env
 env types =
-  Lower.Env (Core.FileId 0) (Map.fromList [(Can.NodeId i, t) | (i, t) <- types]) Map.empty
+  Lower.Env (Core.FileId 0) (Map.fromList [(Can.NodeId i, t) | (i, t) <- types]) Map.empty Map.empty
 
 value :: [(Int, Can.Type)] -> Can.Expr -> Core.Expr_
 value types = Core._exprValue . Lower.expr (env types)

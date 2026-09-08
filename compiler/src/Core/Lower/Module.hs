@@ -44,7 +44,7 @@ import Canonicalize.Effects qualified as Effects
 import Core.AST qualified as Core
 import Core.Lower.Expression qualified as Expr
 import Core.Lower.Port qualified as Port
-import Core.Lower.Type (lowerAnnotation, lowerClass, lowerUnion)
+import Core.Lower.Type (lowerAnnotation, lowerClass, lowerType, lowerUnion)
 import Core.Order qualified as Order
 import Core.Refs qualified as Refs
 import Data.List qualified as List
@@ -58,23 +58,26 @@ import Gren.Package qualified as Pkg
 import Gren.Platform qualified as P
 import Reporting.Annotation qualified as A
 import Reporting.Error.Canonicalize qualified as CE
+import Type.Resolve qualified as Resolve
 
 lower ::
   P.Platform ->
   Map.Map Name Can.Annotation ->
   Map.Map Can.NodeId Can.Type ->
-  Map.Map Can.NodeId (ModuleName.Canonical, Name) ->
+  Resolve.Elaboration ->
   Can.Module ->
   Core.Module
-lower platform annotations types resolutions modul =
+lower platform annotations types elaboration modul =
   let home = Can._name modul
-      env = Expr.Env selfFile types resolutions
+      env = Expr.Env selfFile types (Resolve._uses elaboration) (Resolve._params elaboration)
+      witnessesOf i =
+        Map.findWithDefault [] (Can.instanceKey (Can._in_head i)) (Resolve._instanceParams elaboration)
       instances = Map.elems (Can._instances modul)
       defs =
         definitions home $
           map (Expr.def env) (concatMap group (declGroups (Can._decls modul)))
             ++ entries home (Can._effects modul)
-            ++ concatMap (instanceBinds env) instances
+            ++ concatMap (\i -> instanceBinds env (witnessesOf i) i) instances
    in Core.Module
         { Core._moduleName = home,
           Core._moduleFiles = Map.singleton selfFile home,
@@ -134,10 +137,59 @@ lowerOrigin origin =
     Can.Written -> Core.Written
     Can.Derived -> Core.Derived
 
--- | The bindings an instance's methods become.
-instanceBinds :: Expr.Env -> Can.Instance -> [Core.Bind]
-instanceBinds env (Can.Instance head_ _ methods) =
-  map snd (instanceBindsBy env head_ methods)
+-- | The bindings an instance becomes: one per method, plus its witness.
+instanceBinds :: Expr.Env -> [(Name, Can.Type)] -> Can.Instance -> [Core.Bind]
+instanceBinds env params (Can.Instance head_ _ methods) =
+  witnessBind params head_ : map snd (instanceBindsBy env head_ methods)
+
+-- | An instance's method table, as an ordinary binding — D125.
+--
+-- D123 made an instance's methods bindings because a resolved call has to name
+-- the code it calls. A witness is the same argument one level up: a call at a
+-- /type variable/ has to name the table it is handed, and passing one means
+-- there is a value to pass. So the table is a record of the instance's own
+-- methods, bound under the name the head already publishes, and every pass,
+-- the linker, DCE and each backend treat it as the definition it is — an
+-- instance nothing needs a witness for costs nothing, exactly as an instance
+-- nothing calls does.
+--
+-- An instance with a context builds a table from tables, so its binding is a
+-- 'Core.EWitLam' over the same context its methods are quantified by, in the
+-- same 'Can.contextOrder'. That is the recursive case of §G23.6: the witness
+-- for @Eq (Array Int)@ is this binding applied to the witness for @Eq Int@,
+-- and building it is what fails when there is no @Eq Int@ — which is why an
+-- instance's context is now discharged rather than ignored.
+witnessBind :: [(Name, Can.Type)] -> Can.InstanceHead -> Core.Bind
+witnessBind params head_ =
+  let sp = zeroSpan
+      context = Can._ih_context head_
+      methods = Can._ih_methods head_
+      recordType = Resolve.witnessRecord methods
+      binders = [Core.Binder name (lowerType tipe) sp | (name, tipe) <- params]
+      passed = [Core.Expr (Core.EVar n) t sp | Core.Binder n t _ <- binders]
+      field (name, tipe) =
+        let global =
+              Core.Expr
+                (Core.EGlobal (Core.QualName (Can._ih_home head_) (Can.instanceMethodName head_ name)))
+                (lowerType tipe)
+                sp
+         in ( name,
+              case passed of
+                [] -> global
+                _ -> Core.Expr (Core.EWitApp global passed) (lowerType tipe) sp
+            )
+      table =
+        Core.Expr
+          (Core.ERecord (map field (Map.toAscList methods)))
+          (lowerType recordType)
+          sp
+   in case binders of
+        [] ->
+          Core.Bind (Core.Binder (Can._ih_witness head_) (lowerType recordType) sp) table
+        _ ->
+          Core.Bind
+            (Core.Binder (Can._ih_witness head_) (lowerAnnotation (Can.Forall context recordType)) sp)
+            (Core.Expr (Core.EWitLam binders table) (lowerType recordType) sp)
 
 instanceBindsBy :: Expr.Env -> Can.InstanceHead -> Map.Map Name Can.Def -> [(Name, Core.Bind)]
 instanceBindsBy env head_ methods =

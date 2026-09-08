@@ -65,18 +65,6 @@ data Constraint
     -- could change what generalization sees, and this pass has to be
     -- observationally invisible to inference (`docs/m1a-node-types.md`).
     CNode Can.NodeId Type
-  | -- | A use of a class method (§G23): check it the way 'CForeign' checks any
-    -- other published signature, and record what the __class parameter__ came
-    -- out as.
-    --
-    -- The parameter's type is the whole of resolution's input, and the solver
-    -- is the only place it exists: the annotation is instantiated here, so the
-    -- variable standing for @a@ in @Sizey a => a -> Int@ is in hand at exactly
-    -- the moment the use site's type is unified into it. Recovering it later
-    -- would mean matching the node's solved type back against the declared one,
-    -- which is a second, weaker way of computing something the solver already
-    -- knows.
-    CMethod A.Region Can.NodeId Can.Class Name.Name Name.Name Can.Annotation (E.Expected Type)
   | CAnd [Constraint]
   | CLet
       { _rigidVars :: [Variable],
@@ -268,7 +256,7 @@ collectTypeVarNames :: Type -> Map.Map Name.Name Variable -> IO (Map.Map Name.Na
 collectTypeVarNames tipe taken =
   case tipe of
     PlaceHolder _ -> return taken
-    VarN var -> getVarNames var taken
+    VarN var -> keepVarNames var taken
     AliasN _ _ args real ->
       collectTypeVarNames real =<< foldrM collectTypeVarNames taken (map snd args)
     AppN _ _ args -> foldrM collectTypeVarNames taken args
@@ -558,13 +546,43 @@ getFreshSuperHelp prefix index taken =
 -- GET ALL VARIABLE NAMES
 
 getVarNames :: Variable -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
-getVarNames var takenNames =
+getVarNames =
+  varNames (addName 0)
+
+-- | The same, without renaming a duplicate — see 'keepVarNames'.
+keepVarNames :: Variable -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
+keepVarNames =
+  varNames keepName
+
+-- | Register a name that is already taken by a different variable.
+--
+-- 'addName' renames: two distinct rigid variables both called @a@ come out as
+-- @a@ and @a1@, which is what a message showing one type at a time needs, and
+-- what an annotation needs so that its own variables are distinct.
+--
+-- __Node types are not one type at a time.__ They are every node in the module
+-- at once (`docs/m1a-node-types.md`), and two definitions each writing @a@ in
+-- their own signature is ordinary rather than a clash: a rigid variable is
+-- scoped to the definition whose annotation names it, and no node type mentions
+-- two of them. Renaming there makes a body's type disagree with the signature
+-- the body is checked against — which is invisible while nothing reads the two
+-- together, and is exactly what a witness parameter is looked up by (§G26).
+keepName :: Name.Name -> Variable -> (Name.Name -> Content) -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
+keepName givenName var _ takenNames =
+  return (Map.insertWith (\_ old -> old) givenName var takenNames)
+
+type Register =
+  Name.Name -> Variable -> (Name.Name -> Content) -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
+
+varNames :: Register -> Variable -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
+varNames register var takenNames =
   do
     (Descriptor content rank mark copy) <- UF.get var
     if mark == getVarNamesMark
       then return takenNames
       else do
         UF.set var (Descriptor content rank getVarNamesMark copy)
+        let recurse = varNames register
         case content of
           Error ->
             return takenNames
@@ -573,30 +591,30 @@ getVarNames var takenNames =
               Nothing ->
                 return takenNames
               Just name ->
-                addName 0 name var (FlexVar . Just) takenNames
+                register name var (FlexVar . Just) takenNames
           FlexSuper super maybeName ->
             case maybeName of
               Nothing ->
                 return takenNames
               Just name ->
-                addName 0 name var (FlexSuper super . Just) takenNames
+                register name var (FlexSuper super . Just) takenNames
           RigidVar name ->
-            addName 0 name var RigidVar takenNames
+            register name var RigidVar takenNames
           RigidSuper super name ->
-            addName 0 name var (RigidSuper super) takenNames
+            register name var (RigidSuper super) takenNames
           Alias _ _ args _ ->
-            foldrM getVarNames takenNames (map snd args)
+            foldrM recurse takenNames (map snd args)
           Structure flatType ->
             case flatType of
               App1 _ _ args ->
-                foldrM getVarNames takenNames args
+                foldrM recurse takenNames args
               Fun1 arg body ->
-                getVarNames arg =<< getVarNames body takenNames
+                recurse arg =<< recurse body takenNames
               EmptyRecord1 ->
                 return takenNames
               Record1 fields extension ->
-                getVarNames extension
-                  =<< foldrM getVarNames takenNames (Map.elems fields)
+                recurse extension
+                  =<< foldrM recurse takenNames (Map.elems fields)
 
 -- REGISTER NAME / RENAME DUPLICATES
 

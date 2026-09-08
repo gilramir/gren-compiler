@@ -199,10 +199,15 @@ generate env (Core.Expr value _ sp) =
           error "Generate.CoreJS: ETyLam — specialization is M1b (docs/m1a-lowering.md §L2)"
         Core.ETyApp _ _ ->
           error "Generate.CoreJS: ETyApp — specialization is M1b (docs/m1a-lowering.md §L2)"
-        Core.EWitLam _ _ ->
-          error "Generate.CoreJS: EWitLam — classes are M1b"
-        Core.EWitApp _ _ ->
-          error "Generate.CoreJS: EWitApp — classes are M1b"
+        Core.EWitLam binders body ->
+          -- R1 says witness passing exists in every backend as the semantics.
+          -- Here it costs nothing to have: a witness is a record (§G26), so
+          -- abstracting over one is a function and applying one is a call, and
+          -- the only reason these are separate nodes is that specialization
+          -- erases exactly them and nothing else.
+          function env pos (map Core._binderName binders) (generate env body)
+        Core.EWitApp fn args ->
+          JsExpr (call env pos fn args)
 
 -- | A reference to a top-level name.
 --
