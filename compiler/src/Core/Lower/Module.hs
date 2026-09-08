@@ -59,14 +59,22 @@ import Gren.Platform qualified as P
 import Reporting.Annotation qualified as A
 import Reporting.Error.Canonicalize qualified as CE
 
-lower :: P.Platform -> Map.Map Name Can.Annotation -> Map.Map Can.NodeId Can.Type -> Can.Module -> Core.Module
-lower platform annotations types modul =
+lower ::
+  P.Platform ->
+  Map.Map Name Can.Annotation ->
+  Map.Map Can.NodeId Can.Type ->
+  Map.Map Can.NodeId (ModuleName.Canonical, Name) ->
+  Can.Module ->
+  Core.Module
+lower platform annotations types resolutions modul =
   let home = Can._name modul
-      env = Expr.Env selfFile types
+      env = Expr.Env selfFile types resolutions
+      instances = Map.elems (Can._instances modul)
       defs =
         definitions home $
           map (Expr.def env) (concatMap group (declGroups (Can._decls modul)))
             ++ entries home (Can._effects modul)
+            ++ concatMap (instanceBinds env) instances
    in Core.Module
         { Core._moduleName = home,
           Core._moduleFiles = Map.singleton selfFile home,
@@ -75,7 +83,7 @@ lower platform annotations types modul =
           Core._moduleClasses =
             [lowerClass home name decl | (name, decl) <- Map.toAscList (Can._classes modul)],
           Core._moduleInstances =
-            [lowerInstance env i | i <- Map.elems (Can._instances modul)],
+            [lowerInstance env i | i <- instances],
           Core._moduleDefs = concat defs,
           Core._moduleDefsRec =
             [map (Core.QualName home . bindName) g | g <- defs, length g > 1],
@@ -93,11 +101,13 @@ lower platform annotations types modul =
 -- as the annotation it is — the same function, the same sorted constraint
 -- list, and no second way of writing a constrained type down.
 --
--- __A method is an expression, not a binding.__ Core's 'Core.InstanceDecl'
--- holds @[(Name, Expr)]@, so the 'Core.Bind' the shared lowering builds is
--- unwrapped and its binder dropped: an instance method has no name anything
--- may refer to, which is the same fact that keeps it out of '_decls' and out
--- of the interface's values.
+-- __A method's body is a top-level binding and the declaration names it__
+-- (D123, §G23). It was the body itself until resolution existed, on the
+-- grounds that an instance method has no name anything may refer to. A
+-- resolved call is a reference, and a reference needs a name — so the method
+-- gets a compiler-made one, and the instance holds an 'Core.EGlobal' to it
+-- rather than a second copy of the code. Nothing written can collide with the
+-- name, because a Gren identifier has no @$@ in it.
 --
 -- Every instance is 'Core.Written'. 'Core.Derived' is @\@derive@'s, and
 -- nothing produces one until verb 4.
@@ -110,8 +120,31 @@ lowerInstance env (Can.Instance head_ methods) =
             lowerAnnotation (Can.Forall (Can._ih_context head_) (Can.instanceType head_)),
           Core._instOrigin = Core.Written,
           Core._instMethods =
-            [(name, Core._bindValue (Expr.def env d)) | (name, d) <- Map.toAscList methods]
+            [ (name, reference (Can._ih_home head_) (Can.instanceMethodName head_ name) bind)
+            | (name, bind) <- instanceBindsBy env head_ methods
+            ]
         }
+
+-- | The bindings an instance's methods become.
+instanceBinds :: Expr.Env -> Can.Instance -> [Core.Bind]
+instanceBinds env (Can.Instance head_ methods) =
+  map snd (instanceBindsBy env head_ methods)
+
+instanceBindsBy :: Expr.Env -> Can.InstanceHead -> Map.Map Name Can.Def -> [(Name, Core.Bind)]
+instanceBindsBy env head_ methods =
+  [ (name, rename (Can.instanceMethodName head_ name) (Expr.def env d))
+  | (name, d) <- Map.toAscList methods
+  ]
+
+rename :: Name -> Core.Bind -> Core.Bind
+rename name bind =
+  bind {Core._bindBinder = (Core._bindBinder bind) {Core._binderName = name}}
+
+-- | A reference to a binding, carrying the type and the span of what it names.
+reference :: ModuleName.Canonical -> Name -> Core.Bind -> Core.Expr
+reference home name bind =
+  let value = Core._bindValue bind
+   in Core.Expr (Core.EGlobal (Core.QualName home name)) (Core._exprType value) (Core._exprSpan value)
 
 -- | What a module's @main@ is, or why it is not one (C19).
 --

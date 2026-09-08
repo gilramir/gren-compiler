@@ -168,8 +168,8 @@ withClasses (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) decls =
 methodIndex :: Classes -> Map.Map Name.Name Env.Method
 methodIndex classes =
   Map.fromList
-    [ (methodName, Env.Method className annotation)
-    | (className, Can.ClassDecl _ methods) <- Map.toList classes,
+    [ (methodName, Env.Method className param annotation)
+    | (className, Can.ClassDecl param methods) <- Map.toList classes,
       (methodName, annotation) <- Map.toList methods
     ]
 

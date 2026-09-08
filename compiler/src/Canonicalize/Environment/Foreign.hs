@@ -132,8 +132,8 @@ addImport ifaces (State vs ts cs bs cls ms qvs qts qcs qcls qms) (Src.Import (A.
 methodsOf :: ModuleName.Canonical -> Map.Map Name.Name Can.ClassDecl -> Env.Exposed Env.Method
 methodsOf home classes =
   Map.fromList
-    [ (methodName, Env.Specific home (Env.Method className annotation))
-    | (className, Can.ClassDecl _ methods) <- Map.toList classes,
+    [ (methodName, Env.Specific home (Env.Method className param annotation))
+    | (className, Can.ClassDecl param methods) <- Map.toList classes,
       (methodName, annotation) <- Map.toList methods
     ]
 

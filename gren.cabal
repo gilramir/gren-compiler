@@ -169,6 +169,7 @@ Library common
         Reporting.Error.Canonicalize
         Reporting.Error.Docs
         Reporting.Error.Import
+        Reporting.Error.Instance
         Reporting.Error.Json
         Reporting.Error.Main
         Reporting.Error.Pattern
@@ -188,6 +189,7 @@ Library common
         Type.Error
         Type.Instantiate
         Type.Occurs
+        Type.Resolve
         Type.Solve
         Type.Type
         Type.Unify
@@ -292,6 +294,7 @@ Test-Suite gren-tests
         Parse.DeclSpec
         Reporting.Error.ImportSpec
         Type.ClassSpec
+        Type.ResolveSpec
 
     Build-Depends:
         gren:common,

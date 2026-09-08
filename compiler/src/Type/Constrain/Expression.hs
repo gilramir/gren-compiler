@@ -33,7 +33,7 @@ type RTV =
 
 constrain :: RTV -> Can.Expr -> Expected Type -> IO Constraint
 constrain rtv (Can.Expr nid region expression) expected =
-  recordNodeType nid expected <$> constrainHelp rtv region expression expected
+  recordNodeType nid expected <$> constrainHelp rtv nid region expression expected
 
 -- | Attach the node's type to the constraint it generates.
 --
@@ -73,8 +73,8 @@ expectedType expected =
     FromContext _ _ tipe -> tipe
     FromAnnotation _ _ _ tipe -> tipe
 
-constrainHelp :: RTV -> A.Region -> Can.Expr_ -> Expected Type -> IO Constraint
-constrainHelp rtv region expression expected =
+constrainHelp :: RTV -> Can.NodeId -> A.Region -> Can.Expr_ -> Expected Type -> IO Constraint
+constrainHelp rtv nid region expression expected =
   case expression of
     Can.VarLocal name ->
       return (CLocal region name expected)
@@ -84,6 +84,8 @@ constrainHelp rtv region expression expected =
       return CTrue
     Can.VarForeign _ name annotation ->
       return $ CForeign region name annotation expected
+    Can.VarMethod cls param name annotation ->
+      return $ CMethod region nid cls param name annotation expected
     Can.VarCtor _ _ name _ annotation ->
       return $ CForeign region name annotation expected
     Can.VarDebug _ name annotation ->
@@ -227,6 +229,7 @@ getName (Can.Expr _ _ expr) =
     Can.VarLocal name -> FuncName name
     Can.VarTopLevel _ name -> FuncName name
     Can.VarForeign _ name _ -> FuncName name
+    Can.VarMethod _ _ name _ -> FuncName name
     Can.VarCtor _ _ name _ _ -> CtorName name
     Can.VarOperator op _ _ _ -> OpName op
     Can.VarKernel _ name -> FuncName name

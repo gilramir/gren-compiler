@@ -19,6 +19,7 @@ import Reporting.Doc qualified as D
 import Reporting.Error.Canonicalize qualified as Canonicalize
 import Reporting.Error.Docs qualified as Docs
 import Reporting.Error.Import qualified as Import
+import Reporting.Error.Instance qualified as Instance
 import Reporting.Error.Main qualified as Main
 import Reporting.Error.Pattern qualified as Pattern
 import Reporting.Error.Syntax qualified as Syntax
@@ -44,6 +45,7 @@ data Error
   | BadImports (NE.List Import.Error)
   | BadNames (OneOrMore.OneOrMore Canonicalize.Error)
   | BadTypes L.Localizer (NE.List Type.Error)
+  | BadInstances L.Localizer (NE.List Instance.Error)
   | BadMains L.Localizer (OneOrMore.OneOrMore Main.Error)
   | BadPatterns (NE.List Pattern.Error)
   | BadDocs Docs.Error
@@ -61,6 +63,8 @@ toReports source err =
       fmap (Canonicalize.toReport source) (OneOrMore.destruct NE.List errs)
     BadTypes localizer errs ->
       fmap (Type.toReport source localizer) errs
+    BadInstances localizer errs ->
+      fmap (Instance.toReport localizer source) errs
     BadMains localizer errs ->
       fmap (Main.toReport localizer source) (OneOrMore.destruct NE.List errs)
     BadPatterns errs ->

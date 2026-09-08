@@ -4,6 +4,7 @@
 module Type.Solve
   ( run,
     Solved (..),
+    MethodUse (..),
   )
 where
 
@@ -33,7 +34,7 @@ run constraint =
   do
     pools <- MVector.replicate 8 []
 
-    (State env _ errors nodes) <-
+    (State env _ errors nodes methods) <-
       solve Map.empty outermostRank pools emptyState constraint
 
     case errors of
@@ -41,7 +42,13 @@ run constraint =
         do
           annotations <- traverse Type.toAnnotation env
           nodeTypes <- Type.toNodeTypes nodes
-          return (Right (Solved annotations nodeTypes))
+          paramTypes <- Type.toNodeTypes (Map.map (\(_, _, _, tipe) -> tipe) methods)
+          let uses =
+                Map.intersectionWith
+                  (\(region, cls, method, _) param -> MethodUse region cls method param)
+                  methods
+                  paramTypes
+          return (Right (Solved annotations nodeTypes uses))
       e : es ->
         return $ Left (NE.List e es)
 
@@ -53,12 +60,24 @@ run constraint =
 -- nothing used to compute (`docs/m1a-node-types.md`).
 data Solved = Solved
   { _annotations :: Map.Map Name.Name Can.Annotation,
-    _nodeTypes :: Map.Map Can.NodeId Can.Type
+    _nodeTypes :: Map.Map Can.NodeId Can.Type,
+    -- | One entry per class-method use, keyed by the node it is (§G23). The
+    -- type is what the __class parameter__ solved to, which is the whole of
+    -- what picking an instance needs.
+    _methodUses :: Map.Map Can.NodeId MethodUse
+  }
+
+-- | A use of a class method, as the solver leaves it for `Type.Resolve`.
+data MethodUse = MethodUse
+  { _mu_region :: A.Region,
+    _mu_class :: Can.Class,
+    _mu_method :: Name.Name,
+    _mu_param :: Can.Type
   }
 
 emptyState :: State
 emptyState =
-  State Map.empty (nextMark noMark) [] Map.empty
+  State Map.empty (nextMark noMark) [] Map.empty Map.empty
 
 -- SOLVER
 
@@ -75,7 +94,10 @@ data State = State
     -- | The constraint-level type recorded for each expression node, zonked
     -- once at the end of the solve rather than as it is recorded — a node's
     -- type is not final until everything that can unify with it has run.
-    _nodes :: Map.Map Can.NodeId Type
+    _nodes :: Map.Map Can.NodeId Type,
+    -- | The class-method uses, and the variable each one's class parameter
+    -- stands for. Zonked at the end for the same reason '_nodes' is.
+    _methods :: Map.Map Can.NodeId (A.Region, Can.Class, Name.Name, Type)
   }
 
 solve :: Env -> Int -> Pools -> State -> Constraint -> IO State
@@ -160,6 +182,32 @@ solve env rank pools state constraint =
       -- Recording only. Nothing is unified and no variable is allocated, so a
       -- CNode cannot change what typechecks or what generalizes.
       return state {_nodes = Map.insert nid tipe (_nodes state)}
+    CMethod region nid cls param name (Can.Forall freeVars srcType) expectation ->
+      -- 'CForeign' with one extra line: the instantiation's own variable for
+      -- the class parameter is kept, because that is what the use site's type
+      -- flows into and what resolution reads (§G23).
+      do
+        (flexVars, actual) <- srcTypeToVariables rank pools freeVars srcType
+        expected <- expectedToVariable rank pools expectation
+        answer <- Unify.unify actual expected
+        let recorded =
+              case Map.lookup param flexVars of
+                Nothing ->
+                  state
+                Just var ->
+                  state {_methods = Map.insert nid (region, cls, name, VarN var) (_methods state)}
+        case answer of
+          Unify.Ok vars ->
+            do
+              introduce rank pools vars
+              return recorded
+          Unify.Err vars actualType expectedType ->
+            do
+              introduce rank pools vars
+              return $
+                addError recorded $
+                  Error.BadExpr region (Error.Foreign name) actualType $
+                    Error.typeReplace expectation expectedType
     CAnd constraints ->
       foldM (solve env rank pools) state constraints
     CLet [] flexs _ headerCon CTrue ->
@@ -192,7 +240,7 @@ solve env rank pools state constraint =
 
         -- run solver in next pool
         locals <- traverse (A.traverse (typeToVariable nextRank nextPools)) header
-        (State savedEnv mark errors nodes) <-
+        (State savedEnv mark errors nodes methods) <-
           solve env nextRank nextPools state headerCon
 
         let youngMark = mark
@@ -207,7 +255,7 @@ solve env rank pools state constraint =
         mapM_ isGeneric rigids
 
         let newEnv = Map.union env (Map.map A.toValue locals)
-        let tempState = State savedEnv finalMark errors nodes
+        let tempState = State savedEnv finalMark errors nodes methods
         newState <- solve newEnv rank nextPools tempState subCon
 
         foldM occurs newState (Map.toList locals)
@@ -256,8 +304,8 @@ patternExpectationToVariable rank pools expectation =
 -- ERROR HELPERS
 
 addError :: State -> Error.Error -> State
-addError (State savedEnv rank errors nodes) err =
-  State savedEnv rank (err : errors) nodes
+addError (State savedEnv rank errors nodes methods) err =
+  State savedEnv rank (err : errors) nodes methods
 
 -- OCCURS CHECK
 
@@ -469,6 +517,15 @@ emptyRecord1 =
 -- `Canonicalize.Expression` for want of an instance (§G20.3).
 srcTypeToVariable :: Int -> Pools -> Can.FreeVars -> Can.Type -> IO Variable
 srcTypeToVariable rank pools freeVars srcType =
+  snd <$> srcTypeToVariables rank pools freeVars srcType
+
+-- | The same, and the instantiation's variables with it.
+--
+-- 'CMethod' needs the one standing for the class parameter, which is only
+-- nameable here: after this returns, the map is gone and the parameter is an
+-- ordinary flex variable among the rest.
+srcTypeToVariables :: Int -> Pools -> Can.FreeVars -> Can.Type -> IO (Map.Map Name.Name Variable, Variable)
+srcTypeToVariables rank pools freeVars srcType =
   let nameToContent name =
         maybe (FlexVar (Just name)) (\classes -> FlexSuper classes (Just name)) (Class.fromName name)
 
@@ -477,7 +534,7 @@ srcTypeToVariable rank pools freeVars srcType =
    in do
         flexVars <- Map.traverseWithKey makeVar freeVars
         MVector.modify pools (Map.elems flexVars ++) rank
-        srcTypeToVar rank pools flexVars srcType
+        (,) flexVars <$> srcTypeToVar rank pools flexVars srcType
 
 srcTypeToVar :: Int -> Pools -> Map.Map Name.Name Variable -> Can.Type -> IO Variable
 srcTypeToVar rank pools flexVars srcType =

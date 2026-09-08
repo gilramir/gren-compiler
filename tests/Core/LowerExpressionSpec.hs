@@ -251,6 +251,19 @@ spec = do
       value [(1, intT)] (at 1 (Can.VarDebug home "log" plusAnnotation))
         `shouldBe` Core.EGlobal (Core.QualName ModuleName.debug "log")
 
+    it "makes a class-method call a reference to the instance it was resolved to" $
+      -- §G23. The node names its class and never its instance: which instance
+      -- it is was decided by the solved type, before the lowering ran, and
+      -- what is left here is the reference D123 gave the instance's method.
+      let method =
+            Can.VarMethod (Can.Class ModuleName.basics "Sizey") "a" "size" plusAnnotation
+       in Core._exprValue
+            ( Lower.expr
+                (env [(1, intT)]) {Lower._resolutions = Map.singleton (Can.NodeId 1) (home, "$i$Sizey$Int$size")}
+                (at 1 method)
+            )
+            `shouldBe` Core.EGlobal (qual "$i$Sizey$Int$size")
+
 -- FIXTURES
 
 home :: ModuleName.Canonical
@@ -322,7 +335,7 @@ recordField name p = A.At here' (Can.PRFieldPattern name (A.At here' p))
 
 env :: [(Int, Can.Type)] -> Lower.Env
 env types =
-  Lower.Env (Core.FileId 0) (Map.fromList [(Can.NodeId i, t) | (i, t) <- types])
+  Lower.Env (Core.FileId 0) (Map.fromList [(Can.NodeId i, t) | (i, t) <- types]) Map.empty
 
 value :: [(Int, Can.Type)] -> Can.Expr -> Core.Expr_
 value types = Core._exprValue . Lower.expr (env types)

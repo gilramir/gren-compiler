@@ -41,7 +41,6 @@ data Error
   | AmbiguousClass A.Region (Maybe Name.Name) Name.Name ModuleName.Canonical (OneOrMore.OneOrMore ModuleName.Canonical)
   | BadArity A.Region BadArityContext Name.Name Int Int
   | ClassDeclThirdParty A.Region Name.Name
-  | ClassMethodUnsupported A.Region Name.Name Name.Name
   | ClassMethodWithoutParam A.Region Name.Name Name.Name Name.Name
   | ConstraintDuplicate A.Region Name.Name Name.Name
   | ConstraintNotAClass A.Region Name.Name
@@ -377,24 +376,6 @@ toReport source err =
               "Only the packages the toolchain ships may declare classes and instances for\
               \ now. The restriction is on who writes the declaration, not on what it says,\
               \ and it lifts when user-defined classes open up."
-          )
-    ClassMethodUnsupported region className methodName ->
-      Report.Report "UNSUPPORTED CLASS METHOD" region [] $
-        Code.toSnippet
-          source
-          region
-          Nothing
-          ( D.reflow $
-              "`"
-                ++ Name.toChars methodName
-                ++ "` is a method of the `"
-                ++ Name.toChars className
-                ++ "` class, and I cannot call one yet:",
-            D.reflow $
-              "A class declares what a method's type is and the instances say what it does,\
-              \ so a call needs an instance to resolve against and instance declarations do\
-              \ not work in this version. Accepting the call would compile a program with\
-              \ nothing behind this name."
           )
     ClassMethodWithoutParam region className param methodName ->
       Report.Report "BAD CLASS METHOD" region [] $

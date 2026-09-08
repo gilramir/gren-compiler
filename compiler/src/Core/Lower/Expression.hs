@@ -84,7 +84,11 @@ data Env = Env
     -- came from.
     _file :: !Core.FileId,
     -- | One entry per node, from the solver.
-    _types :: Map.Map Can.NodeId Can.Type
+    _types :: Map.Map Can.NodeId Can.Type,
+    -- | Where each class-method call goes, from `Type.Resolve` (§G23). Total
+    -- for the same reason '_types' is: every use resolved or the module did
+    -- not get here.
+    _resolutions :: Map.Map Can.NodeId (ModuleName.Canonical, Name)
   }
 
 -- | The Core type recorded for a node.
@@ -97,6 +101,17 @@ typeOf env nid =
         "Core.Lower.Expression: node "
           ++ show nid
           ++ " has no recorded type. See docs/m1a-node-types.md."
+
+-- | The instance a class-method call was resolved to.
+resolutionOf :: Env -> Can.NodeId -> (ModuleName.Canonical, Name)
+resolutionOf env nid =
+  case Map.lookup nid (_resolutions env) of
+    Just answer -> answer
+    Nothing ->
+      error $
+        "Core.Lower.Expression: class-method node "
+          ++ show nid
+          ++ " was not resolved. See docs/m1b-classes.md §G23."
 
 span :: Env -> A.Region -> Core.Span
 span env (A.Region (A.Position startRow startCol) (A.Position endRow endCol)) =
@@ -121,6 +136,11 @@ expr env (Can.Expr nid region value) =
           node (Core.EGlobal (Core.QualName home name))
         Can.VarForeign home name _ ->
           node (Core.EGlobal (Core.QualName home name))
+        Can.VarMethod _ _ _ _ ->
+          -- The instance was picked before the lowering ran, because picking
+          -- it needs the solved type and reporting that there is none needs a
+          -- phase that reports (§G23). What is left here is the reference.
+          node (Core.EGlobal (uncurry Core.QualName (resolutionOf env nid)))
         Can.VarOperator _ home name _ ->
           node (Core.EGlobal (Core.QualName home name))
         Can.VarKernel home name ->

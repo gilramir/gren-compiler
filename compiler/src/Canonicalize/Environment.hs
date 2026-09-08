@@ -111,6 +111,11 @@ data Type
 -- signature. The class's home is the 'Info' this is wrapped in.
 data Method = Method
   { _m_class :: Name.Name,
+    -- | The class's parameter, carried because resolution needs to know which
+    -- of the signature's variables the instance is chosen by, and the
+    -- constraint list cannot say: a method's own context may name the class
+    -- being declared on a second variable (§G21.1).
+    _m_param :: Name.Name,
     _m_annotation :: Can.Annotation
   }
 

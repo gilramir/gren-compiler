@@ -40,6 +40,7 @@ module AST.Canonical
     InstanceKey (..),
     instanceKey,
     instanceType,
+    instanceMethodName,
     Union (..),
     Ctor (..),
     Exports (..),
@@ -77,6 +78,7 @@ import Data.Index qualified as Index
 import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name (Name)
+import Data.Name qualified as Name
 import Gren.Float qualified as EF
 import Gren.ModuleName qualified as ModuleName
 import Gren.String qualified as ES
@@ -128,6 +130,17 @@ data Expr_
   | VarForeign ModuleName.Canonical Name Annotation
   | VarCtor CtorOpts ModuleName.Canonical Name Index.ZeroBased Annotation
   | VarDebug ModuleName.Canonical Name Annotation
+  | -- | A use of a class method: the class, the class's parameter, the
+    -- method's name and the signature the class published for it.
+    --
+    -- Not a 'VarForeign' with extra fields, because it names nothing that is
+    -- defined: a method has no binding (§G19.2) and what a use of one compiles
+    -- to is whatever instance the /type at this use site/ picks. The class
+    -- parameter is carried rather than recovered from the annotation's
+    -- constraints, because a method's own context may name the class being
+    -- declared on a second variable (§G21.1) and then there would be two
+    -- candidates for the one this method is a method of.
+    VarMethod Class Name Name Annotation
   | VarOperator Name ModuleName.Canonical Name Annotation -- CACHE real name for optimization
   | Chr ES.String
   | Str ES.String
@@ -341,6 +354,16 @@ data InstanceHead = InstanceHead
     _ih_conName :: Name,
     -- | Its arguments: @[a]@ of @Eq (Array a)@.
     _ih_args :: [Type],
+    -- | The name the declaring module gave this instance, so that a call it
+    -- resolves has something to refer to (§G23).
+    --
+    -- Published rather than derived from the key at each end, because
+    -- deriving one would have to flatten two module names into a name and
+    -- there is no separator that keeps that injective. The declaring module
+    -- sees all of its own instances, so it can pick a name that is unique
+    -- among them and say what it picked, which is one rule instead of two
+    -- that have to agree.
+    _ih_witness :: Name,
     -- | @Eq a =>@, resolved onto the variables the head binds, exactly as an
     -- annotation's context is resolved onto the ones its type binds.
     _ih_context :: FreeVars
@@ -361,13 +384,23 @@ data Instance = Instance
   deriving (Show)
 
 instanceKey :: InstanceHead -> InstanceKey
-instanceKey (InstanceHead _ cls home name _ _) =
-  InstanceKey cls home name
+instanceKey head_ =
+  InstanceKey (_ih_class head_) (_ih_con head_) (_ih_conName head_)
 
 -- | The type the instance is for: @Array a@ of @Eq (Array a)@.
 instanceType :: InstanceHead -> Type
-instanceType (InstanceHead _ _ home name args _) =
-  TType home name args
+instanceType head_ =
+  TType (_ih_con head_) (_ih_conName head_) (_ih_args head_)
+
+-- | What one of the instance's methods is called in Core.
+--
+-- An instance method /is/ a Core binding (D123) even though it is not a Gren
+-- one, because a resolved call has to name the code it calls. The name is the
+-- instance's plus the method's, and it cannot collide with a written name: a
+-- Gren identifier has no @$@ in it.
+instanceMethodName :: InstanceHead -> Name -> Name
+instanceMethodName head_ method =
+  Name.sepBy 0x24 (_ih_witness head_) method
 
 data Binop = Binop_ Binop.Associativity Binop.Precedence Name
   deriving (Eq, Show)
@@ -441,8 +474,8 @@ instance Binary InstanceKey where
   put (InstanceKey a b c) = put a >> put b >> put c
 
 instance Binary InstanceHead where
-  get = InstanceHead <$> get <*> get <*> get <*> get <*> get <*> get
-  put (InstanceHead a b c d e f) = put a >> put b >> put c >> put d >> put e >> put f
+  get = InstanceHead <$> get <*> get <*> get <*> get <*> get <*> get <*> get
+  put (InstanceHead a b c d e f g) = put a >> put b >> put c >> put d >> put e >> put f >> put g
 
 instance Binary Union where
   put (Union a b c d) = put a >> put b >> put c >> put d

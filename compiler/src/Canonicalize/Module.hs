@@ -2,6 +2,7 @@
 
 module Canonicalize.Module
   ( canonicalize,
+    importedInstances,
   )
 where
 

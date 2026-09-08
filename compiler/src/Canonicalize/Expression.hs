@@ -579,14 +579,14 @@ findVarQual region (Env.Env localHome vs _ _ _ _ _ qvs _ _ _ qms) prefix name =
         then Result.ok $ Can.VarKernel (Name.getKernel prefix) name
         else Result.throw (Error.NotFoundVar region (Just prefix) name (toPossibleNames vs qvs))
 
--- | A name that is not a value may still be a class method, and that is worth
--- saying rather than reporting it as missing.
+-- | A name that is not a value may still be a class method.
 --
--- The rejection is temporary and is the fourth of its kind (§G16.1): a class
--- declares a method's type and the __instances__ say what it does, so until
--- instance declarations work there is nothing behind the name. A call that
--- typechecked here would lower to a reference nothing defines, which is the
--- one outcome worse than an error.
+-- What it becomes is a 'Can.VarMethod', which is neither a local nor a
+-- foreign: it names no binding at all (§G19.2). The class it belongs to is
+-- known here and the instance is not, because the instance is chosen by the
+-- __type at this use site__ and no type has been solved yet — so this node is
+-- what the resolver later reads (§G23), and its published signature is what
+-- the type checker checks the use against in the meantime.
 methodOrNotFound ::
   A.Region ->
   Env.Exposed Env.Method ->
@@ -596,8 +596,8 @@ methodOrNotFound ::
   Result FreeLocals w Can.Expr_
 methodOrNotFound region methods prefix name notFound =
   case Map.lookup name methods of
-    Just (Env.Specific _ (Env.Method className _)) ->
-      Result.throw (Error.ClassMethodUnsupported region className name)
+    Just (Env.Specific home (Env.Method className param annotation)) ->
+      Result.ok (Can.VarMethod (Can.Class home className) param name annotation)
     Just (Env.Ambiguous h hs) ->
       Result.throw (Error.AmbiguousVar region prefix name h hs)
     Nothing ->

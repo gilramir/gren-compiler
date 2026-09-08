@@ -65,6 +65,18 @@ data Constraint
     -- could change what generalization sees, and this pass has to be
     -- observationally invisible to inference (`docs/m1a-node-types.md`).
     CNode Can.NodeId Type
+  | -- | A use of a class method (§G23): check it the way 'CForeign' checks any
+    -- other published signature, and record what the __class parameter__ came
+    -- out as.
+    --
+    -- The parameter's type is the whole of resolution's input, and the solver
+    -- is the only place it exists: the annotation is instantiated here, so the
+    -- variable standing for @a@ in @Sizey a => a -> Int@ is in hand at exactly
+    -- the moment the use site's type is unified into it. Recovering it later
+    -- would mean matching the node's solved type back against the declared one,
+    -- which is a second, weaker way of computing something the solver already
+    -- knows.
+    CMethod A.Region Can.NodeId Can.Class Name.Name Name.Name Can.Annotation (E.Expected Type)
   | CAnd [Constraint]
   | CLet
       { _rigidVars :: [Variable],

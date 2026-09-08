@@ -27,6 +27,7 @@ import Reporting.Result qualified as R
 import System.Environment qualified as Env
 import System.IO.Unsafe (unsafePerformIO)
 import Type.Constrain.Module qualified as Type
+import Type.Resolve qualified as Resolve
 import Type.Solve qualified as Type
 
 -- COMPILE
@@ -51,11 +52,12 @@ compile platform pkg ifaces modul =
     -- the checker records a type per node id (`docs/m1a-node-types.md`) and
     -- everything downstream of it must see the same ids.
     canonical <- NodeId.number <$> canonicalize pkg ifaces modul
-    Type.Solved annotations nodeTypes <- typeCheck modul canonical
+    Type.Solved annotations nodeTypes methodUses <- typeCheck modul canonical
     () <- checkNodeTypes canonical nodeTypes
+    resolutions <- resolveInstances modul ifaces canonical methodUses
     () <- nitpick canonical
     () <- checkMain platform modul annotations canonical
-    let core = Lower.lower platform annotations nodeTypes canonical
+    let core = Lower.lower platform annotations nodeTypes resolutions canonical
     () <- dumpCore canonical core
     return (Artifacts canonical annotations nodeTypes core)
 
@@ -76,6 +78,32 @@ typeCheck modul canonical =
       Right solved
     Left errors ->
       Left (E.BadTypes (Localizer.fromModule modul) errors)
+
+-- | Pick an instance for every class-method call (@docs/m1b-classes.md@ §G23).
+--
+-- Between the solve and the lowering because it needs both halves: the type at
+-- the call site, which only the solver has, and the ability to report that
+-- there is no instance for it, which the lowering does not have.
+--
+-- The environment is the module's own instances plus its imports' closure,
+-- which is the same union `Canonicalize.Module` checks a new declaration
+-- against (D122) and is that function rather than a second copy of the rule.
+resolveInstances ::
+  Src.Module ->
+  Map.Map ModuleName.Raw I.Interface ->
+  Can.Module ->
+  Map.Map Can.NodeId Type.MethodUse ->
+  Either E.Error Resolve.Resolutions
+resolveInstances modul ifaces canonical uses =
+  let visible =
+        Map.union
+          (Map.map Can._in_head (Can._instances canonical))
+          (Canonicalize.importedInstances ifaces)
+   in case Resolve.run visible uses of
+        Right resolutions ->
+          Right resolutions
+        Left errors ->
+          Left (E.BadInstances (Localizer.fromModule modul) errors)
 
 -- | Assert that the type checker recorded a usable type for every node.
 --

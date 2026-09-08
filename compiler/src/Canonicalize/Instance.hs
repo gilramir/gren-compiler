@@ -108,6 +108,7 @@ addInstance pkg imported env sofar (A.At region (Src.Instance maybeContext srcHe
                 Can._ih_con = home,
                 Can._ih_conName = name,
                 Can._ih_args = args,
+                Can._ih_witness = witnessName sofar className name,
                 Can._ih_context = context
               }
         Can.TAlias _ name _ _ ->
@@ -121,6 +122,25 @@ addInstance pkg imported env sofar (A.At region (Src.Instance maybeContext srcHe
       else do
         canMethods <- canonicalizeMethods env region className decl head_ methods
         Result.ok (Map.insert key (Can.Instance head_ canMethods) sofar)
+
+-- | What this instance is called, so that a call resolved to it has something
+-- to name (§G23).
+--
+-- The class and the head's constructor, which is what an instance /is/, and a
+-- @$@ in front so that nothing written can be spelled the same way. Those two
+-- names are enough on their own except when one module declares instances of
+-- two same-named classes, or for two same-named constructors, from different
+-- modules; the module can see when that happens, so the answer is an index in
+-- declaration order rather than a scheme that flattens four module names into
+-- a name and hopes it stays injective.
+witnessName :: Instances -> Name.Name -> Name.Name -> Name.Name
+witnessName sofar className conName =
+  let base = "$i$" ++ Name.toChars className ++ "$" ++ Name.toChars conName
+      taken = [Can._ih_witness (Can._in_head i) | i <- Map.elems sofar]
+      pick n =
+        let candidate = Name.fromChars (if n == (0 :: Int) then base else base ++ "$" ++ show n)
+         in if candidate `elem` taken then pick (n + 1) else candidate
+   in pick 0
 
 -- | `classes.md` §8.3's gate, which classes and instances share.
 --
