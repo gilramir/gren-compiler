@@ -34,6 +34,7 @@ module Type.Class
     toList,
     entailedBy,
     inhabited,
+    defaultsTo,
     admitsAtom,
     arrayObligations,
   )
@@ -144,6 +145,46 @@ inhabited classes =
         || atom ModuleName.string Name.string
         || atom ModuleName.char Name.char
         || all (\c -> arrayObligations c /= Nothing) cs
+
+-- DEFAULTING
+
+-- | What an /ambiguous/ variable constrained by these classes becomes —
+-- `classes.md` §0, the rule that closes a numeric variable nothing else will.
+--
+-- §0 states it as a case analysis: @Float@ if @Fractional@ is among the
+-- constraints, @Int@ otherwise. It is written here as an __ordered candidate
+-- list__ checked against 'admitsAtom', which gives the same answers and says
+-- something §0's phrasing does not:
+--
+--   * The defaulting rule and the unifier read __one__ table. "Does the default
+--     satisfy the constraints" is not a second statement of what is in each
+--     class, so D2's four integer types cannot be added to 'admitsAtom' and
+--     forgotten here.
+--   * §0's @Fractional@ clause falls out rather than being written. @Int@ is
+--     first and @Fractional@ will not admit it, so a @Fractional@ variable
+--     lands on @Float@ the day that class exists, with no edit here.
+--   * A variable no candidate admits is not defaulted. §0 calls
+--     @{Fractional, Integral}@ a type error rather than an ambiguity, and it
+--     already is one: 'inhabited' refuses that pair where the variable is
+--     created, which is earlier and names a better place.
+--
+-- @Appendable@ is deliberately not defaultable — no candidate admits it — which
+-- is §0's list of defaultable classes read off the table instead of restated.
+-- It leaves with D13.
+defaultsTo :: Classes -> Maybe (ModuleName.Canonical, Name.Name)
+defaultsTo classes =
+  let admits (home, name) = all (\c -> admitsAtom c home name) (toList classes)
+   in case filter admits candidates of
+        candidate : _ -> Just candidate
+        [] -> Nothing
+
+-- | The whole of §0's candidate set: fixed by the compiler, in this order, with
+-- no user-facing declaration (§0.2).
+candidates :: [(ModuleName.Canonical, Name.Name)]
+candidates =
+  [ (ModuleName.basics, Name.int),
+    (ModuleName.basics, Name.float)
+  ]
 
 -- MEMBERSHIP
 

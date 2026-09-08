@@ -11,6 +11,7 @@ import AST.Canonical qualified as Can
 import Control.Monad
 import Data.Map.Strict ((!))
 import Data.Map.Strict qualified as Map
+import Data.Maybe qualified as Maybe
 import Data.Name qualified as Name
 import Data.NonEmptyList qualified as NE
 import Data.Vector qualified as Vector
@@ -33,12 +34,14 @@ run constraint =
   do
     pools <- MVector.replicate 8 []
 
-    (State env _ errors nodes) <-
+    (State env mark errors nodes) <-
       solve Map.empty outermostRank pools emptyState constraint
 
     case errors of
       [] ->
         do
+          -- The second of defaulting's two moments; see 'defaultAmbiguous'.
+          defaultStuck (nextMark mark) (Map.elems env) (Map.elems nodes)
           annotations <- traverse Type.toAnnotation env
           nodeTypes <- Type.toNodeTypes nodes
           return (Right (Solved annotations nodeTypes))
@@ -197,11 +200,15 @@ solve env rank pools state constraint =
 
         let youngMark = mark
         let visitMark = nextMark youngMark
-        let finalMark = nextMark visitMark
+        let headerMark = nextMark visitMark
+        let finalMark = nextMark headerMark
 
         -- pop pool
-        generalize youngMark visitMark nextRank nextPools
+        generalized <- generalize youngMark visitMark nextRank nextPools
         MVector.write nextPools nextRank []
+
+        -- close the ambiguous constrained variables (`classes.md` §0)
+        defaultAmbiguous headerMark (map A.toValue (Map.elems locals)) generalized
 
         -- check that things went well
         mapM_ isGeneric rigids
@@ -277,7 +284,12 @@ occurs state (name, A.At region variable) =
 
 -- | Every variable has rank less than or equal to the maxRank of the pool.
 -- This sorts variables into the young and old pools accordingly.
-generalize :: Mark -> Mark -> Int -> Pools -> IO ()
+--
+-- __Returns the variables it generalized__, which is what 'defaultAmbiguous'
+-- needs and the only reason this is not @IO ()@. They are the candidates and
+-- not the answer: a generalized variable is ambiguous only if the header does
+-- not mention it, which is a question this function has no way to ask.
+generalize :: Mark -> Mark -> Int -> Pools -> IO [Variable]
 generalize youngMark visitMark youngRank pools =
   do
     youngVars <- MVector.read pools youngRank
@@ -305,16 +317,162 @@ generalize youngMark visitMark youngRank pools =
     -- For variables with rank youngRank
     --   If rank < youngRank: register in oldPool
     --   otherwise generalize
-    forM_ (Vector.unsafeLast rankTable) $ \var ->
+    fmap Maybe.catMaybes $
+      forM (Vector.unsafeLast rankTable) $ \var ->
+        do
+          isRedundant <- UF.redundant var
+          if isRedundant
+            then return Nothing
+            else do
+              (Descriptor content rank mark copy) <- UF.get var
+              if rank < youngRank
+                then do
+                  MVector.modify pools (var :) rank
+                  return Nothing
+                else do
+                  UF.set var $ Descriptor content noRank mark copy
+                  return (Just var)
+
+-- DEFAULTING
+
+-- | `classes.md` §0: an ambiguous constrained variable takes the default.
+--
+-- __What ambiguous means here.__ A variable this generalization made generic
+-- and the header does not mention is one nothing will ever instantiate: it is
+-- not part of any definition's type, so no use site can pin it down and no
+-- later constraint can reach it. If it carries classes, it is stuck at
+-- @number@ forever, which is the state §G23.5 measured — `same 3 3` reports
+-- `UNCONSTRAINED TYPE VARIABLE` naming `number`, because a variable is not
+-- something an instance can be picked by.
+--
+-- __Why the header is the whole test.__ Reachability from the header is what
+-- separates the ambiguous case from the legitimately polymorphic one, and the
+-- difference is not academic: an unannotated @zero = 0@ generalizes to
+-- @number@, its variable /is/ the header's, and defaulting it would make
+-- @zero@ an @Int@ and @zero + 1.5@ an error. §0 says an exported polymorphic
+-- numeric constant is not an ambiguity case; this is that sentence, and it is
+-- also why a __rigid__ variable is not a candidate. A rigid one is the
+-- annotation's, so `zero : Num a => a` keeps its @a@ by construction rather
+-- than by a rule about annotations.
+--
+-- __Marks, not a set.__ The reachable variables are marked, exactly as
+-- 'adjustRank' marks the ones it has visited, because 'Variable' is a
+-- union-find point with no ordering to put in a set and because the mark
+-- doubles as the cycle guard a recursive type needs.
+defaultAmbiguous :: Mark -> [Variable] -> [Variable] -> IO ()
+defaultAmbiguous headerMark headerVars generalized =
+  do
+    mapM_ (markReachable headerMark) headerVars
+    forM_ generalized $ \var ->
       do
-        isRedundant <- UF.redundant var
-        if isRedundant
-          then return ()
-          else do
-            (Descriptor content rank mark copy) <- UF.get var
-            if rank < youngRank
-              then MVector.modify pools (var :) rank
-              else UF.set var $ Descriptor content noRank mark copy
+        (Descriptor content _ mark copy) <- UF.get var
+        case content of
+          FlexSuper classes _
+            | mark /= headerMark,
+              Just (home, name) <- Class.defaultsTo classes ->
+                -- `outermostRank`, not the `noRank` it was just given: the
+                -- variable is a closed type now, so 'makeCopyHelp' should share
+                -- it rather than copy one per use, which is the rank a concrete
+                -- nullary type has anyway ('adjustRankContent' on an `App1` with
+                -- no arguments).
+                UF.set var $ Descriptor (Structure (App1 home name [])) outermostRank mark copy
+          _ ->
+            return ()
+
+-- | The other moment: a constrained variable the whole solve left stuck.
+--
+-- __Why one moment is not enough.__ 'defaultAmbiguous' fires where a rank is
+-- popped, and the most ordinary program in the language never pops one. An
+-- annotated definition whose type has no variables — @main : String@ — is a
+-- @CLet [] [] header ...@, which solves its body at the /current/ rank and
+-- generalizes nothing. So the @number@ in @same 3 3@ inside such a definition
+-- is never young, never generalized, and never seen by the other moment. This
+-- was measured before it was written down: with only the generalization-time
+-- rule in place, `same 3 3` still reported `UNCONSTRAINED TYPE VARIABLE`, and
+-- not one 'FlexSuper' reached 'generalize' in the whole module.
+--
+-- __One rule, two witnesses that nothing can reach a variable.__ At a
+-- generalization it is that the header does not mention it. Here it is that the
+-- module's environment does not mention it and generalization never made it
+-- generic — the solve is over, so a variable no published type contains is one
+-- nothing can unify with and nothing can instantiate.
+--
+-- __The @noRank@ half of that test is what protects a local polymorphic
+-- binding.__ @let n = 1 in …@ generalizes @n@ to @number@ and each use
+-- instantiates a copy; the generic variable is in no top-level type, so the
+-- environment test alone would default it and leave a binder typed @Int@ under
+-- uses typed @Float@. It was already generalized, so it is somebody's, and it
+-- is left alone.
+--
+-- The sweep is over the recorded node types because that — with the annotations,
+-- which come out of the same environment — is everything anything downstream
+-- reads. A variable in neither is one no one asks about.
+defaultStuck :: Mark -> [Variable] -> [Type] -> IO ()
+defaultStuck mark envVars nodeTypes =
+  do
+    mapM_ (markReachable mark) envVars
+    mapM_ (sweepType mark) nodeTypes
+
+-- | Walk a recorded node type down to its variables.
+sweepType :: Mark -> Type -> IO ()
+sweepType mark tipe =
+  case tipe of
+    PlaceHolder _ -> return ()
+    AliasN _ _ args realType ->
+      mapM_ (sweepType mark . snd) args >> sweepType mark realType
+    VarN var -> sweepVar mark var
+    AppN _ _ args -> mapM_ (sweepType mark) args
+    FunN arg result -> sweepType mark arg >> sweepType mark result
+    EmptyRecordN -> return ()
+    RecordN fields ext ->
+      mapM_ (sweepType mark) (Map.elems fields) >> sweepType mark ext
+
+-- | Default one variable if it is stuck, and walk what is under it.
+--
+-- The mark does double duty, as it does in 'adjustRank': a variable the
+-- environment reached carries it already and is skipped, and a variable this
+-- sweep has handled carries it afterwards. Both mean "not a candidate", so one
+-- mark says both and the walk terminates on a recursive type.
+sweepVar :: Mark -> Variable -> IO ()
+sweepVar mark var =
+  do
+    (Descriptor content rank varMark copy) <- UF.get var
+    if varMark == mark
+      then return ()
+      else do
+        UF.set var (Descriptor content rank mark copy)
+        case content of
+          FlexSuper classes _
+            | rank /= noRank,
+              Just (home, name) <- Class.defaultsTo classes ->
+                UF.set var $ Descriptor (Structure (App1 home name [])) outermostRank mark copy
+          Structure flatType ->
+            () <$ traverseFlatType (\v -> sweepVar mark v >> return v) flatType
+          Alias _ _ args realType ->
+            do
+              mapM_ (sweepVar mark . snd) args
+              sweepVar mark realType
+          _ ->
+            return ()
+
+-- | Mark a variable and everything under it, for 'defaultAmbiguous'.
+markReachable :: Mark -> Variable -> IO ()
+markReachable headerMark var =
+  do
+    (Descriptor content rank mark copy) <- UF.get var
+    if mark == headerMark
+      then return ()
+      else do
+        UF.set var (Descriptor content rank headerMark copy)
+        case content of
+          Structure flatType ->
+            () <$ traverseFlatType (\v -> markReachable headerMark v >> return v) flatType
+          Alias _ _ args realType ->
+            do
+              mapM_ (markReachable headerMark . snd) args
+              markReachable headerMark realType
+          _ ->
+            return ()
 
 poolToRankTable :: Mark -> Int -> [Variable] -> IO (Vector.Vector [Variable])
 poolToRankTable youngMark youngRank youngInhabitants =

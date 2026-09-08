@@ -2,6 +2,7 @@
 
 module Type.ClassSpec where
 
+import Data.Name qualified as Name
 import Test.Hspec (Spec, describe, it, shouldBe)
 import Type.Class qualified as Class
 
@@ -65,6 +66,33 @@ spec = do
     it "an array is appendable whatever it holds" $
       Class.arrayObligations Class.Appendable `shouldBe` Just []
 
+  describe "Defaulting" $ do
+    it "an ambiguous number becomes Int" $
+      -- `classes.md` §0's headline, and `same 3 3`'s whole problem.
+      defaultsTo [Class.Num] `shouldBe` Just "Int"
+
+    it "so does an ambiguous comparable, because Int is comparable" $
+      -- §0 makes an open class that both candidates derive defaultable rather
+      -- than blocking, and the table is what says `Ord` is one.
+      defaultsTo [Class.Ord] `shouldBe` Just "Int"
+
+    it "and so does the pair, which reduces to number anyway" $
+      defaultsTo [Class.Num, Class.Ord] `shouldBe` Just "Int"
+
+    it "an appendable does not default, because no candidate is one" $
+      -- §0 lists the defaultable classes; this reads that list off
+      -- `admitsAtom` instead of restating it, so `Appendable` is excluded by
+      -- the same table the unifier uses. It leaves with D13.
+      defaultsTo [Class.Appendable] `shouldBe` Nothing
+
+    it "nor does a pair one candidate satisfies only half of" $
+      defaultsTo [Class.Num, Class.Appendable] `shouldBe` Nothing
+
+    it "the candidates are ordered, so Int wins wherever both fit" $
+      -- Which is what makes §0's `Fractional` clause fall out rather than be
+      -- written: `Float` is reached only when `Int` is refused.
+      defaultsTo [Class.Ord] `shouldBe` Just "Int"
+
   describe "The magic names" $ do
     it "reads Gren's three constrained type variables" $ do
       names' (Class.fromName "number") `shouldBe` Just ["Num"]
@@ -93,6 +121,12 @@ entailedBy have want =
   case (Class.fromList have, Class.fromList want) of
     (Just h, Just w) -> Class.entailedBy h w
     _ -> False
+
+defaultsTo :: [Class.Class] -> Maybe String
+defaultsTo cs =
+  case Class.fromList cs of
+    Nothing -> Nothing
+    Just classes -> Name.toChars . snd <$> Class.defaultsTo classes
 
 names :: Maybe Class.Classes -> [String]
 names =
