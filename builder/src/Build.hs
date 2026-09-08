@@ -317,11 +317,18 @@ crawlModule env@(Env _ _ projectType _ _ _ _ foreigns) mvar sources docsNeed nam
 -- and why the other one — an import's interface having moved since this module
 -- was last compiled — is answered later, in 'checkDepsHelp', where the results
 -- of this build are in scope.
+--
+-- __A module whose docs are wanted is never cached__, because the cache does
+-- not hold any. `SCached` compiles with `DocsNeed False` when it compiles at
+-- all and `toDocs` gives `Nothing` when it does not, so taking this path for an
+-- exposed module means @gren docs@ writes @{}@ and exits 0 — a silent wrong
+-- answer, and the second run of it differs from the first. Only the exposed
+-- roots ask for docs, so what this costs is recompiling those.
 crawlKnown :: Env -> MVar StatusDict -> Sources -> DocsNeed -> ModuleName.Raw -> Source -> IO Status
 crawlKnown env mvar sources docsNeed name source@(Source _ bytes) =
   case Map.lookup name (_locals env) of
     Just local
-      | Details._source local == FP.ofBytes bytes ->
+      | Details._source local == FP.ofBytes bytes && not (needsDocs docsNeed) ->
           crawlDeps env mvar sources (Details._deps local) (SCached local)
     _ ->
       crawlFile env mvar sources docsNeed name source
@@ -829,6 +836,10 @@ data DocsGoal a where
   IgnoreDocs :: DocsGoal ()
 
 newtype DocsNeed = DocsNeed Bool
+
+needsDocs :: DocsNeed -> Bool
+needsDocs (DocsNeed isNeeded) =
+  isNeeded
 
 toDocsNeed :: DocsGoal a -> DocsNeed
 toDocsNeed goal =
