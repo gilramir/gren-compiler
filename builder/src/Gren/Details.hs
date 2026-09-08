@@ -58,8 +58,12 @@ import Gren.Platform qualified as P
 import Gren.Version qualified as V
 import Parse.Module qualified as Parse
 import Reporting.Annotation qualified as A
+import Reporting.Doc qualified as D
+import Reporting.Error qualified as E
 import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
+import System.Environment qualified as Env
+import System.IO qualified as IO
 
 -- DETAILS
 
@@ -642,7 +646,10 @@ type StatusDict =
   Map.Map ModuleName.Raw (MVar (Either CrawlError Status))
 
 data Status
-  = SLocal DocsStatus (Map.Map ModuleName.Raw ()) Src.Module
+  = -- | The source bytes ride along only so that a compile error in a
+    -- dependency can be /reported/ — see 'reportDepError'. Nothing else reads
+    -- them.
+    SLocal DocsStatus (Map.Map ModuleName.Raw ()) Src.Module ByteString
   | SForeign I.Interface
   | SKernelLocal [Kernel.Chunk]
   | SKernelForeign
@@ -678,7 +685,14 @@ crawlFile foreignDeps sources mvar pkg docsStatus authorizedForKernelCode expect
     Right modul@(Src.Module (Just (A.At _ actualName)) _ _ imports _ _ _ _ _ _ _ _ _) | expectedName == actualName ->
       do
         deps <- crawlImports foreignDeps sources mvar pkg authorizedForKernelCode (fmap snd imports)
-        return (Right (SLocal docsStatus deps modul))
+        return (Right (SLocal docsStatus deps modul bytes))
+    Left err ->
+      do
+        -- A dependency that does not *parse* is as silent as one that does not
+        -- typecheck, and reaches the user as the same guess about version
+        -- ranges. Same escape hatch, same reason.
+        reportDepError pkg expectedName bytes (E.BadSyntax err)
+        return $ Left CrawlCorruption
     _ ->
       return $ Left CrawlCorruption
 
@@ -723,7 +737,7 @@ data Result
 compile :: P.Platform -> Pkg.Name -> MVar (Map.Map ModuleName.Raw (MVar (Maybe Result))) -> Status -> IO (Maybe Result)
 compile platform pkg mvar status =
   case status of
-    SLocal docsStatus deps modul ->
+    SLocal docsStatus deps modul bytes ->
       do
         resultsDict <- readMVar mvar
         maybeResults <- traverse readMVar (Map.intersection resultsDict deps)
@@ -733,8 +747,10 @@ compile platform pkg mvar status =
           Just results ->
             let importedIfaces = Map.mapMaybe getInterface results
              in case Compile.compile platform pkg importedIfaces modul of
-                  Left _ ->
-                    return Nothing
+                  Left err ->
+                    do
+                      reportDepError pkg (maybe (Name.fromChars "?") A.toValue (Src._name modul)) bytes err
+                      return Nothing
                   Right (Compile.Artifacts canonical annotations _nodeTypes core) ->
                     let ifaces = I.fromModule pkg importedIfaces canonical annotations
                         docs = makeDocs docsStatus canonical
@@ -745,6 +761,32 @@ compile platform pkg mvar status =
       return (Just (RKernelLocal chunks))
     SKernelForeign ->
       return (Just RKernelForeign)
+
+-- | Print a dependency's compile error, when @GENG_DEP_ERRORS@ asks for it.
+--
+-- A dependency that fails to compile is reported as
+-- @PROBLEM BUILDING DEPENDENCIES@ and __nothing else__: the error is discarded
+-- here, and the message that reaches the user names the package and says it
+-- "probably means it has package constraints that are too wide", which is a
+-- guess and is wrong every time the package is a vendored working tree.
+-- `docs/m1b-classes.md` §G30 cost three separate detours to that message in
+-- one day, and D132 was found in spite of it rather than because of it.
+--
+-- Behind an environment variable rather than always on, because a published
+-- package failing to compile really is a packaging problem for the person who
+-- is only trying to build their program, and pages of someone else's type
+-- errors would bury that. For anyone working on `core` it is the only way to
+-- see what is wrong.
+reportDepError :: Pkg.Name -> ModuleName.Raw -> ByteString -> E.Error -> IO ()
+reportDepError pkg name bytes err =
+  do
+    wanted <- Env.lookupEnv "GENG_DEP_ERRORS"
+    case wanted of
+      Nothing ->
+        return ()
+      Just _ ->
+        let path = Pkg.toChars pkg ++ "/" ++ ModuleName.toChars name
+         in D.toAnsi IO.stderr (E.toDoc "." (E.Module name path bytes err) [])
 
 getInterface :: Result -> Maybe I.Interface
 getInterface result =

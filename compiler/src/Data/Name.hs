@@ -19,8 +19,6 @@ module Data.Name
     hasDot,
     splitDots,
     isKernel,
-    isNumberType,
-    isAppendableType,
     fromVarIndex,
     fromWords,
     fromManyNames,
@@ -33,6 +31,8 @@ module Data.Name
     bool,
     char,
     string,
+    num,
+    appendable,
     bytes,
     maybe,
     result,
@@ -157,20 +157,8 @@ getKernel name@(Utf8.Utf8 ba#) =
 isKernel :: Name -> Bool
 isKernel = Utf8.startsWith prefix_kernel
 
-isNumberType :: Name -> Bool
-isNumberType = Utf8.startsWith prefix_number
-
-isAppendableType :: Name -> Bool
-isAppendableType = Utf8.startsWith prefix_appendable
-
 prefix_kernel :: Name
 prefix_kernel = fromChars "Gren.Kernel."
-
-prefix_number :: Name
-prefix_number = fromChars "number"
-
-prefix_appendable :: Name
-prefix_appendable = fromChars "appendable"
 
 -- FROM VAR INDEX
 
@@ -378,6 +366,15 @@ char = fromChars "Char"
 
 string :: Name
 string = fromChars "String"
+
+-- | `classes.md` §1.2's closed classes, which `core` declares in `Basics` and
+-- "Type.Class" is the meaning of (D135). They are named here rather than
+-- spelled at the use site for the same reason 'int' and 'float' are.
+num :: Name
+num = fromChars "Num"
+
+appendable :: Name
+appendable = fromChars "Appendable"
 
 bytes :: Name
 bytes = fromChars "Bytes"

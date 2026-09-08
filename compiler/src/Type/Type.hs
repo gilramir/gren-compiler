@@ -26,10 +26,12 @@ module Type.Type
     unnamedFlexVar,
     unnamedFlexSuper,
     nameToFlex,
+    classesOf,
     nameToRigid,
     toAnnotation,
     toNodeTypes,
     toErrorType,
+    toErrorTypePair,
   )
 where
 
@@ -207,19 +209,45 @@ unnamedFlexSuper :: Class.Classes -> Content
 unnamedFlexSuper classes =
   FlexSuper classes Nothing
 
+-- | The unifier's reading of a written context: the closed classes in it
+-- (D135).
+--
+-- `Nothing` when there are none, which is a `FlexVar`/`RigidVar` rather than a
+-- constrained one. An /open/ class in the list is not lost — it is
+-- `Type.Resolve`'s, and this is the seam where D130's two mechanisms divide.
+-- It lives here rather than in "Type.Class" only so that that module stays a
+-- leaf `AST.Canonical` can import.
+classesOf :: [Can.Class] -> Maybe Class.Classes
+classesOf classes =
+  Class.fromList [c | Can.Class home name <- classes, Just c <- [Class.fromDeclared home name]]
+
+-- | A class the unifier knows, as the constraint an annotation writes.
+toCanClass :: Class.Class -> Can.Class
+toCanClass c =
+  let (home, name) = Class.toDeclared c
+   in Can.Class home name
+
 -- MAKE NAMED VARIABLES
 
-nameToFlex :: Name.Name -> IO Variable
-nameToFlex name =
+-- | A type variable an annotation binds, under the constraints it was written
+-- with.
+--
+-- __The constraint list is the input, not the name__ (D135). Until verb 7 these
+-- read `Class.fromName`, so `number` was a constrained variable and `a` was
+-- not; a variable's name means nothing now and what makes it constrained is the
+-- context beside the type. Only the closed classes reach here — an open one is
+-- `Type.Resolve`'s and leaves the variable flexible, which is exactly D130.
+nameToFlex :: Name.Name -> [Can.Class] -> IO Variable
+nameToFlex name constraints =
   UF.fresh $
     makeDescriptor $
-      maybe FlexVar FlexSuper (Class.fromName name) (Just name)
+      maybe FlexVar FlexSuper (classesOf constraints) (Just name)
 
-nameToRigid :: Name.Name -> IO Variable
-nameToRigid name =
+nameToRigid :: Name.Name -> [Can.Class] -> IO Variable
+nameToRigid name constraints =
   UF.fresh $
     makeDescriptor $
-      maybe RigidVar RigidSuper (Class.fromName name) name
+      maybe RigidVar RigidSuper (classesOf constraints) name
 
 -- TO TYPE ANNOTATION
 
@@ -227,16 +255,22 @@ toAnnotation :: Variable -> IO Can.Annotation
 toAnnotation variable =
   do
     userNames <- getVarNames variable Map.empty
-    (tipe, NameState freeVars _ _ _) <-
+    (tipe, NameState freeVars _ _ _ constrained) <-
       State.runStateT (variableToCanType variable) (makeNameState userNames)
-    -- Every variable comes out unconstrained, including the ones the unifier
-    -- knows are constrained. `Class.Classes` is the unifier's own three-way
-    -- enum and has no module to name — `Basics.Num` is not declared anywhere
-    -- until `core` is rewritten — so pointing `Can.Class` at it here would be
-    -- inventing a reference. The name still carries the meaning in the
-    -- meantime: `number` comes back as `number`, and `Class.fromName` reads it
-    -- again on the way in. Both halves of that bridge go together, in verb 7.
-    return $ Can.Forall (Map.map (const []) freeVars) tipe
+    -- A constrained variable comes back constrained (D135). `Basics` declares
+    -- the closed classes now, so `Class.toDeclared` has a real name to point a
+    -- `Can.Class` at, and an annotation the solver produced says what the
+    -- solver knew — which is what closes §G21.3's unenforced promise for them:
+    -- an importer's `srcTypeToVariable` reads the constraint back and the
+    -- unifier demands it again.
+    --
+    -- An /open/ class is not here and cannot be: the solver never saw one.
+    -- `Compile.withContexts` puts a written context back for that reason, and
+    -- the two are consistent because a written closed constraint arrives here
+    -- as a `FlexSuper`/`RigidSuper` and leaves as itself.
+    let contextOf name =
+          maybe [] (map toCanClass . Class.toList) (Map.lookup name constrained)
+    return $ Can.Forall (Map.mapWithKey (\name _ -> contextOf name) freeVars) tipe
 
 -- | Zonk a whole map of recorded node types at once.
 --
@@ -321,16 +355,21 @@ variableToCanType variable =
       FlexSuper super maybeName ->
         case maybeName of
           Just name ->
-            return (Can.TVar name)
+            do
+              noteClasses name super
+              return (Can.TVar name)
           Nothing ->
             do
               name <- getFreshSuperName super
               liftIO $ UF.modify variable (\desc -> desc {_content = FlexSuper super (Just name)})
+              noteClasses name super
               return (Can.TVar name)
       RigidVar name ->
         return (Can.TVar name)
-      RigidSuper _ name ->
-        return (Can.TVar name)
+      RigidSuper super name ->
+        do
+          noteClasses name super
+          return (Can.TVar name)
       Alias home name args realVariable ->
         do
           canArgs <- traverse (traverse variableToCanType) args
@@ -376,6 +415,26 @@ toErrorType variable =
   do
     userNames <- getVarNames variable Map.empty
     State.evalStateT (variableToErrorType variable) (makeNameState userNames)
+
+-- | The two sides of a mismatch, named against __one__ state.
+--
+-- Same reason 'toNodeTypes' shares one: a name this invents for a variable
+-- nobody named has to avoid every name in the message, and two independent
+-- states each avoid only their own half. The result is a report that says
+-- "this is a `number`, but I need a `number`" — which is what
+-- `corpus/reject/method-at-a-numeric-variable` produced the day `number`
+-- stopped being reserved and became a name a program may bind
+-- (`docs/m1b-classes.md` §G32).
+--
+-- Reachable before D135 too, with an ordinary @a@ on one side and an invented
+-- @a@ on the other. What changed is how easy it is to reach.
+toErrorTypePair :: Variable -> Variable -> IO (ET.Type, ET.Type)
+toErrorTypePair v1 v2 =
+  do
+    userNames <- getVarNames v2 =<< getVarNames v1 Map.empty
+    State.evalStateT
+      ((,) <$> variableToErrorType v1 <*> variableToErrorType v2)
+      (makeNameState userNames)
 
 variableToErrorType :: Variable -> StateT NameState IO ET.Type
 variableToErrorType variable =
@@ -425,15 +484,18 @@ contentToErrorType variable content =
     Error ->
       return ET.Error
 
--- | The error layer keeps its own four-constructor vocabulary, and this is the
--- seam that lets it: `number`, `comparable`, `appendable` and `compappend` are
--- what a Gren programmer has written and what every error message says, so
--- they go on meaning that until D13 and the `core` rewrite change what a
--- programmer writes. `Reporting/Error/Type.hs` is untouched by verb 2 for
--- exactly this reason.
+-- | The error layer keeps a vocabulary of its own, and this is the seam that
+-- lets it.
+--
+-- It was the four magic names once — `number`, `comparable`, `appendable`,
+-- `compappend` — and what kept it after D135 is that `ET.Super` is a
+-- *classification*, not a spelling: `Reporting.Error.Type` keys its hints on
+-- it ("only Int and Float work as numbers") and would key them on the class if
+-- it could see one. Rendering a constraint in an error type is D12's
+-- (`docs/m1b-classes.md` §G32.6).
 --
 -- The reduction in `Class.union` is what makes this total in practice: the
--- only sets that reach here are the four the old enum could hold.
+-- only sets that reach here are the ones the old enum could hold.
 classesToSuper :: Class.Classes -> ET.Super
 classesToSuper classes =
   case Class.toList classes of
@@ -478,12 +540,23 @@ data NameState = NameState
   { _taken :: Map.Map Name.Name (),
     _normals :: Int,
     _numbers :: Int,
-    _appendables :: Int
+    _appendables :: Int,
+    -- | The classes each variable the walk met is constrained by (D135).
+    --
+    -- Collected on the way through rather than read back off the type, because
+    -- by the time there is a `Can.Type` the variable is a bare `Can.TVar` and
+    -- the constraint is gone. `Can.FreeVars` wants exactly this map.
+    _constrained :: Map.Map Name.Name Class.Classes
   }
 
 makeNameState :: Map.Map Name.Name Variable -> NameState
 makeNameState taken =
-  NameState (Map.map (const ()) taken) 0 0 0
+  NameState (Map.map (const ()) taken) 0 0 0 Map.empty
+
+noteClasses :: (Monad m) => Name.Name -> Class.Classes -> StateT NameState m ()
+noteClasses name classes =
+  State.modify $ \state ->
+    state {_constrained = Map.insertWith Class.union name classes (_constrained state)}
 
 -- FRESH VAR NAMES
 
@@ -506,9 +579,13 @@ getFreshVarNameHelp index taken =
 
 -- FRESH SUPER NAMES
 
--- | The name a constrained variable is shown under, which is the name the
--- author would have written for it. Same seam as `classesToSuper`, and it goes
--- the same way when `core` stops writing `number`.
+-- | The name an /unnamed/ constrained variable is shown under.
+--
+-- It is invented, not read: a literal's type is a variable nobody named, and
+-- `number` is the friendliest thing to call it. That it is now a name a program
+-- may also bind is exactly why 'toErrorTypePair' exists — two independent name
+-- states could hand the same one to two different variables in one message
+-- (`docs/m1b-classes.md` §G32.6).
 getFreshSuperName :: (Monad m) => Class.Classes -> StateT NameState m Name.Name
 getFreshSuperName classes =
   case Class.toList classes of

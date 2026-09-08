@@ -192,29 +192,17 @@ isEquivalentRenaming varPairs =
 -- | Whether renaming a published signature's type variable is a breaking
 -- change.
 --
--- `comparable` and `compappend` were categories here until `core` declared
--- `Ord` (`docs/m1b-classes.md` §G29). They are ordinary variable names now, so
--- they categorize as `Var` and the widening rule that let a `number` become a
--- `comparable` has nothing left to widen into: a constraint is written in the
--- context today, and a context is part of the signature this compares.
+-- __It is not, ever.__ This had four categories and now has none.
+-- `comparable` and `compappend` went when `core` declared `Ord`
+-- (`docs/m1b-classes.md` §G29) and `number` and `appendable` go with D135, so
+-- every type variable in a published signature is an ordinary name that can be
+-- renamed to any other. What a variable is constrained by is written in the
+-- __context__ now, and a context is part of the signature this compares — so
+-- the question this function used to answer is asked somewhere it can be
+-- answered exactly, instead of being guessed from a spelling.
 compatibleVars :: (Name.Name, Name.Name) -> Bool
-compatibleVars (old, new) =
-  case (categorizeVar old, categorizeVar new) of
-    (Appendable, Appendable) -> True
-    (Number, Number) -> True
-    (_, Var) -> True
-    (_, _) -> False
-
-data TypeVarCategory
-  = Appendable
-  | Number
-  | Var
-
-categorizeVar :: Name.Name -> TypeVarCategory
-categorizeVar name
-  | Name.isAppendableType name = Appendable
-  | Name.isNumberType name = Number
-  | otherwise = Var
+compatibleVars _ =
+  True
 
 -- MAGNITUDE
 

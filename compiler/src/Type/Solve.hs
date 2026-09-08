@@ -611,27 +611,25 @@ emptyRecord1 =
 
 -- SOURCE TYPE TO VARIABLE
 
--- | An annotation's bound variables become unification variables, and this is
--- where a constraint on one would become a `Class.Classes`.
+-- | An annotation's bound variables become unification variables, under the
+-- constraints the annotation was written with.
 --
--- It still reads the variable's *name* rather than its constraint list, and
--- the reason moved (`docs/m1b-classes.md` §G21). The list is no longer empty —
--- `Canonicalize.Type` resolves `Eq a =>` onto it — but `Class.Class` is a
--- three-constructor enum, `Num`/`Ord`/`Appendable`, and a declared class is
--- not one of them and cannot be until `core` declares them. So the constraint
--- is __recorded and not enforced__, and what unblocks it is verb 7's change to
--- the unifier's vocabulary rather than anything else in the front end.
+-- __This is where §G21.3's unenforced promise is spent__ (D135). It read the
+-- variable's *name* through verbs 3 to 6, because `Class.Class` was an enum of
+-- names no module declared; `Basics` declares the closed ones now, so
+-- `Class.fromContext` reads the resolved constraint list and `Num a =>` is
+-- enforced here, by unification, at the definition and at every use of it.
 --
--- Nothing can depend on the unenforced promise in the meantime: the only thing
--- a constraint buys is calling a method, and a method call is rejected in
--- `Canonicalize.Expression` for want of an instance (§G20.3).
+-- An /open/ class in the list leaves the variable flexible on purpose. It is
+-- `Type.Resolve`'s to discharge and D130 is the rule: the two mechanisms divide
+-- here and nowhere else.
 srcTypeToVariable :: Int -> Pools -> Can.FreeVars -> Can.Type -> IO Variable
 srcTypeToVariable rank pools freeVars srcType =
-  let nameToContent name =
-        maybe (FlexVar (Just name)) (\classes -> FlexSuper classes (Just name)) (Class.fromName name)
+  let nameToContent name constraints =
+        maybe (FlexVar (Just name)) (\classes -> FlexSuper classes (Just name)) (classesOf constraints)
 
-      makeVar name _constraints =
-        UF.fresh (Descriptor (nameToContent name) rank noMark Nothing)
+      makeVar name constraints =
+        UF.fresh (Descriptor (nameToContent name constraints) rank noMark Nothing)
    in do
         flexVars <- Map.traverseWithKey makeVar freeVars
         MVector.modify pools (Map.elems flexVars ++) rank

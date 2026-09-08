@@ -152,14 +152,19 @@ witnessType env cls tipe =
           (\(Can.Forall _ methodType) -> Type.substitute (Map.singleton param tipe) methodType)
           methods
 
--- | The witness parameters a context binds, in 'Can.contextOrder'.
+-- | The witness parameters a context binds, in 'Can.witnessOrder'.
 --
 -- The names are the caller's, because they have to be distinct down a whole
 -- nesting chain; the types are computed here.
+--
+-- 'Can.witnessOrder' and not 'Can.contextOrder': a closed class binds nothing
+-- (D130, D135). `Num a =>` is enforced by unification, has no instances and no
+-- methods, so there is no witness to pass and a definition constrained only by
+-- closed classes takes exactly the arguments it is written with.
 witnessParams :: Env -> [Name] -> Can.FreeVars -> [(Name, Can.Type)]
 witnessParams env names context =
   [ (name, witnessType env cls (Can.TVar var))
-  | (name, (var, cls)) <- zip names (Can.contextOrder context)
+  | (name, (var, cls)) <- zip names (Can.witnessOrder context)
   ]
 
 -- MATCHING
@@ -235,7 +240,7 @@ witnessFor env bound region wanted because cls tipe =
             args' <-
               traverse
                 (\(var, ctxCls) -> witnessFor env bound region wanted deeper ctxCls (under sub var))
-                (Can.contextOrder (Can._ih_context head_))
+                (Can.witnessOrder (Can._ih_context head_))
             Right $
               FromInstance
                 (Can._ih_home head_)
@@ -307,7 +312,7 @@ run env modul =
       (_, (uses, params, errs, _)) = runState walk (Map.empty, Map.empty, [], 0)
       ofInstance i =
         let context = Can._ih_context (Can._in_head i)
-         in witnessParams env (localNames (length (Can.contextOrder context))) context
+         in witnessParams env (localNames (length (Can.witnessOrder context))) context
    in case errs of
         [] -> Right (Elaboration uses params (Map.map ofInstance (Can._instances modul)))
         err : rest -> Left (NE.List err rest)
@@ -365,7 +370,7 @@ def env tops scope d =
       expr env tops (bindPatterns args scope) body
     Can.TypedDef _ freeVars args body _ ->
       do
-        let context = Can.contextOrder freeVars
+        let context = Can.witnessOrder freeVars
         names <- freshNames (length context)
         let bound = witnessParams env names freeVars
         let scope' =
@@ -496,7 +501,7 @@ constrainedAt ::
   Can.Type ->
   Walk ()
 constrainedAt env scope nid region wanted (Can.Forall freeVars declared) actual =
-  case Can.contextOrder freeVars of
+  case Can.witnessOrder freeVars of
     [] ->
       return ()
     context ->
@@ -525,7 +530,7 @@ methodUse ::
   Walk ()
 methodUse env scope nid region cls param name (Can.Forall freeVars declared) actual =
   let sub = match declared actual Map.empty
-      others = [c | (v, c) <- Can.contextOrder freeVars, (v, c) /= (param, cls)]
+      others = [c | (v, c) <- Can.witnessOrder freeVars, (v, c) /= (param, cls)]
       wanted = E.ForMethod name
    in case others of
         extra : _ ->

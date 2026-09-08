@@ -137,7 +137,9 @@ addEntry listRegion tipe state (index, pattern) =
 addCtor :: A.Region -> ModuleName.Canonical -> Name.Name -> [Name.Name] -> Name.Name -> [Can.PatternCtorArg] -> E.PExpected Type -> State -> IO State
 addCtor region home typeName typeVarNames ctorName args expectation state =
   do
-    varPairs <- traverse (\var -> (,) var <$> nameToFlex var) typeVarNames
+    -- A union's type variables carry no constraints: `Can.Union` binds bare
+    -- names, and a constraint qualifies an annotation (D111).
+    varPairs <- traverse (\var -> (,) var <$> nameToFlex var []) typeVarNames
     let typePairs = map (second VarN) varPairs
     let freeVarDict = Map.fromList typePairs
 

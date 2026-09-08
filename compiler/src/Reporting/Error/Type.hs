@@ -552,11 +552,18 @@ badDoubleRigid x y =
     D.reflowLink "Read" "type-annotations" "for more advice!"
   ]
 
+-- | How a constrained variable is described in a hint.
+--
+-- The class rather than a spelling (D135). `number` and `appendable` were
+-- variable /names/ with meaning until verb 7, so a message could say
+-- "a `number` value" and point at something the reader could write. They are
+-- ordinary names now and `Num a =>` is what a reader writes, so what these say
+-- is the constraint.
 toASuperThing :: T.Super -> String
 toASuperThing super =
   case super of
-    T.Number -> "a `number` value"
-    T.Appendable -> "an `appendable` value"
+    T.Number -> "a `Num` value — an `Int` or a `Float`"
+    T.Appendable -> "an `Appendable` value — a `String` or an `Array`"
 
 -- BAD SUPER HINTS
 
@@ -584,12 +591,12 @@ badRigidSuper :: T.Super -> String -> [D.Doc]
 badRigidSuper super aThing =
   let (superType, manyThings) =
         case super of
-          T.Number -> ("number", "ints AND floats")
-          T.Appendable -> ("appendable", "strings AND arrays")
+          T.Number -> ("Num", "ints AND floats")
+          T.Appendable -> ("Appendable", "strings AND arrays")
    in [ D.toSimpleHint $
           "The `"
             ++ superType
-            ++ "` in your type annotation is saying that "
+            ++ "` constraint in your type annotation is saying that "
             ++ manyThings
             ++ " can flow through, but your code is saying it specifically wants "
             ++ aThing

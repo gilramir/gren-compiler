@@ -37,6 +37,7 @@ import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name (Name)
 import Gren.ModuleName qualified as ModuleName
+import Type.Class qualified as Class
 
 lowerType :: Can.Type -> Core.Type
 lowerType tipe =
@@ -101,17 +102,20 @@ lowerAnnotation (Can.Forall freeVars tipe) =
 -- 'Map.Map', which is C2's requirement met the same way record fields meet it:
 -- an order two frontends agree on without having to agree on a traversal.
 --
--- Every declared class is 'Core.Open'. `classes.md` §1.2's closed four are
--- __compiler-known__ — their membership is a table in "Type.Class" and there is
--- no source syntax that says @closed@ — so nothing a module can write is one.
--- What marks them when `core` declares them is verb 7's question, and guessing
--- at it here would put an answer in the field a backend reads.
+-- __What marks a class 'Core.Closed' is the compiler-known table__, not
+-- anything in the source (D135). `classes.md` §1.2 fixes the membership of the
+-- numeric classes by construction and there is no syntax that says @closed@, so
+-- the declaration `core` writes is an ordinary one and "Type.Class" is what it
+-- means. A class a user declares is 'Core.Open' because it is not in that
+-- table, which is also the §8.3 gate said in the IR: an instance is the only
+-- way into an open class and there is no way at all into a closed one.
 lowerClass :: ModuleName.Canonical -> Name -> Can.ClassDecl -> Core.ClassDecl
 lowerClass home name (Can.ClassDecl param methods) =
   Core.ClassDecl
     { Core._classNameC = Core.QualName home name,
       Core._classParam = param,
-      Core._classOpenness = Core.Open,
+      Core._classOpenness =
+        if Class.isClosed home name then Core.Closed else Core.Open,
       Core._classMethods =
         [(methodName, lowerAnnotation annotation) | (methodName, annotation) <- Map.toAscList methods]
     }

@@ -3,6 +3,7 @@
 module Type.ClassSpec where
 
 import Data.Name qualified as Name
+import Gren.ModuleName qualified as ModuleName
 import Test.Hspec (Spec, describe, it, shouldBe)
 import Type.Class qualified as Class
 
@@ -79,22 +80,35 @@ spec = do
     it "nor does a pair one candidate satisfies only half of" $
       defaultsTo [Class.Num, Class.Appendable] `shouldBe` Nothing
 
-  describe "The magic names" $ do
-    it "reads the two constrained type variables that are left" $ do
-      names' (Class.fromName "number") `shouldBe` Just ["Num"]
-      names' (Class.fromName "appendable") `shouldBe` Just ["Appendable"]
+  describe "The declared names" $ do
+    it "reads the two classes the unifier still owns" $ do
+      -- D135. What used to be here was a table of magic type-variable *names*;
+      -- the bridge is a qualified class name now, and `core` declares both.
+      Class.fromDeclared ModuleName.basics "Num" `shouldBe` Just Class.Num
+      Class.fromDeclared ModuleName.basics "Appendable" `shouldBe` Just Class.Appendable
 
-    it "numbers them the way the parser does" $
-      names' (Class.fromName "number2") `shouldBe` Just ["Num"]
+    it "round-trips through the name core declares" $ do
+      Class.toDeclared Class.Num `shouldBe` (ModuleName.basics, "Num")
+      Class.toDeclared Class.Appendable `shouldBe` (ModuleName.basics, "Appendable")
 
-    it "comparable and compappend are ordinary variables now" $ do
-      -- The other half of D130: `core` says `Ord a =>`, so these two names mean
-      -- nothing and a program may use them for anything.
-      names' (Class.fromName "comparable") `shouldBe` Nothing
-      names' (Class.fromName "compappend") `shouldBe` Nothing
+    it "an open class is not one, and that is what makes it the elaborator's" $ do
+      -- `Eq` and `Ord` are declared in the same module and are not here: their
+      -- constraints leave the unifier entirely (D130).
+      Class.fromDeclared ModuleName.basics "Eq" `shouldBe` Nothing
+      Class.fromDeclared ModuleName.basics "Ord" `shouldBe` Nothing
+      Class.isClosed ModuleName.basics "Ord" `shouldBe` False
+      Class.isClosed ModuleName.basics "Num" `shouldBe` True
 
-    it "an ordinary variable has no classes" $
-      names' (Class.fromName "a") `shouldBe` Nothing
+    it "a same-named class from another module is a different class" $ do
+      -- The reason the bridge is a *qualified* name. A package declaring its
+      -- own `Num` gets an ordinary open class, not the numeric one.
+      Class.fromDeclared ModuleName.string "Num" `shouldBe` Nothing
+
+    it "no type-variable name means anything any more" $ do
+      -- `number`, `appendable`, `comparable` and `compappend` were all magic
+      -- at M1b's start. This is the whole of what is left of that.
+      Class.fromDeclared ModuleName.basics "number" `shouldBe` Nothing
+      Class.fromDeclared ModuleName.basics "appendable" `shouldBe` Nothing
 
 union :: [Class.Class] -> [Class.Class] -> Maybe Class.Classes
 union a b =

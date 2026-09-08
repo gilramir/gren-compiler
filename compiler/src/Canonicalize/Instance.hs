@@ -50,6 +50,7 @@ import Reporting.Annotation qualified as A
 import Reporting.Error.Canonicalize qualified as Error
 import Reporting.Result qualified as Result
 import Reporting.Warning qualified as W
+import Type.Class qualified as Class
 
 -- RESULT
 
@@ -111,6 +112,12 @@ addInstance pkg imported env sofar (A.At region (Src.Instance maybeContext srcHe
       case srcClassName of
         Unqualified name -> Env.findClassDecl classRegion env name
         Qualified home name -> Env.findClassDeclQual classRegion env home name
+
+    -- After the class resolves, because "is this class closed?" is a question
+    -- about a qualified name (D135), and before anything else is checked
+    -- because there is no instance to check: a closed class has no methods, so
+    -- a body for one is a body for nothing.
+    checkNotClosed region cls
 
     (Can.Forall context canArgType) <- Type.toAnnotation env maybeContext srcArg
 
@@ -189,6 +196,17 @@ checkFirstParty pkg region srcClassName
           case srcClassName of
             Unqualified name -> name
             Qualified _ name -> name
+
+-- | `classes.md` §1.2's closed classes admit no instances at all (D135).
+--
+-- Not the same refusal as `checkFirstParty`, and not lifted by the same thing:
+-- §8.3's gate opens when D10 opens, and this one never does. Membership in a
+-- closed class is a table in "Type.Class", so an instance would be a second
+-- statement of it that the unifier would never read.
+checkNotClosed :: A.Region -> Can.Class -> Result i w ()
+checkNotClosed region (Can.Class home name)
+  | Class.isClosed home name = Result.throw (Error.InstanceForClosedClass region name)
+  | otherwise = Result.ok ()
 
 -- THE HEAD
 

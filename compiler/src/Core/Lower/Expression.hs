@@ -479,9 +479,18 @@ def env d =
       let declared = foldr (Can.TLambda . snd) result args
           sp = span env region
           value = bindValue env sp (lowerType declared) (map fst args) (expr env body)
-       in case Can.contextOrder freeVars of
-            [] ->
+       in case (Can.contextOrder freeVars, Can.witnessOrder freeVars) of
+            ([], _) ->
               Core.Bind (Core.Binder name (lowerType declared) sp) value
+            (_, []) ->
+              -- Constrained only by closed classes (D135). The type is
+              -- quantified and says so — a backend reading `Num a` knows the
+              -- variable is a machine number, which is more than `TVar a` said
+              -- — but there is no witness to bind, so the value is untouched
+              -- and the arity is what was written.
+              Core.Bind
+                (Core.Binder name (lowerAnnotation (Can.Forall freeVars declared)) sp)
+                value
             _ ->
               Core.Bind
                 (Core.Binder name (lowerAnnotation (Can.Forall freeVars declared)) sp)

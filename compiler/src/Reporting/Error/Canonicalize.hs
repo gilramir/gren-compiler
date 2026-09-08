@@ -56,6 +56,7 @@ data Error
   | InstanceHeadNotType A.Region Name.Name
   | InstanceHeadIsAlias A.Region Name.Name Name.Name
   | InstanceDuplicate A.Region Name.Name Name.Name
+  | InstanceForClosedClass A.Region Name.Name
   | InstanceMethodUnknown A.Region Name.Name Name.Name [Name.Name]
   | InstanceMethodMissing A.Region Name.Name Name.Name [Name.Name]
   | Binop A.Region Name.Name Name.Name
@@ -565,6 +566,24 @@ toReport source err =
               \ module that depends on this one — so who may write one is the whole of what\
               \ keeps two packages from disagreeing about the same type. The restriction\
               \ lifts when user-defined classes open up."
+          )
+    InstanceForClosedClass region className ->
+      Report.Report "INSTANCE FOR A CLOSED CLASS" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`"
+                ++ Name.toChars className
+                ++ "` is a closed class, so nothing may declare an instance of it:",
+            D.reflow $
+              "Which types are in `"
+                ++ Name.toChars className
+                ++ "` is fixed by the compiler and cannot be added to, now or later. That is\
+                   \ what makes it cheap: a constraint on a closed class is checked while\
+                   \ types are being worked out rather than by passing an instance around,\
+                   \ so it costs your code nothing at all to write one."
           )
     InstanceHeadNotApplied region ->
       Report.Report "BAD INSTANCE HEAD" region [] $

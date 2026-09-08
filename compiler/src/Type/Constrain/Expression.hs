@@ -488,7 +488,7 @@ constrainDef rtv def bodyCon =
     Can.TypedDef (A.At region name) freeVars typedArgs expr srcResultType ->
       do
         let newNames = Map.difference freeVars rtv
-        newRigids <- Map.traverseWithKey (\n _ -> nameToRigid n) newNames
+        newRigids <- Map.traverseWithKey nameToRigid newNames
         let newRtv = Map.union rtv (Map.map VarN newRigids)
 
         (TypedArgs tipe resultType (Pattern.State headers pvars revCons)) <-
@@ -571,7 +571,7 @@ recDefsHelp rtv defs bodyCon rigidInfo flexInfo =
         Can.TypedDef (A.At region name) freeVars typedArgs expr srcResultType ->
           do
             let newNames = Map.difference freeVars rtv
-            newRigids <- Map.traverseWithKey (\n _ -> nameToRigid n) newNames
+            newRigids <- Map.traverseWithKey nameToRigid newNames
             let newRtv = Map.union rtv (Map.map VarN newRigids)
 
             (TypedArgs tipe resultType (Pattern.State headers pvars revCons)) <-

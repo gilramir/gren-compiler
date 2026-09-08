@@ -29,8 +29,7 @@ unify v1 v2 =
     Unify k ->
       k [] onSuccess $ \vars () ->
         do
-          t1 <- Type.toErrorType v1
-          t2 <- Type.toErrorType v2
+          (t1, t2) <- Type.toErrorTypePair v1 v2
           UF.union v1 v2 errorDescriptor
           return (Err vars t1 t2)
 

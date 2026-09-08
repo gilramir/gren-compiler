@@ -229,21 +229,25 @@ classDecl maybeDocs start =
         name <- addLocation (Var.upper E.ClassName)
         commentsAfterName <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentVar
         var@(A.At (A.Region _ varEnd) _) <- addLocation (Var.lower E.ClassVar)
+        hasBody <- oneOfWithFallback [lookAhead classBodyAhead >> return True] False
         ((methods, commentsAfterVar, commentsAfterWhere, commentsAfter), end) <-
-          oneOfWithFallback
-            [ do
-                _ <- lookAhead classBodyAhead
-                afterVar <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentWhere
-                Keyword.where_ E.ClassWhere
-                afterWhere <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentBody
-                ((ms, after), bodyEnd) <-
-                  withIndent $
-                    do
-                      ((method, commentsAfterMethod), methodEnd) <- chompClassMethod []
-                      chompClassMethods (NonEmpty.singleton method) commentsAfterMethod methodEnd
-                return ((ms, afterVar, afterWhere, after), bodyEnd)
-            ]
-            (([], [], [], []), varEnd)
+          if hasBody
+            then do
+              afterVar <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentWhere
+              Keyword.where_ E.ClassWhere
+              afterWhere <- Space.chompAndCheckIndent E.ClassSpace E.ClassIndentBody
+              ((ms, after), bodyEnd) <-
+                withIndent $
+                  do
+                    ((method, commentsAfterMethod), methodEnd) <- chompClassMethod []
+                    chompClassMethods (NonEmpty.singleton method) commentsAfterMethod methodEnd
+              return ((ms, afterVar, afterWhere, after), bodyEnd)
+            else do
+              -- `Space.chomp` rather than `chompAndCheckIndent`: a declaration
+              -- consumes the whitespace after it and hands back the comments in
+              -- it, and what follows this one starts in column 1.
+              after <- Space.chomp E.ClassSpace
+              return (([], [], [], after), varEnd)
         let comments = SC.ClassComments commentsAfterKeyword commentsAfterName commentsAfterVar commentsAfterWhere
         let class_ = A.at start end (Src.Class name var methods comments)
         return ((Class maybeDocs class_, commentsAfter), end)

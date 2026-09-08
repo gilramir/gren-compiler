@@ -22,14 +22,22 @@
 --
 -- `Ord` __has left__: `core` declares it and `Basics.compare` is its method, so
 -- membership is an instance lookup the elaborator does and not a table here
--- (`docs/m1b-classes.md` §G29). `Appendable` leaves when D13 drops `++`. `Num`
--- stays until `core` declares it too, and grows D2's other three integer types.
+-- (`docs/m1b-classes.md` §G29). What is left is `classes.md` §1.2's __closed__
+-- classes, and `core` declares those too now (D135, §G32) — the difference is
+-- what the declaration /means/. An open class means its instances; a closed one
+-- means the tables below, so `Basics.Num` is a name this module answers to
+-- rather than a name the elaborator resolves.
+--
+-- `Appendable` leaves when D13 drops `++`. `Num` grows D2's other three integer
+-- types, and `Integral`, `Fractional` and `Bits` join it.
 module Type.Class
   ( Class (..),
     Classes,
     singleton,
     union,
-    fromName,
+    fromDeclared,
+    toDeclared,
+    isClosed,
     fromList,
     toList,
     entailedBy,
@@ -40,6 +48,7 @@ module Type.Class
   )
 where
 
+import Data.Maybe qualified as Maybe
 import Data.Name qualified as Name
 import Data.Set qualified as Set
 import Gren.ModuleName qualified as ModuleName
@@ -91,18 +100,51 @@ reduce :: Set.Set Class -> Classes
 reduce cs =
   Classes (Set.filter (\c -> not (any (\other -> other /= c && entails other c) (Set.toList cs))) cs)
 
--- | A type variable whose name is one of Gren's remaining magic ones.
+-- | The class a declared name is, when the class is one of `classes.md` §1.2's
+-- closed ones.
 --
--- This is the bridge that let verb 2 land without verb 7 (D115, as amended by
--- D120): a name still means a class here, so a signature nobody has rewritten
--- goes on compiling while the representation underneath it changes. Half of it
--- is gone -- `comparable` and `compappend` are ordinary variable names now that
--- `core` declares `Ord` (§G29) -- and the rest goes with `Num` and D13.
-fromName :: Name.Name -> Maybe Classes
-fromName name
-  | Name.isNumberType name = Just (singleton Num)
-  | Name.isAppendableType name = Just (singleton Appendable)
+-- __This is what replaced `Class.fromName`__ (D135, §G32). Until verb 7 the
+-- bridge into the unifier was a type /variable's/ name: `number` meant `Num`
+-- and `appendable` meant `Appendable`, which is what let verb 2 change the
+-- representation without rewriting `core` (D115, as amended by D120). Now
+-- `Basics` declares both classes and a constraint names one, so this reads a
+-- qualified name — and no type-variable name means anything to the compiler any
+-- more.
+--
+-- `Nothing` is an /open/ class, which is the elaborator's: a constraint on one
+-- is discharged by finding an instance and passing a witness, and the unifier
+-- neither knows nor needs to know about it.
+fromDeclared :: ModuleName.Canonical -> Name.Name -> Maybe Class
+fromDeclared home name
+  | home /= ModuleName.basics = Nothing
+  | name == Name.num = Just Num
+  | name == Name.appendable = Just Appendable
   | otherwise = Nothing
+
+-- | The declared name a class is, which is what an annotation the solver
+-- produces has to say (`Type.Type.toAnnotation`).
+--
+-- The inverse of 'fromDeclared', and total in this direction: every class in
+-- the enum is one `core` declares, which is the whole of what D135 changed.
+toDeclared :: Class -> (ModuleName.Canonical, Name.Name)
+toDeclared c =
+  case c of
+    Num -> (ModuleName.basics, Name.num)
+    Appendable -> (ModuleName.basics, Name.appendable)
+
+-- | Whether a constraint is enforced by unification rather than by a witness.
+--
+-- D130 states the rule this answers: an open class's constraint leaves the
+-- unifier and is enforced by witness resolution; a closed class's stays and is
+-- enforced by unification. Everything that builds, binds or applies a witness
+-- asks this and skips the ones it says yes to — which is why a closed-class
+-- constraint costs a definition no parameter and a call site no argument, and
+-- so why `Basics.add` keeps the arity kernel JavaScript calls it at (D132).
+-- Takes a home and a name rather than a `Can.Class` so that this module stays
+-- a leaf: `AST.Canonical` asks it, in `Can.witnessOrder`.
+isClosed :: ModuleName.Canonical -> Name.Name -> Bool
+isClosed home name =
+  Maybe.isJust (fromDeclared home name)
 
 -- ENTAILMENT
 

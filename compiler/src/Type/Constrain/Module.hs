@@ -86,19 +86,19 @@ letPort name port_ makeConstraint =
   case port_ of
     Can.Incoming freeVars _ srcType ->
       do
-        vars <- Map.traverseWithKey (\k _ -> nameToRigid k) freeVars
+        vars <- Map.traverseWithKey nameToRigid freeVars
         tipe <- Instantiate.fromSrcType (Map.map VarN vars) srcType
         let header = Map.singleton name (A.At A.zero tipe)
         CLet (Map.elems vars) [] header CTrue <$> makeConstraint
     Can.Outgoing freeVars _ srcType ->
       do
-        vars <- Map.traverseWithKey (\k _ -> nameToRigid k) freeVars
+        vars <- Map.traverseWithKey nameToRigid freeVars
         tipe <- Instantiate.fromSrcType (Map.map VarN vars) srcType
         let header = Map.singleton name (A.At A.zero tipe)
         CLet (Map.elems vars) [] header CTrue <$> makeConstraint
     Can.Task freeVars _ _ srcType ->
       do
-        vars <- Map.traverseWithKey (\k _ -> nameToRigid k) freeVars
+        vars <- Map.traverseWithKey nameToRigid freeVars
         tipe <- Instantiate.fromSrcType (Map.map VarN vars) srcType
         let header = Map.singleton name (A.At A.zero tipe)
         CLet (Map.elems vars) [] header CTrue <$> makeConstraint

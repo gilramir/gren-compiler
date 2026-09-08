@@ -42,6 +42,7 @@ module AST.Canonical
     instanceType,
     instanceMethodName,
     contextOrder,
+    witnessOrder,
     Origin (..),
     isAbstract,
     Union (..),
@@ -86,6 +87,7 @@ import Gren.Float qualified as EF
 import Gren.ModuleName qualified as ModuleName
 import Gren.String qualified as ES
 import Reporting.Annotation qualified as A
+import Type.Class qualified as Class
 
 -- EXPRESSIONS
 
@@ -443,6 +445,23 @@ contextOrder freeVars =
   | (var, classes) <- Map.toAscList freeVars,
     cls <- List.sort classes
   ]
+
+-- | The constraints a witness is passed for, in the same order.
+--
+-- 'contextOrder' is the whole context and this is the half of it the elaborator
+-- owns. D130 divides them: an /open/ class is discharged by finding an instance
+-- and handing it over, so it costs a definition a parameter and a call site an
+-- argument; a /closed/ one is discharged by unification, has no instances and
+-- no methods, and costs neither. Every site that binds, builds or applies a
+-- witness asks this rather than 'contextOrder', and they have to agree exactly
+-- — the lowering's binders and the elaborator's answers are the same list seen
+-- twice.
+--
+-- This is why `Basics.add : Num a => a -> a -> a` keeps the arity kernel
+-- JavaScript calls it at, which D132 says is otherwise a silent break.
+witnessOrder :: FreeVars -> [(Name, Class)]
+witnessOrder freeVars =
+  filter (\(_, Class home name) -> not (Class.isClosed home name)) (contextOrder freeVars)
 
 data Binop = Binop_ Binop.Associativity Binop.Precedence Name
   deriving (Eq, Show)
