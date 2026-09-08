@@ -41,6 +41,8 @@ module AST.Canonical
     instanceKey,
     instanceType,
     instanceMethodName,
+    Origin (..),
+    isAbstract,
     Union (..),
     Ctor (..),
     Exports (..),
@@ -379,9 +381,21 @@ data InstanceHead = InstanceHead
 -- (§G19.2), and two instances of the same class define the same method name.
 data Instance = Instance
   { _in_head :: InstanceHead,
+    _in_origin :: Origin,
     _in_methods :: Map.Map Name Def
   }
   deriving (Show)
+
+-- | Who wrote the instance: an author, or @\@derive@ (`classes.md` §2.1).
+--
+-- It changes nothing about how the instance is checked or resolved — a derived
+-- instance is an ordinary one, which is the point of generating 'Can' rather
+-- than code — and it is carried because Core distinguishes them and because a
+-- reader of a Core dump should not have to guess.
+data Origin
+  = Written
+  | Derived
+  deriving (Eq, Show)
 
 instanceKey :: InstanceHead -> InstanceKey
 instanceKey head_ =
@@ -428,6 +442,27 @@ data Exports
   = ExportEverything A.Region
   | Export (Map.Map Name (A.Located Export))
   deriving (Show)
+
+-- | Whether a type's structure is private (`classes.md` §2.5).
+--
+-- A custom type exposed __without__ its constructors is abstract: its module is
+-- the only place that can see what it is made of, so structural derivation
+-- would publish a meaning nobody agreed to and, for `Dict` and `Set`, would
+-- publish a wrong one.
+--
+-- Everything else is transparent, including a type the module does not expose
+-- at all. Structure is the meaning when structure is public, and a private
+-- type's structure is public to everyone who can name it — which is the module
+-- that declares it and nobody else.
+isAbstract :: Exports -> Name -> Bool
+isAbstract exports name =
+  case exports of
+    ExportEverything _ ->
+      False
+    Export dict ->
+      case Map.lookup name dict of
+        Just (A.At _ ExportUnionClosed) -> True
+        _ -> False
 
 data Export
   = ExportValue

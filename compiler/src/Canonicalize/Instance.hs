@@ -26,6 +26,9 @@
 -- is the Paterson condition itself. §G22.2.
 module Canonicalize.Instance
   ( canonicalize,
+    canonicalizeInto,
+    specialize,
+    witnessNameOf,
   )
 where
 
@@ -73,7 +76,20 @@ canonicalize ::
   [A.Located Src.Instance] ->
   Result i [W.Warning] Instances
 canonicalize pkg imported env instances =
-  foldM (addInstance pkg imported env) Map.empty instances
+  canonicalizeInto pkg imported env Map.empty instances
+
+-- | The same, starting from instances something else already made — which is
+-- `@derive`'s (§G25). They go in first so that a hand-written instance for the
+-- same type and class is the one reported as the duplicate.
+canonicalizeInto ::
+  Pkg.Name ->
+  Map.Map Can.InstanceKey Can.InstanceHead ->
+  Env.Env ->
+  Instances ->
+  [A.Located Src.Instance] ->
+  Result i [W.Warning] Instances
+canonicalizeInto pkg imported env sofar instances =
+  foldM (addInstance pkg imported env) sofar instances
 
 addInstance ::
   Pkg.Name ->
@@ -108,7 +124,7 @@ addInstance pkg imported env sofar (A.At region (Src.Instance maybeContext srcHe
                 Can._ih_con = home,
                 Can._ih_conName = name,
                 Can._ih_args = args,
-                Can._ih_witness = witnessName sofar className name,
+                Can._ih_witness = witnessNameOf sofar className name,
                 Can._ih_context = context
               }
         Can.TAlias _ name _ _ ->
@@ -121,7 +137,7 @@ addInstance pkg imported env sofar (A.At region (Src.Instance maybeContext srcHe
       then Result.throw (Error.InstanceDuplicate region className (Can._ih_conName head_))
       else do
         canMethods <- canonicalizeMethods env region className decl head_ methods
-        Result.ok (Map.insert key (Can.Instance head_ canMethods) sofar)
+        Result.ok (Map.insert key (Can.Instance head_ Can.Written canMethods) sofar)
 
 -- | What this instance is called, so that a call resolved to it has something
 -- to name (§G23).
@@ -133,8 +149,8 @@ addInstance pkg imported env sofar (A.At region (Src.Instance maybeContext srcHe
 -- modules; the module can see when that happens, so the answer is an index in
 -- declaration order rather than a scheme that flattens four module names into
 -- a name and hopes it stays injective.
-witnessName :: Instances -> Name.Name -> Name.Name -> Name.Name
-witnessName sofar className conName =
+witnessNameOf :: Instances -> Name.Name -> Name.Name -> Name.Name
+witnessNameOf sofar className conName =
   let base = "$i$" ++ Name.toChars className ++ "$" ++ Name.toChars conName
       taken = [Can._ih_witness (Can._in_head i) | i <- Map.elems sofar]
       pick n =

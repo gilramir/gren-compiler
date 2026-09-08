@@ -112,22 +112,31 @@ lower platform annotations types resolutions modul =
 -- Every instance is 'Core.Written'. 'Core.Derived' is @\@derive@'s, and
 -- nothing produces one until verb 4.
 lowerInstance :: Expr.Env -> Can.Instance -> Core.InstanceDecl
-lowerInstance env (Can.Instance head_ methods) =
+lowerInstance env (Can.Instance head_ origin methods) =
   let Can.Class classHome className = Can._ih_class head_
    in Core.InstanceDecl
         { Core._instClass = Core.QualName classHome className,
           Core._instHead =
             lowerAnnotation (Can.Forall (Can._ih_context head_) (Can.instanceType head_)),
-          Core._instOrigin = Core.Written,
+          Core._instOrigin = lowerOrigin origin,
           Core._instMethods =
             [ (name, reference (Can._ih_home head_) (Can.instanceMethodName head_ name) bind)
             | (name, bind) <- instanceBindsBy env head_ methods
             ]
         }
 
+-- | Who wrote it (`classes.md` §2.1). Core distinguishes the two and nothing
+-- reads the difference yet; @\@derive@ is the only thing that produces
+-- 'Core.Derived'.
+lowerOrigin :: Can.Origin -> Core.Origin
+lowerOrigin origin =
+  case origin of
+    Can.Written -> Core.Written
+    Can.Derived -> Core.Derived
+
 -- | The bindings an instance's methods become.
 instanceBinds :: Expr.Env -> Can.Instance -> [Core.Bind]
-instanceBinds env (Can.Instance head_ methods) =
+instanceBinds env (Can.Instance head_ _ methods) =
   map snd (instanceBindsBy env head_ methods)
 
 instanceBindsBy :: Expr.Env -> Can.InstanceHead -> Map.Map Name Can.Def -> [(Name, Core.Bind)]

@@ -122,8 +122,8 @@ number modul =
    in modul {Can._decls = ds', Can._instances = is'}
 
 instanceMethods :: Can.Instance -> Numbering Can.Instance
-instanceMethods (Can.Instance head_ methods) =
-  Can.Instance head_ <$> traverse def methods
+instanceMethods (Can.Instance head_ origin methods) =
+  Can.Instance head_ origin <$> traverse def methods
 
 -- | Number one expression, starting from zero. For tests, and for anything
 -- that needs a numbered subtree without a module around it.

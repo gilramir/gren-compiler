@@ -45,7 +45,13 @@ data Error
   | ConstraintDuplicate A.Region Name.Name Name.Name
   | ConstraintNotAClass A.Region Name.Name
   | ConstraintVarUnbound A.Region Name.Name Name.Name
-  | DeriveUnsupported A.Region Name.Name
+  | DeriveComponentIsFunction A.Region Name.Name Int
+  | DeriveMethodMissing A.Region Name.Name Name.Name
+  | DeriveNeedsWitness A.Region Name.Name Name.Name
+  | DeriveMethodShape A.Region Name.Name Name.Name
+  | DeriveNotStructural A.Region Name.Name Name.Name
+  | DeriveOnTransparent A.Region Name.Name Name.Name
+  | DeriveTwice A.Region Name.Name Name.Name
   | InstanceDeclThirdParty A.Region Name.Name
   | InstanceHeadNotApplied A.Region
   | InstanceHeadNotType A.Region Name.Name
@@ -445,20 +451,122 @@ toReport source err =
               \ variable that does not appear says nothing at all. Either use it in the type\
               \ or drop the constraint."
           )
-    DeriveUnsupported region name ->
-      Report.Report "UNSUPPORTED ATTRIBUTE" region [] $
+    DeriveOnTransparent region typeName className ->
+      Report.Report "REDUNDANT DERIVE" region [] $
         Code.toSnippet
           source
           region
           Nothing
           ( D.reflow $
-              "I can read the `@derive` on `"
-                ++ Name.toChars name
-                ++ "`, but I cannot act on it yet:",
+              "`"
+                ++ Name.toChars typeName
+                ++ "` does not have to ask to derive `"
+                ++ Name.toChars className
+                ++ "`:",
             D.reflow
-              "`@derive` belongs on an abstract type, and on a transparent one it is an\
-              \ error rather than a no-op. I cannot yet tell those two apart, so the one\
-              \ case that has to fail is the one I would let through. Remove it for now."
+              "`@derive` is for an abstract type — one whose constructors its module does not\
+              \ expose, so that nobody outside can see what it is made of and it means\
+              \ nothing to derive from. This type exposes its constructors, so its structure\
+              \ is already public and deriving from it is what that structure means. Expose\
+              \ fewer constructors, or drop the attribute."
+          )
+    DeriveNeedsWitness region typeName varName ->
+      Report.Report "CANNOT DERIVE THIS YET" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`"
+                ++ Name.toChars typeName
+                ++ "` holds a value of type `"
+                ++ Name.toChars varName
+                ++ "`, and I cannot derive a type with a variable in it yet:",
+            D.reflow $
+              "The instance I would write compares that field with whatever instance `"
+                ++ Name.toChars varName
+                ++ "` turns out to have, and passing an instance in is something I cannot do\
+                   \ in this version. A type with no variables in it derives fine."
+          )
+    DeriveNotStructural region typeName className ->
+      Report.Report "CANNOT DERIVE THIS" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "I do not know how to derive `"
+                ++ Name.toChars className
+                ++ "` for `"
+                ++ Name.toChars typeName
+                ++ "`:",
+            D.reflow
+              "Deriving means building the instance from the type's structure, and that is\
+              \ defined for `Eq`, `Ord` and `Inspect` and for nothing else. Any other class\
+              \ needs an `instance` declaration saying what it does."
+          )
+    DeriveTwice region typeName className ->
+      Report.Report "DUPLICATE DERIVE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`"
+                ++ Name.toChars typeName
+                ++ "` asks to derive `"
+                ++ Name.toChars className
+                ++ "` twice:",
+            D.reflow "Remove one of them."
+          )
+    DeriveComponentIsFunction region typeName index ->
+      Report.Report "CANNOT DERIVE THIS" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`"
+                ++ Name.toChars typeName
+                ++ "` holds a function in argument "
+                ++ show (index + 1)
+                ++ " of one of its constructors, so it cannot be derived:",
+            D.reflow
+              "Deriving compares, orders or renders a value by its parts, and there is no\
+              \ answer for a function: whether two functions are the same is undecidable.\
+              \ Write the instance by hand, or keep functions out of the type."
+          )
+    DeriveMethodMissing region typeName methodName ->
+      Report.Report "CANNOT DERIVE THIS" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "I cannot derive this instance for `"
+                ++ Name.toChars typeName
+                ++ "` because the class does not declare `"
+                ++ Name.toChars methodName
+                ++ "`:",
+            D.reflow
+              "The structural rule knows what this class's methods mean, so the class has to\
+              \ be the one it knows."
+          )
+    DeriveMethodShape region typeName methodName ->
+      Report.Report "CANNOT DERIVE THIS" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "I cannot derive this instance for `"
+                ++ Name.toChars typeName
+                ++ "` because `"
+                ++ Name.toChars methodName
+                ++ "` does not have the type the structural rule is written for:",
+            D.reflow
+              "Deriving builds the method from the type's structure, and it can only do that\
+              \ for the signature the class is specified to have."
           )
     InstanceDeclThirdParty region className ->
       Report.Report "INSTANCE DECLARATION NOT ALLOWED HERE" region [] $

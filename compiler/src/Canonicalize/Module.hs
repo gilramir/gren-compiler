@@ -8,6 +8,7 @@ where
 
 import AST.Canonical qualified as Can
 import AST.Source qualified as Src
+import Canonicalize.Derive qualified as Derive
 import Canonicalize.Effects qualified as Effects
 import Canonicalize.Environment qualified as Env
 import Canonicalize.Environment.Dups qualified as Dups
@@ -17,6 +18,7 @@ import Canonicalize.Expression qualified as Expr
 import Canonicalize.Instance qualified as Instance
 import Canonicalize.Pattern qualified as Pattern
 import Canonicalize.Type qualified as Type
+import Control.Monad (foldM)
 import Data.Graph qualified as Graph
 import Data.Index qualified as Index
 import Data.Map qualified as Map
@@ -40,7 +42,6 @@ canonicalize :: Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> 
 canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ effects) =
   do
     checkClassesAreFirstParty pkg (fmap snd classes)
-    checkDerives (fmap snd unions)
 
     let values = fmap snd valuesWithSourceOrder
     let home = ModuleName.Canonical pkg (Src.getName modul)
@@ -51,9 +52,14 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
         =<< Foreign.createInitialEnv home ifaces (fmap snd imports)
 
     cvalues <- canonicalizeValues env values
-    cinstances <- Instance.canonicalize pkg (importedInstances ifaces) env (fmap snd instances)
     ceffects <- Effects.canonicalize env values cunions effects
     cexports <- canonicalizeExports values cunions caliases cclasses cbinops ceffects exports
+
+    -- Derived instances first, so that a hand-written one for the same type and
+    -- class is the duplicate: the author wrote that one, so the error can point
+    -- at code they can see.
+    derived <- deriveInstances home ifaces env cexports cunions (fmap snd unions)
+    cinstances <- Instance.canonicalizeInto pkg (importedInstances ifaces) env derived (fmap snd instances)
 
     return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops ceffects
 
@@ -87,22 +93,91 @@ checkClassesAreFirstParty pkg classes
         A.At region (Src.Class (A.At _ name) _ _ _) : _ ->
           Result.throw (Error.ClassDeclThirdParty region name)
 
--- | `@derive(Eq, Ord)` parses (§G15) and is rejected for a reason of its own,
--- which is not the one classes and instances are rejected for. The attribute
--- would be a no-op today rather than a lie: Gren's equality is structural for
--- everything, so a type asking to derive `Eq` already has it. What makes
--- accepting it wrong is `classes.md` §8.1 — `@derive` on a __transparent__
--- type is a redundancy error — and transparent is a thing the compiler cannot
--- yet tell from abstract, because §2.5's abstractness is verb 4's. Accepting
--- the attribute now means accepting it in exactly the place the spec says must
--- fail.
-checkDerives :: [A.Located Src.Union] -> Result i w ()
-checkDerives unions =
-  case [(region, name) | A.At region (Src.Union (A.At _ name) _ _ (_ : _) _) <- unions] of
-    [] ->
-      Result.ok ()
-    (region, name) : _ ->
-      Result.throw (Error.DeriveUnsupported region name)
+-- | The instances `@derive` asks for (`classes.md` §2.1, §G25).
+--
+-- Three things are checked before anything is generated, and they are in this
+-- order because each makes the next one meaningful: the type has to be
+-- __abstract__, because a transparent one already derives and §8.1 calls
+-- asking a redundancy error; a class named twice has one answer written twice;
+-- and the class has to resolve, which is `Canonicalize.Type`'s lookup and
+-- reports what it reports for a constraint.
+deriveInstances ::
+  ModuleName.Canonical ->
+  Map.Map ModuleName.Raw I.Interface ->
+  Env.Env ->
+  Can.Exports ->
+  Map.Map Name.Name Can.Union ->
+  [A.Located Src.Union] ->
+  Result i w (Map.Map Can.InstanceKey Can.Instance)
+deriveInstances home ifaces env exports cunions unions =
+  foldM (deriveOne home ifaces env exports cunions) Map.empty $
+    [ (region, name, classes)
+    | A.At region (Src.Union (A.At _ name) _ _ classes@(_ : _) _) <- unions
+    ]
+
+deriveOne ::
+  ModuleName.Canonical ->
+  Map.Map ModuleName.Raw I.Interface ->
+  Env.Env ->
+  Can.Exports ->
+  Map.Map Name.Name Can.Union ->
+  Map.Map Can.InstanceKey Can.Instance ->
+  (A.Region, Name.Name, [A.Located Name.Name]) ->
+  Result i w (Map.Map Can.InstanceKey Can.Instance)
+deriveOne home ifaces env exports cunions sofar (_, typeName, classNames) =
+  case Map.lookup typeName cunions of
+    Nothing ->
+      -- The union is in `cunions` by construction: both come from the same
+      -- declarations, and a duplicate name was reported before this ran.
+      Result.ok sofar
+    Just union ->
+      foldM (deriveClass home ifaces env exports typeName union) sofar classNames
+
+deriveClass ::
+  ModuleName.Canonical ->
+  Map.Map ModuleName.Raw I.Interface ->
+  Env.Env ->
+  Can.Exports ->
+  Name.Name ->
+  Can.Union ->
+  Map.Map Can.InstanceKey Can.Instance ->
+  A.Located Name.Name ->
+  Result i w (Map.Map Can.InstanceKey Can.Instance)
+deriveClass home ifaces env exports typeName union sofar (A.At region className) =
+  if not (Can.isAbstract exports typeName)
+    then Result.throw (Error.DeriveOnTransparent region typeName className)
+    else do
+      (cls, decl) <- Env.findClassDecl region env className
+      let key = Can.InstanceKey cls home typeName
+      if Map.member key sofar
+        then Result.throw (Error.DeriveTwice region typeName className)
+        else do
+          let witness = Instance.witnessNameOf sofar className typeName
+          instance_ <-
+            Derive.derive home (boolUnion home ifaces) region typeName union cls decl witness
+          Result.ok (Map.insert key instance_ sofar)
+
+-- | `Basics.Bool`, which every derived method needs to answer with.
+--
+-- Read from the interface rather than from this module's environment, because
+-- the generated code is not the author's and must not depend on what they
+-- imported or shadowed. `Basics` is compiling itself in the one case the
+-- interface is absent, and then its own declaration is the same union.
+boolUnion :: ModuleName.Canonical -> Map.Map ModuleName.Raw I.Interface -> Can.Union
+boolUnion home ifaces =
+  case I._unions <$> Map.lookup Name.basics ifaces of
+    Just unions ->
+      case Map.lookup Name.bool unions >>= I.toPublicUnion of
+        Just union -> union
+        Nothing -> emptyBool
+    Nothing ->
+      if home == ModuleName.basics then emptyBool else emptyBool
+
+-- | The stand-in when `Basics` is not an import, which is only while `Basics`
+-- itself compiles. Nothing in `core` derives, so nothing reaches it.
+emptyBool :: Can.Union
+emptyBool =
+  Can.Union [] [] 0 Can.Enum
 
 -- CANONICALIZE BINOP
 
