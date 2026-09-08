@@ -79,6 +79,24 @@ spec = do
       let defs = [def "plain" (call (globalE "f") [one])]
        in Core._moduleDefs (only (Specialize.run (one_ (modul defs)))) `shouldBe` defs
 
+  describe "the copy's types" $ do
+    it "substitutes the variable its key fixed into the copy's own type" $
+      -- §G26.1's open item, closed at §G29.7. The witness the key names is an
+      -- instance table whose binding carries the concrete type, so matching it
+      -- against the generic witness parameter says what `a` was.
+      let out = pass [generic, useOf "generic" "callInt" (witnessOf "eqInt")]
+       in typeOf out "generic$s0" `shouldBe` Core.TFun [intT] intT
+
+    it "substitutes it into the binders inside the body too" $
+      -- What a JS backend never reads and the Core -> C spike does: a copy with
+      -- a boxed parameter where the call site passes an int32_t.
+      let out = pass [generic, useOf "generic" "callInt" (witnessOf "eqInt")]
+       in lamBinderTypes (valueOf out "generic$s0") `shouldBe` [intT]
+
+    it "keeps quantifying whatever the instantiation did not fix" $
+      let out = pass [generic2, useOf "generic2" "callInt" (witnessOf "eqInt")]
+       in typeOf out "generic2$s0" `shouldBe` Core.TForall ["b"] [] (Core.TFun [intT] (Core.TVar "b"))
+
   describe "the names" $
     it "numbers a generic's copies over the sorted key set, not the traversal" $
       -- Same two instantiations, opposite discovery order, same two names on the
@@ -105,6 +123,20 @@ only cores =
 
 defNames :: Core.Module -> [Name]
 defNames = List.sort . map (Core._binderName . Core._bindBinder) . Core._moduleDefs
+
+typeOf :: Core.Module -> Name -> Core.Type
+typeOf m wanted =
+  case [Core._binderType b | Core.Bind b _ <- Core._moduleDefs m, Core._binderName b == wanted] of
+    t : _ -> t
+    [] -> error ("no definition named " ++ show wanted)
+
+-- | The types an expression's outermost ordinary lambda binds.
+lamBinderTypes :: Core.Expr -> [Core.Type]
+lamBinderTypes e =
+  case Core._exprValue e of
+    Core.ELam binders _ -> map Core._binderType binders
+    Core.EWitLam _ body -> lamBinderTypes body
+    _ -> []
 
 valueOf :: Core.Module -> Name -> Core.Expr
 valueOf m wanted =
@@ -207,6 +239,43 @@ arrayEq =
   Core.Bind
     (Core.Binder "eqArray" witFunT span0)
     (witLam ["$w0"] (record [("eq", witApp (globalE "arrayEqMethod") [var "$w0"])]))
+
+-- | The witness parameter's type as the lowering really writes it: a record of
+-- the class's methods /at the class parameter/, which is what makes the copy's
+-- substitution derivable.
+genericWitT :: Core.Type
+genericWitT = Core.TRecord [("eq", Core.TVar "a")] Nothing
+
+-- | @generic : Eq a => a -> a@, with the variable everywhere it belongs.
+generic :: Core.Bind
+generic =
+  Core.Bind
+    (Core.Binder "generic" (Core.TForall ["a"] [Core.CClass (Core.QualName home "Eq") (Core.TVar "a")] (Core.TFun [Core.TVar "a"] (Core.TVar "a"))) span0)
+    ( Core.Expr
+        (Core.EWitLam
+           [Core.Binder "$w0" genericWitT span0]
+           (Core.Expr (Core.ELam [Core.Binder "x" (Core.TVar "a") span0] (var "x")) (Core.TFun [Core.TVar "a"] (Core.TVar "a")) span0))
+        (Core.TFun [Core.TVar "a"] (Core.TVar "a"))
+        span0
+    )
+
+-- | @generic2 : Eq a => a -> b@: one variable the witness fixes and one it does
+-- not.
+generic2 :: Core.Bind
+generic2 =
+  Core.Bind
+    (Core.Binder "generic2" (Core.TForall ["a", "b"] [Core.CClass (Core.QualName home "Eq") (Core.TVar "a")] (Core.TFun [Core.TVar "a"] (Core.TVar "b"))) span0)
+    ( Core.Expr
+        (Core.EWitLam
+           [Core.Binder "$w0" genericWitT span0]
+           (Core.Expr (Core.ELam [Core.Binder "x" (Core.TVar "a") span0] (var "x")) (Core.TFun [Core.TVar "a"] (Core.TVar "b")) span0))
+        (Core.TFun [Core.TVar "a"] (Core.TVar "b"))
+        span0
+    )
+
+-- | A use of a named generic at one witness.
+useOf :: Name -> Name -> Core.Expr -> Core.Bind
+useOf callee name witness = def name (witApp (globalE callee) [witness])
 
 -- | A use of the generic at one witness.
 use :: Name -> Core.Expr -> Core.Bind

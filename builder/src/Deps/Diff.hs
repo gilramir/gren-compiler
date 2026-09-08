@@ -189,28 +189,29 @@ isEquivalentRenaming varPairs =
           all compatibleVars verifiedRenamings
             && allUnique (map snd verifiedRenamings)
 
+-- | Whether renaming a published signature's type variable is a breaking
+-- change.
+--
+-- `comparable` and `compappend` were categories here until `core` declared
+-- `Ord` (`docs/m1b-classes.md` §G29). They are ordinary variable names now, so
+-- they categorize as `Var` and the widening rule that let a `number` become a
+-- `comparable` has nothing left to widen into: a constraint is written in the
+-- context today, and a context is part of the signature this compares.
 compatibleVars :: (Name.Name, Name.Name) -> Bool
 compatibleVars (old, new) =
   case (categorizeVar old, categorizeVar new) of
-    (CompAppend, CompAppend) -> True
-    (Comparable, Comparable) -> True
     (Appendable, Appendable) -> True
     (Number, Number) -> True
-    (Number, Comparable) -> True
     (_, Var) -> True
     (_, _) -> False
 
 data TypeVarCategory
-  = CompAppend
-  | Comparable
-  | Appendable
+  = Appendable
   | Number
   | Var
 
 categorizeVar :: Name.Name -> TypeVarCategory
 categorizeVar name
-  | Name.isCompappendType name = CompAppend
-  | Name.isComparableType name = Comparable
   | Name.isAppendableType name = Appendable
   | Name.isNumberType name = Number
   | otherwise = Var

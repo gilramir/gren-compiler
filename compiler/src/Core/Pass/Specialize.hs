@@ -102,10 +102,11 @@ run cores =
         else
           let keys = demand gens cores
               names = assign keys
+              tys = bindingTypes cores
               added =
                 Map.fromListWith
                   (++)
-                  [ (Core._qnHome name, [copy gens names key])
+                  [ (Core._qnHome name, [copy gens tys names key])
                   | key@(name, _) <- Set.toAscList keys
                   ]
               collapsed = Map.mapWithKey (module_ gens names added) cores
@@ -128,6 +129,21 @@ generics cores =
     | (home, modul) <- Map.toAscList cores,
       Core.Bind binder value <- Core._moduleDefs modul,
       Core.EWitLam binders body <- [Core._exprValue value]
+    ]
+
+-- | Every top-level binding's declared type, by name.
+--
+-- What it is for: a witness is an instance's table, and that table's binding
+-- carries the /concrete/ type of the instance — @{ compare : Int -> Int -> Order }@
+-- for @Ord Int@. Matching it against the generic witness parameter's type is
+-- how a copy learns what its key fixed, which is the substitution 'copy' needs
+-- and the only place the answer is written down.
+bindingTypes :: Map ModuleName.Canonical Core.Module -> Map Core.QualName Core.Type
+bindingTypes cores =
+  Map.fromList
+    [ (Core.QualName home (Core._binderName binder), Core._binderType binder)
+    | (home, modul) <- Map.toAscList cores,
+      Core.Bind binder _ <- Core._moduleDefs modul
     ]
 
 -- | Every instantiation the program asks for, to a fixed point.
@@ -240,26 +256,132 @@ canonical binder = expand
             [] -> global
             _ -> Core.Expr (Core.EWitApp global (map expand args)) tipe sp
 
-copy :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Key Name -> Key -> Core.Bind
-copy gens names key@(name, _) =
-  let body = rewrite gens names (substituted gens key)
+copy :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Map Key Name -> Key -> Core.Bind
+copy gens tys names key@(name, _) =
+  let sub = fixed gens tys key
+      body = retype (substituteT sub) (rewrite gens names (substituted gens key))
       (binders, _, declared) = gens Map.! name
       sp = maybe (Core.spanOf body) Core._binderSpan (Maybe.listToMaybe binders)
-   in Core.Bind (Core.Binder (Core._qnName (nameOf names key)) (discharged declared) sp) body
+   in Core.Bind (Core.Binder (Core._qnName (nameOf names key)) (discharged sub declared) sp) body
 
--- | A copy's type is the generic one without its constraints.
+-- | What a key fixed: one type per variable its witnesses are about.
 --
--- It still quantifies the variables the constraints were about, which the
--- instantiation has in fact fixed. That is the open item §G26.1 already
--- registers — a witness-abstracted binding's Core type omits its witnesses, L2's
--- looseness about binder types rather than a new licence — and it ends the same
--- way, when a producer for 'Core.AST.ETyLam' makes the type-level half of this
--- pass writable.
-discharged :: Core.Type -> Core.Type
-discharged tipe =
+-- Read off the witnesses rather than off the constraint list, because a witness
+-- names an instance and an instance's table binding carries the concrete type.
+-- A witness that is itself an application — @Ord (Array Int)@ is the
+-- @Ord (Array a)@ table applied to @Ord Int@ — is resolved the same way,
+-- recursively.
+fixed :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Key -> Map Name Core.Type
+fixed gens tys (name, wits) =
+  let (binders, _, _) = gens Map.! name
+   in Map.unions
+        [ matchT (Core._binderType binder) actual
+        | (binder, wit) <- zip binders wits,
+          Just actual <- [witType gens tys wit]
+        ]
+
+-- | The type of a witness expression: the instance table's own type, with the
+-- context it was applied to substituted in.
+witType :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Wit -> Maybe Core.Type
+witType gens tys (Wit name args) =
+  case args of
+    [] ->
+      Map.lookup name tys
+    _ ->
+      do
+        (binders, _, _) <- Map.lookup name gens
+        declared <- Map.lookup name tys
+        let sub =
+              Map.unions
+                [ matchT (Core._binderType binder) actual
+                | (binder, arg) <- zip binders args,
+                  Just actual <- [witType gens tys arg]
+                ]
+        return (substituteT sub declared)
+
+-- | The substitution that turns one type into another, where it can.
+--
+-- First-order and total, exactly as @Type.Resolve.match@ is and for the same
+-- reason: this is reading an answer the solver already gave, not checking one.
+matchT :: Core.Type -> Core.Type -> Map Name Core.Type
+matchT declared actual =
+  case (declared, actual) of
+    (Core.TVar v, _) -> Map.singleton v actual
+    (Core.TCon _ as, Core.TCon _ bs) -> Map.unions (zipWith matchT as bs)
+    (Core.TFun as a, Core.TFun bs b) -> Map.unions (matchT a b : zipWith matchT as bs)
+    (Core.TRecord as _, Core.TRecord bs _) ->
+      Map.unions [matchT a b | (f, a) <- as, Just b <- [lookup f bs]]
+    (Core.TForall _ _ a, Core.TForall _ _ b) -> matchT a b
+    _ -> Map.empty
+
+substituteT :: Map Name Core.Type -> Core.Type -> Core.Type
+substituteT sub tipe =
   case tipe of
-    Core.TForall vars _ body -> Core.TForall vars [] body
-    _ -> tipe
+    Core.TVar n -> Map.findWithDefault tipe n sub
+    Core.TCon q args -> Core.TCon q (map (substituteT sub) args)
+    Core.TFun args result -> Core.TFun (map (substituteT sub) args) (substituteT sub result)
+    Core.TRecord fields row -> Core.TRecord [(f, substituteT sub t) | (f, t) <- fields] row
+    Core.TForall vars constraints body ->
+      let inner = foldr Map.delete sub vars
+       in Core.TForall
+            vars
+            [Core.CClass c (substituteT inner t) | Core.CClass c t <- constraints]
+            (substituteT inner body)
+
+-- | A copy's type is the generic one with its constraints discharged and the
+-- variables they were about replaced by what the key fixed.
+--
+-- The quantifier has to be taken off first: 'substituteT' respects binding, and
+-- the variables being substituted are the ones this @forall@ binds. What is
+-- left quantified is whatever the instantiation did not fix, which is an
+-- ordinary polymorphic argument and stays polymorphic.
+--
+-- §G26.1's open item was that this said only @discharged@ and left the variable
+-- quantified: a JS backend does not read a binder's type, and the Core -> C
+-- spike does — it gave a specialized copy a boxed parameter where the call site
+-- passed an @int32_t@ (§G29.8).
+discharged :: Map Name Core.Type -> Core.Type -> Core.Type
+discharged sub tipe =
+  case tipe of
+    Core.TForall vars _ body ->
+      let body' = substituteT sub body
+          left = [v | v <- vars, not (Map.member v sub)]
+       in if null left then body' else Core.TForall left [] body'
+    _ -> substituteT sub tipe
+
+-- | Apply a type function to every type an expression carries: its own, and
+-- every binder inside it.
+--
+-- 'childrenA' rebuilds the children; the case below is only the constructors
+-- that bind a name, which is where a type lives that is not some node's own.
+retype :: (Core.Type -> Core.Type) -> Core.Expr -> Core.Expr
+retype f = go
+  where
+    go e =
+      let rebuilt = runIdentity (childrenA (Identity . go) e)
+       in Core.Expr (value (Core._exprValue rebuilt)) (f (Core.typeOf e)) (Core.spanOf e)
+
+    value v =
+      case v of
+        Core.ELam bs body -> Core.ELam (map binder bs) body
+        Core.ELet bs body -> Core.ELet (map bind bs) body
+        Core.ELetRec bs body -> Core.ELetRec (map bind bs) body
+        Core.EJoin bs body -> Core.EJoin (map bind bs) body
+        Core.EWitLam bs body -> Core.EWitLam (map binder bs) body
+        Core.ECase scrut alts fallback -> Core.ECase scrut (map alt alts) fallback
+        other -> other
+
+    binder b = b {Core._binderType = f (Core._binderType b)}
+    bind (Core.Bind b v) = Core.Bind (binder b) v
+    alt (Core.Alt p b) = Core.Alt (pattern_ p) b
+    pattern_ p =
+      case p of
+        Core.PVar b -> Core.PVar (binder b)
+        Core.PCtor q t ps -> Core.PCtor q t (map pattern_ ps)
+        Core.PRecord fs -> Core.PRecord [(field, pattern_ q) | (field, q) <- fs]
+        Core.PArray ps tl -> Core.PArray (map pattern_ ps) (fmap binder tl)
+        Core.PAs b q -> Core.PAs (binder b) (pattern_ q)
+        other -> other
 
 -- REWRITING
 

@@ -227,7 +227,7 @@ toAnnotation :: Variable -> IO Can.Annotation
 toAnnotation variable =
   do
     userNames <- getVarNames variable Map.empty
-    (tipe, NameState freeVars _ _ _ _ _) <-
+    (tipe, NameState freeVars _ _ _) <-
       State.runStateT (variableToCanType variable) (makeNameState userNames)
     -- Every variable comes out unconstrained, including the ones the unifier
     -- knows are constrained. `Class.Classes` is the unifier's own three-way
@@ -437,11 +437,8 @@ contentToErrorType variable content =
 classesToSuper :: Class.Classes -> ET.Super
 classesToSuper classes =
   case Class.toList classes of
-    [Class.Num] -> ET.Number
-    [Class.Ord] -> ET.Comparable
     [Class.Appendable] -> ET.Appendable
-    [Class.Ord, Class.Appendable] -> ET.CompAppend
-    _ -> ET.Comparable
+    _ -> ET.Number
 
 termToErrorType :: FlatType -> StateT NameState IO ET.Type
 termToErrorType term =
@@ -481,14 +478,12 @@ data NameState = NameState
   { _taken :: Map.Map Name.Name (),
     _normals :: Int,
     _numbers :: Int,
-    _comparables :: Int,
-    _appendables :: Int,
-    _compAppends :: Int
+    _appendables :: Int
   }
 
 makeNameState :: Map.Map Name.Name Variable -> NameState
 makeNameState taken =
-  NameState (Map.map (const ()) taken) 0 0 0 0 0
+  NameState (Map.map (const ()) taken) 0 0 0
 
 -- FRESH VAR NAMES
 
@@ -517,14 +512,10 @@ getFreshVarNameHelp index taken =
 getFreshSuperName :: (Monad m) => Class.Classes -> StateT NameState m Name.Name
 getFreshSuperName classes =
   case Class.toList classes of
-    [Class.Num] ->
-      getFreshSuper "number" _numbers (\index state -> state {_numbers = index})
     [Class.Appendable] ->
       getFreshSuper "appendable" _appendables (\index state -> state {_appendables = index})
-    [Class.Ord, Class.Appendable] ->
-      getFreshSuper "compappend" _compAppends (\index state -> state {_compAppends = index})
     _ ->
-      getFreshSuper "comparable" _comparables (\index state -> state {_comparables = index})
+      getFreshSuper "number" _numbers (\index state -> state {_numbers = index})
 
 getFreshSuper :: (Monad m) => Name.Name -> (NameState -> Int) -> (Int -> NameState -> NameState) -> StateT NameState m Name.Name
 getFreshSuper prefix getter setter =

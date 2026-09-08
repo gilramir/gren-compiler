@@ -556,8 +556,6 @@ toASuperThing :: T.Super -> String
 toASuperThing super =
   case super of
     T.Number -> "a `number` value"
-    T.Comparable -> "a `comparable` value"
-    T.CompAppend -> "a `compappend` value"
     T.Appendable -> "an `appendable` value"
 
 -- BAD SUPER HINTS
@@ -565,37 +563,8 @@ toASuperThing super =
 badFlexSuper :: T.Direction -> T.Super -> T.Type -> [D.Doc]
 badFlexSuper direction super tipe =
   case super of
-    T.Comparable ->
-      case tipe of
-        T.Record _ _ ->
-          [ D.link
-              "Hint"
-              "I do not know how to compare records. I can only compare ints, floats,\
-              \ chars, strings and arrays of comparable values.\
-              \ Check out"
-              "comparing-records"
-              "for ideas on how to proceed."
-          ]
-        T.Type _ name _ ->
-          [ D.toSimpleHint $
-              "I do not know how to compare `"
-                ++ Name.toChars name
-                ++ "` values. I can only\
-                   \ compare ints, floats, chars, strings and arrays of comparable values.",
-            D.reflowLink
-              "Check out"
-              "comparing-custom-types"
-              "for ideas on how to proceed."
-          ]
-        _ ->
-          [ D.toSimpleHint $
-              "I only know how to compare ints, floats, chars, strings and arrays of comparable values."
-          ]
     T.Appendable ->
       [ D.toSimpleHint "I only know how to append strings and arrays."
-      ]
-    T.CompAppend ->
-      [ D.toSimpleHint "Only strings and arrays are both comparable and appendable."
       ]
     T.Number ->
       case tipe of
@@ -616,9 +585,7 @@ badRigidSuper super aThing =
   let (superType, manyThings) =
         case super of
           T.Number -> ("number", "ints AND floats")
-          T.Comparable -> ("comparable", "ints, floats, chars, strings and arrays")
           T.Appendable -> ("appendable", "strings AND arrays")
-          T.CompAppend -> ("compappend", "strings AND arrays")
    in [ D.toSimpleHint $
           "The `"
             ++ superType
@@ -636,8 +603,6 @@ badFlexFlexSuper s1 s2 =
   let likeThis super =
         case super of
           T.Number -> "a number"
-          T.Comparable -> "comparable"
-          T.CompAppend -> "a compappend"
           T.Appendable -> "appendable"
    in [ D.toSimpleHint $
           "There are no values in Gren that are both "

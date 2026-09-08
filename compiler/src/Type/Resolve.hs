@@ -301,8 +301,9 @@ run env modul =
   let scope = Scope Map.empty Map.empty
       walk =
         do
-          decls env (topLevel (Can._decls modul)) scope (Can._decls modul)
-          mapM_ (instanceMethods env scope) (Map.elems (Can._instances modul))
+          let tops = topLevel (Can._decls modul)
+          decls env tops scope (Can._decls modul)
+          mapM_ (instanceMethods env tops scope) (Map.elems (Can._instances modul))
       (_, (uses, params, errs, _)) = runState walk (Map.empty, Map.empty, [], 0)
       ofInstance i =
         let context = Can._ih_context (Can._in_head i)
@@ -343,9 +344,18 @@ decls env tops scope ds =
     Can.SaveTheEnvironment ->
       return ()
 
-instanceMethods :: Env -> Scope -> Can.Instance -> Walk ()
-instanceMethods env scope i =
-  mapM_ (def env Map.empty scope) (Map.elems (Can._in_methods i))
+-- | An instance's methods, under the module's own top-level annotations.
+--
+-- Those annotations are not optional here and it took a corpus case to say so
+-- (`docs/m1b-classes.md` §G29.7). An instance method is an ordinary definition
+-- (§G22.4) and its body may call an ordinary constrained one — `instance Ord a
+-- => Ord (Array a)` calls `Array.compareFrom`, which is `Ord a =>` — and a use
+-- of a name this map does not hold is a use the elaborator has no annotation
+-- for, so it passes no witness and the call is left with its arguments shifted
+-- by one. It compiles and it is wrong at runtime.
+instanceMethods :: Env -> Map.Map Name Can.Annotation -> Scope -> Can.Instance -> Walk ()
+instanceMethods env tops scope i =
+  mapM_ (def env tops scope) (Map.elems (Can._in_methods i))
 
 -- | A definition: bind its witness parameters, then walk its body under them.
 def :: Env -> Map.Map Name Can.Annotation -> Scope -> Can.Def -> Walk ()

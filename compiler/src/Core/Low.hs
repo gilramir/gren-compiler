@@ -195,6 +195,11 @@ data Program = Program
     -- agreed by hand in two files — is exactly the kind of thing that is
     -- silently wrong.
     _lowBoolTags :: !(Maybe (Int, Int)),
+    -- | @Basics.Order@'s three tags, for the same reason and read the same
+    -- way. The kernel gained a use for them when @Basics.compare@ became a
+    -- method of @class Ord@ (@docs/m1b-classes.md@ §G29): @Utils.compare@ is
+    -- the body of @instance Ord Int@ and it answers with an @Order@.
+    _lowOrderTags :: !(Maybe (Int, Int, Int)),
     _lowNotes :: ![Note]
   }
 
@@ -413,6 +418,7 @@ lower prog root =
                 _lowGroups = _envGroups env,
                 _lowKernel = Set.toAscList (_envKernel env),
                 _lowBoolTags = boolTags (Program._progData prog),
+                _lowOrderTags = orderTags (Program._progData prog),
                 _lowNotes = Set.toAscList (_envNotes env)
               }
 
@@ -560,15 +566,22 @@ kernelAliases binds =
 boolTags :: [Core.DataDecl] -> Maybe (Int, Int)
 boolTags datas =
   case [d | d <- datas, Core._dataName d == basics "Bool"] of
-    (d : _) ->
-      let tagOf n =
-            Maybe.listToMaybe
-              [ Core._ctorTag c
-              | c <- Core._dataCtors d,
-                Core._qnName (Core._ctorName c) == Name.fromChars n
-              ]
-       in (,) <$> tagOf "True" <*> tagOf "False"
+    (d : _) -> (,) <$> tagIn d "True" <*> tagIn d "False"
     [] -> Nothing
+
+orderTags :: [Core.DataDecl] -> Maybe (Int, Int, Int)
+orderTags datas =
+  case [d | d <- datas, Core._dataName d == basics "Order"] of
+    (d : _) -> (,,) <$> tagIn d "LT" <*> tagIn d "EQ" <*> tagIn d "GT"
+    [] -> Nothing
+
+tagIn :: Core.DataDecl -> String -> Maybe Int
+tagIn d n =
+  Maybe.listToMaybe
+    [ Core._ctorTag c
+    | c <- Core._dataCtors d,
+      Core._qnName (Core._ctorName c) == Name.fromChars n
+    ]
 
 -- | The bindings whose value is a lambda, so their arity is known statically.
 topLams :: [(Core.QualName, Core.Bind)] -> [(Core.QualName, Core.Bind)]

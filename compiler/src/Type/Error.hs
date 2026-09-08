@@ -42,9 +42,7 @@ data Type
 
 data Super
   = Number
-  | Comparable
   | Appendable
-  | CompAppend
   deriving (Eq)
 
 data Extension
@@ -344,12 +342,10 @@ isArray home name =
 isSuper :: Super -> Type -> Bool
 isSuper super tipe =
   case iteratedDealias tipe of
-    Type h n args ->
+    Type h n _ ->
       case super of
         Number -> isInt h n || isFloat h n
-        Comparable -> isInt h n || isFloat h n || isString h n || isChar h n || isArray h n && isSuper super (head args)
         Appendable -> isString h n || isArray h n
-        CompAppend -> isString h n || isArray h n && isSuper Comparable (head args)
     _ ->
       False
 

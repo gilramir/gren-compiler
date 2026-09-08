@@ -93,7 +93,28 @@ renderTags prog =
              \#define GENG_TRUE 0\n\
              \#define GENG_FALSE 1\n"
        )
+    <> orderDefines (_lowOrderTags prog)
     <> "\n#endif\n"
+
+-- | @Basics.Order@'s tags, on the same terms as @Bool@'s: the kernel's
+-- @Utils.compare@ answers with one and may not guess which integer it is.
+orderDefines :: Maybe (Int, Int, Int) -> B.Builder
+orderDefines tags =
+  case tags of
+    Just (lt, eq, gt) ->
+      "\n#define GENG_LT "
+        <> B.intDec lt
+        <> "\n#define GENG_EQ "
+        <> B.intDec eq
+        <> "\n#define GENG_GT "
+        <> B.intDec gt
+        <> "\n"
+    Nothing ->
+      "\n/* Order is not reachable from this root; emitted for the same reason\n\
+      \ * as the Bool tags above. */\n\
+      \#define GENG_LT 0\n\
+      \#define GENG_EQ 1\n\
+      \#define GENG_GT 2\n"
 
 -- | The functions some expression actually allocates a closure for.
 --

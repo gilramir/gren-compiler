@@ -20,9 +20,7 @@ module Data.Name
     splitDots,
     isKernel,
     isNumberType,
-    isComparableType,
     isAppendableType,
-    isCompappendType,
     fromVarIndex,
     fromWords,
     fromManyNames,
@@ -162,14 +160,8 @@ isKernel = Utf8.startsWith prefix_kernel
 isNumberType :: Name -> Bool
 isNumberType = Utf8.startsWith prefix_number
 
-isComparableType :: Name -> Bool
-isComparableType = Utf8.startsWith prefix_comparable
-
 isAppendableType :: Name -> Bool
 isAppendableType = Utf8.startsWith prefix_appendable
-
-isCompappendType :: Name -> Bool
-isCompappendType = Utf8.startsWith prefix_compappend
 
 prefix_kernel :: Name
 prefix_kernel = fromChars "Gren.Kernel."
@@ -177,14 +169,8 @@ prefix_kernel = fromChars "Gren.Kernel."
 prefix_number :: Name
 prefix_number = fromChars "number"
 
-prefix_comparable :: Name
-prefix_comparable = fromChars "comparable"
-
 prefix_appendable :: Name
 prefix_appendable = fromChars "appendable"
-
-prefix_compappend :: Name
-prefix_compappend = fromChars "compappend"
 
 -- FROM VAR INDEX
 
