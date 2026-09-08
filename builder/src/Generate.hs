@@ -227,7 +227,29 @@ linkCore details artifacts kernels =
   Task.io $
     do
       cores <- Pass.run <$> programCore details artifacts
-      return (Program.link (backendFor kernels cores) cores (coreRoots artifacts cores))
+      return (checked (Program.link (backendFor kernels cores) cores (coreRoots artifacts cores)))
+
+-- | @GENG_SPECIALIZE_STRICT=1@: the linked program carries no witness node.
+--
+-- D127 puts the question to a linked program rather than to a module, and this
+-- is the only place it can be asked: 'Core.Pass.run' has every module but not
+-- the roots, so it cannot tell a binding nothing reaches from one the pass
+-- failed to reach. Off by default, because §G27.3 makes giving up on a site
+-- legitimate — the witness path still runs. On for @harness/run.py@\'s
+-- @geng-hs-spec@ target, where it is the standing form of the measurement that
+-- the pass is complete on every program the corpus has.
+checked :: Program.Program -> Program.Program
+checked program
+  | not Dump.specializeStrict = program
+  | otherwise =
+      case Program.unspecialized program of
+        [] -> program
+        names ->
+          error $
+            "GENG_SPECIALIZE_STRICT: "
+              ++ show (length names)
+              ++ " reachable binding(s) still carry a witness or type-abstraction node:\n"
+              ++ unlines (map (("  " ++) . Program.qualToChars) names)
 
 -- | The kernel modules' JavaScript, which C16 keeps in the build system.
 --
@@ -396,7 +418,7 @@ linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels =
               | (raw, core) <- map replModuleCore modules
               ]
       cores <- Pass.run <$> throughWire (Map.union own deps)
-      return (Program.link (backendFor kernels cores) cores (replRoots home name))
+      return (checked (Program.link (backendFor kernels cores) cores (replRoots home name)))
 
 replModuleCore :: Build.Module -> (ModuleName.Raw, Core.Module)
 replModuleCore modul =

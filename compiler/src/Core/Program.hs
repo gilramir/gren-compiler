@@ -43,6 +43,7 @@ module Core.Program
     Missing (..),
     MissingKind (..),
     link,
+    unspecialized,
     kernelName,
     qualToChars,
     render,
@@ -156,6 +157,23 @@ data Kernel = Kernel
 -- reason: a kernel module is reached as a whole — one chunk list, spliced or
 -- not — so its functions are not separate nodes and @$@ is the name no Gren
 -- module can collide with.
+-- | The reachable bindings that still carry one of the four nodes
+-- specialization erases — D127.
+--
+-- The question "has this been specialized?" has no honest answer about a module
+-- on its own: a module legitimately holds a witness-abstracted binding whose
+-- only instantiations are in another module, which is what an exported
+-- constrained function /is/. It has one about a linked program, because a
+-- program is where "reachable" is defined and where every instantiation any of
+-- its code asks for is in hand. So 'Core.AST.isSpecialized' stays the
+-- expression-level predicate C2 describes and this is the claim built on it.
+unspecialized :: Program -> [Core.QualName]
+unspecialized program =
+  [ name
+  | (name, bind) <- _progBindings program,
+    not (Core.isSpecialized (Core._bindValue bind))
+  ]
+
 kernelName :: Name -> Core.QualName
 kernelName short =
   Core.QualName (ModuleName.Canonical Pkg.kernel short) Name.dollar

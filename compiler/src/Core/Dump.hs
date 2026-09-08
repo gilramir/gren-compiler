@@ -28,6 +28,7 @@ module Core.Dump
     wireDir,
     linkEveryExport,
     corePasses,
+    specializeStrict,
     spikeFile,
     spikeRoot,
   )
@@ -108,6 +109,19 @@ linkEveryExport =
 -- decision-tree pass is optional in the first place. A switch is also what lets
 -- the corpus run the same programs with and without them, which is the
 -- obligation C12 attaches to @accept\/pattern-shapes@.
+-- | @GENG_SPECIALIZE_STRICT=1@: refuse to emit a program that still carries a
+-- witness node (§G27.4, D127).
+--
+-- The specializer is allowed to give up on a site — the witness path it erases
+-- is a correct one — so this is not on by an ordinary build. It is on for
+-- @harness/run.py@'s @geng-hs-spec@ target, which turns "the pass is complete
+-- on every program the corpus has" from a thing measured once into a thing that
+-- goes red when it stops being true, and names the binding when it does.
+specializeStrict :: Bool
+specializeStrict =
+  unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_SPECIALIZE_STRICT")
+{-# NOINLINE specializeStrict #-}
+
 corePasses :: [String]
 corePasses =
   unsafePerformIO (maybe [] (splitOn ',') <$> Env.lookupEnv "GENG_CORE_PASSES")
