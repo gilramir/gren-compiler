@@ -443,9 +443,49 @@ call env pos fn args =
       | pkg == Pkg.core && raw == Name.basics -> basicsCall env pos q name args
       | pkg == Pkg.core && raw == Name.bitwise -> bitwiseCall env pos q name (map (jsExpr env) args)
       | pkg == Pkg.core && raw == Name.math -> mathCall env pos q name (map (jsExpr env) args)
+      | pkg == Pkg.kernel -> kernelCall env pos q raw name (map (jsExpr env) args)
       | otherwise -> globalCall env pos q (map (jsExpr env) args)
     _ ->
       normalCall env pos (jsExpr env fn) (map (jsExpr env) args)
+
+-- | The two kernel primitives that are an operator rather than a function.
+--
+-- `Eq`'s five primitive instances are reference equality (D142,
+-- @docs/m1b-classes.md@ §G40), and reference equality is @===@: routing it
+-- through @A2@ and a kernel @F2@ would cost more than the comparison. Every
+-- other kernel value is an ordinary global, so this is a saturated call to one
+-- of two names and nothing else.
+--
+--   * @Utils.identical@ is @===@ at an @Int@, a @Float@, a @Bool@ or a
+--     @String@, all four of which are a JavaScript primitive.
+--   * @Char.identical@ is @===@ at a @Char@, which is a primitive in @Mode.Prod@
+--     and a boxed @String@ object under @_Utils_chr__DEBUG@ in @Mode.Dev@ — so
+--     dev compares what 'scrutinised' compares, for the same reason.
+kernelCall :: Env -> A.Position -> Core.QualName -> Name -> Name -> [JS.Expr] -> JS.Expr
+kernelCall env pos q home name args =
+  case (home, name, args) of
+    (_, "identical", [left, right])
+      | home == Name.utils -> identical left right
+      | home == Name.char ->
+          case _mode env of
+            Mode.Prod _ -> identical left right
+            Mode.Dev -> identical (valueOf left) (valueOf right)
+    _ -> globalCall env pos q args
+
+-- | @===@, and only that. Not 'strictEq', which collapses @x === 0@ to @!x@ and
+-- @x === true@ to @x@: that is right for a constructor tag, whose values the
+-- backend chose, and it is not right for an @Int@ that could hold a @NaN@ (D2,
+-- @accept/int-remainder-by-zero@). Nothing reaches here with a literal operand
+-- today — the only callers are `core`'s five instance bodies, whose arguments
+-- are their parameters — and this is the line that keeps it true if something
+-- ever inlines one.
+identical :: JS.Expr -> JS.Expr -> JS.Expr
+identical =
+  JS.Infix JS.OpEq
+
+valueOf :: JS.Expr -> JS.Expr
+valueOf value =
+  JS.Call (JS.Access value (JsName.fromLocal "valueOf")) []
 
 -- | A call to a name whose arity is known and matched goes straight to the
 -- uncurried @name$@; anything else goes through @A2@ … @A9@.
@@ -492,13 +532,10 @@ basicsCall env pos q name args =
                 "mul" -> JS.Infix JS.OpMul left right
                 "fdiv" -> JS.Infix JS.OpDiv left right
                 "idiv" -> JS.Infix JS.OpBitwiseOr (JS.Infix JS.OpDiv left right) (JS.Int 0)
-                -- `Basics.equal`, not `Basics.eq`: §G24 renamed the kernel
-                -- call to free `eq` for `Eq`'s method, and this table kept the
-                -- old name for two checkpoints, so `==` compiled to a call
-                -- rather than to `===` the whole time (§G39.5). `notEqual` is
-                -- not here because it is no longer a kernel call at all — it is
-                -- `not (eq a b)`, and `not` is one line above.
-                "equal" -> equal left right
+                -- Neither `==` nor `/=` is here. `==` is `Eq`'s method and
+                -- reaches an instance; `/=` is `not (eq a b)`, and `not` is one
+                -- line above. What used to be here was `Basics.equal`, the
+                -- kernel's structural walker, and D142 deleted it (§G40).
                 "lt" -> cmp JS.OpLt JS.OpLt 0 left right
                 "gt" -> cmp JS.OpGt JS.OpGt 0 left right
                 "le" -> cmp JS.OpLe JS.OpLt 1 left right
@@ -571,12 +608,6 @@ isStringLiteral expr =
     _ -> False
 
 -- COMPARISON
-
-equal :: JS.Expr -> JS.Expr -> JS.Expr
-equal left right =
-  if isLiteral left || isLiteral right
-    then strictEq left right
-    else JS.Call (JS.Ref (JsName.fromKernel Name.utils "eq")) [left, right]
 
 cmp :: JS.InfixOp -> JS.InfixOp -> Int -> JS.Expr -> JS.Expr -> JS.Expr
 cmp idealOp backupOp backupInt left right =
