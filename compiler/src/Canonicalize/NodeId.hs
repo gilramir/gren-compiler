@@ -27,6 +27,7 @@ module Canonicalize.NodeId
     Node (..),
     nodeId,
     nodes,
+    defNodes,
   )
 where
 

@@ -16,6 +16,7 @@ import Data.Name qualified as Name
 import Data.NonEmptyList qualified as NE
 import Data.Vector qualified as Vector
 import Data.Vector.Mutable qualified as MVector
+import Gren.ModuleName qualified as ModuleName
 import Reporting.Annotation qualified as A
 import Reporting.Error.Type qualified as Error
 import Reporting.Render.Type qualified as RT
@@ -43,8 +44,12 @@ run constraint =
           -- The second of defaulting's two moments; see 'defaultAmbiguous'.
           defaultStuck (nextMark mark) (Map.elems env) (Map.elems nodes)
           annotations <- traverse Type.toAnnotation env
-          nodeTypes <- Type.toNodeTypes nodes
-          return (Right (Solved annotations nodeTypes))
+          -- A mark of its own, past the one 'defaultStuck' just used, because
+          -- the constant one every annotation walk shares would say every
+          -- variable had already been visited.
+          (nodeTypes, constrained) <- Type.toNodeTypes (nextMark (nextMark mark)) nodes
+          let defaults = Map.mapMaybe (fmap atom . Class.defaultsTo) constrained
+          return (Right (Solved annotations nodeTypes defaults))
       e : es ->
         return $ Left (NE.List e es)
 
@@ -56,7 +61,16 @@ run constraint =
 -- nothing used to compute (`docs/m1a-node-types.md`).
 data Solved = Solved
   { _annotations :: Map.Map Name.Name Can.Annotation,
-    _nodeTypes :: Map.Map Can.NodeId Can.Type
+    _nodeTypes :: Map.Map Can.NodeId Can.Type,
+    -- | What `classes.md` §0 makes of each constrained type variable in those
+    -- types: @Int@, @Float@, or no entry where no candidate admits it.
+    --
+    -- 'defaultAmbiguous' and 'defaultStuck' apply the rule where the solver can
+    -- see that nothing will ever reach a variable. An /open/ constraint is not
+    -- something the solver can see at all (D130), so the third place the rule
+    -- is needed is one the elaborator finds (§G33.2) — and this is the answer
+    -- it needs, computed here because @Type.Class@ is the table it is read off.
+    _defaults :: Map.Map Name.Name Can.Type
   }
 
 emptyState :: State
@@ -80,6 +94,10 @@ data State = State
     -- type is not final until everything that can unify with it has run.
     _nodes :: Map.Map Can.NodeId Type
   }
+
+atom :: (ModuleName.Canonical, Name.Name) -> Can.Type
+atom (home, name) =
+  Can.TType home name []
 
 solve :: Env -> Int -> Pools -> State -> Constraint -> IO State
 solve env rank pools state constraint =

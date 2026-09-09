@@ -6,12 +6,14 @@ where
 
 import AST.Canonical qualified as Can
 import AST.Source qualified as Src
+import AST.Utils.Type qualified as Utils
 import Canonicalize.Module qualified as Canonicalize
 import Canonicalize.NodeId qualified as NodeId
 import Core.AST qualified as Core
 import Core.Dump qualified as Dump
 import Core.Lower.Module qualified as Lower
 import Core.Pretty qualified as Pretty
+import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Data.OneOrMore qualified as OneOrMore
@@ -53,51 +55,69 @@ compile platform pkg ifaces modul =
     -- the checker records a type per node id (`docs/m1a-node-types.md`) and
     -- everything downstream of it must see the same ids.
     canonical <- NodeId.number <$> canonicalize pkg ifaces modul
-    Type.Solved solved nodeTypes <- typeCheck modul canonical
-    let annotations = withContexts canonical solved
+    Type.Solved solved nodeTypes defaults <- typeCheck modul canonical
     () <- checkNodeTypes canonical nodeTypes
-    elaboration <- resolveInstances modul ifaces canonical nodeTypes
+    -- Before the annotations, because half of one may come from it: an
+    -- unannotated definition's open constraints are the elaborator's answer
+    -- (§G33) and nothing earlier knows them. It may also change the types it
+    -- was given, which is why they come back out of it (§G33.2).
+    (elaboration, solved', nodeTypes') <-
+      resolveInstances modul ifaces canonical defaults solved nodeTypes
+    let annotations = withContexts canonical (Resolve._inferred elaboration) solved'
     () <- nitpick canonical
     () <- checkMain platform modul annotations canonical
-    let core = Lower.lower platform annotations nodeTypes elaboration canonical
+    let core = Lower.lower platform annotations nodeTypes' elaboration canonical
     () <- dumpCore canonical core
-    return (Artifacts canonical annotations nodeTypes core)
+    return (Artifacts canonical annotations nodeTypes' core)
 
--- | Put each written context back on the annotation the solver produced.
+-- | Put each open context back on the annotation the solver produced.
 --
--- `Type.Type.toAnnotation` returns every variable unconstrained, and has to:
--- the unifier's classes are its own three-way enum and @Basics.Num@ is not
--- declared anywhere until @core@ is rewritten, so pointing a 'Can.Class' at one
--- would be inventing a reference (verb 7). What a module /wrote/ is a
--- 'Can.Class' already, and it is what an importer needs: a constrained
--- signature that publishes no constraint is a signature whose callers pass no
--- witness, which compiles and is wrong (§G26).
+-- `Type.Type.toAnnotation` returns the /closed/ half of a context and no more,
+-- and has to: an open class never reaches the unifier (D130), so the solver
+-- has never heard of one. The other half has two sources and they are the same
+-- fact seen twice — what a module __wrote__, which is a 'Can.Class' already,
+-- and what the elaborator __inferred__ for a definition that wrote nothing
+-- (§G33). Either way it is what an importer needs: a constrained signature
+-- that publishes no constraint is a signature whose callers pass no witness,
+-- which compiles and is wrong (§G26).
 --
 -- Only the payloads move. The variables and the type are the solved
--- annotation's, and the two agree about names because a rigid variable comes
--- back from the solver under the name the signature gave it.
-withContexts :: Can.Module -> Map.Map Name.Name Can.Annotation -> Map.Map Name.Name Can.Annotation
-withContexts canonical annotations =
-  let written = writtenContexts (Can._decls canonical)
+-- annotation's, and the three agree about names because a rigid variable comes
+-- back from the solver under the name the signature gave it, and an inferred
+-- context is read off the node type the same zonking named.
+--
+-- The union rather than the replacement: an unannotated definition may be
+-- constrained by a closed class the solver found /and/ an open one the
+-- elaborator did — @countDown@ is both — and dropping either half is a wrong
+-- signature. For a written context the union is the written context, because
+-- unification cannot add a class to a rigid variable; it can only refuse one.
+withContexts :: Can.Module -> Resolve.Inferred -> Map.Map Name.Name Can.Annotation -> Map.Map Name.Name Can.Annotation
+withContexts canonical inferred annotations =
+  let declared = contexts inferred (Can._decls canonical)
       apply name (Can.Forall freeVars tipe) =
-        case Map.lookup name written of
+        case Map.lookup name declared of
           Nothing -> Can.Forall freeVars tipe
           Just context ->
-            Can.Forall (Map.mapWithKey (\var _ -> Map.findWithDefault [] var context) freeVars) tipe
+            Can.Forall
+              (Map.mapWithKey (\var fromSolver -> List.union fromSolver (Map.findWithDefault [] var context)) freeVars)
+              tipe
    in Map.mapWithKey apply annotations
 
-writtenContexts :: Can.Decls -> Map.Map Name.Name Can.FreeVars
-writtenContexts ds =
+contexts :: Resolve.Inferred -> Can.Decls -> Map.Map Name.Name Can.FreeVars
+contexts inferred ds =
   case ds of
-    Can.Declare d rest -> Map.union (contextOf d) (writtenContexts rest)
+    Can.Declare d rest -> Map.union (contextOf inferred d) (contexts inferred rest)
     Can.DeclareRec d others rest ->
-      Map.unions (map contextOf (d : others) ++ [writtenContexts rest])
+      Map.unions (map (contextOf inferred) (d : others) ++ [contexts inferred rest])
     Can.SaveTheEnvironment -> Map.empty
 
-contextOf :: Can.Def -> Map.Map Name.Name Can.FreeVars
-contextOf d =
+contextOf :: Resolve.Inferred -> Can.Def -> Map.Map Name.Name Can.FreeVars
+contextOf inferred d =
   case d of
-    Can.Def {} -> Map.empty
+    Can.Def nid (A.At _ name) _ _ ->
+      case Map.lookup nid inferred of
+        Nothing -> Map.empty
+        Just context -> Map.singleton name context
     Can.TypedDef (A.At _ name) freeVars _ _ _
       | all null (Map.elems freeVars) -> Map.empty
       | otherwise -> Map.singleton name freeVars
@@ -129,13 +149,23 @@ typeCheck modul canonical =
 -- The environment is the module's own instances plus its imports' closure,
 -- which is the same union `Canonicalize.Module` checks a new declaration
 -- against (D122) and is that function rather than a second copy of the rule.
+--
+-- __It may have to be asked more than once__ (§G33.2). A definition that takes
+-- no arguments and needs a witness would become a function, so `classes.md`
+-- §0's rule closes its variable instead — and that changes the types every
+-- later question is asked against, so the substitution is applied and the
+-- elaborator is asked again. Each round replaces at least one variable by a
+-- type with none, so there are at most as many rounds as the module has
+-- constrained variables.
 resolveInstances ::
   Src.Module ->
   Map.Map ModuleName.Raw I.Interface ->
   Can.Module ->
+  Map.Map Name.Name Can.Type ->
+  Map.Map Name.Name Can.Annotation ->
   Map.Map Can.NodeId Can.Type ->
-  Either E.Error Resolve.Elaboration
-resolveInstances modul ifaces canonical nodeTypes =
+  Either E.Error (Resolve.Elaboration, Map.Map Name.Name Can.Annotation, Map.Map Can.NodeId Can.Type)
+resolveInstances modul ifaces canonical defaults solved nodeTypes =
   let visible =
         Map.union
           (Map.map Can._in_head (Can._instances canonical))
@@ -144,11 +174,31 @@ resolveInstances modul ifaces canonical nodeTypes =
         Map.union
           (ownClasses canonical)
           (importedClasses ifaces)
-   in case Resolve.run (Resolve.Env visible classes nodeTypes) canonical of
-        Right elaboration ->
-          Right elaboration
-        Left errors ->
-          Left (E.BadInstances (Localizer.fromModule modul) errors)
+      ask anns types =
+        case Resolve.run (Resolve.Env visible classes types defaults) canonical of
+          Resolve.Answered elaboration ->
+            Right (elaboration, anns, types)
+          Resolve.Refused errors ->
+            Left (E.BadInstances (Localizer.fromModule modul) errors)
+          Resolve.Defaulted subs ->
+            ask (foldr closeAnnotation anns subs) (foldr closeNodes types subs)
+   in ask solved nodeTypes
+
+-- | Apply one definition's defaults to the annotation it publishes, if it
+-- publishes one, and stop quantifying what they closed.
+closeAnnotation :: Resolve.Substitution -> Map.Map Name.Name Can.Annotation -> Map.Map Name.Name Can.Annotation
+closeAnnotation s anns =
+  case Resolve._sTopLevel s of
+    Nothing -> anns
+    Just name -> Map.adjust close name anns
+  where
+    close (Can.Forall freeVars tipe) =
+      Can.Forall (Map.difference freeVars (Resolve._sTypes s)) (Utils.substitute (Resolve._sTypes s) tipe)
+
+-- | Apply one definition's defaults to the types recorded at its own nodes.
+closeNodes :: Resolve.Substitution -> Map.Map Can.NodeId Can.Type -> Map.Map Can.NodeId Can.Type
+closeNodes s types =
+  foldr (Map.adjust (Utils.substitute (Resolve._sTypes s))) types (Resolve._sNodes s)
 
 -- | The classes this module declares, keyed the way a constraint names one.
 ownClasses :: Can.Module -> Map.Map Can.Class Can.ClassDecl

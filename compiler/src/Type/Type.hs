@@ -272,7 +272,8 @@ toAnnotation variable =
           maybe [] (map toCanClass . Class.toList) (Map.lookup name constrained)
     return $ Can.Forall (Map.mapWithKey (\name _ -> contextOf name) freeVars) tipe
 
--- | Zonk a whole map of recorded node types at once.
+-- | Zonk a whole map of recorded node types at once, and say what each
+-- variable in them is constrained by.
 --
 -- One shared 'NameState', not one per entry: 'variableToCanType' writes the
 -- name it picks back into the variable, so a variable shared between two nodes
@@ -280,24 +281,32 @@ toAnnotation variable =
 -- against two fresh name states would both be handed "a". Core needs a
 -- lambda's binder type and its body's occurrence of it to agree, so the naming
 -- has to be module-wide.
-toNodeTypes :: Map.Map Can.NodeId Type -> IO (Map.Map Can.NodeId Can.Type)
-toNodeTypes types =
+--
+-- The classes come out with the types because this is the only walk that sees
+-- every variable in the module — an annotation's walk sees one definition's —
+-- and `classes.md` §0's rule has to be answerable for any of them once an
+-- /open/ constraint can put a variable in front of it (§G33.2).
+toNodeTypes :: Mark -> Map.Map Can.NodeId Type -> IO (Map.Map Can.NodeId Can.Type, Map.Map Name.Name Class.Classes)
+toNodeTypes visited types =
   do
-    userNames <- foldrM collectTypeVarNames Map.empty (Map.elems types)
-    State.evalStateT (traverse typeToCanType types) (makeNameState userNames)
+    userNames <- foldrM (collectTypeVarNames visited) Map.empty (Map.elems types)
+    (canTypes, NameState _ _ _ _ constrained) <-
+      State.runStateT (traverse typeToCanType types) (makeNameState userNames)
+    return (canTypes, constrained)
 
-collectTypeVarNames :: Type -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
-collectTypeVarNames tipe taken =
-  case tipe of
-    PlaceHolder _ -> return taken
-    VarN var -> keepVarNames var taken
-    AliasN _ _ args real ->
-      collectTypeVarNames real =<< foldrM collectTypeVarNames taken (map snd args)
-    AppN _ _ args -> foldrM collectTypeVarNames taken args
-    FunN a b -> collectTypeVarNames b =<< collectTypeVarNames a taken
-    EmptyRecordN -> return taken
-    RecordN fields ext ->
-      collectTypeVarNames ext =<< foldrM collectTypeVarNames taken (Map.elems fields)
+collectTypeVarNames :: Mark -> Type -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
+collectTypeVarNames visited tipe taken =
+  let recurse = collectTypeVarNames visited
+   in case tipe of
+        PlaceHolder _ -> return taken
+        VarN var -> keepVarNames visited var taken
+        AliasN _ _ args real ->
+          recurse real =<< foldrM recurse taken (map snd args)
+        AppN _ _ args -> foldrM recurse taken args
+        FunN a b -> recurse b =<< recurse a taken
+        EmptyRecordN -> return taken
+        RecordN fields ext ->
+          recurse ext =<< foldrM recurse taken (Map.elems fields)
 
 -- | Convert a constraint-level 'Type' without going through
 -- 'Type.Solve.typeToVariable'.
@@ -615,12 +624,12 @@ getFreshSuperHelp prefix index taken =
 
 getVarNames :: Variable -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
 getVarNames =
-  varNames (addName 0)
+  varNames getVarNamesMark (addName 0)
 
--- | The same, without renaming a duplicate — see 'keepVarNames'.
-keepVarNames :: Variable -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
-keepVarNames =
-  varNames keepName
+-- | The same, without renaming a duplicate — see 'keepName'.
+keepVarNames :: Mark -> Variable -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
+keepVarNames visited =
+  varNames visited keepName
 
 -- | Register a name that is already taken by a different variable.
 --
@@ -642,15 +651,25 @@ keepName givenName var _ takenNames =
 type Register =
   Name.Name -> Variable -> (Name.Name -> Content) -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
 
-varNames :: Register -> Variable -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
-varNames register var takenNames =
+-- | Every name already spoken for in what this walk can reach.
+--
+-- __The mark is a parameter because it says what "already visited" means.__
+-- 'getVarNamesMark' is a constant, so a variable one walk has visited is
+-- invisible to every later one — which is right for 'toAnnotation', where each
+-- definition is asked about its own type once, and __wrong for
+-- 'toNodeTypes'__, which runs after all of them and would collect almost
+-- nothing. What it collects is the set a fresh name has to avoid, so collecting
+-- nothing means inventing a name another variable in the module already has
+-- (§G33.3).
+varNames :: Mark -> Register -> Variable -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
+varNames visited register var takenNames =
   do
     (Descriptor content rank mark copy) <- UF.get var
-    if mark == getVarNamesMark
+    if mark == visited
       then return takenNames
       else do
-        UF.set var (Descriptor content rank getVarNamesMark copy)
-        let recurse = varNames register
+        UF.set var (Descriptor content rank visited copy)
+        let recurse = varNames visited register
         case content of
           Error ->
             return takenNames

@@ -92,19 +92,28 @@ data Env = Env
     _uses :: Resolve.Uses,
     -- | The witness parameters each definition binds, keyed by the node id of
     -- its body.
-    _params :: Resolve.Params
+    _params :: Resolve.Params,
+    -- | The context inferred for each unannotated definition (§G33), keyed by
+    -- the node id of the definition. A definition with an entry here is
+    -- constrained, and is quantified in Core exactly as a written one is.
+    _inferred :: Resolve.Inferred
   }
 
--- | The Core type recorded for a node.
-typeOf :: Env -> Can.NodeId -> Core.Type
-typeOf env nid =
+-- | The type recorded for a node.
+canTypeOf :: Env -> Can.NodeId -> Can.Type
+canTypeOf env nid =
   case Map.lookup nid (_types env) of
-    Just tipe -> lowerType tipe
+    Just tipe -> tipe
     Nothing ->
       error $
         "Core.Lower.Expression: node "
           ++ show nid
           ++ " has no recorded type. See docs/m1a-node-types.md."
+
+-- | The Core type recorded for a node.
+typeOf :: Env -> Can.NodeId -> Core.Type
+typeOf env nid =
+  lowerType (canTypeOf env nid)
 
 -- | What a use of a constrained name elaborates to, or nothing if the name is
 -- not constrained.
@@ -469,36 +478,41 @@ def :: Env -> Can.Def -> Core.Bind
 def env d =
   case d of
     Can.Def nid (A.At region name) args body ->
-      bind env (span env region) name (typeOf env nid) args (expr env body)
+      -- An unannotated definition's context is the elaborator's answer rather
+      -- than the author's (§G33), and everything after that is the same: the
+      -- context it has is the context it binds. It has none unless something
+      -- was attributed to it, which is what keeps every unconstrained
+      -- definition's Core exactly what it was.
+      quantified env (span env region) name (Map.findWithDefault Map.empty nid (_inferred env)) (canTypeOf env nid) args body
     Can.TypedDef (A.At region name) freeVars args body result ->
-      -- __A definition is quantified in Core exactly when it is constrained__
-      -- (§G26). The witness parameters are real binders and the 'Core.TForall'
-      -- that names them is a real type; an unconstrained definition keeps L2's
-      -- unquantified type, because a `TForall` with nothing to bind it is
-      -- decoration and type abstraction is specialization's half of verb 6.
-      let declared = foldr (Can.TLambda . snd) result args
-          sp = span env region
-          value = bindValue env sp (lowerType declared) (map fst args) (expr env body)
-       in case (Can.contextOrder freeVars, Can.witnessOrder freeVars) of
-            ([], _) ->
-              Core.Bind (Core.Binder name (lowerType declared) sp) value
-            (_, []) ->
-              -- Constrained only by closed classes (D135). The type is
-              -- quantified and says so — a backend reading `Num a` knows the
-              -- variable is a machine number, which is more than `TVar a` said
-              -- — but there is no witness to bind, so the value is untouched
-              -- and the arity is what was written.
-              Core.Bind
-                (Core.Binder name (lowerAnnotation (Can.Forall freeVars declared)) sp)
-                value
-            _ ->
-              Core.Bind
-                (Core.Binder name (lowerAnnotation (Can.Forall freeVars declared)) sp)
-                (witnessLam env sp (nodeIdOf body) value)
+      quantified env (span env region) name freeVars (foldr (Can.TLambda . snd) result args) (map fst args) body
 
-bind :: Env -> Core.Span -> Name -> Core.Type -> [Can.Pattern] -> Core.Expr -> Core.Bind
-bind env sp name tipe args body =
-  Core.Bind (Core.Binder name tipe sp) (bindValue env sp tipe args body)
+-- | Bind a definition under the context it carries.
+--
+-- __A definition is quantified in Core exactly when it is constrained__
+-- (§G26). The witness parameters are real binders and the 'Core.TForall' that
+-- names them is a real type; an unconstrained definition keeps L2's
+-- unquantified type, because a `TForall` with nothing to bind it is decoration
+-- and type abstraction is specialization's half of verb 6.
+quantified :: Env -> Core.Span -> Name -> Can.FreeVars -> Can.Type -> [Can.Pattern] -> Can.Expr -> Core.Bind
+quantified env sp name freeVars declared args body =
+  let value = bindValue env sp (lowerType declared) args (expr env body)
+   in case (Can.contextOrder freeVars, Can.witnessOrder freeVars) of
+        ([], _) ->
+          Core.Bind (Core.Binder name (lowerType declared) sp) value
+        (_, []) ->
+          -- Constrained only by closed classes (D135). The type is quantified
+          -- and says so — a backend reading `Num a` knows the variable is a
+          -- machine number, which is more than `TVar a` said — but there is no
+          -- witness to bind, so the value is untouched and the arity is what
+          -- was written.
+          Core.Bind
+            (Core.Binder name (lowerAnnotation (Can.Forall freeVars declared)) sp)
+            value
+        _ ->
+          Core.Bind
+            (Core.Binder name (lowerAnnotation (Can.Forall freeVars declared)) sp)
+            (witnessLam env sp (nodeIdOf body) value)
 
 bindValue :: Env -> Core.Span -> Core.Type -> [Can.Pattern] -> Core.Expr -> Core.Expr
 bindValue env sp tipe args body =

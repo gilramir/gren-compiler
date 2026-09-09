@@ -69,7 +69,13 @@ lower ::
   Core.Module
 lower platform annotations types elaboration modul =
   let home = Can._name modul
-      env = Expr.Env selfFile types (Resolve._uses elaboration) (Resolve._params elaboration)
+      env =
+        Expr.Env
+          selfFile
+          types
+          (Resolve._uses elaboration)
+          (Resolve._params elaboration)
+          (Resolve._inferred elaboration)
       witnessesOf i =
         Map.findWithDefault [] (Can.instanceKey (Can._in_head i)) (Resolve._instanceParams elaboration)
       instances = Map.elems (Can._instances modul)

@@ -121,6 +121,7 @@ environment =
     (Map.fromList [(Can.instanceKey h, h) | h <- [plain ModuleName.basics "Int" "$i$Sizey$Int", recursive]])
     Map.empty
     Map.empty
+    Map.empty
 
 -- | A witness, with only what this file is asking about: an instance's name and
 -- what it was applied to, or a parameter's name. The types and modules on the

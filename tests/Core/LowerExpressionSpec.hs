@@ -361,7 +361,7 @@ recordField name p = A.At here' (Can.PRFieldPattern name (A.At here' p))
 
 env :: [(Int, Can.Type)] -> Lower.Env
 env types =
-  Lower.Env (Core.FileId 0) (Map.fromList [(Can.NodeId i, t) | (i, t) <- types]) Map.empty Map.empty
+  Lower.Env (Core.FileId 0) (Map.fromList [(Can.NodeId i, t) | (i, t) <- types]) Map.empty Map.empty Map.empty
 
 value :: [(Int, Can.Type)] -> Can.Expr -> Core.Expr_
 value types = Core._exprValue . Lower.expr (env types)
