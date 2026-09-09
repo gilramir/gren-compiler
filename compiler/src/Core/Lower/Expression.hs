@@ -145,6 +145,73 @@ witness sp w =
        in case args of
             [] -> global
             _ -> Core.Expr (Core.EWitApp global (map (witness sp) args)) table sp
+    Resolve.FromRecord fields subject tipe ->
+      recordWitness sp fields (lowerType subject) (lowerType tipe)
+
+-- | The method table for a record type, built where it is needed (§G38).
+--
+-- Every other witness names something: a parameter the definition was handed,
+-- or an instance's binding. A record has no instance to name, because an
+-- instance head is a type constructor applied to arguments and a record has no
+-- constructor — so this is the one witness that is a value written out rather
+-- than a reference, and it is written out at each use.
+--
+-- What it holds is `classes.md` §2.1's rule for a record, which
+-- 'Canonicalize.Derive.eqField' already writes for a record that is a
+-- __component__ of a type that does have a constructor. The two say the same
+-- thing about the same shape, in two IRs, because the two shapes reach the
+-- comparison by different routes; §G38.3 is the argument for not unifying them.
+recordWitness :: Core.Span -> [(Name, Resolve.Witness)] -> Core.Type -> Core.Type -> Core.Expr
+recordWitness sp fields subject tipe =
+  let left = Name.fromChars "$el"
+      right = Name.fromChars "$er"
+      var name = Core.Expr (Core.EVar name) subject sp
+      access side field = Core.Expr (Core.EAccess (var side) field) (fieldType subject field) sp
+      compare_ (field, w) =
+        Core.Expr
+          (Core.EApp (method sp w) [access left field, access right field])
+          boolType
+          sp
+      body = conjunction sp (map compare_ fields)
+      eqType = Core.TFun [subject, subject] boolType
+      eq =
+        Core.Expr
+          (Core.ELam [Core.Binder left subject sp, Core.Binder right subject sp] body)
+          eqType
+          sp
+   in Core.Expr (Core.ERecord [(Name.fromChars "eq", eq)]) tipe sp
+
+-- | One method out of a witness, which is what a witness is a record of.
+method :: Core.Span -> Resolve.Witness -> Core.Expr
+method sp w =
+  let table = witness sp w
+   in Core.Expr (Core.EAccess table (Name.fromChars "eq")) (fieldType (Core.typeOf table) (Name.fromChars "eq")) sp
+
+-- | @a && b && …@, as the nested `case` `Canonicalize.Derive` writes for the
+-- same rule. `True` for the empty record, which is the right answer and the
+-- only one available.
+conjunction :: Core.Span -> [Core.Expr] -> Core.Expr
+conjunction sp conditions =
+  case conditions of
+    [] ->
+      Core.Expr (Core.ECtor (Core.QualName ModuleName.basics Name.true) (boolTag True) []) boolType sp
+    [one] ->
+      one
+    first : rest ->
+      Core.Expr
+        ( Core.ECase
+            first
+            [ Core.Alt (boolPattern True) (conjunction sp rest),
+              Core.Alt (boolPattern False) (Core.Expr (Core.ECtor (Core.QualName ModuleName.basics Name.false) (boolTag False) []) boolType sp)
+            ]
+            Nothing
+        )
+        boolType
+        sp
+
+boolType :: Core.Type
+boolType =
+  Core.TCon (Core.QualName ModuleName.basics Name.bool) []
 
 -- | A use of a constrained name, applied to the witnesses it needs.
 applied :: Env -> Can.NodeId -> Core.Span -> Core.Expr -> Core.Expr

@@ -492,8 +492,13 @@ basicsCall env pos q name args =
                 "mul" -> JS.Infix JS.OpMul left right
                 "fdiv" -> JS.Infix JS.OpDiv left right
                 "idiv" -> JS.Infix JS.OpBitwiseOr (JS.Infix JS.OpDiv left right) (JS.Int 0)
-                "eq" -> equal left right
-                "neq" -> notEqual left right
+                -- `Basics.equal`, not `Basics.eq`: §G24 renamed the kernel
+                -- call to free `eq` for `Eq`'s method, and this table kept the
+                -- old name for two checkpoints, so `==` compiled to a call
+                -- rather than to `===` the whole time (§G39.5). `notEqual` is
+                -- not here because it is no longer a kernel call at all — it is
+                -- `not (eq a b)`, and `not` is one line above.
+                "equal" -> equal left right
                 "lt" -> cmp JS.OpLt JS.OpLt 0 left right
                 "gt" -> cmp JS.OpGt JS.OpGt 0 left right
                 "le" -> cmp JS.OpLe JS.OpLt 1 left right
@@ -573,12 +578,6 @@ equal left right =
     then strictEq left right
     else JS.Call (JS.Ref (JsName.fromKernel Name.utils "eq")) [left, right]
 
-notEqual :: JS.Expr -> JS.Expr -> JS.Expr
-notEqual left right =
-  if isLiteral left || isLiteral right
-    then strictNEq left right
-    else JS.Prefix JS.PrefixNot (JS.Call (JS.Ref (JsName.fromKernel Name.utils "eq")) [left, right])
-
 cmp :: JS.InfixOp -> JS.InfixOp -> Int -> JS.Expr -> JS.Expr -> JS.Expr
 cmp idealOp backupOp backupInt left right =
   if isLiteral left || isLiteral right
@@ -599,17 +598,6 @@ strictEq left right =
         JS.Int 0 -> JS.Prefix JS.PrefixNot left
         JS.Bool b -> if b then left else JS.Prefix JS.PrefixNot left
         _ -> JS.Infix JS.OpEq left right
-
-strictNEq :: JS.Expr -> JS.Expr -> JS.Expr
-strictNEq left right =
-  case left of
-    JS.Int 0 -> JS.Prefix JS.PrefixNot (JS.Prefix JS.PrefixNot right)
-    JS.Bool b -> if b then JS.Prefix JS.PrefixNot right else right
-    _ ->
-      case right of
-        JS.Int 0 -> JS.Prefix JS.PrefixNot (JS.Prefix JS.PrefixNot left)
-        JS.Bool b -> if b then JS.Prefix JS.PrefixNot left else left
-        _ -> JS.Infix JS.OpNe left right
 
 isLiteral :: JS.Expr -> Bool
 isLiteral expr =

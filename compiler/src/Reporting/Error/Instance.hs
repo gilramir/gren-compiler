@@ -25,6 +25,7 @@ module Reporting.Error.Instance
 where
 
 import AST.Canonical qualified as Can
+import AST.Utils.Type qualified as Type
 import Data.Name qualified as Name
 import Reporting.Annotation qualified as A
 import Reporting.Doc qualified as D
@@ -52,6 +53,30 @@ data Error
 
 -- TO REPORT
 
+-- | Why there is no definition to use, said differently for a function.
+--
+-- `classes.md` §2.3 calls comparing functions "the single most visible
+-- correctness improvement in the spec", so the message it produces should say
+-- what is true rather than what is generic: an instance head is a type
+-- constructor applied to arguments (§G22.1), and a function is not one, so
+-- this is not an instance somebody forgot to write.
+noInstance :: Name.Name -> Wanted -> Can.Type -> String
+noInstance className wanted tipe =
+  let use = case wanted of ForMethod _ -> "call to use."; ForValue _ -> "to use."
+   in case Type.iteratedDealias tipe of
+        Can.TLambda _ _ ->
+          "A function has no structure to compare, and no `instance "
+            ++ Name.toChars className
+            ++ "` can give it one: an instance is declared for a type\
+               \ constructor, and a function is not one. So there is no\
+               \ definition for this "
+            ++ use
+        _ ->
+          "There is no `instance "
+            ++ Name.toChars className
+            ++ "` for it, so there is no definition for this "
+            ++ use
+
 toReport :: L.Localizer -> Code.Source -> Error -> Report.Report
 toReport localizer source err =
   case err of
@@ -64,11 +89,7 @@ toReport localizer source err =
           ( introduction wanted className,
             D.stack $
               chain localizer className tipe because
-                ++ [ D.reflow $
-                       "There is no `instance "
-                         ++ Name.toChars className
-                         ++ "` for it, so there is no definition for this "
-                         ++ (case wanted of ForMethod _ -> "call to use."; ForValue _ -> "to use.")
+                ++ [ D.reflow (noInstance className wanted tipe)
                    ]
           )
     NotConstrained region wanted (Can.Class _ className) var because ->

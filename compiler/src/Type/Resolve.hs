@@ -63,6 +63,7 @@ import Data.Maybe (listToMaybe)
 import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.NonEmptyList qualified as NE
+import Data.Set qualified as Set
 import Gren.ModuleName qualified as ModuleName
 import Reporting.Annotation qualified as A
 import Reporting.Error.Instance qualified as E
@@ -167,6 +168,16 @@ data Witness
   | -- | An instance's method table — the binding D125 gives every instance —
     -- applied to witnesses for the instance's own context, and its type.
     FromInstance ModuleName.Canonical Name [Witness] Can.Type
+  | -- | A __record__, which can have no instance and needs one anyway
+    -- (§G38). The fields in alphabetical order with a witness each, the
+    -- record's own type, and the witness type — everything
+    -- 'Core.Lower.Expression' needs to build the method table on the spot.
+    --
+    -- Only for a class with a structural definition, which is `classes.md`
+    -- §2.1's three and today is `Eq`: what the built method does is compare
+    -- the fields, and there is nothing to build for a class whose meaning is
+    -- an author's.
+    FromRecord [(Name, Witness)] Can.Type Can.Type
 
 -- WHAT GOES IN
 
@@ -309,10 +320,36 @@ witnessFor env bound region wanted because cls tipe =
                 (Can._ih_witness head_)
                 args'
                 (witnessRecord (Map.map (Type.substitute sub) (Can._ih_methods head_)))
+    actual@(Can.TRecord fields Nothing)
+      | isStructural cls ->
+          -- §2.1 says a record derives when its fields do, and an instance
+          -- head is a type constructor applied to arguments (§G22.1), so a
+          -- record can never have one to derive into. The witness is built
+          -- here instead, out of its fields' (§G38).
+          do
+            let deeper = because ++ [(cls, actual)]
+            ws <-
+              traverse
+                (\(field, tipe') -> (,) field <$> witnessFor env bound region wanted deeper cls tipe')
+                [(field, t) | (field, Can.FieldType _ t) <- Map.toAscList fields]
+            Right (FromRecord ws actual (witnessType env cls actual))
     actual ->
-      -- A function or a record. An instance head is a type constructor applied
-      -- to arguments (§G22.1), so neither can ever have one.
+      -- A function, an extensible record, or a record at a class with no
+      -- structural definition. An instance head is a type constructor applied
+      -- to arguments (§G22.1), so none of them can ever have one.
       Left (E.NoInstance region wanted cls actual because)
+
+-- | Whether `classes.md` §2.1 defines what this class means for a record.
+--
+-- §2.1's three are `Eq`, `Ord` and `Inspect`, and `core` declares one of them
+-- with a structural generator behind it (§G37.5). The list grows where
+-- 'Canonicalize.Derive' grows, and the two have to grow together: a record
+-- witness built here and a derived instance written there are the same rule
+-- said twice, once for a type that has a constructor to hang an instance on
+-- and once for a type that does not.
+isStructural :: Can.Class -> Bool
+isStructural (Can.Class home name) =
+  home == ModuleName.basics && name == Name.eqClass
 
 -- THE WALK
 
@@ -332,7 +369,23 @@ data Scope = Scope
     -- | The unannotated definitions this node is inside, __outermost first__.
     -- This is what a constraint with nowhere to go is attributed to; see
     -- 'refuse'.
-    _scopeInferable :: [Quantifier]
+    _scopeInferable :: [Quantifier],
+    -- | The __innermost__ definition this node is inside, annotated or not.
+    --
+    -- Only §0's defaulting reads it, and only when nothing quantifies the
+    -- variable: a use of a polymorphic local at a literal has a variable that
+    -- belongs to no definition's type, and the substitution that closes it
+    -- still has to be scoped to some definition's nodes (§G39.4).
+    _scopeEnclosing :: Maybe Can.Def,
+    -- | Every variable an enclosing __written__ signature binds.
+    --
+    -- §0 must not reach one: `isZero : Num a => a -> Bool` stands for every
+    -- numeric type at once and closing its `a` would silently retype it, which
+    -- is what `corpus/reject/method-at-a-numeric-variable` exists to say.
+    -- 'quantifier' answers for the unannotated definitions; this is the other
+    -- half, and it is needed because 'Env._envDefaults' is keyed by a variable
+    -- __name__ and `a` is the commonest name there is.
+    _scopeRigid :: Set.Set Name
   }
 
 -- | An unannotated definition a constraint at a type variable can belong to.
@@ -396,8 +449,9 @@ failure err =
 refuse :: Env -> Scope -> E.Error -> Walk ()
 refuse env scope err =
   case err of
-    E.NotConstrained _ _ cls var _
-      | Just q <- quantifier scope var ->
+    E.NotConstrained _ _ cls var _ ->
+      case quantifier scope var of
+        Just q ->
           if _qFunction q
             then attribute (_qDef q) (_qVars q) var cls
             else case Map.lookup var (_envDefaults env) of
@@ -407,8 +461,39 @@ refuse env scope err =
               -- to pick. What is said instead is true and the fix it names
               -- works — write the context down.
               Nothing -> failure err
+        Nothing ->
+          -- No definition's type mentions the variable, which is what a
+          -- __use__ of a polymorphic local at a literal looks like: `isEven 4`
+          -- where `isEven` was inferred `(Eq a, Num a) => a -> Bool` has a
+          -- fresh variable that is nobody's quantifier and is exactly what §0
+          -- closes. The substitution is scoped to the definition the use is
+          -- in, because that is where the variable lives (§G39.4).
+          case (_scopeEnclosing scope, Map.lookup var (_envDefaults env)) of
+            (Just d, Just tipe)
+              | not (Set.member var (_scopeRigid scope)) ->
+                  closeIn d var tipe
+            _ -> failure err
     _ ->
       failure err
+
+-- | Record that a variable inside a definition takes §0's default.
+--
+-- No published annotation to close, unlike 'close': the variable belongs to no
+-- definition's type, so nothing published mentions it and only the nodes'
+-- recorded types have to move.
+closeIn :: Can.Def -> Name -> Can.Type -> Walk ()
+closeIn d var tipe =
+  modify' $ \p ->
+    let one = Substitution Nothing (map NodeId.nodeId (NodeId.defNodes d)) (Map.singleton var tipe)
+        merge new old = old {_sTypes = Map.union (_sTypes new) (_sTypes old)}
+     in p {_pDefaults = Map.insertWith merge (defNodeId d) one (_pDefaults p)}
+
+-- | A key for 'Progress._pDefaults' that names the definition.
+defNodeId :: Can.Def -> Can.NodeId
+defNodeId d =
+  case d of
+    Can.Def nid _ _ _ -> nid
+    Can.TypedDef _ _ _ body _ -> nodeIdOf body
 
 -- | Record that one of a definition's variables takes §0's default.
 close :: Quantifier -> Name -> Can.Type -> Walk ()
@@ -526,7 +611,7 @@ converge env modul inferred =
 
 onePass :: Env -> Can.Module -> Inferred -> Progress
 onePass env modul inferred =
-  let scope = Scope Map.empty Map.empty []
+  let scope = Scope Map.empty Map.empty [] Nothing Set.empty
       tops = topLevel env inferred (Can._decls modul)
       walk =
         do
@@ -615,11 +700,12 @@ defWith published env tops scope d =
         scope' <- bindWitnesses env context (nodeIdOf body) scope
         let quantifies = Quantifier nid (not (null args)) (typeVars (typeOf env nid)) d published
         let inferable = _scopeInferable scope ++ [quantifies]
-        expr env tops (bindPatterns args scope' {_scopeInferable = inferable}) body
+        expr env tops (bindPatterns args scope' {_scopeInferable = inferable, _scopeEnclosing = Just d}) body
     Can.TypedDef _ freeVars args body _ ->
       do
         scope' <- bindWitnesses env freeVars (nodeIdOf body) scope
-        expr env tops (bindPatterns (map fst args) scope') body
+        let rigid = Set.union (Map.keysSet freeVars) (_scopeRigid scope)
+        expr env tops (bindPatterns (map fst args) scope' {_scopeEnclosing = Just d, _scopeRigid = rigid}) body
 
 -- | Give a definition's context fresh witness parameters, record them for the
 -- lowering, and put them in scope for the body.
@@ -806,7 +892,10 @@ methodUse env scope nid region cls param name (Can.Forall freeVars declared) act
             do
               witness <- witnessFor env (_scopeParams scope) region wanted [] cls (under sub param)
               case witness of
-                FromParam _ _ ->
-                  Right (Projected witness name)
                 FromInstance home instanceName args _ ->
                   Right (Instantiated home (Name.sepBy 0x24 instanceName name) args)
+                _ ->
+                  -- A witness parameter, or a record's table built on the spot
+                  -- (§G38). Either way there is no binding to call and the
+                  -- method comes out of the record.
+                  Right (Projected witness name)

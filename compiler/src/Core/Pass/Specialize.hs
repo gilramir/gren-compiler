@@ -72,8 +72,29 @@ import Gren.ModuleName qualified as ModuleName
 --
 -- So reading an expression into this type /is/ the test for "closed", and
 -- failing to read one is not an error: it is a site that waits for its caller.
-data Wit = Wit !Core.QualName ![Wit]
-  deriving (Eq, Ord, Show)
+--
+-- __A fourth shape arrived with §G38__: a witness for a record type is built
+-- where it is needed rather than named, because a record has no type
+-- constructor and so no instance to name. It is closed when it mentions no
+-- witness parameter, which 'Core.Refs.freeLocals' answers, and then it
+-- specializes like any other — 'Built' carries the expression to write back and
+-- is __keyed by its type__, which determines it: a witness for
+-- @Eq { x : Int }@ is the same witness wherever it is built.
+data Wit
+  = Wit !Core.QualName ![Wit]
+  | Built !Core.Type !Core.Expr
+  deriving (Show)
+
+instance Eq Wit where
+  a == b = compare a b == Prelude.EQ
+
+instance Ord Wit where
+  compare a b =
+    case (a, b) of
+      (Wit n1 as, Wit n2 bs) -> compare n1 n2 <> compare as bs
+      (Wit _ _, Built _ _) -> Prelude.LT
+      (Built _ _, Wit _ _) -> Prelude.GT
+      (Built t1 _, Built t2 _) -> compare t1 t2
 
 -- | A generic binding applied to a full row of witnesses. This is what gets a
 -- copy, and it is the copy's name.
@@ -90,7 +111,10 @@ depthCap :: Int
 depthCap = 16
 
 depth :: Wit -> Int
-depth (Wit _ args) = 1 + maximum (0 : map depth args)
+depth w =
+  case w of
+    Wit _ args -> 1 + maximum (0 : map depth args)
+    Built _ _ -> 1
 
 -- THE PASS
 
@@ -177,9 +201,12 @@ sites gens = collect
           | Just (name, wits) <- keyOf gens fn args -> (name, wits) : concatMap fromWit wits
         _ -> children_ collect e
 
-    fromWit (Wit name args)
-      | null args = []
-      | otherwise = (name, args) : concatMap fromWit args
+    fromWit w =
+      case w of
+        Wit name args
+          | null args -> []
+          | otherwise -> (name, args) : concatMap fromWit args
+        Built _ _ -> []
 
 -- | The key an application makes, when it makes one.
 keyOf :: Map Core.QualName a -> Core.Expr -> [Core.Expr] -> Maybe Key
@@ -201,6 +228,13 @@ witOf e =
       case Core._exprValue fn of
         Core.EGlobal name -> Wit name <$> traverse witOf args
         _ -> Nothing
+    Core.ERecord _
+      | Set.null (Refs.freeLocals e) ->
+          -- A record's witness (§G38), built rather than named. Closed is the
+          -- same test as for the other shapes and is asked the same way: a
+          -- built witness whose own fields' witnesses are parameters mentions
+          -- them, and then this waits for its caller like an 'Core.EVar'.
+          Just (Built (Core.typeOf e) e)
     _ -> Nothing
 
 -- NAMES
@@ -250,11 +284,14 @@ canonical binder = expand
   where
     tipe = Core._binderType binder
     sp = Core._binderSpan binder
-    expand (Wit name args) =
-      let global = Core.Expr (Core.EGlobal name) tipe sp
-       in case args of
-            [] -> global
-            _ -> Core.Expr (Core.EWitApp global (map expand args)) tipe sp
+    expand w =
+      case w of
+        Built _ built -> built
+        Wit name args ->
+          let global = Core.Expr (Core.EGlobal name) tipe sp
+           in case args of
+                [] -> global
+                _ -> Core.Expr (Core.EWitApp global (map expand args)) tipe sp
 
 copy :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Map Key Name -> Key -> Core.Bind
 copy gens tys names key@(name, _) =
@@ -283,6 +320,7 @@ fixed gens tys (name, wits) =
 -- | The type of a witness expression: the instance table's own type, with the
 -- context it was applied to substituted in.
 witType :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Wit -> Maybe Core.Type
+witType _ _ (Built tipe _) = Just tipe
 witType gens tys (Wit name args) =
   case args of
     [] ->
