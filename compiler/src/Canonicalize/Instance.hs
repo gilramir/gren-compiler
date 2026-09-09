@@ -27,6 +27,7 @@
 module Canonicalize.Instance
   ( canonicalize,
     canonicalizeInto,
+    Instances,
     specialize,
     witnessNameOf,
   )

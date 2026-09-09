@@ -32,16 +32,16 @@ constrain (Can.Module home _ _ decls _ _ _ instances _ effects) =
           Can.Cmd cmdName ->
             letCmd home cmdName
               =<< constrainDecls decls
-              =<< constrainEffects home r0 r1 r2 manager
+              =<< constrainEffects home r0 r1 r2 manager final
           Can.Sub subName ->
             letSub home subName
               =<< constrainDecls decls
-              =<< constrainEffects home r0 r1 r2 manager
+              =<< constrainEffects home r0 r1 r2 manager final
           Can.Fx cmdName subName ->
             letCmd home cmdName
               =<< letSub home subName
               =<< constrainDecls decls
-              =<< constrainEffects home r0 r1 r2 manager
+              =<< constrainEffects home r0 r1 r2 manager final
 
 -- CONSTRAIN INSTANCES
 
@@ -56,7 +56,11 @@ constrain (Can.Module home _ _ decls _ _ _ instances _ effects) =
 --
 -- It replaces 'CSaveTheEnvironment' as the innermost constraint rather than
 -- wrapping the declarations, because an instance body may call anything the
--- module defines.
+-- module defines. __An effect module has a second innermost place__ —
+-- 'constrainEffects' had its own 'CSaveTheEnvironment' — and this was silently
+-- dropped there until §G37 gave an effect module an instance to have: the
+-- methods were never constrained, so their nodes had no solved type and the
+-- elaborator reported a method used at the class's own parameter.
 constrainInstances :: Map.Map Can.InstanceKey Can.Instance -> IO Constraint
 constrainInstances instances =
   case concatMap (Map.elems . Can._in_methods) (Map.elems instances) of
@@ -123,8 +127,13 @@ letSub home tipe constraint =
     let header = Map.singleton "subscription" (A.At A.zero subType)
     return $ CLet [msgVar] [] header CTrue constraint
 
-constrainEffects :: ModuleName.Canonical -> A.Region -> A.Region -> A.Region -> Can.Manager -> IO Constraint
-constrainEffects home r0 r1 r2 manager =
+-- | The effect manager's four definitions, with @final@ innermost.
+--
+-- @final@ is 'constrainInstances'' answer, and it has to reach here: this is
+-- the innermost constraint of an effect module, so a 'CSaveTheEnvironment' of
+-- its own would leave the instance methods unconstrained (§G37.3).
+constrainEffects :: ModuleName.Canonical -> A.Region -> A.Region -> A.Region -> Can.Manager -> Constraint -> IO Constraint
+constrainEffects home r0 r1 r2 manager final =
   do
     s0 <- mkFlexVar
     s1 <- mkFlexVar
@@ -162,12 +171,12 @@ constrainEffects home r0 r1 r2 manager =
     CLet [] [s0, s1, s2, m1, m2, sm1, sm2] Map.empty effectCons
       <$> case manager of
         Can.Cmd cmd ->
-          checkMap "cmdMap" home cmd CSaveTheEnvironment
+          checkMap "cmdMap" home cmd final
         Can.Sub sub ->
-          checkMap "subMap" home sub CSaveTheEnvironment
+          checkMap "subMap" home sub final
         Can.Fx cmd sub ->
           checkMap "cmdMap" home cmd
-            =<< checkMap "subMap" home sub CSaveTheEnvironment
+            =<< checkMap "subMap" home sub final
 
 effectList :: ModuleName.Canonical -> Name.Name -> Type -> Type
 effectList home name msg =

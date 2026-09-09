@@ -29,6 +29,7 @@ module Data.Name
     int,
     float,
     bool,
+    eqClass,
     char,
     string,
     num,
@@ -357,6 +358,12 @@ int = fromChars "Int"
 
 float :: Name
 float = fromChars "Float"
+
+-- | The `Eq` class's name, which implicit structural derivation looks up in
+-- `Basics` rather than in the module's environment (§G37).
+eqClass :: Name
+eqClass =
+  fromChars "Eq"
 
 bool :: Name
 bool = fromChars "Bool"

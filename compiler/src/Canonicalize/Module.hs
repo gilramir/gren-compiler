@@ -15,6 +15,7 @@ import Canonicalize.Environment.Dups qualified as Dups
 import Canonicalize.Environment.Foreign qualified as Foreign
 import Canonicalize.Environment.Local qualified as Local
 import Canonicalize.Expression qualified as Expr
+import Canonicalize.Implicit qualified as Implicit
 import Canonicalize.Instance qualified as Instance
 import Canonicalize.Pattern qualified as Pattern
 import Canonicalize.Type qualified as Type
@@ -59,7 +60,20 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
     -- class is the duplicate: the author wrote that one, so the error can point
     -- at code they can see.
     derived <- deriveInstances home ifaces env cexports cunions (fmap snd unions)
-    cinstances <- Instance.canonicalizeInto pkg (importedInstances ifaces) env derived (fmap snd instances)
+    written <- Instance.canonicalizeInto pkg (importedInstances ifaces) env derived (fmap snd instances)
+
+    -- Last, so that a written or `@derive`d instance is already in the map and
+    -- the implicit rule can see that this type is spoken for (§G37).
+    cinstances <-
+      Implicit.add
+        home
+        (structuralClass home ifaces cclasses)
+        (boolUnion home ifaces cunions)
+        cexports
+        cunions
+        (Map.fromList [(name, region) | A.At region (Src.Union (A.At _ name) _ _ _ _) <- fmap snd unions])
+        (importedInstances ifaces)
+        written
 
     return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops ceffects
 
@@ -131,19 +145,20 @@ deriveOne home ifaces env exports cunions sofar (_, typeName, classNames) =
       -- declarations, and a duplicate name was reported before this ran.
       Result.ok sofar
     Just union ->
-      foldM (deriveClass home ifaces env exports typeName union) sofar classNames
+      foldM (deriveClass home ifaces env exports cunions typeName union) sofar classNames
 
 deriveClass ::
   ModuleName.Canonical ->
   Map.Map ModuleName.Raw I.Interface ->
   Env.Env ->
   Can.Exports ->
+  Map.Map Name.Name Can.Union ->
   Name.Name ->
   Can.Union ->
   Map.Map Can.InstanceKey Can.Instance ->
   A.Located Name.Name ->
   Result i w (Map.Map Can.InstanceKey Can.Instance)
-deriveClass home ifaces env exports typeName union sofar (A.At region className) =
+deriveClass home ifaces env exports cunions typeName union sofar (A.At region className) =
   if not (Can.isAbstract exports typeName)
     then Result.throw (Error.DeriveOnTransparent region typeName className)
     else do
@@ -154,7 +169,7 @@ deriveClass home ifaces env exports typeName union sofar (A.At region className)
         else do
           let witness = Instance.witnessNameOf sofar className typeName
           instance_ <-
-            Derive.derive home (boolUnion home ifaces) region typeName union cls decl witness
+            Derive.derive home (boolUnion home ifaces cunions) region typeName union cls decl witness
           Result.ok (Map.insert key instance_ sofar)
 
 -- | `Basics.Bool`, which every derived method needs to answer with.
@@ -162,22 +177,48 @@ deriveClass home ifaces env exports typeName union sofar (A.At region className)
 -- Read from the interface rather than from this module's environment, because
 -- the generated code is not the author's and must not depend on what they
 -- imported or shadowed. `Basics` is compiling itself in the one case the
--- interface is absent, and then its own declaration is the same union.
-boolUnion :: ModuleName.Canonical -> Map.Map ModuleName.Raw I.Interface -> Can.Union
-boolUnion home ifaces =
+-- interface is absent, and then its own declarations are where to look — which
+-- they had to become with implicit derivation (§G37), because `Basics`'
+-- transparent types derive too and `Order` is one of them.
+boolUnion :: ModuleName.Canonical -> Map.Map ModuleName.Raw I.Interface -> Map.Map Name.Name Can.Union -> Can.Union
+boolUnion home ifaces localUnions =
   case I._unions <$> Map.lookup Name.basics ifaces of
     Just unions ->
       case Map.lookup Name.bool unions >>= I.toPublicUnion of
         Just union -> union
         Nothing -> emptyBool
     Nothing ->
-      if home == ModuleName.basics then emptyBool else emptyBool
+      if home == ModuleName.basics
+        then Map.findWithDefault emptyBool Name.bool localUnions
+        else emptyBool
 
--- | The stand-in when `Basics` is not an import, which is only while `Basics`
--- itself compiles. Nothing in `core` derives, so nothing reaches it.
+-- | The stand-in when `Bool` cannot be found at all, which nothing reaches:
+-- `Basics` declares it and every other module imports `Basics`.
 emptyBool :: Can.Union
 emptyBool =
   Can.Union [] [] 0 Can.Enum
+
+-- | The class implicit derivation writes instances for, found the same way
+-- `Bool` is and for the same reason.
+--
+-- One class, because `Canonicalize.Derive` writes one: `Ord` and `Inspect` are
+-- `classes.md` §2.1's other two and join this list when the generator grows
+-- them (§G37.5). `Nothing` is `Basics` before `class Eq` is declared, which
+-- cannot happen — `Basics` declares it — and a `core` that removed it.
+structuralClass ::
+  ModuleName.Canonical ->
+  Map.Map ModuleName.Raw I.Interface ->
+  Map.Map Name.Name Can.ClassDecl ->
+  Maybe (Can.Class, Can.ClassDecl)
+structuralClass home ifaces localClasses =
+  let named decl = (Can.Class ModuleName.basics Name.eqClass, decl)
+   in case I._classes <$> Map.lookup Name.basics ifaces of
+        Just classes ->
+          named <$> (Map.lookup Name.eqClass classes >>= I.toPublicClass)
+        Nothing ->
+          if home == ModuleName.basics
+            then named <$> Map.lookup Name.eqClass localClasses
+            else Nothing
 
 -- CANONICALIZE BINOP
 

@@ -110,6 +110,7 @@ Library common
         Canonicalize.Derive
         Canonicalize.Environment.Local
         Canonicalize.Expression
+        Canonicalize.Implicit
         Canonicalize.Instance
         Canonicalize.Module
         Canonicalize.NodeId
