@@ -69,6 +69,7 @@ import Data.Maybe qualified as Maybe
 import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.Set qualified as Set
+import Data.Utf8 qualified as Utf8
 import Data.Word (Word32)
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
@@ -145,8 +146,8 @@ witness sp w =
        in case args of
             [] -> global
             _ -> Core.Expr (Core.EWitApp global (map (witness sp) args)) table sp
-    Resolve.FromRecord fields subject tipe ->
-      recordWitness sp fields (lowerType subject) (lowerType tipe)
+    Resolve.FromRecord cls fields subject tipe ->
+      recordWitness sp cls fields (lowerType subject) (lowerType tipe)
 
 -- | The method table for a record type, built where it is needed (§G38).
 --
@@ -161,31 +162,95 @@ witness sp w =
 -- __component__ of a type that does have a constructor. The two say the same
 -- thing about the same shape, in two IRs, because the two shapes reach the
 -- comparison by different routes; §G38.3 is the argument for not unifying them.
-recordWitness :: Core.Span -> [(Name, Resolve.Witness)] -> Core.Type -> Core.Type -> Core.Expr
-recordWitness sp fields subject tipe =
-  let left = Name.fromChars "$el"
-      right = Name.fromChars "$er"
-      var name = Core.Expr (Core.EVar name) subject sp
-      access side field = Core.Expr (Core.EAccess (var side) field) (fieldType subject field) sp
-      compare_ (field, w) =
+recordWitness :: Core.Span -> Can.Class -> [(Name, Resolve.Witness)] -> Core.Type -> Core.Type -> Core.Expr
+recordWitness sp cls@(Can.Class _ className) fields subject tipe
+  | className == Name.ordClass = Core.Expr (Core.ERecord [(nameCompare, ordMethod sp cls fields subject)]) tipe sp
+  | className == Name.inspectClass = Core.Expr (Core.ERecord [(nameInspect, inspectMethod sp cls fields subject)]) tipe sp
+  | otherwise = Core.Expr (Core.ERecord [(nameEq, eqMethod sp cls fields subject)]) tipe sp
+
+-- | @\$el $er -> $el.a == $er.a && …@, and 'True' for the empty record.
+eqMethod :: Core.Span -> Can.Class -> [(Name, Resolve.Witness)] -> Core.Type -> Core.Expr
+eqMethod sp cls fields subject =
+  let compare_ (field, w) =
         Core.Expr
-          (Core.EApp (method sp w) [access left field, access right field])
+          (Core.EApp (method sp cls nameEq w) [access sp subject witLeft field, access sp subject witRight field])
           boolType
           sp
-      body = conjunction sp (map compare_ fields)
-      eqType = Core.TFun [subject, subject] boolType
-      eq =
+   in lambda2 sp subject boolType (conjunction sp (map compare_ fields))
+
+-- | @\$el $er -> case compare $el.a $er.a of EQ -> …; $o -> $o@, and @EQ@ for
+-- the empty record.
+--
+-- The fall-through binds rather than repeating the call, which is the same
+-- choice 'Canonicalize.Derive.firstUnequal' makes and for the same reason: the
+-- unequal path is the common one and the component would otherwise be compared
+-- twice.
+ordMethod :: Core.Span -> Can.Class -> [(Name, Resolve.Witness)] -> Core.Type -> Core.Expr
+ordMethod sp cls fields subject =
+  let compare_ (field, w) =
         Core.Expr
-          (Core.ELam [Core.Binder left subject sp, Core.Binder right subject sp] body)
-          eqType
+          (Core.EApp (method sp cls nameCompare w) [access sp subject witLeft field, access sp subject witRight field])
+          orderType
           sp
-   in Core.Expr (Core.ERecord [(Name.fromChars "eq", eq)]) tipe sp
+   in lambda2 sp subject orderType (firstUnequal sp (map compare_ fields))
+
+-- | @\$el -> Inspect.record [ { name = "a", value = inspect $el.a }, … ]@.
+--
+-- `representation.md` R5's record shape, built by the same @Inspect.record@
+-- that a derived instance calls, so the two routes to a record produce one
+-- format (§G43.3).
+inspectMethod :: Core.Span -> Can.Class -> [(Name, Resolve.Witness)] -> Core.Type -> Core.Expr
+inspectMethod sp cls fields subject =
+  let entry (field, w) =
+        Core.Expr
+          ( Core.ERecord
+              [ (nameName, Core.Expr (Core.ELit (Core.LString (Utf8.fromChars (Name.toChars field)))) stringType sp),
+                ( nameValue,
+                  Core.Expr
+                    (Core.EApp (method sp cls nameInspect w) [access sp subject witLeft field])
+                    stringType
+                    sp
+                )
+              ]
+          )
+          entryType
+          sp
+      entries = Core.Expr (Core.EArray (map entry fields)) (arrayOf entryType) sp
+      called =
+        Core.Expr
+          ( Core.EApp
+              (Core.Expr (Core.EGlobal (Core.QualName ModuleName.inspect nameRecord)) recordFnType sp)
+              [entries]
+          )
+          stringType
+          sp
+   in Core.Expr
+        (Core.ELam [Core.Binder witLeft subject sp] called)
+        (Core.TFun [subject] stringType)
+        sp
+
+witLeft :: Name
+witLeft = Name.fromChars "$el"
+
+witRight :: Name
+witRight = Name.fromChars "$er"
+
+access :: Core.Span -> Core.Type -> Name -> Name -> Core.Expr
+access sp subject side field =
+  Core.Expr (Core.EAccess (Core.Expr (Core.EVar side) subject sp) field) (fieldType subject field) sp
+
+lambda2 :: Core.Span -> Core.Type -> Core.Type -> Core.Expr -> Core.Expr
+lambda2 sp subject result body =
+  Core.Expr
+    (Core.ELam [Core.Binder witLeft subject sp, Core.Binder witRight subject sp] body)
+    (Core.TFun [subject, subject] result)
+    sp
 
 -- | One method out of a witness, which is what a witness is a record of.
-method :: Core.Span -> Resolve.Witness -> Core.Expr
-method sp w =
+method :: Core.Span -> Can.Class -> Name -> Resolve.Witness -> Core.Expr
+method sp _ name w =
   let table = witness sp w
-   in Core.Expr (Core.EAccess table (Name.fromChars "eq")) (fieldType (Core.typeOf table) (Name.fromChars "eq")) sp
+   in Core.Expr (Core.EAccess table name) (fieldType (Core.typeOf table) name) sp
 
 -- | @a && b && …@, as the nested `case` `Canonicalize.Derive` writes for the
 -- same rule. `True` for the empty record, which is the right answer and the
@@ -209,9 +274,90 @@ conjunction sp conditions =
         boolType
         sp
 
+-- | The first field that is not @EQ@, and @EQ@ when there are none.
+firstUnequal :: Core.Span -> [Core.Expr] -> Core.Expr
+firstUnequal sp comparisons =
+  case comparisons of
+    [] ->
+      orderCtor sp "EQ"
+    [one] ->
+      one
+    first : rest ->
+      let carried = Name.fromChars "$o"
+       in Core.Expr
+            ( Core.ECase
+                first
+                [ Core.Alt (orderPattern "EQ") (firstUnequal sp rest),
+                  Core.Alt
+                    (Core.PVar (Core.Binder carried orderType sp))
+                    (Core.Expr (Core.EVar carried) orderType sp)
+                ]
+                Nothing
+            )
+            orderType
+            sp
+
+orderTag :: String -> Int
+orderTag chars =
+  case chars of
+    "LT" -> 0
+    "EQ" -> 1
+    _ -> 2
+
+orderCtor :: Core.Span -> String -> Core.Expr
+orderCtor sp chars =
+  Core.Expr
+    (Core.ECtor (Core.QualName ModuleName.basics (Name.fromChars chars)) (orderTag chars) [])
+    orderType
+    sp
+
+orderPattern :: String -> Core.Pattern
+orderPattern chars =
+  Core.PCtor (Core.QualName ModuleName.basics (Name.fromChars chars)) (orderTag chars) []
+
 boolType :: Core.Type
 boolType =
   Core.TCon (Core.QualName ModuleName.basics Name.bool) []
+
+orderType :: Core.Type
+orderType =
+  Core.TCon (Core.QualName ModuleName.basics Name.order) []
+
+stringType :: Core.Type
+stringType =
+  Core.TCon (Core.QualName ModuleName.string Name.string) []
+
+arrayOf :: Core.Type -> Core.Type
+arrayOf element =
+  Core.TCon (Core.QualName ModuleName.array Name.array) [element]
+
+-- | @{ name : String, value : String }@, the entry `Inspect.record` takes.
+entryType :: Core.Type
+entryType =
+  Core.TRecord [(nameName, stringType), (nameValue, stringType)] Nothing
+
+-- | @Array { name : String, value : String } -> String@
+recordFnType :: Core.Type
+recordFnType =
+  Core.TFun [arrayOf entryType] stringType
+
+nameEq :: Name
+nameEq = Name.fromChars "eq"
+
+nameCompare :: Name
+nameCompare = Name.fromChars "compare"
+
+nameInspect :: Name
+nameInspect = Name.fromChars "inspect"
+
+nameRecord :: Name
+nameRecord = Name.fromChars "record"
+
+nameName :: Name
+nameName = Name.fromChars "name"
+
+nameValue :: Name
+nameValue = Name.fromChars "value"
 
 -- | A use of a constrained name, applied to the witnesses it needs.
 applied :: Env -> Can.NodeId -> Core.Span -> Core.Expr -> Core.Expr

@@ -222,23 +222,37 @@ structuralClasses ::
   Map.Map Name.Name Can.ClassDecl ->
   [(Can.Class, Can.ClassDecl)]
 structuralClasses home ifaces localClasses =
-  [ (Can.Class ModuleName.basics name, decl)
-  | name <- [Name.eqClass, Name.ordClass],
-    Just decl <- [structuralClassDecl home ifaces localClasses name]
+  [ (Can.Class classHome name, decl)
+  | (classHome, moduleName, name) <-
+      [ (ModuleName.basics, Name.basics, Name.eqClass),
+        (ModuleName.basics, Name.basics, Name.ordClass),
+        (ModuleName.inspect, Name.inspectModule, Name.inspectClass)
+      ],
+    Just decl <- [structuralClassDecl home ifaces localClasses moduleName name]
   ]
 
+-- | One class, from the interface of the module that declares it.
+--
+-- `Eq` and `Ord` are `Basics`'s and every module imports `Basics`, so they are
+-- always found. `Inspect` is its own module's (§G43) and is found only where
+-- that module is imported — which is every module outside `core`, because it is
+-- a default import, and inside `core` only the modules that ask. That is the
+-- rule rather than an accident: `Inspect` names `String`, so everything
+-- `String` imports is beneath it and cannot import back, and those types'
+-- instances are written in `Inspect` itself.
 structuralClassDecl ::
   ModuleName.Canonical ->
   Map.Map ModuleName.Raw I.Interface ->
   Map.Map Name.Name Can.ClassDecl ->
   Name.Name ->
+  Name.Name ->
   Maybe Can.ClassDecl
-structuralClassDecl home ifaces localClasses name =
-  case I._classes <$> Map.lookup Name.basics ifaces of
+structuralClassDecl home ifaces localClasses moduleName name =
+  case I._classes <$> Map.lookup moduleName ifaces of
     Just classes ->
       Map.lookup name classes >>= I.toPublicClass
     Nothing ->
-      if home == ModuleName.basics
+      if ModuleName._module home == moduleName
         then Map.lookup name localClasses
         else Nothing
 

@@ -1,8 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Structural derivation: what @\@derive(Eq)@ and @\@derive(Ord)@ write for
--- you (@classes.md@ §2.1, §2.2, @docs/m1b-classes.md@ §G25, §G42).
+-- | Structural derivation: what @\@derive(Eq)@, @\@derive(Ord)@ and
+-- @\@derive(Inspect)@ write for you (@classes.md@ §2.1, §2.2,
+-- @docs/representation.md@ R5, @docs/m1b-classes.md@ §G25, §G42, §G43).
 --
 -- __What it produces is an ordinary instance.__ A derived instance is a
 -- 'AST.Canonical.Instance' with a real head and real method definitions, sitting
@@ -19,7 +20,22 @@
 -- from abstract, which is 'AST.Canonical.isAbstract' and is why §G16.1 could
 -- not make it before now.
 --
--- __The two classes share every decision but the leaf.__ @eq@ and @compare@
+-- __@Inspect@ is a different walk, and deliberately not the same one.__ @eq@
+-- and @compare@ are __relations__ — two values in, one answer out — and
+-- @inspect@ is a __rendering__: one value in, a string out. Forcing them
+-- together would make every field of 'Verb' a @Maybe@ of something. So the
+-- binary pair share 'body' and the unary one has 'inspectBody', and what they
+-- do share is 'Position''s refusals, which are §2.1's and are the same for all
+-- three classes.
+--
+-- __The format lives in @core@, not here.__ @Inspect.ctor@, @Inspect.record@
+-- and @Inspect.arg@ are ordinary functions in the class's own module, and the
+-- generated body calls them. So @representation.md@ R5 is one Gren file that
+-- can be read against the specification, and this module decides only which
+-- components are visited — which is the same question it answers for the other
+-- two classes.
+--
+-- __The two relations share every decision but the leaf.__ @eq@ and @compare@
 -- walk the same shapes in the same order and differ in three places: what a
 -- pair of components reduces to (a @Bool@ or an @Order@), how a constructor's
 -- components are combined (all of them, against the first that is not @EQ@),
@@ -46,6 +62,7 @@ import Data.Index qualified as Index
 import Data.Map.Strict qualified as Map
 import Data.Name qualified as Name
 import Gren.ModuleName qualified as ModuleName
+import Gren.String qualified as ES
 import Reporting.Annotation qualified as A
 import Reporting.Error.Canonicalize qualified as Error
 import Reporting.Result qualified as Result
@@ -90,13 +107,18 @@ derive home boolDecl orderDecl region typeName union cls@(Can.Class classHome cl
         Nothing ->
           -- §8.3: structural derivation is defined for `Eq`, `Ord` and
           -- `Inspect` and for nothing else, so a user class has no structural
-          -- rule to appeal to. `Inspect` is not declared yet (§G24.3), so
-          -- today the list is two long.
+          -- rule to appeal to. All three are declared now, so the list is
+          -- closed rather than partial.
           Result.throw (Error.DeriveNotStructural region typeName className)
-        Just verb ->
+        Just (Relation verb) ->
           do
             let name = _v_method verb
             method_ <- methodDef ctx head_ published name (body ctx verb union)
+            Result.ok (Can.Instance head_ Can.Derived (Map.singleton name method_))
+        Just Rendering ->
+          do
+            let name = nameInspect
+            method_ <- methodDef ctx head_ published name (inspectBody ctx union)
             Result.ok (Can.Instance head_ Can.Derived (Map.singleton name method_))
 
 -- THE TWO VERBS
@@ -122,11 +144,16 @@ data Verb = Verb
     _v_mismatch :: Ctx -> Ordering -> Can.Expr
   }
 
-verbOf :: ModuleName.Canonical -> Name.Name -> Maybe Verb
+-- | Which of §2.1's three classes this is, and therefore which walk it gets.
+data Kind
+  = Relation Verb
+  | Rendering
+
+verbOf :: ModuleName.Canonical -> Name.Name -> Maybe Kind
 verbOf classHome className
-  | classHome /= ModuleName.basics = Nothing
-  | className == Name.eqClass = Just eqVerb
-  | className == Name.ordClass = Just ordVerb
+  | classHome == ModuleName.basics && className == Name.eqClass = Just (Relation eqVerb)
+  | classHome == ModuleName.basics && className == Name.ordClass = Just (Relation ordVerb)
+  | classHome == ModuleName.inspect && className == Name.inspectClass = Just Rendering
   | otherwise = Nothing
 
 eqVerb :: Verb
@@ -333,6 +360,168 @@ field ctx verb (index, tipe) =
 fieldType :: Can.FieldType -> Can.Type
 fieldType (Can.FieldType _ tipe) =
   tipe
+
+-- THE RENDERING
+
+-- | @inspect x@: one @case@, one branch per constructor, and each branch is a
+-- call to @Inspect.ctor@ with the constructor's own name and its components
+-- rendered.
+--
+-- R5's shapes come out of @core@ rather than out of this function: a
+-- constructor with no payload is @ctor "Nothing" []@ and reduces to
+-- @"Nothing"@ there, and a nested one is parenthesized by @Inspect.arg@,
+-- which decides from the rendered string because @inspect : a -> String@ gives
+-- an instance no way to be told it is in an argument position.
+inspectBody :: Ctx -> Can.Union -> [Name.Name] -> Result i w Can.Expr
+inspectBody ctx union@(Can.Union _ ctors _ _) args =
+  case args of
+    [subject] ->
+      do
+        branches <- traverse (inspectBranch ctx union) ctors
+        Result.ok (at ctx (Can.Case (local ctx subject) branches))
+    _ ->
+      Result.throw (Error.DeriveMethodShape (_region ctx) (_typeName ctx) nameInspect)
+
+inspectBranch :: Ctx -> Can.Union -> Can.Ctor -> Result i w Can.CaseBranch
+inspectBranch ctx union ctor@(Can.Ctor name _ _ argTypes) =
+  do
+    renderings <- traverse (inspectField ctx) (zip [0 :: Int ..] argTypes)
+    let binders = [Name.fromChars ("$c" ++ show i) | i <- [0 .. length argTypes - 1]]
+    let rendered =
+          [ call ctx (foreign_ ctx nameArg oneString) [render (local ctx binder)]
+          | (render, binder) <- zip renderings binders
+          ]
+    Result.ok $
+      Can.CaseBranch
+        (ctorPattern ctx union ctor binders)
+        ( call
+            ctx
+            (foreign_ ctx nameCtor ctorType)
+            [str ctx (ES.fromChars (Name.toChars name)), at ctx (Can.Array rendered)]
+        )
+
+-- | How one component is rendered.
+--
+-- The same three answers 'field' gives, for the same reasons: a function
+-- refuses, a record has no instance and is rendered field by field in the
+-- alphabetical order 'Map.toAscList' gives, and everything else goes to the
+-- class's own method.
+inspectField :: Ctx -> (Int, Can.Type) -> Result i w (Can.Expr -> Can.Expr)
+inspectField ctx (index, tipe) =
+  case Type.iteratedDealias tipe of
+    Can.TLambda _ _ ->
+      Result.throw $
+        Error.DeriveComponentIsFunction (_region ctx) (_typeName ctx) index
+    Can.TRecord fields Nothing ->
+      do
+        renderings <- traverse (inspectField ctx) (zip (repeat index) (map fieldType (Map.elems fields)))
+        let names = Map.keys fields
+        Result.ok $ \subject ->
+          call
+            ctx
+            (foreign_ ctx nameRecord recordType)
+            [ at ctx $
+                Can.Array
+                  [ at ctx $
+                      Can.Record
+                        ( Map.fromList
+                            [ (A.At (_region ctx) nameName, str ctx (ES.fromChars (Name.toChars name))),
+                              (A.At (_region ctx) nameValue, render (access ctx subject name))
+                            ]
+                        )
+                  | (render, name) <- zip renderings names
+                  ]
+            ]
+    Can.TRecord _ (Just _) ->
+      Result.throw $
+        Error.DeriveComponentIsFunction (_region ctx) (_typeName ctx) index
+    _ ->
+      Result.ok $ \subject ->
+        call ctx (inspectMethod ctx) [subject]
+
+-- | @Inspect.inspect@ at this instance's own class parameter, which is the
+-- same node 'method' writes for the other two.
+inspectMethod :: Ctx -> Can.Expr
+inspectMethod ctx =
+  at ctx $
+    Can.VarMethod
+      (_class ctx)
+      (_param ctx)
+      nameInspect
+      (Can.Forall (Map.singleton (_param ctx) [_class ctx]) (Can.TLambda (Can.TVar (_param ctx)) stringType))
+
+-- | One of @Inspect@'s ordinary functions, named with its home rather than
+-- looked up, because generated code must not depend on what the author
+-- imported.
+foreign_ :: Ctx -> Name.Name -> Can.Type -> Can.Expr
+foreign_ ctx name tipe =
+  at ctx (Can.VarForeign ModuleName.inspect name (Can.Forall Map.empty tipe))
+
+stringType :: Can.Type
+stringType =
+  Can.TType ModuleName.string Name.string []
+
+arrayOf :: Can.Type -> Can.Type
+arrayOf tipe =
+  Can.TType ModuleName.array Name.array [tipe]
+
+-- | @ctor : String -> Array String -> String@
+ctorType :: Can.Type
+ctorType =
+  Can.TLambda stringType (Can.TLambda (arrayOf stringType) stringType)
+
+-- | @record : Array { name : String, value : String } -> String@
+recordType :: Can.Type
+recordType =
+  Can.TLambda
+    ( arrayOf
+        ( Can.TRecord
+            ( Map.fromList
+                [ (nameName, Can.FieldType 0 stringType),
+                  (nameValue, Can.FieldType 1 stringType)
+                ]
+            )
+            Nothing
+        )
+    )
+    stringType
+
+-- | @arg : String -> String@
+oneString :: Can.Type
+oneString =
+  Can.TLambda stringType stringType
+
+str :: Ctx -> ES.String -> Can.Expr
+str ctx value =
+  at ctx (Can.Str value)
+
+call :: Ctx -> Can.Expr -> [Can.Expr] -> Can.Expr
+call ctx fn args =
+  at ctx (Can.Call fn args)
+
+nameInspect :: Name.Name
+nameInspect =
+  Name.fromChars "inspect"
+
+nameCtor :: Name.Name
+nameCtor =
+  Name.fromChars "ctor"
+
+nameRecord :: Name.Name
+nameRecord =
+  Name.fromChars "record"
+
+nameArg :: Name.Name
+nameArg =
+  Name.fromChars "arg"
+
+nameName :: Name.Name
+nameName =
+  Name.fromChars "name"
+
+nameValue :: Name.Name
+nameValue =
+  Name.fromChars "value"
 
 -- BUILDING BLOCKS
 

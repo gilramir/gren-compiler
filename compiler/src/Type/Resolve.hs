@@ -169,15 +169,17 @@ data Witness
     -- applied to witnesses for the instance's own context, and its type.
     FromInstance ModuleName.Canonical Name [Witness] Can.Type
   | -- | A __record__, which can have no instance and needs one anyway
-    -- (§G38). The fields in alphabetical order with a witness each, the
-    -- record's own type, and the witness type — everything
+    -- (§G38). The class, the fields in alphabetical order with a witness each,
+    -- the record's own type, and the witness type — everything
     -- 'Core.Lower.Expression' needs to build the method table on the spot.
     --
     -- Only for a class with a structural definition, which is `classes.md`
-    -- §2.1's three and today is `Eq`: what the built method does is compare
-    -- the fields, and there is nothing to build for a class whose meaning is
-    -- an author's.
-    FromRecord [(Name, Witness)] Can.Type Can.Type
+    -- §2.1's three: what the built method does is what the rule says a record
+    -- means for that class, and there is nothing to build for a class whose
+    -- meaning is an author's. The class is carried because the three build
+    -- different bodies — a conjunction, a chain and a rendering — and by §G43
+    -- all three exist.
+    FromRecord Can.Class [(Name, Witness)] Can.Type Can.Type
 
 -- WHAT GOES IN
 
@@ -332,7 +334,7 @@ witnessFor env bound region wanted because cls tipe =
               traverse
                 (\(field, tipe') -> (,) field <$> witnessFor env bound region wanted deeper cls tipe')
                 [(field, t) | (field, Can.FieldType _ t) <- Map.toAscList fields]
-            Right (FromRecord ws actual (witnessType env cls actual))
+            Right (FromRecord cls ws actual (witnessType env cls actual))
     actual ->
       -- A function, an extensible record, or a record at a class with no
       -- structural definition. An instance head is a type constructor applied
@@ -341,15 +343,15 @@ witnessFor env bound region wanted because cls tipe =
 
 -- | Whether `classes.md` §2.1 defines what this class means for a record.
 --
--- §2.1's three are `Eq`, `Ord` and `Inspect`, and `core` declares one of them
--- with a structural generator behind it (§G37.5). The list grows where
--- 'Canonicalize.Derive' grows, and the two have to grow together: a record
--- witness built here and a derived instance written there are the same rule
--- said twice, once for a type that has a constructor to hang an instance on
--- and once for a type that does not.
+-- §2.1's three are `Eq`, `Ord` and `Inspect`, and `core` declares all three
+-- (§G43). This list grows where 'Canonicalize.Derive' grows and the two have
+-- to grow together: a record witness built here and a derived instance written
+-- there are the same rule said twice, once for a type that has a constructor
+-- to hang an instance on and once for a type that does not.
 isStructural :: Can.Class -> Bool
 isStructural (Can.Class home name) =
-  home == ModuleName.basics && name == Name.eqClass
+  (home == ModuleName.basics && (name == Name.eqClass || name == Name.ordClass))
+    || (home == ModuleName.inspect && name == Name.inspectClass)
 
 -- THE WALK
 

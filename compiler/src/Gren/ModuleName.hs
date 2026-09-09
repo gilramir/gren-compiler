@@ -26,6 +26,7 @@ module Gren.ModuleName
     cmd,
     sub,
     debug,
+    inspect,
     virtualDom,
     jsonDecode,
     jsonEncode,
@@ -174,6 +175,11 @@ sub = Canonical Pkg.core "Platform.Sub"
 
 debug :: Canonical
 debug = Canonical Pkg.core Name.debug
+
+-- | `Inspect`, which declares the class of the same name and is default-imported
+-- so that `inspect` is in scope everywhere (§G43).
+inspect :: Canonical
+inspect = Canonical Pkg.core Name.inspectModule
 
 bytes :: Canonical
 bytes = Canonical Pkg.core "Bytes"

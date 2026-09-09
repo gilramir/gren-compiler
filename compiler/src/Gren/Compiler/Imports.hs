@@ -15,6 +15,11 @@ defaults :: [Src.Import]
 defaults =
   [ import_ ModuleName.basics Nothing Src.Open,
     import_ ModuleName.debug Nothing closed,
+    -- `Inspect` exposes its class, and D121 makes that expose `inspect` with
+    -- it, so every program has the method in scope without importing anything
+    -- (§G43.1). The class could not go in `Basics`: `inspect : a -> String`
+    -- names `String`, and `String` imports `Basics` (§G24.3).
+    import_ ModuleName.inspect Nothing (typeClosed Name.inspectClass),
     import_ ModuleName.array Nothing (typeClosed Name.array),
     import_ ModuleName.maybe Nothing (typeOpen Name.maybe),
     import_ ModuleName.result Nothing (typeOpen Name.result),

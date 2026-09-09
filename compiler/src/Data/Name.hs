@@ -32,6 +32,8 @@ module Data.Name
     eqClass,
     ordClass,
     order,
+    inspectClass,
+    inspectModule,
     char,
     string,
     num,
@@ -381,6 +383,17 @@ bool = fromChars "Bool"
 -- answers with 'bool'.
 order :: Name
 order = fromChars "Order"
+
+-- | The `Inspect` class's name, and the module it is declared in — which is a
+-- module of its own rather than `Basics`, because `inspect : a -> String` has
+-- to name `String` and `String` imports `Basics` (§G24.3, §G43).
+inspectClass :: Name
+inspectClass =
+  fromChars "Inspect"
+
+inspectModule :: Name
+inspectModule =
+  fromChars "Inspect"
 
 char :: Name
 char = fromChars "Char"
