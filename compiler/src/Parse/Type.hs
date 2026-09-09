@@ -2,6 +2,7 @@
 
 module Parse.Type
   ( annotation,
+    context,
     expression,
     variant,
   )

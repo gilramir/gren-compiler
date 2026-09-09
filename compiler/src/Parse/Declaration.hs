@@ -335,13 +335,33 @@ instanceDecl maybeDocs start =
         let instance_ = A.at start end (Src.Instance maybeContext head_ methods comments)
         return ((Instance maybeDocs instance_, commentsAfter), end)
 
+-- | `instance` and then the start of a head, consumed and thrown away by
+-- `lookAhead` so that only a real instance declaration commits.
+--
+-- An unparenthesized head begins with an upper-case name, whether or not a
+-- one-constraint context comes first: both `instance Eq Int` and
+-- `instance Eq a => Eq (Array a)` start with `Eq`. A head with a **context of
+-- two or more constraints** does not — `instance (Eq k, Eq v) => Eq (Dict k v)`
+-- starts with `(` — and `(` is also how an ordinary definition of a function
+-- named `instance` starts when its first argument is a parenthesized pattern.
+-- The two are told apart the way `Type.annotation` tells a context from a type:
+-- by reading the whole thing and looking for the `=>`, which a pattern does not
+-- have. `lookAhead` throws the reading away either way, so the cost is paying
+-- for the context twice on the declarations that have one.
 instanceDeclAhead :: Parser E.Decl ()
 instanceDeclAhead =
   do
     Keyword.instance_ E.DeclStart
     Space.chompAndCheckIndent E.DeclSpace E.DeclStart
-    _ <- Var.upper E.DeclStart
-    return ()
+    oneOf
+      E.DeclStart
+      [ do
+          _ <- Var.upper E.DeclStart
+          return (),
+        do
+          _ <- specialize (\t row col -> E.DeclInstance (E.InstanceHead t row col) row col) Type.context
+          return ()
+      ]
 
 chompInstanceMethods :: [Src.InstanceMethod] -> [Src.Comment] -> A.Position -> Space.Parser E.DeclInstance ([Src.InstanceMethod], [Src.Comment])
 chompInstanceMethods revMethods commentsBefore end =
