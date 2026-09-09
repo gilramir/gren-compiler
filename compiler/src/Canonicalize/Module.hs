@@ -67,8 +67,9 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
     cinstances <-
       Implicit.add
         home
-        (structuralClass home ifaces cclasses)
+        (structuralClasses home ifaces cclasses)
         (boolUnion home ifaces cunions)
+        (orderUnion home ifaces cunions)
         cexports
         cunions
         (Map.fromList [(name, region) | A.At region (Src.Union (A.At _ name) _ _ _ _) <- fmap snd unions])
@@ -169,10 +170,11 @@ deriveClass home ifaces env exports cunions typeName union sofar (A.At region cl
         else do
           let witness = Instance.witnessNameOf sofar className typeName
           instance_ <-
-            Derive.derive home (boolUnion home ifaces cunions) region typeName union cls decl witness
+            Derive.derive home (boolUnion home ifaces cunions) (orderUnion home ifaces cunions) region typeName union cls decl witness
           Result.ok (Map.insert key instance_ sofar)
 
--- | `Basics.Bool`, which every derived method needs to answer with.
+-- | `Basics.Bool`, which a derived `eq` answers with, and `Basics.Order`,
+-- which a derived `compare` answers with.
 --
 -- Read from the interface rather than from this module's environment, because
 -- the generated code is not the author's and must not depend on what they
@@ -181,44 +183,64 @@ deriveClass home ifaces env exports cunions typeName union sofar (A.At region cl
 -- they had to become with implicit derivation (§G37), because `Basics`'
 -- transparent types derive too and `Order` is one of them.
 boolUnion :: ModuleName.Canonical -> Map.Map ModuleName.Raw I.Interface -> Map.Map Name.Name Can.Union -> Can.Union
-boolUnion home ifaces localUnions =
+boolUnion =
+  basicsUnion Name.bool
+
+orderUnion :: ModuleName.Canonical -> Map.Map ModuleName.Raw I.Interface -> Map.Map Name.Name Can.Union -> Can.Union
+orderUnion =
+  basicsUnion Name.order
+
+basicsUnion :: Name.Name -> ModuleName.Canonical -> Map.Map ModuleName.Raw I.Interface -> Map.Map Name.Name Can.Union -> Can.Union
+basicsUnion name home ifaces localUnions =
   case I._unions <$> Map.lookup Name.basics ifaces of
     Just unions ->
-      case Map.lookup Name.bool unions >>= I.toPublicUnion of
+      case Map.lookup name unions >>= I.toPublicUnion of
         Just union -> union
-        Nothing -> emptyBool
+        Nothing -> emptyUnion
     Nothing ->
       if home == ModuleName.basics
-        then Map.findWithDefault emptyBool Name.bool localUnions
-        else emptyBool
+        then Map.findWithDefault emptyUnion name localUnions
+        else emptyUnion
 
--- | The stand-in when `Bool` cannot be found at all, which nothing reaches:
--- `Basics` declares it and every other module imports `Basics`.
-emptyBool :: Can.Union
-emptyBool =
+-- | The stand-in when the union cannot be found at all, which nothing reaches:
+-- `Basics` declares both and every other module imports `Basics`.
+emptyUnion :: Can.Union
+emptyUnion =
   Can.Union [] [] 0 Can.Enum
 
--- | The class implicit derivation writes instances for, found the same way
+-- | The classes implicit derivation writes instances for, found the same way
 -- `Bool` is and for the same reason.
 --
--- One class, because `Canonicalize.Derive` writes one: `Ord` and `Inspect` are
--- `classes.md` §2.1's other two and join this list when the generator grows
--- them (§G37.5). `Nothing` is `Basics` before `class Eq` is declared, which
--- cannot happen — `Basics` declares it — and a `core` that removed it.
-structuralClass ::
+-- Two of `classes.md` §2.1's three, because `Canonicalize.Derive` writes two:
+-- `Inspect` joins them when it has a module to be declared in (§G24.3). A
+-- class that is absent contributes nothing rather than failing, which is what
+-- a `core` that removed one would do and is why this returns a list rather
+-- than insisting on both.
+structuralClasses ::
   ModuleName.Canonical ->
   Map.Map ModuleName.Raw I.Interface ->
   Map.Map Name.Name Can.ClassDecl ->
-  Maybe (Can.Class, Can.ClassDecl)
-structuralClass home ifaces localClasses =
-  let named decl = (Can.Class ModuleName.basics Name.eqClass, decl)
-   in case I._classes <$> Map.lookup Name.basics ifaces of
-        Just classes ->
-          named <$> (Map.lookup Name.eqClass classes >>= I.toPublicClass)
-        Nothing ->
-          if home == ModuleName.basics
-            then named <$> Map.lookup Name.eqClass localClasses
-            else Nothing
+  [(Can.Class, Can.ClassDecl)]
+structuralClasses home ifaces localClasses =
+  [ (Can.Class ModuleName.basics name, decl)
+  | name <- [Name.eqClass, Name.ordClass],
+    Just decl <- [structuralClassDecl home ifaces localClasses name]
+  ]
+
+structuralClassDecl ::
+  ModuleName.Canonical ->
+  Map.Map ModuleName.Raw I.Interface ->
+  Map.Map Name.Name Can.ClassDecl ->
+  Name.Name ->
+  Maybe Can.ClassDecl
+structuralClassDecl home ifaces localClasses name =
+  case I._classes <$> Map.lookup Name.basics ifaces of
+    Just classes ->
+      Map.lookup name classes >>= I.toPublicClass
+    Nothing ->
+      if home == ModuleName.basics
+        then Map.lookup name localClasses
+        else Nothing
 
 -- CANONICALIZE BINOP
 

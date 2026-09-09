@@ -50,7 +50,8 @@ import Reporting.Result qualified as Result
 type Result i w a =
   Result.Result i w Error.Error a
 
--- | Add the instances this module's transparent types derive without asking.
+-- | Add the instances this module's transparent types derive without asking,
+-- for each of §2.1's structural classes in turn.
 --
 -- Runs __after__ the written and @\@derive@d ones, and skips any key they
 -- already answer: a hand-written @instance Eq MyType@ is the module saying the
@@ -59,10 +60,12 @@ type Result i w a =
 -- be a duplicate rather than a choice.
 add ::
   ModuleName.Canonical ->
-  -- | The class to derive and its declaration, when the module can see it.
-  -- Nothing while @Basics@ compiles the class itself.
-  Maybe (Can.Class, Can.ClassDecl) ->
-  -- | @Basics.Bool@, which every generated method answers with.
+  -- | The classes to derive and their declarations, in the order they are
+  -- generated. Empty while @Basics@ compiles the classes themselves.
+  [(Can.Class, Can.ClassDecl)] ->
+  -- | @Basics.Bool@, which a generated @eq@ answers with.
+  Can.Union ->
+  -- | @Basics.Order@, which a generated @compare@ answers with.
   Can.Union ->
   Can.Exports ->
   Map.Map Name.Name Can.Union ->
@@ -73,16 +76,19 @@ add ::
   Map.Map Can.InstanceKey Can.InstanceHead ->
   Instance.Instances ->
   Result i w Instance.Instances
-add home maybeClass boolDecl exports unions regions imported sofar =
-  case maybeClass of
-    Nothing ->
-      Result.ok sofar
-    Just (cls, decl) ->
+add home classes boolDecl orderDecl exports unions regions imported sofar =
+  foldM addOne sofar classes
+  where
+    -- One pass per class, and each sees what the pass before it produced. The
+    -- passes are independent all the same: 'settle' is keyed by the class it
+    -- is settling, so @Eq@'s answer for a type never decides @Ord@'s. What is
+    -- shared is the map they are both writing into.
+    addOne acc (cls, decl) =
       let candidates = transparent exports unions
-          taken = Set.union (Map.keysSet sofar) (Map.keysSet imported)
+          taken = Set.union (Map.keysSet acc) (Map.keysSet imported)
           known named = Set.member (keyOf cls named) taken
           deriving_ = Set.filter (\name -> not (known (home, name))) (settle home known candidates)
-       in foldM (generate home cls decl boolDecl unions regions) sofar (Set.toAscList deriving_)
+       in foldM (generate home cls decl boolDecl orderDecl unions regions) acc (Set.toAscList deriving_)
 
 -- | The module's types that derive at all: a custom type whose constructors it
 -- exposes, or that it does not expose (§2.5 — structure is the meaning when
@@ -203,12 +209,13 @@ generate ::
   Can.Class ->
   Can.ClassDecl ->
   Can.Union ->
+  Can.Union ->
   Map.Map Name.Name Can.Union ->
   Map.Map Name.Name A.Region ->
   Instance.Instances ->
   Name.Name ->
   Result i w Instance.Instances
-generate home cls decl boolDecl unions regions sofar typeName =
+generate home cls decl boolDecl orderDecl unions regions sofar typeName =
   case Map.lookup typeName unions of
     Nothing ->
       Result.ok sofar
@@ -222,7 +229,7 @@ generate home cls decl boolDecl unions regions sofar typeName =
         -- shows up as a type error in code nobody wrote and the declaration is
         -- the only thing a reader can be pointed at.
         instance_ <-
-          Derive.derive home boolDecl region typeName union cls decl witness
+          Derive.derive home boolDecl orderDecl region typeName union cls decl witness
         Result.ok (Map.insert (Can.InstanceKey cls home typeName) instance_ sofar)
 
 classNameOf :: Can.Class -> Name.Name

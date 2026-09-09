@@ -30,6 +30,8 @@ module Data.Name
     float,
     bool,
     eqClass,
+    ordClass,
+    order,
     char,
     string,
     num,
@@ -365,8 +367,20 @@ eqClass :: Name
 eqClass =
   fromChars "Eq"
 
+-- | The `Ord` class's name, found the same way and for the same reason. §2.1
+-- defines structural derivation for `Eq`, `Ord` and `Inspect`, and the third
+-- has nowhere to be declared yet (§G24.3).
+ordClass :: Name
+ordClass =
+  fromChars "Ord"
+
 bool :: Name
 bool = fromChars "Bool"
+
+-- | `Basics.Order`, which a derived `compare` answers with as a derived `eq`
+-- answers with 'bool'.
+order :: Name
+order = fromChars "Order"
 
 char :: Name
 char = fromChars "Char"
