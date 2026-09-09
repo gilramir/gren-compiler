@@ -172,8 +172,12 @@ aliasToTypeHelp home _ (Can.Alias vars tipe) =
 -- BINOP
 
 binopToBinop :: ModuleName.Canonical -> Name.Name -> I.Binop -> Env.Info Env.Binop
-binopToBinop home op (I.Binop name annotation associativity precedence) =
-  Env.Specific home (Env.Binop op home name annotation associativity precedence)
+binopToBinop home op (I.Binop name method annotation associativity precedence) =
+  let target =
+        case method of
+          Nothing -> Can.OpValue home name
+          Just (className, param) -> Can.OpMethod (Can.Class home className) param name
+   in Env.Specific home (Env.Binop op target annotation associativity precedence)
 
 -- ADD EXPOSED VALUE
 

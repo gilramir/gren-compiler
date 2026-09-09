@@ -361,20 +361,29 @@ exports modul =
     case Can._exports modul of
       Can.ExportEverything _ ->
         concatMap (map defName . group) (declGroups (Can._decls modul))
-          ++ map binopTarget (Map.elems (Can._binops modul))
+          ++ concatMap (binopTarget modul) (Map.elems (Can._binops modul))
           ++ portNames (Can._effects modul)
       Can.Export exposed ->
         concat
           [ case entry of
               Can.ExportValue -> [name]
-              Can.ExportBinop -> maybe [] (pure . binopTarget) (Map.lookup name (Can._binops modul))
+              Can.ExportBinop -> maybe [] (binopTarget modul) (Map.lookup name (Can._binops modul))
               Can.ExportPort -> [name]
               _ -> []
           | (name, A.At _ entry) <- Map.toAscList exposed
           ]
 
-binopTarget :: Can.Binop -> Name
-binopTarget (Can.Binop_ _ _ name) = name
+-- | The declaration an exported infix keeps alive, if it names one.
+--
+-- Nothing when it names a class method (D138, §G35): a method has no
+-- declaration to be a root of, and what an importer's use of the operator
+-- reaches is the instance binding, which is a root because the instance is
+-- (§G26).
+binopTarget :: Can.Module -> Can.Binop -> [Name]
+binopTarget modul (Can.Binop_ _ _ name) =
+  if any (Map.member name . Can._cl_methods) (Map.elems (Can._classes modul))
+    then []
+    else [name]
 
 -- EFFECTS
 

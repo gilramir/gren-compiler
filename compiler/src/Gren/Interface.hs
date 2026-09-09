@@ -20,7 +20,7 @@ where
 
 import AST.Canonical qualified as Can
 import AST.Utils.Binop qualified as Binop
-import Control.Monad (liftM, liftM3, liftM4)
+import Control.Monad (liftM, liftM3)
 import Data.Binary
 import Data.Map.Merge.Strict qualified as Map
 import Data.Map.Strict ((!))
@@ -80,6 +80,11 @@ data Class
 
 data Binop = Binop
   { _op_name :: Name.Name,
+    -- | The class and its parameter when '_op_name' is a method rather than a
+    -- binding (D138, `docs/m1b-classes.md` §G35). Both are names in this
+    -- interface's own module, because an infix may only name something its own
+    -- module declares.
+    _op_method :: Maybe (Name.Name, Name.Name),
     _op_annotation :: Can.Annotation,
     _op_associativity :: Binop.Associativity,
     _op_precedence :: Binop.Precedence
@@ -95,7 +100,7 @@ fromModule home imports (Can.Module _ exports _ _ unions aliases classes instanc
       _values = restrict exports annotations,
       _unions = restrictUnions exports unions,
       _aliases = restrictAliases exports aliases,
-      _binops = restrict exports (Map.map (toOp annotations) binops),
+      _binops = restrict exports (Map.map (toOp annotations classes) binops),
       _classes = restrictClasses exports classes,
       _instances =
         Map.union
@@ -111,9 +116,38 @@ restrict exports dict =
     Can.Export explicitExports ->
       Map.intersection dict explicitExports
 
-toOp :: Map.Map Name.Name Can.Annotation -> Can.Binop -> Binop
-toOp types (Can.Binop_ associativity precedence name) =
-  Binop name (types ! name) associativity precedence
+-- | The infix declaration as an importer needs it: the name it points at and
+-- that name's signature.
+--
+-- The name is looked for among the module's __values__ first and only then
+-- among its class methods, which is the order 'Canonicalize.Environment.Local'
+-- resolves a bare name in and cannot disagree with: a module may not declare a
+-- method and a value of one name (§G20), so at most one of the two lookups
+-- answers.
+toOp :: Map.Map Name.Name Can.Annotation -> Map.Map Name.Name Can.ClassDecl -> Can.Binop -> Binop
+toOp types classes (Can.Binop_ associativity precedence name) =
+  case Map.lookup name types of
+    Just annotation ->
+      Binop name Nothing annotation associativity precedence
+    Nothing ->
+      case methodNamed name classes of
+        Just (className, param, annotation) ->
+          Binop name (Just (className, param)) annotation associativity precedence
+        Nothing ->
+          -- Unreachable: `Canonicalize.Module` resolved the infix's target
+          -- against the same two maps, so a name that reached here is in one
+          -- of them.
+          Binop name Nothing (types ! name) associativity precedence
+
+-- | The class that declares a method of this name, if one does.
+methodNamed :: Name.Name -> Map.Map Name.Name Can.ClassDecl -> Maybe (Name.Name, Name.Name, Can.Annotation)
+methodNamed name classes =
+  case [ (className, param, annotation)
+       | (className, Can.ClassDecl param methods) <- Map.toList classes,
+         Just annotation <- [Map.lookup name methods]
+       ] of
+    found : _ -> Just found
+    [] -> Nothing
 
 restrictUnions :: Can.Exports -> Map.Map Name.Name Can.Union -> Map.Map Name.Name Union
 restrictUnions exports unions =
@@ -274,10 +308,10 @@ instance Binary Class where
 
 instance Binary Binop where
   get =
-    liftM4 Binop get get get get
+    Binop <$> get <*> get <*> get <*> get <*> get
 
-  put (Binop a b c d) =
-    put a >> put b >> put c >> put d
+  put (Binop a b c d e) =
+    put a >> put b >> put c >> put d >> put e
 
 instance Binary DependencyInterface where
   put union =

@@ -42,7 +42,6 @@ data Type
 
 data Super
   = Number
-  | Appendable
   deriving (Eq)
 
 data Extension
@@ -345,7 +344,6 @@ isSuper super tipe =
     Type h n _ ->
       case super of
         Number -> isInt h n || isFloat h n
-        Appendable -> isString h n || isArray h n
     _ ->
       False
 

@@ -241,13 +241,30 @@ expr env (Can.Expr nid region value) =
             Core.EApp
               (Core.Expr (Core.EGlobal (Core.QualName ModuleName.basics Name.negate)) (negateType tipe) sp)
               [expr env inner]
-        Can.Binop _ home name _ left right ->
+        Can.Binop _ target _ left right ->
           let opType = binopType env left right tipe
-              op = Core.Expr (Core.EGlobal (Core.QualName home name)) opType sp
-           in node $
-                Core.EApp
-                  (applied env nid sp op)
-                  [expr env left, expr env right]
+              global home name = Core.Expr (Core.EGlobal (Core.QualName home name)) opType sp
+              call2 fn = node (Core.EApp fn [expr env left, expr env right])
+           in case target of
+                Can.OpValue home name ->
+                  call2 (applied env nid sp (global home name))
+                Can.OpMethod _ _ name ->
+                  -- The three answers 'Can.VarMethod' has, at an operator
+                  -- (D138, §G35). The node id the instance was recorded
+                  -- against is the binop's own, which is why 'Type.Resolve'
+                  -- asks 'methodUse' about it.
+                  case useOf env nid of
+                    Just (Resolve.Instantiated home instanceName args) ->
+                      call2 (witnessApp sp (global home instanceName) args)
+                    Just (Resolve.Projected w methodName) ->
+                      call2 (Core.Expr (Core.EAccess (witness sp w) methodName) opType sp)
+                    _ ->
+                      error $
+                        "Core.Lower.Expression: operator node "
+                          ++ show nid
+                          ++ " names the method "
+                          ++ show name
+                          ++ " and was not resolved. See docs/m1b-classes.md §G23."
         Can.Lambda args body ->
           node (lambda env tipe sp args (expr env body))
         Can.Call func args ->

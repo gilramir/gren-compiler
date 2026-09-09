@@ -69,8 +69,17 @@ canonicalize env (A.At region expression) =
         Can.Array <$> traverse (canonicalize env) (fmap fst exprs)
       Src.Op op ->
         do
-          (Env.Binop _ home name annotation _ _) <- Env.findBinop region env op
-          return (Can.VarOperator op home name annotation)
+          (Env.Binop _ target annotation _ _) <- Env.findBinop region env op
+          return $ case target of
+            Can.OpValue home name ->
+              Can.VarOperator op home name annotation
+            Can.OpMethod cls param name ->
+              -- An operator used as a value is a use of what its declaration
+              -- named, and when that is a method there is no second thing for
+              -- it to be: `(++)` passed to `Array.foldl` picks its instance
+              -- from the type at that use exactly as a written `append` would
+              -- (D138, §G35).
+              Can.VarMethod cls param name annotation
       Src.Negate expr ->
         Can.Negate <$> canonicalize env expr
       Src.Binops ops final ->
@@ -175,15 +184,15 @@ runBinopStepper overallRegion step =
     More ((expr, op) : rest) final ->
       runBinopStepper overallRegion $
         toBinopStep (toBinop op expr) op rest final
-    Error (Env.Binop op1 _ _ _ _ _) (Env.Binop op2 _ _ _ _ _) ->
+    Error (Env.Binop op1 _ _ _ _) (Env.Binop op2 _ _ _ _) ->
       Result.throw (Error.Binop overallRegion op1 op2)
 
 toBinopStep :: (Can.Expr -> Can.Expr) -> Env.Binop -> [(Can.Expr, Env.Binop)] -> Can.Expr -> Step
-toBinopStep makeBinop rootOp@(Env.Binop _ _ _ _ rootAssociativity rootPrecedence) middle final =
+toBinopStep makeBinop rootOp@(Env.Binop _ _ _ rootAssociativity rootPrecedence) middle final =
   case middle of
     [] ->
       Done (makeBinop final)
-    (expr, op@(Env.Binop _ _ _ _ associativity precedence)) : rest ->
+    (expr, op@(Env.Binop _ _ _ associativity precedence)) : rest ->
       if precedence < rootPrecedence
         then More ((makeBinop expr, op) : rest) final
         else
@@ -204,10 +213,10 @@ toBinopStep makeBinop rootOp@(Env.Binop _ _ _ _ rootAssociativity rootPrecedence
                 Error rootOp op
 
 toBinop :: Env.Binop -> Can.Expr -> Can.Expr -> Can.Expr
-toBinop (Env.Binop op home name annotation _ _) left right =
+toBinop (Env.Binop op target annotation _ _) left right =
   Can.at
     (A.mergeRegions (Can.exprRegion left) (Can.exprRegion right))
-    (Can.Binop op home name annotation left right)
+    (Can.Binop op target annotation left right)
 
 -- CANONICALIZE LET
 

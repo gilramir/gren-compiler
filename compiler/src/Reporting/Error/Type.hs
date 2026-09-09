@@ -563,16 +563,12 @@ toASuperThing :: T.Super -> String
 toASuperThing super =
   case super of
     T.Number -> "a `Num` value — an `Int` or a `Float`"
-    T.Appendable -> "an `Appendable` value — a `String` or an `Array`"
 
 -- BAD SUPER HINTS
 
 badFlexSuper :: T.Direction -> T.Super -> T.Type -> [D.Doc]
 badFlexSuper direction super tipe =
   case super of
-    T.Appendable ->
-      [ D.toSimpleHint "I only know how to append strings and arrays."
-      ]
     T.Number ->
       case tipe of
         T.Type home name _ | T.isString home name ->
@@ -592,7 +588,6 @@ badRigidSuper super aThing =
   let (superType, manyThings) =
         case super of
           T.Number -> ("Num", "ints AND floats")
-          T.Appendable -> ("Appendable", "strings AND arrays")
    in [ D.toSimpleHint $
           "The `"
             ++ superType
@@ -610,7 +605,6 @@ badFlexFlexSuper s1 s2 =
   let likeThis super =
         case super of
           T.Number -> "a number"
-          T.Appendable -> "appendable"
    in [ D.toSimpleHint $
           "There are no values in Gren that are both "
             ++ likeThis s1

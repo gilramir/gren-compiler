@@ -34,6 +34,7 @@ module AST.Canonical
     Module (..),
     Alias (..),
     Binop (..),
+    OpTarget (..),
     ClassDecl (..),
     Instance (..),
     InstanceHead (..),
@@ -153,7 +154,9 @@ data Expr_
   | Float EF.Float
   | Array [Expr]
   | Negate Expr
-  | Binop Name ModuleName.Canonical Name Annotation Expr Expr -- CACHE real name for optimization
+  | -- | A use of an infix operator, with what its declaration named
+    -- ('OpTarget') and the signature that name published.
+    Binop Name OpTarget Annotation Expr Expr
   | Lambda [Pattern] Expr
   | Call Expr [Expr]
   | If [(Expr, Expr)] Expr
@@ -464,6 +467,20 @@ witnessOrder freeVars =
   filter (\(_, Class home name) -> not (Class.isClosed home name)) (contextOrder freeVars)
 
 data Binop = Binop_ Binop.Associativity Binop.Precedence Name
+  deriving (Eq, Show)
+
+-- | What an infix declaration's right-hand side named.
+--
+-- Until D138 there was only one answer: an infix names a binding in its own
+-- module, and 'OpValue' carries the 'ModuleName.Canonical' and 'Name' to call.
+-- @infix right 5 (++) = append@ names `Appendable`'s method instead, and a
+-- method is not a binding (§G19.2) — there is nothing to call until the type
+-- at the use site has picked an instance. So 'OpMethod' carries what
+-- 'VarMethod' carries, the class, its parameter and the method's name, and a
+-- use of the operator resolves exactly as a use of the method does.
+data OpTarget
+  = OpValue ModuleName.Canonical Name
+  | OpMethod Class Name Name
   deriving (Eq, Show)
 
 data Union = Union

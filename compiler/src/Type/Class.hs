@@ -28,8 +28,11 @@
 -- means the tables below, so `Basics.Num` is a name this module answers to
 -- rather than a name the elaborator resolves.
 --
--- `Appendable` leaves when D13 drops `++`. `Num` grows D2's other three integer
--- types, and `Integral`, `Fractional` and `Bits` join it.
+-- `Appendable` __has left__ too, the same way and for the same reason: D138
+-- promoted it rather than dropping it with `++`, so `Basics.append` is its
+-- method and `String` and `Array a` are ordinary instances (§G34, §G35). What is
+-- left here is one class. `Num` grows D2's other three integer types, and
+-- `Integral`, `Fractional` and `Bits` join it.
 module Type.Class
   ( Class (..),
     Classes,
@@ -55,12 +58,14 @@ import Gren.ModuleName qualified as ModuleName
 
 -- CLASSES
 
--- | Written `Class.Num`, `Class.Appendable` at every use site,
--- which is why the constructors may share their names with Haskell's classes
--- without either being in doubt.
+-- | Written `Class.Num` at every use site, which is why the constructor may
+-- share its name with Haskell's class without either being in doubt.
+--
+-- One constructor, and the set machinery around it is still worth its keep:
+-- D2's `Integral`, `Fractional` and `Bits` are the next three, and a variable
+-- may be constrained by more than one of them.
 data Class
   = Num
-  | Appendable
   deriving (Eq, Prelude.Ord, Show)
 
 -- | The classes a variable has to satisfy. Never empty: a variable with no
@@ -118,7 +123,6 @@ fromDeclared :: ModuleName.Canonical -> Name.Name -> Maybe Class
 fromDeclared home name
   | home /= ModuleName.basics = Nothing
   | name == Name.num = Just Num
-  | name == Name.appendable = Just Appendable
   | otherwise = Nothing
 
 -- | The declared name a class is, which is what an annotation the solver
@@ -130,7 +134,6 @@ toDeclared :: Class -> (ModuleName.Canonical, Name.Name)
 toDeclared c =
   case c of
     Num -> (ModuleName.basics, Name.num)
-    Appendable -> (ModuleName.basics, Name.appendable)
 
 -- | Whether a constraint is enforced by unification rather than by a witness.
 --
@@ -206,10 +209,6 @@ inhabited classes =
 --     @{Fractional, Integral}@ a type error rather than an ambiguity, and it
 --     already is one: 'inhabited' refuses that pair where the variable is
 --     created, which is earlier and names a better place.
---
--- @Appendable@ is deliberately not defaultable — no candidate admits it — which
--- is §0's list of defaultable classes read off the table instead of restated.
--- It leaves with D13.
 defaultsTo :: Classes -> Maybe (ModuleName.Canonical, Name.Name)
 defaultsTo classes =
   let admits (home, name) = all (\c -> admitsAtom c home name) (toList classes)
@@ -233,8 +232,6 @@ admitsAtom c home name =
   case c of
     Num ->
       isInt home name || isFloat home name
-    Appendable ->
-      isString home name
 
 -- | Whether `Array a` belongs to a class, and what that costs its element.
 --
@@ -248,8 +245,6 @@ arrayObligations c =
   case c of
     Num ->
       Nothing
-    Appendable ->
-      Just []
 
 isInt :: ModuleName.Canonical -> Name.Name -> Bool
 isInt home name =
@@ -258,7 +253,3 @@ isInt home name =
 isFloat :: ModuleName.Canonical -> Name.Name -> Bool
 isFloat home name =
   home == ModuleName.basics && name == Name.float
-
-isString :: ModuleName.Canonical -> Name.Name -> Bool
-isString home name =
-  home == ModuleName.string && name == Name.string

@@ -116,7 +116,7 @@ constrainHelp rtv _nid region expression expected =
         numberCon <- constrain rtv expr (FromContext region Negate numberType)
         let negateCon = CEqual region E.Number numberType expected
         return $ exists [numberVar] $ CAnd [numberCon, negateCon]
-    Can.Binop op _ _ annotation leftExpr rightExpr ->
+    Can.Binop op _ annotation leftExpr rightExpr ->
       constrainBinop rtv region op annotation leftExpr rightExpr expected
     Can.Lambda args body ->
       constrainLambda rtv region args body expected

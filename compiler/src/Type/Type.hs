@@ -255,7 +255,7 @@ toAnnotation :: Variable -> IO Can.Annotation
 toAnnotation variable =
   do
     userNames <- getVarNames variable Map.empty
-    (tipe, NameState freeVars _ _ _ constrained) <-
+    (tipe, NameState freeVars _ _ constrained) <-
       State.runStateT (variableToCanType variable) (makeNameState userNames)
     -- A constrained variable comes back constrained (D135). `Basics` declares
     -- the closed classes now, so `Class.toDeclared` has a real name to point a
@@ -290,7 +290,7 @@ toNodeTypes :: Mark -> Map.Map Can.NodeId Type -> IO (Map.Map Can.NodeId Can.Typ
 toNodeTypes visited types =
   do
     userNames <- foldrM (collectTypeVarNames visited) Map.empty (Map.elems types)
-    (canTypes, NameState _ _ _ _ constrained) <-
+    (canTypes, NameState _ _ _ constrained) <-
       State.runStateT (traverse typeToCanType types) (makeNameState userNames)
     return (canTypes, constrained)
 
@@ -506,10 +506,8 @@ contentToErrorType variable content =
 -- The reduction in `Class.union` is what makes this total in practice: the
 -- only sets that reach here are the ones the old enum could hold.
 classesToSuper :: Class.Classes -> ET.Super
-classesToSuper classes =
-  case Class.toList classes of
-    [Class.Appendable] -> ET.Appendable
-    _ -> ET.Number
+classesToSuper _ =
+  ET.Number
 
 termToErrorType :: FlatType -> StateT NameState IO ET.Type
 termToErrorType term =
@@ -549,7 +547,6 @@ data NameState = NameState
   { _taken :: Map.Map Name.Name (),
     _normals :: Int,
     _numbers :: Int,
-    _appendables :: Int,
     -- | The classes each variable the walk met is constrained by (D135).
     --
     -- Collected on the way through rather than read back off the type, because
@@ -560,7 +557,7 @@ data NameState = NameState
 
 makeNameState :: Map.Map Name.Name Variable -> NameState
 makeNameState taken =
-  NameState (Map.map (const ()) taken) 0 0 0 Map.empty
+  NameState (Map.map (const ()) taken) 0 0 Map.empty
 
 noteClasses :: (Monad m) => Name.Name -> Class.Classes -> StateT NameState m ()
 noteClasses name classes =
@@ -596,12 +593,8 @@ getFreshVarNameHelp index taken =
 -- states could hand the same one to two different variables in one message
 -- (`docs/m1b-classes.md` §G32.6).
 getFreshSuperName :: (Monad m) => Class.Classes -> StateT NameState m Name.Name
-getFreshSuperName classes =
-  case Class.toList classes of
-    [Class.Appendable] ->
-      getFreshSuper "appendable" _appendables (\index state -> state {_appendables = index})
-    _ ->
-      getFreshSuper "number" _numbers (\index state -> state {_numbers = index})
+getFreshSuperName _ =
+  getFreshSuper "number" _numbers (\index state -> state {_numbers = index})
 
 getFreshSuper :: (Monad m) => Name.Name -> (NameState -> Int) -> (Int -> NameState -> NameState) -> StateT NameState m Name.Name
 getFreshSuper prefix getter setter =

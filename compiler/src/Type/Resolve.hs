@@ -682,7 +682,7 @@ expr env tops scope (Can.Expr nid region value) =
           return ()
         Can.VarMethod cls param name annotation ->
           methodUse env scope nid region cls param name annotation (typeOf env nid)
-        Can.Binop op home name annotation left right ->
+        Can.Binop op target annotation left right ->
           do
             -- A binop node's own type is the result, so the operator's type at
             -- this use is rebuilt from the operands' — which is what
@@ -691,8 +691,13 @@ expr env tops scope (Can.Expr nid region value) =
                   Can.TLambda
                     (typeOf env (nodeIdOf left))
                     (Can.TLambda (typeOf env (nodeIdOf right)) (typeOf env nid))
-            constrainedAt env scope nid region (E.ForValue op) annotation actual
-            _ <- pure (home, name)
+            case target of
+              Can.OpValue _ _ ->
+                constrainedAt env scope nid region (E.ForValue op) annotation actual
+              Can.OpMethod cls param name ->
+                -- The same question a written method name asks, asked of the
+                -- operator's type rather than of the node's (D138, §G35).
+                methodUse env scope nid region cls param name annotation actual
             go left
             go right
         Can.Array items -> mapM_ go items

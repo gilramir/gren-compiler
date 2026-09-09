@@ -133,8 +133,9 @@ data Ctor = Ctor
 
 data Binop = Binop
   { _op :: Name.Name,
-    _op_home :: ModuleName.Canonical,
-    _op_name :: Name.Name,
+    -- | What the infix declaration named: a binding, or a class method
+    -- (D138, `docs/m1b-classes.md` §G35).
+    _op_target :: Can.OpTarget,
     _op_annotation :: Can.Annotation,
     _op_associativity :: Binop.Associativity,
     _op_precedence :: Binop.Precedence

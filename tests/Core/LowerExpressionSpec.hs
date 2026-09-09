@@ -230,7 +230,7 @@ spec = do
     it "makes a binop a call of the function it names" $
       case value
         [(1, intT), (2, intT), (3, intT)]
-        (at 1 (Can.Binop "+" ModuleName.basics "add" plusAnnotation (at 2 (Can.Int 1)) (at 3 (Can.Int 2)))) of
+        (at 1 (Can.Binop "+" (Can.OpValue ModuleName.basics "add") plusAnnotation (at 2 (Can.Int 1)) (at 3 (Can.Int 2)))) of
         Core.EApp (Core.Expr (Core.EGlobal name) tipe _) [_, _] -> do
           name `shouldBe` qual' ModuleName.basics "add"
           tipe `shouldBe` Core.TFun [core intT, core intT] (core intT)
