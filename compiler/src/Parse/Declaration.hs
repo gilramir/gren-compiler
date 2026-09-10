@@ -17,6 +17,7 @@ import Data.List qualified as List
 import Data.List.NonEmpty (NonEmpty (..))
 import Data.List.NonEmpty qualified as NonEmpty
 import Data.Name qualified as Name
+import Gren.String qualified as ES
 import Parse.Expression qualified as Expr
 import Parse.Keyword qualified as Keyword
 import Parse.Number qualified as Number
@@ -24,6 +25,7 @@ import Parse.Pattern qualified as Pattern
 import Parse.Primitives hiding (State)
 import Parse.Primitives qualified as P
 import Parse.Space qualified as Space
+import Parse.String qualified as String
 import Parse.Symbol qualified as Symbol
 import Parse.Type qualified as Type
 import Parse.Variable qualified as Var
@@ -46,10 +48,10 @@ declaration :: Space.Parser E.Decl (Decl, [Src.Comment])
 declaration =
   do
     maybeDocs <- chompDocComment
-    derives <- chompDerive
+    attribute <- chompAttribute
     start <- getPosition
-    case derives of
-      Just classes ->
+    case attribute of
+      Just (Derive classes) ->
         -- `@derive` says which classes an abstract type derives (D53,
         -- `classes.md` §8.1), so the declaration it is attached to has to be a
         -- custom type. Anything else is a misplaced attribute rather than a
@@ -61,6 +63,11 @@ declaration =
           [ typeDecl maybeDocs start classes,
             attributeNotOnCustomType
           ]
+      Just (Prim primName) ->
+        -- No fallback list: `@prim` is followed by an annotation and nothing
+        -- else, so an error inside one is that error rather than "this is not
+        -- a primitive declaration".
+        primDecl maybeDocs start primName
       Nothing ->
         oneOf
           E.DeclStart
@@ -73,38 +80,76 @@ declaration =
 
 -- ATTRIBUTES
 
--- | @\@derive(Eq, Ord, Inspect)@ on the line before a custom type.
+-- | The two attributes the language has: @\@derive(Eq, Ord, Inspect)@ on a
+-- custom type (D53, `classes.md` §8.1) and @\@prim("i32_add")@ on an
+-- annotation (`core.md` C13).
 --
--- Nothing in the parser handled @\@@ before this; `ffi.md` F1's @\@extern@ is
--- the other customer and will land beside it. An attribute follows the doc
--- comment and precedes the declaration, which is the order Rust and Gren's own
--- doc comments already read in.
-chompDerive :: Parser E.Decl (Maybe [A.Located Name.Name])
-chompDerive =
+-- `ffi.md` F1's @\@extern@ is the remaining customer and will land beside
+-- them. An attribute follows the doc comment and precedes the declaration,
+-- which is the order Rust and Gren's own doc comments already read in.
+data Attribute
+  = Derive [A.Located Name.Name]
+  | Prim (A.Located Name.Name)
+
+chompAttribute :: Parser E.Decl (Maybe Attribute)
+chompAttribute =
   oneOfWithFallback
     [ inContext E.DeclAttribute (word1 0x40 {-\@-} E.DeclStart) $
         do
           name <- Var.lower E.AttributeName
           nameEnd <- getPosition
-          if name /= Name.fromChars "derive"
-            then attributeUnknown name nameEnd
-            else return ()
-          Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentOpen
-          word1 0x28 {-(-} E.AttributeOpen
-          Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentClass
-          classes <- chompDeriveClasses []
-          Space.chomp E.AttributeSpace
-          Space.checkFreshLine E.AttributeIndentDecl
-          return (Just classes)
+          if name == Name.fromChars "derive"
+            then Just . Derive <$> chompDeriveArgs
+            else
+              if name == Name.fromChars "prim"
+                then Just . Prim <$> chompPrimArg
+                else attributeUnknown name nameEnd
     ]
     Nothing
+
+chompDeriveArgs :: Parser E.Attribute [A.Located Name.Name]
+chompDeriveArgs =
+  do
+    Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentOpen
+    word1 0x28 {-(-} E.AttributeOpen
+    Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentClass
+    classes <- chompDeriveClasses []
+    Space.chomp E.AttributeSpace
+    Space.checkFreshLine E.AttributeIndentDecl
+    return classes
+
+-- | The primitive's name, as a string literal: @\@prim("i32_add")@.
+--
+-- A string rather than a bare word because @i32_add@ is not an identifier —
+-- Gren names have no underscores — and inventing a second lexical class for
+-- the inside of one attribute would be worse than quoting it. The compiler
+-- checks the name against `Core.Prim`'s table at canonicalization, so a typo
+-- is caught there rather than here.
+chompPrimArg :: Parser E.Attribute (A.Located Name.Name)
+chompPrimArg =
+  do
+    Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentOpen
+    word1 0x28 {-(-} E.AttributeOpen
+    Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentPrimName
+    name <- addLocation (chompPrimName)
+    Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentEnd
+    word1 0x29 {-)-} E.AttributeEnd
+    Space.chomp E.AttributeSpace
+    Space.checkFreshLine E.AttributeIndentDecl
+    return name
+
+chompPrimName :: Parser E.Attribute Name.Name
+chompPrimName =
+  do
+    (str, _) <- String.string E.AttributePrimName E.AttributePrimString
+    return (Name.fromChars (ES.toChars str))
 
 attributeNotOnCustomType :: Space.Parser E.Decl (Decl, [Src.Comment])
 attributeNotOnCustomType =
   P.Parser $ \(P.State _ _ _ _ row col) _ _ cerr _ ->
     cerr row col (E.DeclAttribute (E.AttributeNotOnCustomType row col))
 
-attributeUnknown :: Name.Name -> A.Position -> Parser E.Attribute ()
+attributeUnknown :: Name.Name -> A.Position -> Parser E.Attribute a
 attributeUnknown name (A.Position row col) =
   P.Parser $ \_ _ _ cerr _ -> cerr row col (E.AttributeUnknown name)
 
@@ -195,6 +240,39 @@ chompMatchingName expectedName =
                 then eok (A.At (A.Region (A.Position sr sc) (A.Position er ec)) name) newState
                 else eerr sr sc (E.DeclDefNameMatch name)
          in parserL state cokL eokL cerr eerr
+
+-- | @\@prim("i32_add")@ and the annotation under it (`core.md` C13).
+--
+-- A primitive declaration is an annotation with no equation: the body is the
+-- primitive, and an author writing one out would be writing down the thing the
+-- attribute has already named. What this builds is therefore an ordinary
+-- `Src.Value` whose body is `Src.Prim` -- see that constructor for why a
+-- primitive is a value rather than a declaration of its own.
+--
+-- Nothing here says the module is in `core`, or that the name is one the
+-- compiler knows. Both are canonicalization's (`Canonicalize.Expression`),
+-- because both are questions about the package and the primitive table rather
+-- than about the shape of the source.
+primDecl :: Maybe Src.DocComment -> A.Position -> A.Located Name.Name -> Space.Parser E.Decl (Decl, [Src.Comment])
+primDecl maybeDocs start primName =
+  do
+    name <- Var.lower E.DeclStart
+    nameEnd <- getPosition
+    specialize (E.DeclDef name) $
+      do
+        commentsBeforeColon <- Space.chompAndCheckIndent E.DeclDefSpace E.DeclDefIndentEquals
+        word1 0x3A {-:-} E.DeclDefEquals
+        commentsAfterColon <- Space.chompAndCheckIndent E.DeclDefSpace E.DeclDefIndentType
+        -- `Type.expression` and not `Type.annotation`: a primitive is never
+        -- constrained, so `@prim("i32_add") add : Num a => a -> a -> a` is not
+        -- a type error to be found later but a sentence the language does not
+        -- have. The second parser (D86) reads the same shape.
+        ((tipe, commentsAfterTipe), end) <- specialize E.DeclDefType Type.expression
+        let tipeComments = SC.ValueTypeComments commentsBeforeColon commentsAfterColon []
+        let annotation = Src.Annotation Nothing tipe tipeComments
+        let body = A.At (A.toRegion primName) (Src.Prim primName)
+        let value = Src.Value (A.at start nameEnd name) [] body (Just annotation) (SC.ValueComments [] [] [])
+        return ((Value maybeDocs (A.at start end value), commentsAfterTipe), end)
 
 -- CLASS DECLARATIONS
 

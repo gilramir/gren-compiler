@@ -49,6 +49,7 @@ import Data.Map qualified as Map
 import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.Utf8 qualified as Utf8
+import Generate.CoreJS.Prim qualified as Prim
 import Generate.JavaScript.Builder qualified as JS
 import Generate.JavaScript.Literal qualified as Literal
 import Generate.JavaScript.Name qualified as JsName
@@ -191,8 +192,8 @@ generate env (Core.Expr value _ sp) =
           JsExpr (JS.TrackedAccess (jsExpr env base) (_home env) pos (generateField (_mode env) name))
         Core.EArray items ->
           JsExpr (JS.TrackedArray (_home env) (region sp) (map (jsExpr env) items))
-        Core.EPrim _ _ ->
-          error "Generate.CoreJS: EPrim — `core` has no @prim declarations yet (docs/m1a-lowering.md §L4)"
+        Core.EPrim op args ->
+          JsExpr (Prim.prim op (map (jsExpr env) args))
         Core.ECrash _ ->
           error "Generate.CoreJS: ECrash — the lowering does not produce one yet (docs/m1a-lowering.md §L4)"
         Core.ETyLam _ _ ->

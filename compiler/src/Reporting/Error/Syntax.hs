@@ -191,12 +191,15 @@ data Attribute
   | AttributeUnknown Name.Name Row Col
   | AttributeOpen Row Col
   | AttributeClass Row Col
+  | AttributePrimName Row Col
+  | AttributePrimString String Row Col
   | AttributeEnd Row Col
   | AttributeNotOnCustomType Row Col
   | --
     AttributeIndentName Row Col
   | AttributeIndentOpen Row Col
   | AttributeIndentClass Row Col
+  | AttributeIndentPrimName Row Col
   | AttributeIndentEnd Row Col
   | AttributeIndentDecl Row Col
   deriving (Show)
@@ -1815,11 +1818,16 @@ toAttributeReport source attribute startRow startCol =
                 ( D.reflow "I am partway through an attribute, but I got stuck here:",
                   D.stack
                     [ what,
-                      D.reflow "The one attribute there is looks like this:",
+                      D.reflow "The two attributes there are look like this:",
                       D.indent 4 $
                         D.vcat
                           [ "@derive(Eq, Ord, Inspect)",
                             D.cyan "type" <> " UserId = UserId Int"
+                          ],
+                      D.indent 4 $
+                        D.vcat
+                          [ "@prim(\"i32_add\")",
+                            "addInt : Int -> Int -> Int"
                           ]
                     ]
                 )
@@ -1843,6 +1851,14 @@ toAttributeReport source attribute startRow startCol =
           stuck row col "PROBLEM IN ATTRIBUTE" $
             D.reflow
               "I was expecting the name of a class next, starting with an upper-case letter."
+        AttributePrimName row col ->
+          stuck row col "PROBLEM IN ATTRIBUTE" $
+            D.reflow
+              "I was expecting the name of a primitive next, in quotes. `i32_add` is not\
+              \ spelled like a Gren name -- it has an underscore in it -- so `@prim` takes\
+              \ a string rather than a bare word."
+        AttributePrimString string row col ->
+          toStringReport source string row col
         AttributeEnd row col ->
           stuck row col "PROBLEM IN ATTRIBUTE" $
             D.reflow "I was expecting a comma or a closing parenthesis next."
@@ -1861,6 +1877,9 @@ toAttributeReport source attribute startRow startCol =
         AttributeIndentClass row col ->
           stuck row col "UNFINISHED ATTRIBUTE" $
             D.reflow "I was expecting the name of a class next."
+        AttributeIndentPrimName row col ->
+          stuck row col "UNFINISHED ATTRIBUTE" $
+            D.reflow "I was expecting the name of a primitive next, in quotes."
         AttributeIndentEnd row col ->
           stuck row col "UNFINISHED ATTRIBUTE" $
             D.reflow "I was expecting a comma or a closing parenthesis next."

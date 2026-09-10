@@ -78,6 +78,7 @@ So it is clear why the data is kept around.
 import AST.Source qualified as Src
 import AST.Utils.Binop qualified as Binop
 import Control.Monad (liftM, liftM2, liftM3, liftM4, replicateM)
+import Core.Prim qualified as Prim
 import Data.Binary
 import Data.Index qualified as Index
 import Data.List qualified as List
@@ -133,6 +134,13 @@ data Expr_
   = VarLocal Name
   | VarTopLevel ModuleName.Canonical Name
   | VarKernel Name Name
+  | -- | A primitive, named by @core@ through @\@prim@ (@docs/core.md@ C13).
+    --
+    -- The annotation is the __table's__ (@Canonicalize.Prim.primType@), not
+    -- the one @core@ wrote: checking the declaration against the table is the
+    -- same act as inferring this node against it, so the check is unification
+    -- rather than a second comparison written by hand.
+    VarPrim Prim.PrimOp Annotation
   | VarForeign ModuleName.Canonical Name Annotation
   | VarCtor CtorOpts ModuleName.Canonical Name Index.ZeroBased Annotation
   | VarDebug ModuleName.Canonical Name Annotation

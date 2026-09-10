@@ -768,6 +768,10 @@ expr env tops scope (Can.Expr nid region value) =
           return ()
         Can.VarKernel _ _ ->
           return ()
+        Can.VarPrim _ _ ->
+          -- A primitive has no constraints and so nothing to elaborate: the
+          -- table's annotation binds no variables at all (`Canonicalize.Prim`).
+          return ()
         Can.VarMethod cls param name annotation ->
           methodUse env scope nid region cls param name annotation (typeOf env nid)
         Can.Binop op target annotation left right ->

@@ -16,6 +16,7 @@ import AST.Utils.Type qualified as Type
 import Canonicalize.Environment qualified as Env
 import Canonicalize.Environment.Dups qualified as Dups
 import Canonicalize.Pattern qualified as Pattern
+import Canonicalize.Prim qualified as Prim
 import Canonicalize.Type qualified as Type
 import Control.Monad (foldM)
 import Data.Graph qualified as Graph
@@ -130,6 +131,34 @@ canonicalize env (A.At region expression) =
           Can.Record <$> traverse (canonicalize env) fieldDict
       Src.Parens _ expr _ ->
         Can.exprValue <$> canonicalize env expr
+      Src.Prim primName ->
+        canonicalizePrim env primName
+
+-- PRIMITIVES
+
+-- | The body of a @\@prim("i32_add")@ declaration (`core.md` C13).
+--
+-- Three questions, and the order is the order of the answers' reach: whether
+-- this package may name a primitive at all, whether the compiler knows one by
+-- this name, and whether it has a Gren type yet. Only the first is a rule
+-- about who is asking; the other two are the table answering.
+--
+-- The declared type is not checked here. It is checked by /inferring/ this
+-- node against the table's annotation, which is the same act done by the one
+-- piece of the compiler that already knows how to compare two types and say
+-- where they differ.
+canonicalizePrim :: Env.Env -> A.Located Name.Name -> Result i w Can.Expr_
+canonicalizePrim env (A.At region name) =
+  let ModuleName.Canonical pkg _ = Env._home env
+   in if pkg /= Pkg.core
+        then Result.throw (Error.PrimOutsideCore region name)
+        else case Prim.lookup name of
+          Prim.Unknown ->
+            Result.throw (Error.PrimUnknown region name)
+          Prim.NoTypeYet ->
+            Result.throw (Error.PrimHasNoTypeYet region name)
+          Prim.Found op annotation ->
+            Result.ok (Can.VarPrim op annotation)
 
 -- CANONICALIZE IF BRANCH
 

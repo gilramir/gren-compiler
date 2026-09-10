@@ -61,6 +61,7 @@ import Core.AST qualified as Core
 import Core.Lower.Literal qualified as Literal
 import Core.Lower.Type (lowerAnnotation, lowerType)
 import Core.Order qualified as Order
+import Core.Prim qualified as Prim
 import Core.Refs qualified as Refs
 import Data.Index qualified as Index
 import Data.List qualified as List
@@ -426,6 +427,8 @@ expr env (Can.Expr nid region value) =
                   ++ " was not resolved. See docs/m1b-classes.md §G23."
         Can.VarOperator _ home name _ ->
           applied env nid sp (node (Core.EGlobal (Core.QualName home name)))
+        Can.VarPrim op _ ->
+          primValue tipe sp op
         Can.VarKernel home name ->
           -- @AST.Optimized.toKernelGlobal@ already gave a kernel function a
           -- module: the `gren/kernel` pseudo-package, one module per kernel
@@ -526,6 +529,31 @@ call env func args =
           Core.ECtor (Core.QualName home name) (Index.toMachine index) (map (expr env) args)
     _ ->
       Core.EApp (expr env func) (map (expr env) args)
+
+-- | A primitive, which is only ever the whole body of a @\@prim@ declaration
+-- (`core.md` C13) and so is only ever a value.
+--
+-- Eta-expanded, for the reason 'ctorValue' is: 'Core.AST.EPrim' is saturated
+-- everywhere it appears. The wrapper costs nothing that survives — the
+-- declaration it is the body of is @core@'s own one-line wrapper around the
+-- primitive, and inlining that is what the backend's specialization does with
+-- every other one.
+--
+-- The types come from the /node/ rather than from the primitive table, because
+-- they are the same types: this node was inferred against the table's
+-- annotation, so what the solver came back with is the table's type at this
+-- declaration.
+primValue :: Core.Type -> Core.Span -> Prim.PrimOp -> Core.Expr
+primValue tipe sp op =
+  case tipe of
+    Core.TFun argTypes result ->
+      let binders = zipWith (\i t -> Core.Binder (generated i) t sp) [0 ..] argTypes
+          built = Core.Expr (Core.EPrim op (map (variable sp) binders)) result sp
+       in Core.Expr (Core.ELam binders built) tipe sp
+    _ ->
+      -- Unreachable: every primitive takes at least one argument
+      -- ('Core.Prim.primArity'), so its type is a function type.
+      error ("Core.Lower.Expression: the " ++ show op ++ " primitive is not a function: " ++ show tipe)
 
 -- | A constructor used as a value rather than applied.
 --

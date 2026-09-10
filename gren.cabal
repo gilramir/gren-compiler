@@ -115,6 +115,7 @@ Library common
         Canonicalize.Module
         Canonicalize.NodeId
         Canonicalize.Pattern
+        Canonicalize.Prim
         Canonicalize.Type
         Compile
         Core.AST
@@ -139,6 +140,7 @@ Library common
         Core.Wire.Encode
         Core.Wire.Protobuf
         Generate.CoreJS
+        Generate.CoreJS.Prim
         Generate.CoreJS.Expression
         Generate.Html
         Generate.LowC
@@ -275,6 +277,7 @@ Test-Suite gren-tests
 
         -- tests
         Canonicalize.DeriveSpec
+        Canonicalize.PrimSpec
         Canonicalize.NodeIdSpec
         Core.LowerExpressionSpec
         Core.LowerTypeSpec
@@ -292,6 +295,7 @@ Test-Suite gren-tests
         Parse.ClassSpec
         Parse.ConstraintSpec
         Parse.InstanceSpec
+        Parse.PrimSpec
         Parse.RecordUpdateSpec
         Parse.SpaceSpec
         Parse.UnderscorePatternSpec

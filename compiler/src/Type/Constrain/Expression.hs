@@ -8,6 +8,7 @@ module Type.Constrain.Expression
 where
 
 import AST.Canonical qualified as Can
+import Core.Prim qualified as Prim
 import Data.Index qualified as Index
 import Data.Map.Strict qualified as Map
 import Data.Name qualified as Name
@@ -82,6 +83,13 @@ constrainHelp rtv _nid region expression expected =
       return (CLocal region name expected)
     Can.VarKernel _ _ ->
       return CTrue
+    Can.VarPrim op annotation ->
+      -- C13's check that a `@prim` declaration agrees with the compiler's own
+      -- table, and it is the same constraint a use of any published signature
+      -- gets. The declaration `core` wrote is the annotation on the definition
+      -- this node is the body of, so a disagreement is reported where the two
+      -- types differ rather than as "these two do not match".
+      return $ CForeign region (Prim.primVarName op) annotation expected
     Can.VarForeign _ name annotation ->
       return $ CForeign region name annotation expected
     Can.VarMethod _ _ name annotation ->

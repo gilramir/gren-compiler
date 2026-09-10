@@ -138,6 +138,8 @@ checkExpr (Can.Expr _ region expression) errors =
       errors
     Can.VarKernel _ _ ->
       errors
+    Can.VarPrim _ _ ->
+      errors
     Can.VarForeign _ _ _ ->
       errors
     Can.VarMethod _ _ _ _ ->

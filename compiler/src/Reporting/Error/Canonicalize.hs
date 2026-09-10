@@ -89,6 +89,9 @@ data Error
   | NotFoundBinop A.Region Name.Name (Set.Set Name.Name)
   | PortPayloadInvalid A.Region Name.Name Can.Type InvalidPayload
   | PortTypeInvalid A.Region Name.Name PortProblem
+  | PrimOutsideCore A.Region Name.Name
+  | PrimUnknown A.Region Name.Name
+  | PrimHasNoTypeYet A.Region Name.Name
   | RecursiveAlias A.Region Name.Name [Name.Name] Src.Type [Name.Name]
   | RecursiveDecl A.Region Name.Name [Name.Name]
   | RecursiveLet (A.Located Name.Name) [Name.Name]
@@ -1120,6 +1123,47 @@ toReport source err =
                     "Ports need to produce a command (Cmd), a subscription (Sub) or a task but\
                     \ this is none of those. I do not know how to handle this."
                 )
+    PrimOutsideCore region name ->
+      Report.Report "PRIMITIVE OUTSIDE CORE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This `@prim` names the `"
+                ++ Name.toChars name
+                ++ "` primitive, and only `gren/core` may name a primitive:",
+            D.reflow
+              "A primitive is not a capability a package can be granted -- it is the language\
+              \ itself, and its preconditions are guarded by the functions `core` wraps it in.\
+              \ Whatever you were reaching for, a `core` function is the way to reach it."
+          )
+    PrimUnknown region name ->
+      Report.Report "UNKNOWN PRIMITIVE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "I do not know a primitive named `" ++ Name.toChars name ++ "`:",
+            D.reflow
+              "The primitive table is the compiler's own, so this is a name that does not\
+              \ exist rather than one that has not been implemented. Primitives are spelled\
+              \ <type>_<operation>, as in `i32_add`, `f64_sqrt` or `str_length`."
+          )
+    PrimHasNoTypeYet region name ->
+      Report.Report "PRIMITIVE NOT AVAILABLE YET" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`" ++ Name.toChars name ++ "` is a real primitive, but I do not know what its Gren type is yet:",
+            D.reflow
+              "The compiler checks a `@prim` declaration against its own table of types, and\
+              \ that table is filled in group by group as the Gren types each group names\
+              \ come to exist. This primitive's group is not in it yet."
+          )
     RecursiveAlias region name args tipe others ->
       aliasRecursionReport source region name args tipe others
     RecursiveDecl region name names ->

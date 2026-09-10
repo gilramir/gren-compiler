@@ -89,6 +89,16 @@ data Expr_
   | Update Expr [RecordField] SC.UpdateComments
   | Record [RecordField]
   | Parens [Comment] Expr [Comment]
+  | -- | The body a @\@prim("i32_add")@ declaration stands for (@core.md@ C13).
+    --
+    -- No expression syntax produces one: a primitive declaration is an
+    -- annotation with an attribute above it and no equation, and this is what
+    -- the parser puts where the equation's right-hand side would have been. It
+    -- is a 'Value' rather than a declaration of its own because a primitive
+    -- /is/ a top-level binding — it is exposed, it is referred to, it takes
+    -- part in duplicate detection — and none of that machinery is worth a
+    -- second copy.
+    Prim (A.Located Name)
   deriving (Show)
 
 data VarType = LowVar | CapVar

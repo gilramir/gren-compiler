@@ -49,6 +49,7 @@ module Core.Prim
     -- * The table
     allPrims,
     primName,
+    primVarName,
     primFromName,
     primCode,
     primFromCode,
@@ -60,7 +61,9 @@ module Core.Prim
 where
 
 import Data.Map qualified as Map
+import Data.Name qualified as Name
 import Data.Text (Text)
+import Data.Text qualified as Text
 
 -- | @i32@, @i64@, @u32@, @u64@ — the names primitives are spelled with.
 data IntType = I32 | I64 | U32 | U64
@@ -311,6 +314,11 @@ primName op =
     TransientOp p -> "tr_" <> transientPrimName p
     TaskOp p -> taskPrimName p
     DebugLog -> "debug_log"
+
+-- | 'primName' as a 'Name.Name', which is the form an error report and a
+-- type-inference node want it in.
+primVarName :: PrimOp -> Name.Name
+primVarName = Name.fromChars . Text.unpack . primName
 
 intTypeName :: IntType -> Text
 intTypeName I32 = "i32"
