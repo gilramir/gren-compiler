@@ -418,7 +418,7 @@ linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels =
               | (raw, core) <- map replModuleCore modules
               ]
       cores <- Pass.run <$> throughWire (Map.union own deps)
-      return (checked (Program.link (backendFor kernels cores) cores (replRoots home name)))
+      return (checked (Program.link (replBackend kernels cores home name) cores (replRoots home name)))
 
 replModuleCore :: Build.Module -> (ModuleName.Raw, Core.Module)
 replModuleCore modul =
@@ -426,25 +426,48 @@ replModuleCore modul =
     Build.Fresh raw _ core -> (raw, core)
     Build.Cached raw _ core -> (raw, core)
 
--- | What a REPL entry reaches: the value being printed, and @Debug.toString@.
+-- | What a REPL entry reaches: the value being printed, and nothing else.
 --
--- The second is @Generate.JavaScript.generateForRepl@\'s, kept name for name.
--- Nothing generated calls @Debug.toString@ — the printer calls kernel @Debug@\'s
--- @_Debug_toAnsiString@ straight — so what the root is for is the kernel module
--- that function is in, which that binding refers to and nothing else does.
+-- It used to root @Debug.toString@ as well — not because anything generated
+-- calls it, but because that binding was what reached the kernel @Debug@ module
+-- the printer's @_Debug_toAnsiString@ lives in. §J13\'s rule said that should be
+-- an /edge/ and not a root, since a root says a thing is reachable and says
+-- nothing about when; the reason it was a root anyway was to keep the Core REPL
+-- and the graph-walking one reaching the same set, so that comparing their
+-- output tested the emitter rather than two different programs.
 --
--- It is a Gren binding rather than the kernel module itself on purpose. §J13\'s
--- rule is that a kernel module a /runtime/ enters through is an edge and not a
--- root, because a root says a thing is reachable and says nothing about when;
--- here the printer is appended after every linked item, so no order could be
--- wrong. Keeping the same root as the old path is worth more: it is what makes
--- the two REPLs reach the same set, and so makes comparing their output a test
--- of the emitter rather than of two different programs.
+-- §J18 deleted the other REPL and §G45 deleted @Debug.toString@, so both halves
+-- of that are spent. 'replBackend' supplies the edge §J13 always wanted.
 replRoots :: ModuleName.Canonical -> N.Name -> [Core.QualName]
 replRoots home name =
-  [ Core.QualName ModuleName.debug (N.fromChars "toString"),
-    Core.QualName home name
-  ]
+  [Core.QualName home name]
+
+-- | A program's backend plus the one edge a REPL entry has that a program does
+-- not: the printer.
+--
+-- @Generate.CoreJS.printForRepl@ is appended after every linked item and calls
+-- kernel @Debug@\'s @_Debug_toAnsiString@ directly, so the kernel @Debug@ module
+-- has to be emitted and has to come first. That is the same shape as a @port@\'s
+-- constructor and a static @main@ in 'runtimeEdges' — a name a /runtime/ enters
+-- a declaration through, which C16 keeps out of Core and the backend supplies
+-- here — and it hangs off the printed value, which is the one binding a REPL
+-- entry is guaranteed to have.
+replBackend ::
+  Map.Map N.Name [K.Chunk] ->
+  Map.Map ModuleName.Canonical Core.Module ->
+  ModuleName.Canonical ->
+  N.Name ->
+  Program.Backend
+replBackend kernels cores home name =
+  let backend = backendFor kernels cores
+   in backend
+        { Program._backendEdges =
+            Map.insertWith
+              (<>)
+              (Core.QualName home name)
+              (Refs.global (Program.kernelName N.debug))
+              (Program._backendEdges backend)
+        }
 
 -- CHECK FOR DEBUG
 

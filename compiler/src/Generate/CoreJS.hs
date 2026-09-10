@@ -89,12 +89,11 @@ generate mode program kernels =
 -- because a REPL entry has no @main@. What replaces the export is
 -- 'printForRepl'.
 --
--- The value being printed is a root, and so is @Debug.toString@ — not because
--- the printer calls it (it calls kernel @Debug@\'s @_Debug_toAnsiString@
--- directly) but because that binding is what reaches the kernel module the
--- function is in. Rooting the kernel module instead would work here, where the
--- printer runs last and no order can be wrong. 'Generate.replRoots' is where
--- that choice is written down.
+-- The value being printed is the only root. The printer calls kernel @Debug@\'s
+-- @_Debug_toAnsiString@ directly, and what makes that module reachable is an
+-- /edge/ hung off the printed value — §J13\'s rule, which 'Generate.replBackend'
+-- is where it is written down. It used to root @Debug.toString@ instead, and
+-- §G45 deleted that binding.
 generateForRepl :: Bool -> L.Localizer -> Program -> Map Name [K.Chunk] -> ModuleName.Canonical -> Name -> Can.Annotation -> B.Builder
 generateForRepl ansi localizer program kernels home name (Can.Forall _ tipe) =
   let mode = Mode.Dev
