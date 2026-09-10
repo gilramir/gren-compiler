@@ -37,6 +37,9 @@ module Data.Name
     char,
     string,
     num,
+    integral,
+    fractional,
+    bits,
     appendable,
     bytes,
     maybe,
@@ -401,11 +404,27 @@ char = fromChars "Char"
 string :: Name
 string = fromChars "String"
 
--- | `classes.md` §1.2's closed classes, which `core` declares in `Basics` and
+-- | `classes.md` §1.2's closed classes, which `core` declares and
 -- "Type.Class" is the meaning of (D135). They are named here rather than
 -- spelled at the use site for the same reason 'int' and 'float' are.
+--
+-- Three of the four are `Basics`'s, because a closed class lives where its
+-- operators are declared and `+`, `//` and `/` are all there. 'bits' is
+-- `Bitwise`'s instead: its methods are spelled @and@, @or@ and @xor@, which
+-- are `Basics`'s names for the `Bool` operations, and §G20 refuses a method
+-- and a top-level value of one name in one module (D145,
+-- `docs/m1b-int.md` §I12).
 num :: Name
 num = fromChars "Num"
+
+integral :: Name
+integral = fromChars "Integral"
+
+fractional :: Name
+fractional = fromChars "Fractional"
+
+bits :: Name
+bits = fromChars "Bits"
 
 appendable :: Name
 appendable = fromChars "Appendable"

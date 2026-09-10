@@ -15,6 +15,7 @@ module Gren.ModuleName
     --
     Canonical (..),
     basics,
+    bitwise,
     bytes,
     char,
     string,
@@ -145,6 +146,11 @@ instance Binary Canonical where
 
 basics :: Canonical
 basics = Canonical Pkg.core Name.basics
+
+-- | Where `Bits` is declared (D145): its methods are named @and@, @or@ and
+-- @xor@, and those are `Basics`'s `Bool` operations.
+bitwise :: Canonical
+bitwise = Canonical Pkg.core Name.bitwise
 
 char :: Canonical
 char = Canonical Pkg.core Name.char

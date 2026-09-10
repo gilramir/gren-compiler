@@ -455,8 +455,6 @@ call env pos fn args =
     Core.EGlobal q@(Core.QualName (ModuleName.Canonical pkg raw) name)
       | Just op <- primAt env q args -> Prim.prim op (map (jsExpr env) args)
       | pkg == Pkg.core && raw == Name.basics -> basicsCall env pos q name args
-      | pkg == Pkg.core && raw == Name.bitwise -> bitwiseCall env pos q name (map (jsExpr env) args)
-      | pkg == Pkg.core && raw == Name.math -> mathCall env pos q name (map (jsExpr env) args)
       | pkg == Pkg.kernel -> kernelCall env pos q raw name (map (jsExpr env) args)
       | otherwise -> globalCall env pos q (map (jsExpr env) args)
     _ ->
@@ -542,6 +540,15 @@ normalCall env pos fn args =
 -- what each body compiles to is the primitive's — @(a + b) | 0@ at an `Int`
 -- and @a + b@ at a `Float`, said once in "Generate.CoreJS.Prim" rather than
 -- once per backend here.
+--
+-- __Two sibling tables went entirely with D145__, which is the same rule read
+-- twice more. @bitwiseCall@ held the three shifts and @mathCall@ held
+-- @remainderBy@; `Bits` and `Integral` made all four of them instance methods
+-- over @i32_shl@, @i32_shr@, @i32_ushr@ and @i32_rem@, so the JavaScript is
+-- "the primitive, and A4's clamp or A3's zero guard in Geng in front of it"
+-- rather than an entry here that knows neither. @fdiv@ and @idiv@ left this
+-- table for the same reason, and what is left of it is `Bool`, comparison,
+-- @++@ and the two application operators — nothing numeric at all.
 basicsCall :: Env -> A.Position -> Core.QualName -> Name -> [Core.Expr] -> JS.Expr
 basicsCall env pos q name args =
   case args of
@@ -560,8 +567,6 @@ basicsCall env pos q name args =
           let left = jsExpr env leftE
               right = jsExpr env rightE
            in case name of
-                "fdiv" -> JS.Infix JS.OpDiv left right
-                "idiv" -> JS.Infix JS.OpBitwiseOr (JS.Infix JS.OpDiv left right) (JS.Int 0)
                 -- Neither `==` nor `/=` is here. `==` is `Eq`'s method and
                 -- reaches an instance; `/=` is `not (eq a b)`, and `not` is one
                 -- line above. What used to be here was `Basics.equal`, the
@@ -575,32 +580,6 @@ basicsCall env pos q name args =
                 "xor" -> JS.Infix JS.OpNe left right
                 _ -> globalCall env pos q [left, right]
     _ -> globalCall env pos q (map (jsExpr env) args)
-
--- | The three shifts, which are what is left of `Bitwise` in this table.
---
--- @and@, @or@, @xor@ and @complement@ were here and are not: they are @\@prim@
--- declarations since D143 and 'primAt' rewrites a saturated call to one, so
--- they came out of this table rather than being said in two places. The shifts
--- stay until A4's clamped count has an implementation to be the wrapper of.
-bitwiseCall :: Env -> A.Position -> Core.QualName -> Name -> [JS.Expr] -> JS.Expr
-bitwiseCall env pos q name args =
-  case args of
-    [left, right] ->
-      case name of
-        "shiftLeftBy" -> JS.Infix JS.OpLShift right left
-        "shiftRightBy" -> JS.Infix JS.OpSpRShift right left
-        "shiftRightZfBy" -> JS.Infix JS.OpZfRShift right left
-        _ -> globalCall env pos q args
-    _ -> globalCall env pos q args
-
-mathCall :: Env -> A.Position -> Core.QualName -> Name -> [JS.Expr] -> JS.Expr
-mathCall env pos q name args =
-  case args of
-    [left, right] ->
-      case name of
-        "remainderBy" -> JS.Infix JS.OpMod right left
-        _ -> globalCall env pos q args
-    _ -> globalCall env pos q args
 
 -- | @a |> f@ and @f <| a@ are the application they spell, built in Core rather
 -- than in JavaScript so that the arity and operator tables see through them.

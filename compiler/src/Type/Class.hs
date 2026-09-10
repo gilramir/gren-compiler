@@ -31,8 +31,9 @@
 -- `Appendable` __has left__ too, the same way and for the same reason: D138
 -- promoted it rather than dropping it with `++`, so `Basics.append` is its
 -- method and `String` and `Array a` are ordinary instances (§G34, §G35). What is
--- left here is one class. `Num` grows D2's other three integer types, and
--- `Integral`, `Fractional` and `Bits` join it.
+-- left here is `classes.md` §1.2's four, and all four are in as of D145
+-- (`docs/m1b-int.md` §I12). `Num` grows D2's other three integer types at step
+-- 4, and the three that arrived with D145 grow with it.
 module Type.Class
   ( Class (..),
     Classes,
@@ -59,14 +60,17 @@ import Gren.ModuleName qualified as ModuleName
 
 -- CLASSES
 
--- | Written `Class.Num` at every use site, which is why the constructor may
+-- | Written `Class.Num` at every use site, which is why a constructor may
 -- share its name with Haskell's class without either being in doubt.
 --
--- One constructor, and the set machinery around it is still worth its keep:
--- D2's `Integral`, `Fractional` and `Bits` are the next three, and a variable
--- may be constrained by more than one of them.
+-- All four of `classes.md` §1.2's, as of D145. The set machinery around them is
+-- what it was built for: `7 // 2 + 1` constrains one variable by `Integral` and
+-- `Num` at once, and `1 / 2` by `Fractional` and `Num`.
 data Class
   = Num
+  | Integral
+  | Fractional
+  | Bits
   deriving (Eq, Prelude.Ord, Show)
 
 -- | The classes a variable has to satisfy. Never empty: a variable with no
@@ -89,22 +93,22 @@ fromList cs =
     [] ->
       Nothing
     _ ->
-      Just (reduce (Set.fromList cs))
+      Just (Classes (Set.fromList cs))
 
--- | Everything both sides demand, with anything implied by something else
--- dropped.
+-- | Everything both sides demand.
 --
--- The reduction kept the error layer's vocabulary intact while `Num` entailed
--- `Ord`: a variable that was both was written `number` rather than
--- `number and comparable`. Nothing entails anything today; it stays because
--- D2's `Integral` and `Fractional` do.
+-- __An ordinary union, with nothing dropped from it__ (D146). There used to be
+-- a reduction here that deleted a class another one in the set implied, and it
+-- kept the error layer's vocabulary intact while `Num` entailed `Ord`: a
+-- variable that was both was written `number` rather than
+-- `number and comparable`. It survived §G32 on the promise that D2's `Integral`
+-- and `Fractional` would need it, and D145 is where that promise comes due and
+-- is refused — see 'entailedBy'. A closed class carries methods and therefore a
+-- witness now, so dropping `Num` from @{Num, Integral}@ would drop the witness
+-- `+` projects its method out of.
 union :: Classes -> Classes -> Classes
 union (Classes a) (Classes b) =
-  reduce (Set.union a b)
-
-reduce :: Set.Set Class -> Classes
-reduce cs =
-  Classes (Set.filter (\c -> not (any (\other -> other /= c && entails other c) (Set.toList cs))) cs)
+  Classes (Set.union a b)
 
 -- | The class a declared name is, when the class is one of `classes.md` §1.2's
 -- closed ones.
@@ -122,8 +126,10 @@ reduce cs =
 -- neither knows nor needs to know about it.
 fromDeclared :: ModuleName.Canonical -> Name.Name -> Maybe Class
 fromDeclared home name
-  | home /= ModuleName.basics = Nothing
-  | name == Name.num = Just Num
+  | home == ModuleName.basics, name == Name.num = Just Num
+  | home == ModuleName.basics, name == Name.integral = Just Integral
+  | home == ModuleName.basics, name == Name.fractional = Just Fractional
+  | home == ModuleName.bitwise, name == Name.bits = Just Bits
   | otherwise = Nothing
 
 -- | The declared name a class is, which is what an annotation the solver
@@ -135,6 +141,9 @@ toDeclared :: Class -> (ModuleName.Canonical, Name.Name)
 toDeclared c =
   case c of
     Num -> (ModuleName.basics, Name.num)
+    Integral -> (ModuleName.basics, Name.integral)
+    Fractional -> (ModuleName.basics, Name.fractional)
+    Bits -> (ModuleName.bitwise, Name.bits)
 
 -- | Whether a constraint is enforced by unification rather than by a witness.
 --
@@ -152,22 +161,25 @@ isClosed home name =
 
 -- ENTAILMENT
 
--- | Whether every type in the first class is also in the second.
---
--- Not a superclass relation — `classes.md` §1.3 has none among the open
--- classes — but a containment fact about the tables below. It said `Num`
--- entails `Ord` while both were the unifier's; with `Ord` declared in `core`
--- the two live in different mechanisms and there is nothing left to contain,
--- so this is equality until D2 adds `Integral` and `Fractional`.
-entails :: Class -> Class -> Bool
-entails a b =
-  a == b
-
 -- | Whether a rigid variable constrained by `have` satisfies a demand for
 -- `want`.
+--
+-- __Containment of the written sets, and no more than that__ (D146). Every type
+-- in `Integral` is in `Num`, so a containment fact about 'members' would let an
+-- `Integral a =>` signature satisfy a demand for `Num a` — and `classes.md`
+-- §1.2 promised exactly that, under "closed classes pay no superclass cost".
+-- That sentence was a fact about a closed class having no methods, the same one
+-- D144 found under "a closed constraint binds no witness": a `Num a` demand at
+-- a rigid `a` needs a `Num` witness, and only a written `Num a` brings one in.
+-- So `f : Integral a => a -> a` may not say `x + x`, and a function wanting
+-- both writes `(Num a, Integral a) =>` exactly as §1.3 has `(Eq a, Ord a) =>`.
+--
+-- What is still free is the part §1.2 was really about: membership at a
+-- /concrete/ type is 'admitsAtom', a lookup, so `7 // 2 + 1` needs no
+-- entailment rule to typecheck and no inference to discharge either constraint.
 entailedBy :: Classes -> Classes -> Bool
-entailedBy have want =
-  all (\w -> any (\h -> entails h w) (toList have)) (toList want)
+entailedBy (Classes have) (Classes want) =
+  want `Set.isSubsetOf` have
 
 -- | Whether any type at all satisfies every class in the set.
 --
@@ -234,10 +246,12 @@ candidates =
 -- saying the same thing twice — and D144 gives this one a second reader:
 -- `core` writes an instance per member now, and `Canonicalize.Module` checks
 -- that list against this one. So the membership table, the unifier, §0's
--- defaulting and `core`'s instances all read the same seven words.
+-- defaulting and `core`'s instances all read one list.
 --
--- @Int64@, @UInt32@, @UInt64@ and @Float32@ join here, at
--- @docs/m1b-int.md@ §I8 step 4, on the day their instances do.
+-- Three of the four hold one type each today, and that is D2's whole shape: the
+-- integer classes are the ones @Int64@, @UInt32@ and @UInt64@ join, and
+-- @Fractional@ is waiting for @Float32@. They join at @docs/m1b-int.md@ §I8
+-- step 4, on the day their instances do.
 members :: Class -> [(ModuleName.Canonical, Name.Name)]
 members c =
   case c of
@@ -245,6 +259,12 @@ members c =
       [ (ModuleName.basics, Name.int),
         (ModuleName.basics, Name.float)
       ]
+    Integral ->
+      [(ModuleName.basics, Name.int)]
+    Fractional ->
+      [(ModuleName.basics, Name.float)]
+    Bits ->
+      [(ModuleName.basics, Name.int)]
 
 -- | Whether a type with no arguments belongs to a class.
 admitsAtom :: Class -> ModuleName.Canonical -> Name.Name -> Bool
@@ -261,5 +281,7 @@ admitsAtom c home name =
 arrayObligations :: Class -> Maybe [Class]
 arrayObligations c =
   case c of
-    Num ->
-      Nothing
+    Num -> Nothing
+    Integral -> Nothing
+    Fractional -> Nothing
+    Bits -> Nothing
