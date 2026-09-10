@@ -23,6 +23,7 @@ module Type.Type
     never,
     mkFlexVar,
     mkFlexNumber,
+    mkFlexFractional,
     unnamedFlexVar,
     unnamedFlexSuper,
     nameToFlex,
@@ -204,6 +205,26 @@ mkFlexNumber =
 flexNumberDescriptor :: Descriptor
 flexNumberDescriptor =
   makeDescriptor (unnamedFlexSuper (Class.singleton Class.Num))
+
+-- | What a __float literal__ is, as of D2 step 4: a variable constrained by
+-- `Fractional` rather than the type `Float` outright.
+--
+-- Until `Float32` existed there was one fractional type and a literal could be
+-- it. Now there are two, `1.5 : Float32` has to be writable, and `classes.md`
+-- §0 already says what an unresolved one becomes — "a defaultable variable
+-- becomes `Float` if `Fractional` is among its constraints" is a sentence about
+-- exactly this variable, and it was written before the variable existed.
+--
+-- `Fractional` alone rather than `{Num, Fractional}`: nothing is lost, because
+-- any arithmetic the literal takes part in unions `Num` in at the operator, and
+-- D146 says the entailment may not be assumed anywhere else either.
+mkFlexFractional :: IO Variable
+mkFlexFractional =
+  UF.fresh flexFractionalDescriptor
+
+flexFractionalDescriptor :: Descriptor
+flexFractionalDescriptor =
+  makeDescriptor (unnamedFlexSuper (Class.singleton Class.Fractional))
 
 unnamedFlexSuper :: Class.Classes -> Content
 unnamedFlexSuper classes =

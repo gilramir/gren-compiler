@@ -129,15 +129,20 @@ spec = do
       -- `Canonicalize.Module` checks that against this, so a width added here
       -- and nowhere else is a compile error in `Basics` rather than a
       -- `NO INSTANCE` at some unlucky call site.
-      map (Name.toChars . snd) (Class.members Class.Num) `shouldBe` ["Int", "Float"]
+      map (Name.toChars . snd) (Class.members Class.Num)
+        `shouldBe` ["Int", "Int64", "UInt32", "UInt64", "Float", "Float32"]
 
     it "the integer classes hold the integer types and the fractional one does not" $ do
-      -- Three of the four hold one type each today, which is D2's whole shape:
-      -- `Int64`, `UInt32` and `UInt64` join the integer three at §I8 step 4 and
-      -- `Float32` joins `Fractional`.
-      map (Name.toChars . snd) (Class.members Class.Integral) `shouldBe` ["Int"]
-      map (Name.toChars . snd) (Class.members Class.Bits) `shouldBe` ["Int"]
-      map (Name.toChars . snd) (Class.members Class.Fractional) `shouldBe` ["Float"]
+      -- All six are in as of §I8 step 4. `Integral` and `Bits` have one
+      -- membership list, which is A11 and A5 read together -- every integer
+      -- type divides, takes a remainder and does bitwise arithmetic -- and
+      -- `Num` is that list plus the two floats.
+      map (Name.toChars . snd) (Class.members Class.Integral)
+        `shouldBe` ["Int", "Int64", "UInt32", "UInt64"]
+      map (Name.toChars . snd) (Class.members Class.Bits)
+        `shouldBe` ["Int", "Int64", "UInt32", "UInt64"]
+      map (Name.toChars . snd) (Class.members Class.Fractional)
+        `shouldBe` ["Float", "Float32"]
 
     it "no Float is integral and no Int is fractional" $ do
       Class.admitsAtom Class.Integral ModuleName.basics "Float" `shouldBe` False
@@ -148,12 +153,15 @@ spec = do
       all (uncurry (Class.admitsAtom Class.Num)) (Class.members Class.Num) `shouldBe` True
       Class.admitsAtom Class.Num ModuleName.string "String" `shouldBe` False
 
-    it "the four widths are not members until their instances are written" $ do
-      -- §I8 step 4. `Canonicalize.Prim` names their types already, which costs
-      -- nothing because they are not Gren types yet; putting one here before
-      -- `instance Num Int64` exists would make `Basics` stop compiling.
-      Class.admitsAtom Class.Num ModuleName.basics "Int64" `shouldBe` False
-      Class.admitsAtom Class.Num ModuleName.basics "Float32" `shouldBe` False
+    it "a width is a member of the classes its instances are written for" $ do
+      -- §I8 step 4, and the direction that matters: a name in this table with
+      -- no `instance` in `Basics` is a compile error there rather than a
+      -- `NO INSTANCE` at some unlucky call site.
+      Class.admitsAtom Class.Num ModuleName.basics "Int64" `shouldBe` True
+      Class.admitsAtom Class.Num ModuleName.basics "Float32" `shouldBe` True
+      Class.admitsAtom Class.Integral ModuleName.basics "Float32" `shouldBe` False
+      Class.admitsAtom Class.Fractional ModuleName.basics "UInt64" `shouldBe` False
+      Class.admitsAtom Class.Bits ModuleName.basics "Float32" `shouldBe` False
 
   describe "The declared names" $ do
     it "reads the classes the unifier owns" $ do

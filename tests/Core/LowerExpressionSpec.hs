@@ -48,15 +48,39 @@ spec = do
       Literal.chr (escaped "\\uD83D\\uDE00") `shouldBe` Core.LChar 128512
 
     it "reads a float literal, which Canonical stores as its digits" $ do
-      Literal.float (Utf8.fromChars "1.5") `shouldBe` Core.LFloat 1.5
-      Literal.float (Utf8.fromChars "1e3") `shouldBe` Core.LFloat 1000.0
-      Literal.float (Utf8.fromChars "2.2250738585072014e-308")
+      Literal.float floatT (Utf8.fromChars "1.5") `shouldBe` Core.LFloat 1.5
+      Literal.float floatT (Utf8.fromChars "1e3") `shouldBe` Core.LFloat 1000.0
+      Literal.float floatT (Utf8.fromChars "2.2250738585072014e-308")
         `shouldBe` Core.LFloat 2.2250738585072014e-308
 
-    it "keeps an integer in the transitional constructor" $
-      -- LIntLegacy, not LInt: `Int` is a JS double until D2 lands at M1b, and
-      -- real programs hold literals past Int32.
-      Literal.int 1735689600000 `shouldBe` Core.LIntLegacy 1735689600000
+    it "rounds a float literal to single precision at Float32" $ do
+      -- D149: the width is read off the type, so `0.1 : Float32` is the
+      -- binary32 nearest a tenth and not the double sitting in a `Float32`.
+      -- The rounding happens once, here, and not at run time.
+      Literal.float float32T (Utf8.fromChars "0.1") `shouldBe` Core.LFloat32 0.1
+      Literal.float float32T (Utf8.fromChars "1.5") `shouldBe` Core.LFloat32 1.5
+
+    it "keeps an integer in the transitional constructor at Int" $
+      -- LIntLegacy, not LInt: `Int` is a JS double until D2's flag day at
+      -- `docs/m1b-int.md` §I8 step 6, and real programs hold literals past
+      -- Int32.
+      Literal.int intBasicsT 1735689600000 `shouldBe` Core.LIntLegacy 1735689600000
+
+    it "gives an integer literal the width its type says" $ do
+      -- D149. `1` at an `Int64` is the JavaScript `1n` and `1` at an `Int` is
+      -- the JavaScript `1`; they are not the same value, so the constructor
+      -- cannot be chosen without the type.
+      Literal.int int64T 1 `shouldBe` Core.LInt64 1
+      Literal.int uint32T 4294967295 `shouldBe` Core.LUInt32 4294967295
+      Literal.int uint64T 42 `shouldBe` Core.LUInt64 42
+
+    it "leaves a literal at a type variable an Int" $
+      -- The body of `f : Num a => a -> a` that says `x + 1` has no width to
+      -- read. `Num` has no `fromInt` for a witness to carry, and `classes.md`
+      -- §0 closes an *ambiguous* numeric variable rather than a rigid one, so
+      -- nothing closes this and the `Int` case is what it gets.
+      -- `docs/open-items.md` has the hole.
+      Literal.int (Core.TVar "a") 1 `shouldBe` Core.LIntLegacy 1
 
   describe "constructors" $ do
     it "makes a saturated application one ECtor" $
@@ -322,6 +346,31 @@ qual' = Core.QualName
 
 intT :: Can.Type
 intT = Can.TType home "Int" []
+
+-- The numeric types as Core sees them. `intT` above is homed in `Maybe`, which
+-- is fine for everything that only needs a type to hang a node on and is wrong
+-- for a literal since D149: the width comes from the name *and* its module.
+
+intBasicsT :: Core.Type
+intBasicsT = basicsType "Int"
+
+floatT :: Core.Type
+floatT = basicsType "Float"
+
+float32T :: Core.Type
+float32T = basicsType "Float32"
+
+int64T :: Core.Type
+int64T = basicsType "Int64"
+
+uint32T :: Core.Type
+uint32T = basicsType "UInt32"
+
+uint64T :: Core.Type
+uint64T = basicsType "UInt64"
+
+basicsType :: Name.Name -> Core.Type
+basicsType name = Core.TCon (Core.QualName ModuleName.basics name) []
 
 boolT :: Can.Type
 boolT = Can.TType ModuleName.basics "Bool" []

@@ -59,12 +59,13 @@ lookup name =
 -- invented for one of those would be speculation compiled into the compiler
 -- and checked by nothing, so those primitives have no entry and a @\@prim@
 -- naming one is rejected as not available yet. Each entry lands with the Geng
--- type it names (@docs/m1b-int.md@ §I8 step 4 fills the four widths in).
+-- type it names.
 --
--- The four widths' /types/ are named here before they exist, which costs
--- nothing: a declaration cannot mention a type @core@ has not declared, so
--- @\@prim(\"i64_add\")@ fails to canonicalize its own annotation long before
--- this table is consulted.
+-- The four widths\' /types/ were named here before they existed, which cost
+-- nothing while a declaration could not mention them. They exist as of
+-- @docs/m1b-int.md@ §I13, so every entry below is now reachable and @core@
+-- declares a binding at nearly all of them — the exception is the four
+-- @*_bits@ conversions, which are A9\'s and wait for @m1b-ryu.md@ §Y7.
 primType :: PrimOp -> Maybe Can.Type
 primType op =
   case op of

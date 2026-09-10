@@ -22,9 +22,18 @@
 --     GHC's `Read Double` goes through an exact `Rational` and `fromRat`, which
 --     is round-to-nearest-even, so it meets it.
 --
---   * __Integers are already values__, and stay 'Core.AST.LIntLegacy' until D2
---     lands at M1b. See 'Core.AST.LIntLegacy' for why that is its own
---     constructor rather than a widened `LInt64`.
+--   * __Integers are already values__, and stay 'Core.AST.LIntLegacy' /at an
+--     @Int@/ until D2's flag day at §I8 step 6. See 'Core.AST.LIntLegacy' for
+--     why that is its own constructor rather than a widened `LInt64`.
+--
+-- __A literal takes its width from its type__ (D149, @docs/m1b-int.md@ §I13).
+-- Both integer and float literals are lowered against the type the solver gave
+-- the node, because since §I8 step 4 the type decides what the value /is/: a
+-- @1@ at an @Int64@ is the JavaScript @1n@ and a @1@ at an @Int@ is the
+-- JavaScript @1@, and those are not the same value. Suffixed literals
+-- (@syntax.md@ S5, §I8 step 5) are the way to /pin/ a width; this is what makes
+-- an unsuffixed one mean the right thing at a width it was inferred to have,
+-- which is most of the arithmetic in @Basics@.
 module Core.Lower.Literal
   ( str,
     chr,
@@ -37,8 +46,10 @@ where
 import Core.AST qualified as Core
 import Data.Char qualified as Char
 import Data.Int (Int32)
+import Data.Name qualified as Name
 import Data.Utf8 qualified as Utf8
 import Gren.Float qualified as EF
+import Gren.ModuleName qualified as ModuleName
 import Gren.String qualified as ES
 import Text.Read (readMaybe)
 
@@ -61,19 +72,56 @@ chr text =
           ++ " code points: "
           ++ show decoded
 
-float :: EF.Float -> Core.Literal
-float number =
+-- | A float literal at the width its type says.
+--
+-- @Float32@ narrows here rather than at run time: 'realToFrac' from the exactly
+-- read `Double` to a `Float` is the round-to-nearest the backend's
+-- @Math.fround@ would do, done once at compile time. So @0.1 : Float32@ is the
+-- single-precision value and not the double 0.1 sitting in a @Float32@, which
+-- is the one width bug in this family that would be silent rather than loud.
+float :: Core.Type -> EF.Float -> Core.Literal
+float tipe number =
   let written = Utf8.toChars number
    in case readMaybe written :: Maybe Double of
-        Just value -> Core.LFloat value
+        Just value ->
+          if numericType tipe == Just Name.float32
+            then Core.LFloat32 (realToFrac value)
+            else Core.LFloat value
         Nothing ->
           -- The parser's grammar for a float — digits, an optional fraction, an
           -- optional exponent, at least one of the two — is a subset of
           -- Haskell's, so this is unreachable rather than merely unlikely.
           error ("Core.Lower.Literal.float: cannot read " ++ show written)
 
-int :: Int -> Core.Literal
-int = Core.LIntLegacy . toInteger
+-- | An integer literal at the width its type says.
+--
+-- The @Int@ case is 'Core.AST.LIntLegacy' and stays that way until §I8 step 6
+-- deletes it; the three widths D2 adds are the specified constructors. A
+-- literal whose type is still a /variable/ — the body of a
+-- @f : Num a => a -> a@ that says @x + 1@ — has no width to read, and takes the
+-- @Int@ case. That is `docs/open-items.md`\'s registered hole and not a
+-- decision made here: `classes.md` §0 closes an /ambiguous/ numeric variable
+-- and a rigid one is not ambiguous, so nothing closes it and @Num@ has no
+-- @fromInt@ method for a witness to carry.
+int :: Core.Type -> Int -> Core.Literal
+int tipe n =
+  case numericType tipe of
+    Just name
+      | name == Name.int64 -> Core.LInt64 (fromIntegral n)
+      | name == Name.uint32 -> Core.LUInt32 (fromIntegral n)
+      | name == Name.uint64 -> Core.LUInt64 (fromIntegral n)
+    _ -> Core.LIntLegacy (toInteger n)
+
+-- | The name of the @Basics@ type this literal has, when it has one.
+--
+-- All six numeric types are declared in @Basics@ (D148), so one match answers
+-- for every width. 'Nothing' is a type variable, which is the case above.
+numericType :: Core.Type -> Maybe Name.Name
+numericType tipe =
+  case tipe of
+    Core.TCon (Core.QualName home name) []
+      | home == ModuleName.basics -> Just name
+    _ -> Nothing
 
 -- | Resolve a literal's escapes, and put surrogate pairs back together.
 --

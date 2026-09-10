@@ -251,9 +251,16 @@ literal env pos lit =
   case lit of
     Core.LIntLegacy n -> JS.TrackedInt (_home env) pos (fromInteger n)
     Core.LInt n -> JS.TrackedInt (_home env) pos (fromIntegral n)
-    Core.LInt64 n -> JS.TrackedInt (_home env) pos (fromIntegral n)
+    -- A 64-bit literal is a BigInt literal, which is the digits with an `n`
+    -- after them -- the representation `Generate.CoreJS.Prim` gives both 64-bit
+    -- types. `JS.TrackedFloat` is the node that carries a numeric token
+    -- verbatim; there is no `TrackedBigInt`, and adding one would buy a name
+    -- and nothing else, since every consumer treats the two the same way
+    -- ('isLiteral' below is the only one that looks).
+    Core.LInt64 n -> JS.TrackedFloat (_home env) pos (B.string7 (show n ++ "n"))
+    Core.LUInt64 n -> JS.TrackedFloat (_home env) pos (B.string7 (show n ++ "n"))
+    -- A `UInt32` is an ordinary JavaScript number in `[0, 2^32)`.
     Core.LUInt32 n -> JS.TrackedInt (_home env) pos (fromIntegral n)
-    Core.LUInt64 n -> JS.TrackedInt (_home env) pos (fromIntegral n)
     Core.LFloat d -> JS.TrackedFloat (_home env) pos (Utf8.toBuilder (Literal.float d))
     Core.LFloat32 f -> JS.TrackedFloat (_home env) pos (Utf8.toBuilder (Literal.float (realToFrac f)))
     Core.LString text -> JS.TrackedString (_home env) pos (text_ (Utf8.toChars text))

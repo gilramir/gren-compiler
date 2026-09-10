@@ -447,9 +447,9 @@ expr env (Can.Expr nid region value) =
         Can.Str s ->
           node (Core.ELit (Literal.str s))
         Can.Int n ->
-          node (Core.ELit (Literal.int n))
+          node (Core.ELit (Literal.int tipe n))
         Can.Float f ->
-          node (Core.ELit (Literal.float f))
+          node (Core.ELit (Literal.float tipe f))
         Can.Array items ->
           node (Core.EArray (map (expr env) items))
         Can.Negate inner ->
@@ -881,7 +881,7 @@ pattern env tipe (A.At region p) =
         Can.PStr s ->
           Core.PLit (Literal.str s)
         Can.PInt n ->
-          Core.PLit (Literal.int n)
+          Core.PLit (Literal.int tipe n)
         Can.PCtor home _ union name index args ->
           -- The type Canonical caches on a constructor argument is the one the
           -- constructor was *declared* with, so `Just`'s argument is `a` and

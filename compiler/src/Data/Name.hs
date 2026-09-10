@@ -27,7 +27,11 @@ module Data.Name
     sepBy,
     --
     int,
+    int64,
+    uint32,
+    uint64,
     float,
+    float32,
     bool,
     eqClass,
     ordClass,
@@ -365,6 +369,23 @@ int = fromChars "Int"
 
 float :: Name
 float = fromChars "Float"
+
+-- | D2's other four numeric types, which arrive together at
+-- `docs/m1b-int.md` §I8 step 4. The /type/ of each lives in `Basics` beside
+-- `Int` and `Float`, because `Type.Class.members` names it and `classes.md`
+-- §0's defaulting reads that table; the module of the same name holds the
+-- width's bounds and A10's conversions.
+int64 :: Name
+int64 = fromChars "Int64"
+
+uint32 :: Name
+uint32 = fromChars "UInt32"
+
+uint64 :: Name
+uint64 = fromChars "UInt64"
+
+float32 :: Name
+float32 = fromChars "Float32"
 
 -- | The `Eq` class's name, which implicit structural derivation looks up in
 -- `Basics` rather than in the module's environment (§G37).

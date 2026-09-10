@@ -10,12 +10,20 @@
 -- own. So @i32_div@ is @(a \/ b) | 0@ with a non-zero divisor as a
 -- precondition, and a backend may treat a violation as unreachable.
 --
--- __What is here is what can be declared.__ 'Canonicalize.Prim.primType'
--- carries the four integer widths and both float widths, but @Int64@,
--- @UInt32@, @UInt64@ and @Float32@ are not Gren types yet, so a @\@prim@ at
--- one of those widths cannot canonicalize its own annotation and cannot reach
--- this module. Writing their JavaScript now would be writing code no test
--- could run; it lands with the types, at @docs\/m1b-int.md@ §I8 step 4.
+-- __What is here is what can be declared.__ All six numeric types are Gren
+-- types as of @docs\/m1b-int.md@ §I8 step 4, so every arithmetic, comparison
+-- and bitwise primitive has its JavaScript here. What is still missing is the
+-- four @*_bits@ conversions: nothing declares them, because taking a float
+-- apart is A9's requirement and @docs\/m1b-ryu.md@ §Y7 is what will need it.
+--
+-- __The five representations__, which is the whole of what this module knows
+-- that the rest of the compiler does not: an @Int@ is a number brought back
+-- into range by @| 0@; a @UInt32@ a number brought back by @>>> 0@; an
+-- @Int64@ a BigInt brought back by @BigInt.asIntN(64, x)@; a @UInt64@ a BigInt
+-- brought back by @BigInt.asUintN(64, x)@; a @Float32@ a number rounded by
+-- @Math.fround@. A @Float@ is a number and needs nothing. The rule that picks
+-- each of them is the same one: the host coercion that is exactly the type's
+-- wrap, applied once per operation rather than once per read.
 module Generate.CoreJS.Prim
   ( prim,
     inlines,
@@ -51,7 +59,10 @@ prim :: PrimOp -> [JS.Expr] -> JS.Expr
 prim op args =
   case (op, args) of
     (IntOp I32 p, _) -> int32 p args
-    (FloatOp F64 p, _) -> float64 p args
+    (IntOp U32 p, _) -> uint32 p args
+    (IntOp I64 p, _) -> bigint Signed p args
+    (IntOp U64 p, _) -> bigint Unsigned p args
+    (FloatOp w p, _) -> float w p args
     (ConvOp p, [a]) -> conversion p a
     _ ->
       error $
@@ -96,49 +107,194 @@ int32 p args =
     (IUshr, [a, b]) -> coerce (JS.Infix JS.OpZfRShift a b)
     _ -> arityError (IntOp I32 p) args
 
+-- | A @UInt32@ is a JavaScript number in @[0, 2^32)@, and @>>> 0@ is the
+-- coercion that keeps it there — the same instruction @Int@ uses, read the
+-- other way. @>>> 0@ is also what stock Gren reached for as a /conversion/ to
+-- an unsigned reading, at a type that cannot hold one, and §I12.4 is where
+-- that stopped working: an unsigned reading is a type, not a shift by zero.
+--
+-- The bitwise operators produce a /signed/ 32-bit value, so every one of them
+-- needs the coercion, which is the mirror image of 'int32', where only @>>>@
+-- did.
+uint32 :: IntPrim -> [JS.Expr] -> JS.Expr
+uint32 p args =
+  case (p, args) of
+    (IAdd, [a, b]) -> unsign (JS.Infix JS.OpAdd a b)
+    (ISub, [a, b]) -> unsign (JS.Infix JS.OpSub a b)
+    -- `Math.imul` gives the low 32 bits as a signed value, which is the same
+    -- bit pattern; `>>> 0` reads it unsigned. `a * b` would lose the low bits
+    -- above 2^53, which is `core`'s own `Random` bug (§I12.5).
+    (IMul, [a, b]) -> unsign (JS.Call (global "Math" "imul") [a, b])
+    (INeg, [a]) -> unsign (JS.Prefix JS.PrefixNegate a)
+    -- Both operands are non-negative, so `/` then `>>> 0` truncates toward
+    -- zero, which is what a truncating division of two non-negative numbers
+    -- is. `%` on non-negative numbers is already in range.
+    (IDiv, [a, b]) -> unsign (JS.Infix JS.OpDiv a b)
+    (IRem, [a, b]) -> JS.Infix JS.OpMod a b
+    (IEq, [a, b]) -> JS.Infix JS.OpEq a b
+    (ILt, [a, b]) -> JS.Infix JS.OpLt a b
+    (IAnd, [a, b]) -> unsign (JS.Infix JS.OpBitwiseAnd a b)
+    (IOr, [a, b]) -> unsign (JS.Infix JS.OpBitwiseOr a b)
+    (IXor, [a, b]) -> unsign (JS.Infix JS.OpBitwiseXor a b)
+    (INot, [a]) -> unsign (JS.Prefix JS.PrefixComplement a)
+    (IShl, [a, b]) -> unsign (JS.Infix JS.OpLShift a b)
+    (IUshr, [a, b]) -> JS.Infix JS.OpZfRShift a b
+    -- A11: the two right shifts coincide on an unsigned type, so `Bits UInt32`
+    -- binds both to `u32_ushr` and `Core.Prim.allPrims` has no `u32_shr` to
+    -- reach this case.
+    (IShr, _) -> arityError (IntOp U32 IShr) args
+    _ -> arityError (IntOp U32 p) args
+
+-- | Which of the two 64-bit types is being generated, and so which of
+-- @BigInt@'s two truncations wraps it.
+data Sign = Signed | Unsigned
+
+-- | @Int64@ and @UInt64@ are JavaScript BigInts, which is the only exact
+-- 64-bit integer the host has — @int64-migration.md@ §M2 measured the cost and
+-- D2 is the decision that keeps it off @Int@.
+--
+-- @BigInt.asIntN(64, x)@ and @BigInt.asUintN(64, x)@ are the wrap, and they are
+-- applied where the operation can leave the range and nowhere else: @&@, @|@,
+-- @^@, @%@ and @\>\>@ cannot, and neither can @~@ on a signed value.
+bigint :: Sign -> IntPrim -> [JS.Expr] -> JS.Expr
+bigint sign p args =
+  let wrap = wrap64 sign
+   in case (p, args) of
+        (IAdd, [a, b]) -> wrap (JS.Infix JS.OpAdd a b)
+        (ISub, [a, b]) -> wrap (JS.Infix JS.OpSub a b)
+        (IMul, [a, b]) -> wrap (JS.Infix JS.OpMul a b)
+        (INeg, [a]) -> wrap (JS.Prefix JS.PrefixNegate a)
+        -- BigInt division truncates toward zero, which is what `i64_div` is.
+        -- The wrap is A6's one overflowing quotient, `minValue / -1n`.
+        (IDiv, [a, b]) -> wrap (JS.Infix JS.OpDiv a b)
+        (IRem, [a, b]) -> JS.Infix JS.OpMod a b
+        (IEq, [a, b]) -> JS.Infix JS.OpEq a b
+        (ILt, [a, b]) -> JS.Infix JS.OpLt a b
+        (IAnd, [a, b]) -> JS.Infix JS.OpBitwiseAnd a b
+        (IOr, [a, b]) -> JS.Infix JS.OpBitwiseOr a b
+        (IXor, [a, b]) -> JS.Infix JS.OpBitwiseXor a b
+        -- `~x` on a BigInt is `-x - 1`, which stays in a signed 64-bit range
+        -- and leaves an unsigned one.
+        (INot, [a]) ->
+          case sign of
+            Signed -> JS.Prefix JS.PrefixComplement a
+            Unsigned -> wrap (JS.Prefix JS.PrefixComplement a)
+        -- A shift count is an `Int` at every width (A5), so it is a number and
+        -- has to be widened: JavaScript refuses to mix a BigInt and a number in
+        -- one operator.
+        (IShl, [a, b]) -> wrap (JS.Infix JS.OpLShift a (toBigInt b))
+        -- `>>` on a BigInt is arithmetic, so it is `i64_shr` as written and
+        -- `u64_ushr` by the value being non-negative.
+        (IShr, [a, b]) -> JS.Infix JS.OpSpRShift a (toBigInt b)
+        (IUshr, [a, b]) ->
+          case sign of
+            Unsigned -> JS.Infix JS.OpSpRShift a (toBigInt b)
+            -- BigInt has no `>>>`: an arbitrary-precision integer has no top
+            -- bit to shift into. The unsigned reading is the conversion, and
+            -- it is the same pair `i64_as_u64` and `u64_as_i64` name.
+            Signed ->
+              wrap
+                ( JS.Infix
+                    JS.OpSpRShift
+                    (asUintN 64 a)
+                    (toBigInt b)
+                )
+        _ -> arityError (IntOp (sign64 sign) p) args
+
+sign64 :: Sign -> IntType
+sign64 Signed = I64
+sign64 Unsigned = U64
+
+wrap64 :: Sign -> JS.Expr -> JS.Expr
+wrap64 Signed = asIntN 64
+wrap64 Unsigned = asUintN 64
+
 -- FLOATS
 
--- | A @Float@ is a JavaScript number, so every one of these is the machine
--- operation with nothing around it. @eq@ and @lt@ are __IEEE__ (C13): @NaN@ is
--- unequal to itself and unordered, and A2's lawful @Eq@\/@Ord@ are Geng source
--- over these plus @isnan@.
-float64 :: FloatPrim -> [JS.Expr] -> JS.Expr
-float64 p args =
-  case (p, args) of
-    (FAdd, [a, b]) -> JS.Infix JS.OpAdd a b
-    (FSub, [a, b]) -> JS.Infix JS.OpSub a b
-    (FMul, [a, b]) -> JS.Infix JS.OpMul a b
-    (FDiv, [a, b]) -> JS.Infix JS.OpDiv a b
-    (FNeg, [a]) -> JS.Prefix JS.PrefixNegate a
-    (FAbs, [a]) -> JS.Call (global "Math" "abs") [a]
-    (FSqrt, [a]) -> JS.Call (global "Math" "sqrt") [a]
-    (FFloor, [a]) -> JS.Call (global "Math" "floor") [a]
-    (FCeil, [a]) -> JS.Call (global "Math" "ceil") [a]
-    (FTrunc, [a]) -> JS.Call (global "Math" "trunc") [a]
-    (FEq, [a, b]) -> JS.Infix JS.OpEq a b
-    (FLt, [a, b]) -> JS.Infix JS.OpLt a b
-    -- `a !== a` rather than `isNaN(a)`: `isNaN` coerces its argument, and this
-    -- is the idiom every JavaScript engine recognizes.
-    (FIsNan, [a]) -> JS.Infix JS.OpNe a a
-    (FIsInf, [a]) ->
-      JS.Infix
-        JS.OpOr
-        (JS.Infix JS.OpEq a infinity)
-        (JS.Infix JS.OpEq a (JS.Prefix JS.PrefixNegate infinity))
-    _ -> arityError (FloatOp F64 p) args
+-- | A @Float@ is a JavaScript number, so at @F64@ every one of these is the
+-- machine operation with nothing around it. @eq@ and @lt@ are __IEEE__ (C13):
+-- @NaN@ is unequal to itself and unordered, and A2's lawful @Eq@\/@Ord@ are
+-- Geng source over these plus @isnan@.
+--
+-- A @Float32@ is a JavaScript number too, rounded to single precision after
+-- every operation that can leave it — which is exactly what @Math.fround@ is,
+-- and what A8 asks of the type. Five operations need the rounding and the rest
+-- would be wrong to imply it: negation and absolute value touch only the sign
+-- bit, @floor@, @ceil@ and @trunc@ of a single-precision value are
+-- single-precision already, and the comparisons and predicates answer a
+-- @Bool@.
+float :: FloatType -> FloatPrim -> [JS.Expr] -> JS.Expr
+float w p args =
+  let narrow = case w of
+        F64 -> id
+        F32 -> fround
+   in case (p, args) of
+        (FAdd, [a, b]) -> narrow (JS.Infix JS.OpAdd a b)
+        (FSub, [a, b]) -> narrow (JS.Infix JS.OpSub a b)
+        (FMul, [a, b]) -> narrow (JS.Infix JS.OpMul a b)
+        (FDiv, [a, b]) -> narrow (JS.Infix JS.OpDiv a b)
+        (FNeg, [a]) -> JS.Prefix JS.PrefixNegate a
+        (FAbs, [a]) -> JS.Call (global "Math" "abs") [a]
+        (FSqrt, [a]) -> narrow (JS.Call (global "Math" "sqrt") [a])
+        (FFloor, [a]) -> JS.Call (global "Math" "floor") [a]
+        (FCeil, [a]) -> JS.Call (global "Math" "ceil") [a]
+        (FTrunc, [a]) -> JS.Call (global "Math" "trunc") [a]
+        (FEq, [a, b]) -> JS.Infix JS.OpEq a b
+        (FLt, [a, b]) -> JS.Infix JS.OpLt a b
+        -- `a !== a` rather than `isNaN(a)`: `isNaN` coerces its argument, and
+        -- this is the idiom every JavaScript engine recognizes.
+        (FIsNan, [a]) -> JS.Infix JS.OpNe a a
+        (FIsInf, [a]) ->
+          JS.Infix
+            JS.OpOr
+            (JS.Infix JS.OpEq a infinity)
+            (JS.Infix JS.OpEq a (JS.Prefix JS.PrefixNegate infinity))
+        _ -> arityError (FloatOp w p) args
 
 -- CONVERSIONS
 
--- | Only the conversions between types @core@ has today. The rest are at
--- widths that do not exist yet -- see this module's header.
+-- | A10's raw forms. Saturation, @NaN -> 0@ and every @*Checked@ sibling are
+-- Geng in the four width modules; what is here is the truncation or the
+-- widening itself, with the precondition C13 gives it.
+--
+-- The four @*_bits@ conversions are not here. Nothing declares them: taking a
+-- float apart is A9's requirement, and @docs\/m1b-ryu.md@ §Y7's port is what
+-- will need it. They stay a hole rather than a guess, which is
+-- 'Canonicalize.Prim.primType''s rule read at the other end of the pipeline.
 conversion :: ConvPrim -> JS.Expr -> JS.Expr
 conversion p a =
   case p of
-    -- Exact and free: a 32-bit integer is already a double.
+    -- INTEGER WIDENING. `BigInt(x)` is exact for any number that is an
+    -- integer, which both 32-bit types are by construction.
+    I32ToI64 -> toBigInt a
+    U32ToI64 -> toBigInt a
+    U32ToU64 -> toBigInt a
+    -- INTEGER NARROWING -- the low bits, which is what A10's `*Wrap` family is
+    -- written over. `Number` of a 32-bit BigInt is exact.
+    I64ToI32 -> fromBigInt (asIntN 32 a)
+    U64ToU32 -> fromBigInt (asUintN 32 a)
+    -- SAME-WIDTH REINTERPRETATION. At 32 bits these are the two coercions
+    -- themselves, read against each other; at 64 they are `BigInt`'s two
+    -- truncations. None of the four changes a bit pattern.
+    I32AsU32 -> unsign a
+    U32AsI32 -> coerce a
+    I64AsU64 -> asUintN 64 a
+    U64AsI64 -> asIntN 64 a
+    -- INTEGER TO FLOAT. Exact below 2^53 and round-to-nearest-even above it,
+    -- which is what `Number` of a BigInt does and what A10 says these do.
     I32ToF64 -> a
-    -- Precondition: finite and in range, so `| 0` is the truncation itself
-    -- rather than a wrap. A10's saturation and `NaN -> 0` are Geng.
+    I64ToF64 -> fromBigInt a
+    U64ToF64 -> fromBigInt a
+    -- FLOAT TO INTEGER. Precondition: finite and in range, so these truncate
+    -- rather than wrap. `BigInt` refuses a non-integer, so the `Math.trunc` is
+    -- the conversion and not a tidying-up.
     F64ToI32Trunc -> coerce a
+    F64ToI64Trunc -> toBigInt (JS.Call (global "Math" "trunc") [a])
+    -- FLOAT WIDTHS. Widening is free -- a single-precision value is already a
+    -- double -- and narrowing is the same `Math.fround` every `f32` operation
+    -- ends with.
+    F32ToF64 -> a
+    F64ToF32 -> fround a
     -- A `Char` is a one-character JavaScript string, which is what
     -- `_Char_toCode` and `_Char_fromCode` in `core`'s kernel already assume.
     -- `chr` is the kernel's own wrapper, and it is what boxes the string in
@@ -152,13 +308,40 @@ conversion p a =
       error $
         "Generate.CoreJS.Prim: no JavaScript for "
           ++ Name.toChars (Prim.primVarName (ConvOp p))
-          ++ " yet (docs/m1b-int.md §I8)"
+          ++ " yet (docs/m1b-ryu.md §Y7)"
 
 -- PIECES
 
 -- | @x | 0@ -- the coercion that makes an @Int@ 32 bits wide.
 coerce :: JS.Expr -> JS.Expr
 coerce e = JS.Infix JS.OpBitwiseOr e (JS.Int 0)
+
+-- | @x >>> 0@ -- the same instruction read unsigned, which is what makes a
+-- @UInt32@ 32 bits wide.
+unsign :: JS.Expr -> JS.Expr
+unsign e = JS.Infix JS.OpZfRShift e (JS.Int 0)
+
+-- | @Math.fround(x)@ -- the rounding that makes a @Float32@ single precision.
+fround :: JS.Expr -> JS.Expr
+fround e = JS.Call (global "Math" "fround") [e]
+
+-- | @BigInt(x)@ and @Number(x)@ -- the two crossings between a JavaScript
+-- number and a JavaScript BigInt. A shift count is an `Int` at every width
+-- (A5), so 'toBigInt' is also what a 64-bit shift does to its second argument:
+-- JavaScript refuses to mix the two in one operator.
+toBigInt :: JS.Expr -> JS.Expr
+toBigInt e = JS.Call (JS.Ref (JsName.fromLocalHumanReadable "BigInt")) [e]
+
+fromBigInt :: JS.Expr -> JS.Expr
+fromBigInt e = JS.Call (JS.Ref (JsName.fromLocalHumanReadable "Number")) [e]
+
+-- | @BigInt.asIntN(w, x)@ and @BigInt.asUintN(w, x)@ -- the wrap at a 64-bit
+-- type, and the truncation at a narrowing conversion.
+asIntN :: Int -> JS.Expr -> JS.Expr
+asIntN w e = JS.Call (global "BigInt" "asIntN") [JS.Int w, e]
+
+asUintN :: Int -> JS.Expr -> JS.Expr
+asUintN w e = JS.Call (global "BigInt" "asUintN") [JS.Int w, e]
 
 infinity :: JS.Expr
 infinity = JS.Float "Infinity"

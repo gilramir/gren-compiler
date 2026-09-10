@@ -114,7 +114,9 @@ constrainHelp rtv _nid region expression expected =
         var <- mkFlexNumber
         return $ exists [var] $ CEqual region E.Number (VarN var) expected
     Can.Float _ ->
-      return $ CEqual region Float Type.float expected
+      do
+        var <- mkFlexFractional
+        return $ exists [var] $ CEqual region Float (VarN var) expected
     Can.Array elements ->
       constrainList rtv region elements expected
     Can.Negate expr ->

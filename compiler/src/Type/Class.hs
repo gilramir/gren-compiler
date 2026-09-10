@@ -32,8 +32,8 @@
 -- promoted it rather than dropping it with `++`, so `Basics.append` is its
 -- method and `String` and `Array a` are ordinary instances (§G34, §G35). What is
 -- left here is `classes.md` §1.2's four, and all four are in as of D145
--- (`docs/m1b-int.md` §I12). `Num` grows D2's other three integer types at step
--- 4, and the three that arrived with D145 grow with it.
+-- (`docs/m1b-int.md` §I12). All four grew D2's other four numeric types at §I8
+-- step 4, so the membership table below is now the whole of `classes.md` §1.2.
 module Type.Class
   ( Class (..),
     Classes,
@@ -190,7 +190,11 @@ entailedBy (Classes have) (Classes want) =
 -- satisfied is an error where it is created, not where it is finally used.
 --
 -- Decidable because the universe is the privileged list: `Int`, `Float`,
--- `String`, `Char` and `Array`.
+-- `String`, `Char` and `Array`. D2's four widths are deliberately not in it and
+-- need not be: each one's class set is exactly `Int`'s or exactly `Float`'s, so
+-- a set of classes that any of them satisfies is a set one of the two listed
+-- types satisfies. A future member with a class set that is neither would have
+-- to be added here as well as to 'members'.
 inhabited :: Classes -> Bool
 inhabited classes =
   let cs = toList classes
@@ -248,23 +252,37 @@ candidates =
 -- that list against this one. So the membership table, the unifier, §0's
 -- defaulting and `core`'s instances all read one list.
 --
--- Three of the four hold one type each today, and that is D2's whole shape: the
--- integer classes are the ones @Int64@, @UInt32@ and @UInt64@ join, and
--- @Fractional@ is waiting for @Float32@. They join at @docs/m1b-int.md@ §I8
--- step 4, on the day their instances do.
+-- All six numeric types are in as of §I8 step 4. The three integer classes hold
+-- exactly the same four types, which is A11 and A5 read together: every integer
+-- type divides, takes a remainder and does bitwise arithmetic, so @Integral@ and
+-- @Bits@ have one membership list and @Num@ is that list plus the two floats.
 members :: Class -> [(ModuleName.Canonical, Name.Name)]
 members c =
   case c of
     Num ->
       [ (ModuleName.basics, Name.int),
-        (ModuleName.basics, Name.float)
+        (ModuleName.basics, Name.int64),
+        (ModuleName.basics, Name.uint32),
+        (ModuleName.basics, Name.uint64),
+        (ModuleName.basics, Name.float),
+        (ModuleName.basics, Name.float32)
       ]
     Integral ->
-      [(ModuleName.basics, Name.int)]
+      [ (ModuleName.basics, Name.int),
+        (ModuleName.basics, Name.int64),
+        (ModuleName.basics, Name.uint32),
+        (ModuleName.basics, Name.uint64)
+      ]
     Fractional ->
-      [(ModuleName.basics, Name.float)]
+      [ (ModuleName.basics, Name.float),
+        (ModuleName.basics, Name.float32)
+      ]
     Bits ->
-      [(ModuleName.basics, Name.int)]
+      [ (ModuleName.basics, Name.int),
+        (ModuleName.basics, Name.int64),
+        (ModuleName.basics, Name.uint32),
+        (ModuleName.basics, Name.uint64)
+      ]
 
 -- | Whether a type with no arguments belongs to a class.
 admitsAtom :: Class -> ModuleName.Canonical -> Name.Name -> Bool
