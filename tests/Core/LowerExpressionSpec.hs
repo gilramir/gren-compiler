@@ -237,10 +237,21 @@ spec = do
         other ->
           expectationFailure ("unexpected shape: " ++ show other)
 
-    it "makes negate a call of Basics.negate" $
-      case value [(1, intT), (2, intT)] (at 1 (Can.Negate (at 2 (Can.Int 1)))) of
+    it "makes negate a call of the Num instance the elaborator picked" $
+      -- D144, `docs/m1b-int.md` §I11. `-x` used to name `Basics.negate`
+      -- outright, which worked while `Num` had no methods and no witness. It is
+      -- a method now, so unary minus resolves at its own node exactly as an
+      -- operator does, and there is no global left to name.
+      case negated (Resolve.Instantiated ModuleName.basics "$i$Num$Int$negate" []) of
         Core.EApp (Core.Expr (Core.EGlobal name) _ _) [_] ->
-          name `shouldBe` qual' ModuleName.basics "negate"
+          name `shouldBe` qual' ModuleName.basics "$i$Num$Int$negate"
+        other ->
+          expectationFailure ("unexpected shape: " ++ show other)
+
+    it "takes negate out of the witness at a constrained variable" $
+      case negated (Resolve.Projected (Resolve.FromParam "$w0" intT) "negate") of
+        Core.EApp (Core.Expr (Core.EAccess _ method) _ _) [_] ->
+          method `shouldBe` "negate"
         other ->
           expectationFailure ("unexpected shape: " ++ show other)
 
@@ -284,6 +295,14 @@ spec = do
           expectationFailure ("unexpected shape: " ++ show other)
 
 -- FIXTURES
+
+-- | A unary minus, lowered under one elaboration (D144).
+negated :: Resolve.Use -> Core.Expr_
+negated use =
+  Core._exprValue $
+    Lower.expr
+      (env [(1, intT), (2, intT)]) {Lower._uses = Map.singleton (Can.NodeId 1) use}
+      (at 1 (Can.Negate (at 2 (Can.Int 1))))
 
 -- | A class-method node, lowered under one elaboration.
 lowered :: Resolve.Use -> Core.Expr

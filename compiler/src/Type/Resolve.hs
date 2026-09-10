@@ -195,7 +195,17 @@ data Env = Env
     _envTypes :: Map.Map Can.NodeId Can.Type,
     -- | What `classes.md` §0 makes of each constrained type variable, from the
     -- solver. A variable no candidate admits has no entry.
-    _envDefaults :: Map.Map Name Can.Type
+    _envDefaults :: Map.Map Name Can.Type,
+    -- | The annotation the solver produced for each top-level definition,
+    -- context included.
+    --
+    -- Only the __closed__ half of a context is in one, because an open class
+    -- never reaches the unifier (D130) — and until D144 that half cost
+    -- nothing, so an unannotated definition could publish it without this pass
+    -- ever hearing about it (§G32.3). A closed constraint is a witness now, so
+    -- what the solver found has to reach 'defWith' or the definition binds a
+    -- parameter its callers do not pass.
+    _envSolved :: Map.Map Name Can.Annotation
   }
 
 -- THE WITNESS RECORD
@@ -227,19 +237,19 @@ witnessType env cls tipe =
           (\(Can.Forall _ methodType) -> Type.substitute (Map.singleton param tipe) methodType)
           methods
 
--- | The witness parameters a context binds, in 'Can.witnessOrder'.
+-- | The witness parameters a context binds, in 'Can.contextOrder'.
 --
 -- The names are the caller's, because they have to be distinct down a whole
 -- nesting chain; the types are computed here.
 --
--- 'Can.witnessOrder' and not 'Can.contextOrder': a closed class binds nothing
--- (D130, D135). `Num a =>` is enforced by unification, has no instances and no
--- methods, so there is no witness to pass and a definition constrained only by
--- closed classes takes exactly the arguments it is written with.
+-- __Every__ constraint binds one, closed classes included, which is D144 and
+-- was not true until it. `Num a =>` was discharged by unification alone while
+-- `Num` had no methods; `add` is a method now, so a definition constrained on
+-- `Num` is handed the instance to take it out of like any other.
 witnessParams :: Env -> [Name] -> Can.FreeVars -> [(Name, Can.Type)]
 witnessParams env names context =
   [ (name, witnessType env cls (Can.TVar var))
-  | (name, (var, cls)) <- zip names (Can.witnessOrder context)
+  | (name, (var, cls)) <- zip names (Can.contextOrder context)
   ]
 
 -- MATCHING
@@ -315,7 +325,7 @@ witnessFor env bound region wanted because cls tipe =
             args' <-
               traverse
                 (\(var, ctxCls) -> witnessFor env bound region wanted deeper ctxCls (under sub var))
-                (Can.witnessOrder (Can._ih_context head_))
+                (Can.contextOrder (Can._ih_context head_))
             Right $
               FromInstance
                 (Can._ih_home head_)
@@ -588,7 +598,7 @@ run env modul =
   let final = converge env modul Map.empty
       ofInstance i =
         let context = Can._ih_context (Can._in_head i)
-         in witnessParams env (localNames (length (Can.witnessOrder context))) context
+         in witnessParams env (localNames (length (Can.contextOrder context))) context
    in if not (Map.null (_pDefaults final))
         then -- Before the errors, and they are ignored: an error at a variable
         -- that is about to become @Int@ is an error about a type the module
@@ -698,9 +708,10 @@ defWith published env tops scope d =
   case d of
     Can.Def nid _ args body ->
       do
+        let quantifies = Quantifier nid (not (null args)) (typeVars (typeOf env nid)) d published
+        mapM_ (solverConstraint env quantifies) (solverContext env published)
         context <- gets (Map.findWithDefault Map.empty nid . _pInferred)
         scope' <- bindWitnesses env context (nodeIdOf body) scope
-        let quantifies = Quantifier nid (not (null args)) (typeVars (typeOf env nid)) d published
         let inferable = _scopeInferable scope ++ [quantifies]
         expr env tops (bindPatterns args scope' {_scopeInferable = inferable, _scopeEnclosing = Just d}) body
     Can.TypedDef _ freeVars args body _ ->
@@ -709,12 +720,46 @@ defWith published env tops scope d =
         let rigid = Set.union (Map.keysSet freeVars) (_scopeRigid scope)
         expr env tops (bindPatterns (map fst args) scope' {_scopeEnclosing = Just d, _scopeRigid = rigid}) body
 
+-- | The closed constraints the solver put on a definition's own annotation.
+--
+-- Empty for anything but a published top-level definition: a @let@ definition's
+-- annotation is 'annotationOf' and is built out of this pass's own answers, so
+-- there is nothing there this pass has not seen.
+solverContext :: Env -> Maybe Name -> [(Name, Can.Class)]
+solverContext env published =
+  case published >>= (`Map.lookup` _envSolved env) of
+    Just (Can.Forall freeVars _) -> Can.contextOrder freeVars
+    Nothing -> []
+
+-- | One of them, answered the way §G33 answers an inferred open constraint.
+--
+-- __The two halves of a context stopped being different with D144__, and this
+-- is where that shows. A closed constraint used to be discharged by
+-- unification and cost nothing, so §G32.3 could let an unannotated /value/
+-- publish one — @zero = 0@ stayed @Num a => a@ and was used at both members.
+-- It costs a witness now, and a value that grows a witness parameter is a
+-- function (§G33.2), so §0's rule closes its variable instead. That is not a
+-- new rule: it is the rule the open half has always had, reaching the half
+-- that was exempt.
+--
+-- A function keeps its constraint and binds a parameter for it. That case is
+-- usually redundant — a body that calls @-@ raises 'E.NotConstrained' and
+-- 'refuse' attributes the same class — but not always: @zero@ is the shape
+-- whose body asks for nothing at all.
+solverConstraint :: Env -> Quantifier -> (Name, Can.Class) -> Walk ()
+solverConstraint env q (var, cls)
+  | _qFunction q = attribute (_qDef q) (_qVars q) var cls
+  | otherwise =
+      case Map.lookup var (_envDefaults env) of
+        Just tipe -> close q var tipe
+        Nothing -> return ()
+
 -- | Give a definition's context fresh witness parameters, record them for the
 -- lowering, and put them in scope for the body.
 bindWitnesses :: Env -> Can.FreeVars -> Can.NodeId -> Scope -> Walk Scope
 bindWitnesses env context bodyNid scope =
   do
-    let order = Can.witnessOrder context
+    let order = Can.contextOrder context
     names <- freshNames (length order)
     modify' $ \p ->
       p {_pParams = Map.insert bodyNid (witnessParams env names context) (_pParams p)}
@@ -793,7 +838,10 @@ expr env tops scope (Can.Expr nid region value) =
             go left
             go right
         Can.Array items -> mapM_ go items
-        Can.Negate inner -> go inner
+        Can.Negate inner ->
+          do
+            negation env scope nid region (typeOf env (nodeIdOf inner)) (typeOf env nid)
+            go inner
         Can.Lambda args body -> expr env tops (bindPatterns args scope) body
         Can.Call func args -> mapM_ go (func : args)
         Can.If branches final ->
@@ -859,7 +907,7 @@ constrainedAt ::
   Can.Type ->
   Walk ()
 constrainedAt env scope nid region wanted (Can.Forall freeVars declared) actual =
-  case Can.witnessOrder freeVars of
+  case Can.contextOrder freeVars of
     [] ->
       return ()
     context ->
@@ -869,6 +917,29 @@ constrainedAt env scope nid region wanted (Can.Forall freeVars declared) actual 
               <$> traverse
                 (\(var, cls) -> witnessFor env (_scopeParams scope) region wanted [] cls (under sub var))
                 context
+
+-- | Unary minus, which is 'Basics.negate' at the operand's type.
+--
+-- @-x@ is syntax rather than a name, so nothing about it went through the
+-- environment and there is no 'Can.VarMethod' to carry the class: this reads
+-- the declaration out of the environment instead, which is what keeps it from
+-- being a second opinion about what @negate@\'s signature is. Until D144 the
+-- lowering could name @Basics.negate@ as a global, because it was a binding
+-- constrained only by a closed class; it is a method now and a method is not a
+-- binding (§G19.2), so this node resolves exactly as an operator does.
+--
+-- No class declaration and no such method means a `core` that does not declare
+-- one, which is a broken `core` rather than a program error — 'Core.Lower' says
+-- so at the node that then has no answer.
+negation :: Env -> Scope -> Can.NodeId -> A.Region -> Can.Type -> Can.Type -> Walk ()
+negation env scope nid region operand result =
+  let cls = Can.Class ModuleName.basics Name.num
+   in case Map.lookup cls (_envClasses env) of
+        Just (Can.ClassDecl param methods)
+          | Just annotation <- Map.lookup Name.negate methods ->
+              methodUse env scope nid region cls param Name.negate annotation (Can.TLambda operand result)
+        _ ->
+          return ()
 
 -- | A use of a class method.
 --
@@ -888,7 +959,7 @@ methodUse ::
   Walk ()
 methodUse env scope nid region cls param name (Can.Forall freeVars declared) actual =
   let sub = match declared actual Map.empty
-      others = [c | (v, c) <- Can.witnessOrder freeVars, (v, c) /= (param, cls)]
+      others = [c | (v, c) <- Can.contextOrder freeVars, (v, c) /= (param, cls)]
       wanted = E.ForMethod name
    in case others of
         extra : _ ->

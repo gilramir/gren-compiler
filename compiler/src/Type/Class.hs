@@ -47,6 +47,7 @@ module Type.Class
     inhabited,
     defaultsTo,
     admitsAtom,
+    members,
     arrayObligations,
   )
 where
@@ -226,12 +227,29 @@ candidates =
 
 -- MEMBERSHIP
 
+-- | Every type in a class, which is what "closed" means.
+--
+-- One list, and 'admitsAtom' is a lookup in it. Two lists is what §G43.3 cost a
+-- checkpoint — `Type.Resolve.isStructural` and `Canonicalize.Derive` came apart
+-- saying the same thing twice — and D144 gives this one a second reader:
+-- `core` writes an instance per member now, and `Canonicalize.Module` checks
+-- that list against this one. So the membership table, the unifier, §0's
+-- defaulting and `core`'s instances all read the same seven words.
+--
+-- @Int64@, @UInt32@, @UInt64@ and @Float32@ join here, at
+-- @docs/m1b-int.md@ §I8 step 4, on the day their instances do.
+members :: Class -> [(ModuleName.Canonical, Name.Name)]
+members c =
+  case c of
+    Num ->
+      [ (ModuleName.basics, Name.int),
+        (ModuleName.basics, Name.float)
+      ]
+
 -- | Whether a type with no arguments belongs to a class.
 admitsAtom :: Class -> ModuleName.Canonical -> Name.Name -> Bool
 admitsAtom c home name =
-  case c of
-    Num ->
-      isInt home name || isFloat home name
+  (home, name) `elem` members c
 
 -- | Whether `Array a` belongs to a class, and what that costs its element.
 --
@@ -245,11 +263,3 @@ arrayObligations c =
   case c of
     Num ->
       Nothing
-
-isInt :: ModuleName.Canonical -> Name.Name -> Bool
-isInt home name =
-  home == ModuleName.basics && name == Name.int
-
-isFloat :: ModuleName.Canonical -> Name.Name -> Bool
-isFloat home name =
-  home == ModuleName.basics && name == Name.float

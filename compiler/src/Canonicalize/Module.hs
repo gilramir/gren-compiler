@@ -23,6 +23,7 @@ import Control.Monad (foldM)
 import Data.Graph qualified as Graph
 import Data.Index qualified as Index
 import Data.Map qualified as Map
+import Data.Maybe qualified as Maybe
 import Data.Name qualified as Name
 import Gren.Interface qualified as I
 import Gren.ModuleName qualified as ModuleName
@@ -31,6 +32,7 @@ import Reporting.Annotation qualified as A
 import Reporting.Error.Canonicalize qualified as Error
 import Reporting.Result qualified as Result
 import Reporting.Warning qualified as W
+import Type.Class qualified as Class
 
 -- RESULT
 
@@ -76,7 +78,47 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
         (importedInstances ifaces)
         written
 
+    checkClosedClassesCovered home (fmap snd classes) cclasses cinstances
+
     return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops ceffects
+
+-- | Every member of a closed class this module declares has an instance here.
+--
+-- §I3's third rule, and §G43.3's lesson applied before it costs anything. A
+-- closed class is two statements of the same fact: the membership table in
+-- "Type.Class", which the unifier and `classes.md` §0's defaulting read, and
+-- the instances `core` writes, which is where the methods actually are. Nothing
+-- makes them agree, and the last pair of lists that said the same thing twice
+-- came apart for a whole checkpoint.
+--
+-- The direction checked is the one that breaks a program: a member with no
+-- instance is a type the unifier admits and the elaborator cannot find a
+-- witness for, which is a `NO INSTANCE` at whatever unlucky call site reaches
+-- it first. The other direction cannot happen — an instance whose head is not a
+-- member would have to be written in `core`, and 'Type.Class.members' is the
+-- list its author was reading.
+checkClosedClassesCovered ::
+  ModuleName.Canonical ->
+  [A.Located Src.Class] ->
+  Map.Map Name.Name Can.ClassDecl ->
+  Map.Map Can.InstanceKey Can.Instance ->
+  Result i w ()
+checkClosedClassesCovered home classes cclasses cinstances =
+  let regionOf name =
+        Maybe.listToMaybe
+          [region | A.At _ (Src.Class (A.At region declared) _ _ _) <- classes, declared == name]
+      missing =
+        [ (region, className, memberName)
+        | (className, _) <- Map.toList cclasses,
+          Just cls <- [Class.fromDeclared home className],
+          Just region <- [regionOf className],
+          (memberHome, memberName) <- Class.members cls,
+          not (Map.member (Can.InstanceKey (Can.Class home className) memberHome memberName) cinstances)
+        ]
+   in case missing of
+        [] -> Result.ok ()
+        (region, className, memberName) : _ ->
+          Result.throw (Error.ClosedClassMissingInstance region className memberName)
 
 -- | The instances this module's imports make visible.
 --

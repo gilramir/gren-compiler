@@ -122,6 +122,9 @@ environment =
     Map.empty
     Map.empty
     Map.empty
+    -- The solver's own annotations, which this file's module has none of: every
+    -- definition here is written out by hand (D144).
+    Map.empty
 
 -- | A witness, with only what this file is asking about: an instance's name and
 -- what it was applied to, or a parameter's name. The types and modules on the

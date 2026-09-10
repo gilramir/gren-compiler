@@ -40,6 +40,7 @@ module Generate.CoreJS.Expression
 where
 
 import Core.AST qualified as Core
+import Core.Prim qualified as CorePrim
 import Data.ByteString.Builder qualified as B
 import Data.Index qualified as Index
 import Data.IntMap qualified as IntMap
@@ -73,6 +74,17 @@ data Env = Env
     -- through @A2@. `Generate.JavaScript.makeArgLookup` reads the same thing off
     -- the graph.
     _arities :: Map Core.QualName Int,
+    -- | Every top-level binding whose whole body is one primitive applied to
+    -- its own parameters, and which primitive that is.
+    --
+    -- A @\@prim@ declaration lowers to exactly that shape (C13, D143), so this
+    -- is the set of them plus anything that happens to be written the same way.
+    -- A /saturated/ call to one is the primitive at the call site's arguments,
+    -- which is why @Bitwise.and a b@ is @a & b@ and @x + 1@ at an `Int` is
+    -- @(x + 1) | 0@ rather than two calls to reach the same operator. The
+    -- rewrite is 'call''s and 'Generate.CoreJS.Prim.inlines' says which
+    -- primitives are eligible.
+    _prims :: Map Core.QualName CorePrim.PrimOp,
     -- | The joins in scope, and how to enter each one. See 'joins'.
     _tails :: Map Name Join,
     -- | The module being generated, which is what the source map records as the
@@ -441,6 +453,7 @@ call :: Env -> A.Position -> Core.Expr -> [Core.Expr] -> JS.Expr
 call env pos fn args =
   case Core._exprValue fn of
     Core.EGlobal q@(Core.QualName (ModuleName.Canonical pkg raw) name)
+      | Just op <- primAt env q args -> Prim.prim op (map (jsExpr env) args)
       | pkg == Pkg.core && raw == Name.basics -> basicsCall env pos q name args
       | pkg == Pkg.core && raw == Name.bitwise -> bitwiseCall env pos q name (map (jsExpr env) args)
       | pkg == Pkg.core && raw == Name.math -> mathCall env pos q name (map (jsExpr env) args)
@@ -448,6 +461,21 @@ call env pos fn args =
       | otherwise -> globalCall env pos q (map (jsExpr env) args)
     _ ->
       normalCall env pos (jsExpr env fn) (map (jsExpr env) args)
+
+-- | The primitive this call is one of, when it is a saturated call to a
+-- binding that is one.
+--
+-- Saturated is the whole condition beyond 'Generate.CoreJS.Prim.inlines':
+-- 'Core.Prim.primArity' is what the binding's own parameter list is, so a call
+-- with that many arguments substitutes them one for one. A partial application
+-- is left alone and reaches the binding, which is why the binding is still
+-- emitted.
+primAt :: Env -> Core.QualName -> [Core.Expr] -> Maybe CorePrim.PrimOp
+primAt env q args =
+  case Map.lookup q (_prims env) of
+    Just op
+      | Prim.inlines op && length args == CorePrim.primArity op -> Just op
+    _ -> Nothing
 
 -- | The two kernel primitives that are an operator rather than a function.
 --
@@ -506,9 +534,14 @@ normalCall env pos fn args =
     Just helper -> JS.TrackedNormalCall (_home env) pos helper fn args
     Nothing -> List.foldl' (\f a -> JS.Call f [a]) fn args
 
--- | The operators. `Generate.JavaScript.Expression`'s table, unchanged: `core`
--- has no @\@prim@ declarations yet (C13 is M1b), so these names arrive as
--- ordinary applications and the backend is where they become JavaScript.
+-- | The operators `Basics` still has as bindings.
+--
+-- `Generate.JavaScript.Expression`'s table, shrinking as C13's @\@prim@
+-- declarations take the entries over. @add@, @sub@, @mul@ and @negate@ left
+-- with D144: they are `Num`'s methods now, one instance body per member, and
+-- what each body compiles to is the primitive's — @(a + b) | 0@ at an `Int`
+-- and @a + b@ at a `Float`, said once in "Generate.CoreJS.Prim" rather than
+-- once per backend here.
 basicsCall :: Env -> A.Position -> Core.QualName -> Name -> [Core.Expr] -> JS.Expr
 basicsCall env pos q name args =
   case args of
@@ -516,7 +549,6 @@ basicsCall env pos q name args =
       let arg = jsExpr env one
        in case name of
             "not" -> JS.Prefix JS.PrefixNot arg
-            "negate" -> JS.Prefix JS.PrefixNegate arg
             "toFloat" -> arg
             _ -> globalCall env pos q [arg]
     [leftE, rightE] ->
@@ -528,9 +560,6 @@ basicsCall env pos q name args =
           let left = jsExpr env leftE
               right = jsExpr env rightE
            in case name of
-                "add" -> JS.Infix JS.OpAdd left right
-                "sub" -> JS.Infix JS.OpSub left right
-                "mul" -> JS.Infix JS.OpMul left right
                 "fdiv" -> JS.Infix JS.OpDiv left right
                 "idiv" -> JS.Infix JS.OpBitwiseOr (JS.Infix JS.OpDiv left right) (JS.Int 0)
                 -- Neither `==` nor `/=` is here. `==` is `Eq`'s method and
@@ -547,18 +576,17 @@ basicsCall env pos q name args =
                 _ -> globalCall env pos q [left, right]
     _ -> globalCall env pos q (map (jsExpr env) args)
 
+-- | The three shifts, which are what is left of `Bitwise` in this table.
+--
+-- @and@, @or@, @xor@ and @complement@ were here and are not: they are @\@prim@
+-- declarations since D143 and 'primAt' rewrites a saturated call to one, so
+-- they came out of this table rather than being said in two places. The shifts
+-- stay until A4's clamped count has an implementation to be the wrapper of.
 bitwiseCall :: Env -> A.Position -> Core.QualName -> Name -> [JS.Expr] -> JS.Expr
 bitwiseCall env pos q name args =
   case args of
-    [arg] ->
-      case name of
-        "complement" -> JS.Prefix JS.PrefixComplement arg
-        _ -> globalCall env pos q args
     [left, right] ->
       case name of
-        "and" -> JS.Infix JS.OpBitwiseAnd left right
-        "or" -> JS.Infix JS.OpBitwiseOr left right
-        "xor" -> JS.Infix JS.OpBitwiseXor left right
         "shiftLeftBy" -> JS.Infix JS.OpLShift right left
         "shiftRightBy" -> JS.Infix JS.OpSpRShift right left
         "shiftRightZfBy" -> JS.Infix JS.OpZfRShift right left

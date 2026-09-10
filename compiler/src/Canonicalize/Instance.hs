@@ -115,10 +115,8 @@ addInstance pkg imported env sofar (A.At region (Src.Instance maybeContext srcHe
         Qualified home name -> Env.findClassDeclQual classRegion env home name
 
     -- After the class resolves, because "is this class closed?" is a question
-    -- about a qualified name (D135), and before anything else is checked
-    -- because there is no instance to check: a closed class has no methods, so
-    -- a body for one is a body for nothing.
-    checkNotClosed region cls
+    -- about a qualified name (D135).
+    checkNotClosed pkg region cls
 
     (Can.Forall context canArgType) <- Type.toAnnotation env maybeContext srcArg
 
@@ -198,16 +196,24 @@ checkFirstParty pkg region srcClassName
             Unqualified name -> name
             Qualified _ name -> name
 
--- | `classes.md` §1.2's closed classes admit no instances at all (D135).
+-- | `classes.md` §1.2's closed classes admit an instance from `core` and from
+-- nowhere else (D144, `docs/m1b-int.md` §I11).
 --
--- Not the same refusal as `checkFirstParty`, and not lifted by the same thing:
--- §8.3's gate opens when D10 opens, and this one never does. Membership in a
--- closed class is a table in "Type.Class", so an instance would be a second
--- statement of it that the unifier would never read.
-checkNotClosed :: A.Region -> Can.Class -> Result i w ()
-checkNotClosed region (Can.Class home name)
-  | Class.isClosed home name = Result.throw (Error.InstanceForClosedClass region name)
-  | otherwise = Result.ok ()
+-- D135 refused one outright, and could: a closed class had no methods, so a
+-- body for one was a body for nothing. `Num` has methods now, and the
+-- instances that carry them are ordinary Geng in `Basics` -- which is §I3's
+-- shape 1, chosen because it makes `Num` look like every other class in the
+-- language and needs no machinery that does not exist.
+--
+-- Two gates, not one, and they close different doors. 'checkFirstParty' is
+-- §8.3's and lifts when D10 opens; this one narrows first-party to `core`
+-- alone and does not lift, because membership is a table in "Type.Class" and
+-- an instance from anywhere else would be a member the unifier never heard of.
+checkNotClosed :: Pkg.Name -> A.Region -> Can.Class -> Result i w ()
+checkNotClosed pkg region (Can.Class home name)
+  | not (Class.isClosed home name) = Result.ok ()
+  | pkg == Pkg.core = Result.ok ()
+  | otherwise = Result.throw (Error.InstanceForClosedClass region name)
 
 -- THE HEAD
 

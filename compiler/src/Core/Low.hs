@@ -51,6 +51,7 @@ where
 
 import Control.Monad.State.Strict (State, gets, modify', runState)
 import Core.AST qualified as Core
+import Core.Prim qualified as Prim
 import Core.Program (Linked (..), Missing (..), MissingKind (..))
 import Core.Program qualified as Program
 import Data.ByteString.Builder qualified as B
@@ -984,12 +985,18 @@ lowerExpr_ ty expr =
           "an array literal"
           (Absent "Array is core's and X10 keeps core off C; the spike has no Array")
         return (XCrash "arrays are not in the spike" RClosure)
-    Core.EPrim _ _ ->
+    Core.EPrim op args ->
       do
+        args' <- mapM lowerExpr args
+        rep <- repOf ty
+        let n = primCName op
+        modify' (\e -> e {_envKernel = Set.insert n (_envKernel e)})
         note
-          "an EPrim node"
-          (Absent "C13's @prim table is M1b's (D81); at M1a Core emits none")
-        return (XCrash "EPrim is not in the spike" RClosure)
+          ("the C kernel must supply " ++ n)
+          ( Derived
+              "Core.AST.EPrim, which names the operation and its width"
+          )
+        return (XCallKernel n args' rep)
     Core.EJoin binds body -> lowerJoin binds body
     Core.EJump n args -> XJump n <$> mapM lowerExpr args
     Core.ETyLam _ body ->
@@ -1209,11 +1216,13 @@ lowerApp f args =
                     note
                       "a kernel name had to be monomorphized by representation"
                       ( Derived
-                          "core's Basics.add is `number -> number -> number` and \
-                          \Utils.le is `comparable`, so one Core name is several C \
-                          \functions. The call site's Core types are solved, so Low \
-                          \computes which -- but Core names one function and C needs \
-                          \one per Rep"
+                          "core's Utils.le is `comparable` and Basics.fdiv is \
+                          \`Float -> Float -> Float` reached through a `number` \
+                          \wrapper, so one Core name is several C functions. The call \
+                          \site's Core types are solved, so Low computes which -- but \
+                          \Core names one function and C needs one per Rep. What used \
+                          \to head this list was Basics.add, and D144 took it off: an \
+                          \EPrim names its width"
                       )
                     return (XCallKernel n args' rep)
               | otherwise ->
@@ -1290,6 +1299,20 @@ repOfLow expr =
     XJump _ _ -> RInt
     XBounce _ _ -> RInt
     XCrash _ r -> r
+
+-- | @i32_add@ becomes @geng_prim_i32_add@.
+--
+-- __The interesting thing here is what is /not/ here__: a representation
+-- suffix. 'repTag' exists because @core@ used to declare
+-- @add : number -> number -> number@, so one Core name meant several C
+-- functions and @Low@ had to work out which from the call site's solved types
+-- -- a 'Derived' note, and one of the spike's headline findings. A primitive
+-- says its own width (@i32_add@ and @f64_add@ are different names in Core), so
+-- for the operations D144 made primitives that derivation is gone: the C name
+-- is the Core name with a prefix.
+primCName :: Prim.PrimOp -> String
+primCName op =
+  "geng_prim_" ++ Name.toChars (Prim.primVarName op)
 
 -- | Is this a @gren\/kernel@ name? Those are what §X5's C kernel implements.
 isKernel :: Core.QualName -> Bool

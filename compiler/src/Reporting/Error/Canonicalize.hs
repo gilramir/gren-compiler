@@ -57,6 +57,7 @@ data Error
   | InstanceHeadIsAlias A.Region Name.Name Name.Name
   | InstanceDuplicate A.Region Name.Name Name.Name
   | InstanceForClosedClass A.Region Name.Name
+  | ClosedClassMissingInstance A.Region Name.Name Name.Name
   | InstanceMethodUnknown A.Region Name.Name Name.Name [Name.Name]
   | InstanceMethodMissing A.Region Name.Name Name.Name [Name.Name]
   | Binop A.Region Name.Name Name.Name
@@ -579,14 +580,33 @@ toReport source err =
           ( D.reflow $
               "`"
                 ++ Name.toChars className
-                ++ "` is a closed class, so nothing may declare an instance of it:",
+                ++ "` is a closed class, so only `gren/core` may declare an instance of it:",
             D.reflow $
               "Which types are in `"
                 ++ Name.toChars className
-                ++ "` is fixed by the compiler and cannot be added to, now or later. That is\
-                   \ what makes it cheap: a constraint on a closed class is checked while\
-                   \ types are being worked out rather than by passing an instance around,\
-                   \ so it costs your code nothing at all to write one."
+                ++ "` is fixed by the compiler and cannot be added to, now or later. The\
+                   \ instances `core` writes are what its methods do at each of those\
+                   \ types, and they are the whole list -- there is no type left for\
+                   \ another one to be about."
+          )
+    ClosedClassMissingInstance region className typeName ->
+      Report.Report "CLOSED CLASS WITHOUT AN INSTANCE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`"
+                ++ Name.toChars typeName
+                ++ "` is a member of `"
+                ++ Name.toChars className
+                ++ "` and this module does not declare an instance for it:",
+            D.reflow $
+              "A closed class says which types belong to it in `Type.Class.members`, and the\
+              \ instances beside the declaration are what its methods do at each of them. A\
+              \ member with no instance is a type the compiler will accept the constraint\
+              \ for and then have no method to call at, which is a confusing error a long\
+              \ way from here. Add the instance, or take the type out of the table."
           )
     InstanceHeadNotApplied region ->
       Report.Report "BAD INSTANCE HEAD" region [] $

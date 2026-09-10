@@ -64,6 +64,25 @@ spec = do
     it "an unconstrained variable has nothing to default" $
       defaultsTo [] `shouldBe` Nothing
 
+  describe "Membership" $ do
+    it "the list is what `admitsAtom` is a lookup in" $
+      -- One list, not two (D144). `core` writes an instance per member and
+      -- `Canonicalize.Module` checks that against this, so a width added here
+      -- and nowhere else is a compile error in `Basics` rather than a
+      -- `NO INSTANCE` at some unlucky call site.
+      map (Name.toChars . snd) (Class.members Class.Num) `shouldBe` ["Int", "Float"]
+
+    it "every member is admitted, and nothing else is" $ do
+      all (uncurry (Class.admitsAtom Class.Num)) (Class.members Class.Num) `shouldBe` True
+      Class.admitsAtom Class.Num ModuleName.string "String" `shouldBe` False
+
+    it "the four widths are not members until their instances are written" $ do
+      -- §I8 step 4. `Canonicalize.Prim` names their types already, which costs
+      -- nothing because they are not Gren types yet; putting one here before
+      -- `instance Num Int64` exists would make `Basics` stop compiling.
+      Class.admitsAtom Class.Num ModuleName.basics "Int64" `shouldBe` False
+      Class.admitsAtom Class.Num ModuleName.basics "Float32" `shouldBe` False
+
   describe "The declared names" $ do
     it "reads the one class the unifier still owns" $ do
       -- D135. What used to be here was a table of magic type-variable *names*;

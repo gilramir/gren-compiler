@@ -26,6 +26,7 @@ where
 
 import AST.Canonical qualified as Can
 import Core.AST qualified as Core
+import Core.Prim qualified as Prim
 import Core.Program (Linked (..), Program (..))
 import Data.ByteString.Builder qualified as B
 import Data.ByteString.Lazy.Char8 qualified as BLazy
@@ -389,10 +390,36 @@ envFor mode program =
           | (q, Core.Bind _ body) <- _progBindings program,
             Core.ELam params _ <- [Core._exprValue body]
           ],
+      Expr._prims =
+        Map.fromList
+          [ (q, op)
+          | (q, Core.Bind _ body) <- _progBindings program,
+            Just op <- [primBody body]
+          ],
       Expr._tails = Map.empty,
       Expr._home = ModuleName.basics,
       Expr._depth = 0
     }
+
+-- | The primitive a binding /is/, when its whole body is one applied to its own
+-- parameters in order.
+--
+-- That is what a @\@prim@ declaration lowers to — @Core.Lower.Expression@\'s
+-- @primValue@ eta-expands the table entry — so this recognizes the shape rather
+-- than the attribute, and a binding written that way by hand is treated the
+-- same. Nothing else has to be checked: an argument that is a parameter used
+-- once is substitutable at a saturated call site by construction.
+primBody :: Core.Expr -> Maybe Prim.PrimOp
+primBody body =
+  case Core._exprValue body of
+    Core.ELam binders inner ->
+      case Core._exprValue inner of
+        Core.EPrim op args
+          | map Core._binderName binders == [name | Core.EVar name <- map Core._exprValue args],
+            length args == length binders ->
+              Just op
+        _ -> Nothing
+    _ -> Nothing
 
 ctorEntries :: Core.DataDecl -> [(Core.QualName, Expr.Ctor)]
 ctorEntries d =

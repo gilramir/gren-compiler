@@ -453,10 +453,22 @@ expr env (Can.Expr nid region value) =
         Can.Array items ->
           node (Core.EArray (map (expr env) items))
         Can.Negate inner ->
-          node $
-            Core.EApp
-              (Core.Expr (Core.EGlobal (Core.QualName ModuleName.basics Name.negate)) (negateType tipe) sp)
-              [expr env inner]
+          -- `-x` is `Basics.negate` at `x`'s type, and since D144 that is a
+          -- method rather than a binding, so this resolves the way an operator
+          -- does (§I11). What used to be here — a global named outright —
+          -- worked only while `Num` had no methods.
+          let negType = negateType tipe
+              call1 fn = node (Core.EApp fn [expr env inner])
+           in case useOf env nid of
+                Just (Resolve.Instantiated home instanceName args) ->
+                  call1 (witnessApp sp (Core.Expr (Core.EGlobal (Core.QualName home instanceName)) negType sp) args)
+                Just (Resolve.Projected w methodName) ->
+                  call1 (Core.Expr (Core.EAccess (witness sp w) methodName) negType sp)
+                _ ->
+                  error $
+                    "Core.Lower.Expression: negation at node "
+                      ++ show nid
+                      ++ " was not resolved to an instance of Basics.Num."
         Can.Binop _ target _ left right ->
           let opType = binopType env left right tipe
               global home name = Core.Expr (Core.EGlobal (Core.QualName home name)) opType sp
@@ -755,19 +767,14 @@ def env d =
 quantified :: Env -> Core.Span -> Name -> Can.FreeVars -> Can.Type -> [Can.Pattern] -> Can.Expr -> Core.Bind
 quantified env sp name freeVars declared args body =
   let value = bindValue env sp (lowerType declared) args (expr env body)
-   in case (Can.contextOrder freeVars, Can.witnessOrder freeVars) of
-        ([], _) ->
+   in case Can.contextOrder freeVars of
+        [] ->
           Core.Bind (Core.Binder name (lowerType declared) sp) value
-        (_, []) ->
-          -- Constrained only by closed classes (D135). The type is quantified
-          -- and says so — a backend reading `Num a` knows the variable is a
-          -- machine number, which is more than `TVar a` said — but there is no
-          -- witness to bind, so the value is untouched and the arity is what
-          -- was written.
-          Core.Bind
-            (Core.Binder name (lowerAnnotation (Can.Forall freeVars declared)) sp)
-            value
         _ ->
+          -- Every constraint binds a witness since D144, closed ones included:
+          -- the middle case that bound none — a definition constrained only by
+          -- `Num`, which had no methods to project — went with the list that
+          -- named it (@docs\/m1b-int.md@ §I11).
           Core.Bind
             (Core.Binder name (lowerAnnotation (Can.Forall freeVars declared)) sp)
             (witnessLam env sp (nodeIdOf body) value)

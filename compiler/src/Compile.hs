@@ -175,7 +175,7 @@ resolveInstances modul ifaces canonical defaults solved nodeTypes =
           (ownClasses canonical)
           (importedClasses ifaces)
       ask anns types =
-        case Resolve.run (Resolve.Env visible classes types defaults) canonical of
+        case Resolve.run (Resolve.Env visible classes types defaults anns) canonical of
           Resolve.Answered elaboration ->
             Right (elaboration, anns, types)
           Resolve.Refused errors ->

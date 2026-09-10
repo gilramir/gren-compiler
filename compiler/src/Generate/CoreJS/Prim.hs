@@ -18,6 +18,7 @@
 -- could run; it lands with the types, at @docs\/m1b-int.md@ §I8 step 4.
 module Generate.CoreJS.Prim
   ( prim,
+    inlines,
   )
 where
 
@@ -26,6 +27,23 @@ import Core.Prim qualified as Prim
 import Data.Name qualified as Name
 import Generate.JavaScript.Builder qualified as JS
 import Generate.JavaScript.Name qualified as JsName
+
+-- | Whether a saturated call to a binding whose body is this primitive may be
+-- replaced by the primitive itself.
+--
+-- Almost all of them: 'prim' names each argument once, so substituting a call
+-- site's expressions for the binding's parameters evaluates each exactly once
+-- and in order, which is what the call did. Two do not. @f64_isnan@ is
+-- @a !== a@ and @f64_isinf@ compares @a@ to both infinities, so inlining one
+-- would evaluate its argument twice — @isNaN (f x)@ would call @f@ twice, and
+-- a @|0@ coercion is not worth that. They stay ordinary calls, which is all
+-- they ever were.
+inlines :: PrimOp -> Bool
+inlines op =
+  case op of
+    FloatOp _ FIsNan -> False
+    FloatOp _ FIsInf -> False
+    _ -> True
 
 -- | The primitive applied to its arguments, which are always exactly as many
 -- as 'Core.Prim.primArity' says: Core keeps an @EPrim@ saturated.
