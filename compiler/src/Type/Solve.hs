@@ -35,7 +35,7 @@ run constraint =
   do
     pools <- MVector.replicate 8 []
 
-    (State env mark errors nodes) <-
+    (State env mark errors nodes literals) <-
       solve Map.empty outermostRank pools emptyState constraint
 
     case errors of
@@ -49,7 +49,11 @@ run constraint =
           -- variable had already been visited.
           (nodeTypes, constrained) <- Type.toNodeTypes (nextMark (nextMark mark)) nodes
           let defaults = Map.mapMaybe (fmap atom . Class.defaultsTo) constrained
-          return (Right (Solved annotations nodeTypes defaults))
+          -- After defaulting, because that is what closes a bare literal's
+          -- variable at `Int` and the range to check against is the closed
+          -- one's (`docs/m1b-int.md` §I20).
+          widths <- traverse resolveWidth (reverse literals)
+          return (Right (Solved annotations nodeTypes defaults widths))
       e : es ->
         return $ Left (NE.List e es)
 
@@ -70,12 +74,26 @@ data Solved = Solved
     -- something the solver can see at all (D130), so the third place the rule
     -- is needed is one the elaborator finds (§G33.2) — and this is the answer
     -- it needs, computed here because @Type.Class@ is the table it is read off.
-    _defaults :: Map.Map Name.Name Can.Type
+    _defaults :: Map.Map Name.Name Can.Type,
+    -- | Every numeric literal in the module, with the @Basics@ type it came
+    -- out at and the region it was written in — D63's range check, which
+    -- `Compile` runs because it is the phase that can report an error
+    -- (`docs/m1b-int.md` §I20).
+    --
+    -- 'Nothing' for the type is a literal whose type is still a variable,
+    -- which 'Core.Lower.Literal' lowers at the @Int@ case.
+    _literalWidths :: [(A.Region, Integer, Maybe Name.Name)]
   }
+
+resolveWidth :: (A.Region, Integer, Type) -> IO (A.Region, Integer, Maybe Name.Name)
+resolveWidth (region, value, tipe) =
+  do
+    name <- Type.numericName tipe
+    return (region, value, name)
 
 emptyState :: State
 emptyState =
-  State Map.empty (nextMark noMark) [] Map.empty
+  State Map.empty (nextMark noMark) [] Map.empty []
 
 -- SOLVER
 
@@ -92,7 +110,10 @@ data State = State
     -- | The constraint-level type recorded for each expression node, zonked
     -- once at the end of the solve rather than as it is recorded — a node's
     -- type is not final until everything that can unify with it has run.
-    _nodes :: Map.Map Can.NodeId Type
+    _nodes :: Map.Map Can.NodeId Type,
+    -- | 'CLiteral's, newest first; reversed once at the end so that a module's
+    -- errors come out in source order.
+    _literals :: [(A.Region, Integer, Type)]
   }
 
 atom :: (ModuleName.Canonical, Name.Name) -> Can.Type
@@ -177,6 +198,9 @@ solve env rank pools state constraint =
                     category
                     actualType
                     (Error.ptypeReplace expectation expectedType)
+    CLiteral region value tipe ->
+      -- Recorded and not checked: the type is a variable until the solve ends.
+      return state {_literals = (region, value, tipe) : _literals state}
     CNode nid tipe ->
       -- Recording only. Nothing is unified and no variable is allocated, so a
       -- CNode cannot change what typechecks or what generalizes.
@@ -213,7 +237,7 @@ solve env rank pools state constraint =
 
         -- run solver in next pool
         locals <- traverse (A.traverse (typeToVariable nextRank nextPools)) header
-        (State savedEnv mark errors nodes) <-
+        (State savedEnv mark errors nodes literals) <-
           solve env nextRank nextPools state headerCon
 
         let youngMark = mark
@@ -232,7 +256,7 @@ solve env rank pools state constraint =
         mapM_ isGeneric rigids
 
         let newEnv = Map.union env (Map.map A.toValue locals)
-        let tempState = State savedEnv finalMark errors nodes
+        let tempState = State savedEnv finalMark errors nodes literals
         newState <- solve newEnv rank nextPools tempState subCon
 
         foldM occurs newState (Map.toList locals)
@@ -281,8 +305,8 @@ patternExpectationToVariable rank pools expectation =
 -- ERROR HELPERS
 
 addError :: State -> Error.Error -> State
-addError (State savedEnv rank errors nodes) err =
-  State savedEnv rank (err : errors) nodes
+addError (State savedEnv rank errors nodes literals) err =
+  State savedEnv rank (err : errors) nodes literals
 
 -- OCCURS CHECK
 

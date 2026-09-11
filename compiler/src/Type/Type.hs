@@ -18,6 +18,7 @@ module Type.Type
     int,
     float,
     suffixed,
+    numericName,
     char,
     string,
     bool,
@@ -70,6 +71,17 @@ data Constraint
     -- could change what generalization sees, and this pass has to be
     -- observationally invisible to inference (`docs/m1a-node-types.md`).
     CNode Can.NodeId Type
+  | -- | Record a numeric literal's value and the type it was constrained
+    -- against, for D63's range check (@syntax.md@ S5, @docs\/m1b-int.md@ §I20).
+    --
+    -- It carries no obligation either, for 'CNode'\'s reason: the solver reads
+    -- it and unifies nothing. The check itself cannot run here — the type is
+    -- not final until the solve is — so what this does is put the literal's
+    -- /region/ next to the type the solver will resolve, which is the one
+    -- thing a later pass cannot reconstruct. A pattern literal has no node id
+    -- and no recorded type (§N9), so this is also the only way its width is
+    -- knowable outside the lowering.
+    CLiteral A.Region Integer Type
   | CAnd [Constraint]
   | CLet
       { _rigidVars :: [Variable],
@@ -171,6 +183,27 @@ int = AppN ModuleName.basics "Int" []
 
 float :: Type
 float = AppN ModuleName.basics "Float" []
+
+-- | The @Basics@ type a literal's type resolved to, if it resolved to one.
+--
+-- 'Nothing' is a type variable — @f : Num a => a -> a@ saying @x + 1@ — which
+-- is D149's registered hole. 'Core.Lower.Literal' gives such a literal the
+-- @Int@ case, so the range check does too: the two answer the same question and
+-- have to agree about it.
+numericName :: Type -> IO (Maybe Name.Name)
+numericName tipe =
+  case tipe of
+    AppN home name [] | home == ModuleName.basics -> return (Just name)
+    AppN _ _ _ -> return Nothing
+    AliasN _ _ _ real -> numericName real
+    VarN var ->
+      do
+        (Descriptor content _ _ _) <- UF.get var
+        case content of
+          Structure (App1 home name []) | home == ModuleName.basics -> return (Just name)
+          Alias _ _ _ real -> numericName (VarN real)
+          _ -> return Nothing
+    _ -> return Nothing
 
 -- | The type a literal's suffix names (@syntax.md@ S5, D154).
 --

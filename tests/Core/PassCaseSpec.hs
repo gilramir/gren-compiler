@@ -157,7 +157,7 @@ var :: Name -> Core.Expr
 var n = Core.Expr (Core.EVar n) mT span0
 
 one :: Core.Expr
-one = Core.Expr (Core.ELit (Core.LIntLegacy 1)) intT span0
+one = Core.Expr (Core.ELit (Core.LInt 1)) intT span0
 
 alt :: Core.Pattern -> Core.Expr -> Core.Alt
 alt = Core.Alt

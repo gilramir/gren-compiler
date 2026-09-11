@@ -177,6 +177,7 @@ Library common
         Reporting.Error.Import
         Reporting.Error.Instance
         Reporting.Error.Json
+        Reporting.Error.Literal
         Reporting.Error.Main
         Reporting.Error.Pattern
         Reporting.Error.Syntax

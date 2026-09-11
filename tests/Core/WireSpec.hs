@@ -151,18 +151,22 @@ spec = do
           BS.length together `shouldSatisfy` (< BS.length apart)
         _ -> expectationFailure "did not encode"
 
-  describe "D91" $ do
-    it "carries an integer literal at the edge of the range" $
-      roundTrip (moduleWith [bindOf (lit (LIntLegacy 9223372036854775807))])
+  -- D91 used to live here: the transitional `LIntLegacy` carried an unbounded
+  -- `Integer` and the wire format carries a `sint64`, so the encoder had a
+  -- refusal for a literal that did not fit. D2's flag day deleted the
+  -- constructor (`docs/m1b-int.md` §I20) and every integer literal now has a
+  -- width its constructor names, so the edge cases are ordinary round trips.
+  describe "integer literals at their edges" $ do
+    it "carries an Int64 at the edge of the range" $ do
+      roundTrip (moduleWith [bindOf (lit (LInt64 9223372036854775807))])
+      roundTrip (moduleWith [bindOf (lit (LInt64 (-9223372036854775808)))])
 
-    it "carries a negative one" $
-      roundTrip (moduleWith [bindOf (lit (LIntLegacy (-9223372036854775808)))])
+    it "carries an Int at the edge of the range" $ do
+      roundTrip (moduleWith [bindOf (lit (LInt 2147483647))])
+      roundTrip (moduleWith [bindOf (lit (LInt (-2147483648)))])
 
-    it "refuses one past the edge, and says which" $
-      case Wire.encode (moduleWith [bindOf (lit (LIntLegacy 9223372036854775808))]) of
-        Right _ -> expectationFailure "an out-of-range literal encoded"
-        Left problems ->
-          length problems `shouldBe` 1
+    it "carries a UInt64 with every bit set" $
+      roundTrip (moduleWith [bindOf (lit (LUInt64 18446744073709551615))])
 
   describe "floats" $ do
     it "distinguishes negative zero from zero" $ do
@@ -346,8 +350,10 @@ caseOverEveryPattern =
         Nothing
     )
 
--- | All nine (C8, D2, D91). The five with no producer at M1a are exactly why
--- this list is written by hand.
+-- | All eight (C8, D2). Nine until D2's flag day deleted the transitional
+-- @LIntLegacy@ (`docs/m1b-int.md` §I20); this list is written by hand because
+-- the corpus reaches a constructor only when something produces it, and the
+-- point of the round trip is that the codec does not depend on that.
 everyLiteral :: [Literal]
 everyLiteral =
   [ LInt 0,
@@ -358,9 +364,7 @@ everyLiteral =
     LFloat 3.141592653589793,
     LFloat32 1.5,
     LChar 0x10FFFF,
-    LString (utf8 ""),
-    LIntLegacy 0,
-    LIntLegacy 1735689600000
+    LString (utf8 "")
   ]
 
 -- | 'Core.Prim.primCode' 0. Named rather than taken with @head@, because an

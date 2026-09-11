@@ -111,7 +111,7 @@ selfE :: Core.Expr
 selfE = globalE "f"
 
 one :: Core.Expr
-one = node (Core.ELit (Core.LIntLegacy 1))
+one = node (Core.ELit (Core.LInt 1))
 
 lam :: [Name] -> Core.Expr -> Core.Expr
 lam names body = node (Core.ELam [Core.Binder n intT span0 | n <- names] body)

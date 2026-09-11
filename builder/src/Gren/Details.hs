@@ -484,11 +484,11 @@ readDepArtifacts path =
         return (DepArtifacts ifaces <$> traverse decodeCore encoded <*> pure kernels)
 
 -- | __A module whose Core will not encode stops the file being written at
--- all__, rather than being quietly left out. D91's out-of-range
--- 'Core.AST.LIntLegacy' is the one thing a user can write that does that, and a
--- program containing one still compiles to JavaScript today — so the cache must
--- not be the thing that breaks it. No file means no reuse next time, which is
--- the honest outcome: slower, never wrong.
+-- all__, rather than being quietly left out. Since D2's flag day nothing a user
+-- can write does that (@docs\/m1b-int.md@ §I20) — D91's out-of-range
+-- @LIntLegacy@ was the one thing, and the constructor is gone — so what is left
+-- is an internal invariant. No file means no reuse next time, which is the
+-- honest outcome either way: slower, never wrong.
 --
 -- Written by rename ('File.writeBinaryAtomic'), because this directory is
 -- shared with every other build on the machine and two of them compiling the

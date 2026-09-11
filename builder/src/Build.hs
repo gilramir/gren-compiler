@@ -740,11 +740,15 @@ compile (Env key root projectType platform _ buildID _ _) docsNeed (Details.Loca
 -- has the measurement, and what buys it back is that the next build does not
 -- compile the module at all.
 --
--- D91's out-of-range 'Core.AST.LIntLegacy' is the one thing a user can write
--- that will not encode. Such a module simply has no @.grenc@ and is recompiled
--- next time, which is the same policy 'Gren.Details.writeArtifacts' applies to
--- the dependencies: the cache is allowed to be slower and never allowed to
--- refuse a program that would otherwise have compiled.
+-- __Nothing a user can write fails to encode any more__ (@docs\/m1b-int.md@
+-- §I20): D91's out-of-range @LIntLegacy@ was the one thing that did, and D2's
+-- flag day deleted the constructor while D63's range check refuses the literal
+-- in the frontend. The @Left@ branch is kept because the encoder can still
+-- report an internal invariant, and the policy it implements is the right one
+-- either way: such a module simply has no @.grenc@ and is recompiled next
+-- time, the same policy 'Gren.Details.writeArtifacts' applies to the
+-- dependencies. The cache is allowed to be slower and never allowed to refuse
+-- a program that would otherwise have compiled.
 writeCore :: FilePath -> ModuleName.Raw -> Core.Module -> IO ()
 writeCore root name core =
   case Wire.encode core of

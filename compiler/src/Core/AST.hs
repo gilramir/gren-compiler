@@ -466,6 +466,16 @@ data Pattern
   | PAs !Binder !Pattern
   deriving (Eq, Show)
 
+-- | A scalar constant, at the width its type gives it.
+--
+-- There used to be an 'LIntLegacy' beside these carrying an unbounded
+-- @Integer@, because M1a's gate was that the existing JS suite passed and a
+-- pre-D2 @Int@ was a JavaScript double exact to 2^53 — so real programs held
+-- literals past 'Int32' and they could not be an 'LInt' without changing the
+-- program. It was a separate constructor rather than a widened 'LInt64' so
+-- that deleting it would be a visible event with a compiler error at every
+-- site, which is what D2's flag day wanted and what it got
+-- (@docs\/m1b-int.md@ §I20).
 data Literal
   = LInt !Int32
   | LInt64 !Int64
@@ -478,19 +488,6 @@ data Literal
     LChar !Int32
   | -- | UTF-8 in the wire format.
     LString !Text
-  | -- | __Transitional; removed at M1b.__
-    --
-    -- D2 makes @Int@ 32-bit, but that lands at M1b and M1a's gate is that the
-    -- existing JS test suite passes with the JS backend reading Core. Until
-    -- then @Int@ is a JS double, exact to 2^53, and real programs hold literals
-    -- past 'Int32' — every millisecond timestamp since 1970, for one. Those
-    -- cannot be an 'LInt' without changing the program.
-    --
-    -- So the pre-D2 @Int@ gets its own constructor rather than being quietly
-    -- widened into one of the specified ones. Deleting it is then a visible
-    -- event with a compiler error at every site, which is what M1b wants; a
-    -- widened 'LInt64' would have compiled silently and left D2 half-applied.
-    LIntLegacy !Integer
   deriving (Eq, Ord, Show)
 
 data CrashKind

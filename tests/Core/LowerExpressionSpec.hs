@@ -60,11 +60,12 @@ spec = do
       Literal.float float32T (Utf8.fromChars "0.1") `shouldBe` Core.LFloat32 0.1
       Literal.float float32T (Utf8.fromChars "1.5") `shouldBe` Core.LFloat32 1.5
 
-    it "keeps an integer in the transitional constructor at Int" $
-      -- LIntLegacy, not LInt: `Int` is a JS double until D2's flag day at
-      -- `docs/m1b-int.md` §I8 step 6, and real programs hold literals past
-      -- Int32.
-      Literal.int intBasicsT 1735689600000 `shouldBe` Core.LIntLegacy 1735689600000
+    it "gives an Int literal the 32-bit constructor" $
+      -- `LInt` and not the transitional `LIntLegacy`, which D2's flag day
+      -- deleted (`docs/m1b-int.md` §I20). The value is narrowed here and the
+      -- range is checked in `Compile`, which is the phase that has a region to
+      -- report against.
+      Literal.int intBasicsT 42 `shouldBe` Core.LInt 42
 
     it "gives an integer literal the width its type says" $ do
       -- D149. `1` at an `Int64` is the JavaScript `1n` and `1` at an `Int` is
@@ -80,7 +81,7 @@ spec = do
       -- §0 closes an *ambiguous* numeric variable rather than a rigid one, so
       -- nothing closes this and the `Int` case is what it gets.
       -- `docs/open-items.md` has the hole.
-      Literal.int (Core.TVar "a") 1 `shouldBe` Core.LIntLegacy 1
+      Literal.int (Core.TVar "a") 1 `shouldBe` Core.LInt 1
 
   describe "constructors" $ do
     it "makes a saturated application one ECtor" $
@@ -89,7 +90,7 @@ spec = do
       value
         [(1, Can.TType home "Maybe" [intT]), (2, Can.TLambda intT (Can.TType home "Maybe" [intT])), (3, intT)]
         (at 1 (Can.Call (at 2 just) [at 3 (Can.Int 5 Nothing)]))
-        `shouldBe` Core.ECtor (qual "Just") 1 [expr (core intT) (Core.ELit (Core.LIntLegacy 5))]
+        `shouldBe` Core.ECtor (qual "Just") 1 [expr (core intT) (Core.ELit (Core.LInt 5))]
 
     it "eta-expands a constructor used as a value" $
       value
@@ -110,8 +111,8 @@ spec = do
         (at 1 (Can.If [(at 2 true, at 3 (Can.Int 1 Nothing))] (at 4 (Can.Int 2 Nothing))))
         `shouldBe` Core.ECase
           (expr (core boolT) (Core.ECtor (qual' ModuleName.basics "True") 0 []))
-          [ Core.Alt (Core.PCtor (qual' ModuleName.basics "True") 0 []) (expr (core intT) (Core.ELit (Core.LIntLegacy 1))),
-            Core.Alt (Core.PCtor (qual' ModuleName.basics "False") 1 []) (expr (core intT) (Core.ELit (Core.LIntLegacy 2)))
+          [ Core.Alt (Core.PCtor (qual' ModuleName.basics "True") 0 []) (expr (core intT) (Core.ELit (Core.LInt 1))),
+            Core.Alt (Core.PCtor (qual' ModuleName.basics "False") 1 []) (expr (core intT) (Core.ELit (Core.LInt 2)))
           ]
           Nothing
 
@@ -279,6 +280,20 @@ spec = do
         other ->
           expectationFailure ("unexpected shape: " ++ show other)
 
+    it "folds a unary minus into the literal under it" $
+      -- `syntax.md` S5 and §I20.3. Gren parses `-1` as `Negate (Int 1)`, so
+      -- without the fold every negative number is a call — and
+      -- `-9223372036854775808` is a call that reaches the right answer by
+      -- wrapping twice. One literal, no `negate`, and no elaboration needed:
+      -- the `_uses` map is empty here and the other two examples would fail
+      -- without theirs.
+      Core._exprValue
+        ( Lower.expr
+            (env [(1, intT), (2, intT)])
+            (at 1 (Can.Negate (at 2 (Can.Int 1 Nothing))))
+        )
+        `shouldBe` Core.ELit (Core.LInt (-1))
+
     it "gives a kernel reference the module the optimizer already gives it" $
       value [(1, intT)] (at 1 (Can.VarKernel "Array" "length"))
         `shouldBe` Core.EGlobal (Core.QualName (ModuleName.Canonical Pkg.kernel "Array") "length")
@@ -321,12 +336,16 @@ spec = do
 -- FIXTURES
 
 -- | A unary minus, lowered under one elaboration (D144).
+--
+-- Over a /variable/ and not a literal, because since D2's flag day a unary
+-- minus on a literal is folded into the literal and there is no call left to
+-- look at (`docs/m1b-int.md` §I20.3). That fold has its own example below.
 negated :: Resolve.Use -> Core.Expr_
 negated use =
   Core._exprValue $
     Lower.expr
       (env [(1, intT), (2, intT)]) {Lower._uses = Map.singleton (Can.NodeId 1) use}
-      (at 1 (Can.Negate (at 2 (Can.Int 1 Nothing))))
+      (at 1 (Can.Negate (at 2 (Can.VarLocal "x"))))
 
 -- | A class-method node, lowered under one elaboration.
 lowered :: Resolve.Use -> Core.Expr

@@ -69,9 +69,12 @@ schemaVersion = 5
 
 -- | A module's bytes, or the reasons there are none.
 --
--- The failure list is D91's and nothing else: 'Core.AST.LIntLegacy' carries an
--- unbounded 'Integer' and the wire format carries a @sint64@. Every other
--- constructor in Core has a total encoding.
+-- __The failure list is now only ever an internal invariant.__ It was D91's and
+-- nothing else — the transitional @LIntLegacy@ carried an unbounded 'Integer'
+-- and the wire format carries a @sint64@ — and D2's flag day deleted that
+-- constructor (@docs\/m1b-int.md@ §I20). Every constructor in Core has a total
+-- encoding now; what is left to report is a name or a type missing from its
+-- table, which is a bug in this module rather than in a program.
 encode :: Core.Module -> Either [String] BS.ByteString
 encode = fmap LBS.toStrict . encodeLazy
 

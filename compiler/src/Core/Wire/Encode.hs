@@ -83,10 +83,14 @@ data Table
 -- | Bytes and how many of them there are — or the strings they would need, or
 -- the reasons there are none.
 --
--- The failure case exists for exactly one rule, D91\'s: 'LIntLegacy' carries an
--- unbounded 'Integer' and the wire format carries a @sint64@. Accumulating the
--- messages rather than stopping at the first means a module with three
--- out-of-range literals reports three, which is what a person fixing them wants.
+-- The failure case is now only ever an internal invariant — a name or a type
+-- that is not in its table. It existed for D91's rule, which was that an
+-- unbounded 'LIntLegacy' might not fit the wire format's @sint64@; D2's flag
+-- day deleted that constructor and D63's range check refuses such a literal in
+-- the frontend, so no program reaches the encoder with one
+-- (@docs\/m1b-int.md@ §I20). Accumulating the messages rather than stopping at
+-- the first is kept: it costs nothing and the two remaining producers are the
+-- kind of bug one wants all of.
 data Piece
   = Piece !Int B.Builder ![Str] ![QualName] ![Type]
   | Bad [String]
@@ -836,9 +840,6 @@ literalEnc l =
     LFloat32 f -> key 6 WFixed32 <> bytes 4 (B.floatLE f)
     LChar c -> sint32Oneof 7 c
     LString s -> oneofText 8 s
-    LIntLegacy n
-      | n >= legacyMin && n <= legacyMax -> sint64Oneof 9 (fromIntegral n)
-      | otherwise -> lift (Bad [legacyProblem n])
 
 sint32Oneof :: Word32 -> Int32 -> Enc
 sint32Oneof tag n = key tag WVarint <> varint (zigzag32 n)

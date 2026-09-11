@@ -88,17 +88,21 @@ add (A.At region pattern) expectation state =
     -- TYPE MISMATCH — @42@ meant something different on the two sides of a
     -- @when@. A @Num@ variable here is the same thing the expression case
     -- makes, and the scrutinee is what it unifies with; a suffix pins it.
-    Can.PInt _ (Just suffix) ->
+    Can.PInt value (Just suffix) ->
       do
         let (State headers vars revCons) = state
-        let intCon = CPattern region E.PInt (T.suffixed suffix) expectation
-        return $ State headers vars (intCon : revCons)
-    Can.PInt _ Nothing ->
+        let tipe = T.suffixed suffix
+        let intCon = CPattern region E.PInt tipe expectation
+        return $ State headers vars (T.CLiteral region value tipe : intCon : revCons)
+    Can.PInt value Nothing ->
       do
         let (State headers vars revCons) = state
         var <- mkFlexNumber
         let intCon = CPattern region E.PInt (T.VarN var) expectation
-        return $ State headers (var : vars) (intCon : revCons)
+        -- No `Negate` to fold: the parser refuses a negative literal pattern
+        -- outright ("It is not possible to pattern match on negative numbers"),
+        -- so a `Can.PInt` is always the magnitude it was written as.
+        return $ State headers (var : vars) (T.CLiteral region value (T.VarN var) : intCon : revCons)
     Can.PStr _ ->
       do
         let (State headers vars revCons) = state

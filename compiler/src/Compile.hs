@@ -15,8 +15,11 @@ import Core.Lower.Module qualified as Lower
 import Core.Pretty qualified as Pretty
 import Data.List qualified as List
 import Data.Map qualified as Map
+import Data.Maybe qualified as Maybe
 import Data.Name qualified as Name
+import Data.NonEmptyList qualified as NE
 import Data.OneOrMore qualified as OneOrMore
+import Data.Word (Word16)
 import Gren.Interface qualified as I
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
@@ -25,6 +28,7 @@ import Nitpick.Main qualified as NitpickMain
 import Nitpick.PatternMatches qualified as PatternMatches
 import Reporting.Annotation qualified as A
 import Reporting.Error qualified as E
+import Reporting.Error.Literal qualified as Literal
 import Reporting.Render.Type.Localizer qualified as Localizer
 import Reporting.Result qualified as R
 import System.Environment qualified as Env
@@ -55,7 +59,7 @@ compile platform pkg ifaces modul =
     -- the checker records a type per node id (`docs/m1a-node-types.md`) and
     -- everything downstream of it must see the same ids.
     canonical <- NodeId.number <$> canonicalize pkg ifaces modul
-    Type.Solved solved nodeTypes defaults <- typeCheck modul canonical
+    Type.Solved solved nodeTypes defaults literalWidths <- typeCheck modul canonical
     () <- checkNodeTypes canonical nodeTypes
     -- Before the annotations, because half of one may come from it: an
     -- unannotated definition's open constraints are the elaborator's answer
@@ -65,6 +69,7 @@ compile platform pkg ifaces modul =
       resolveInstances modul ifaces canonical defaults solved nodeTypes
     let annotations = withContexts canonical (Resolve._inferred elaboration) solved'
     () <- nitpick canonical
+    () <- checkLiterals literalWidths
     () <- checkMain platform modul annotations canonical
     let core = Lower.lower platform annotations nodeTypes' elaboration canonical
     () <- dumpCore canonical core
@@ -308,6 +313,62 @@ dumpCore canonical core =
           Dump.writeModule dir (Can._name canonical) $
             Pretty.moduleToBuilder Pretty.defaultOptions core
           return (Right ())
+
+-- | D63's range check: a numeric literal outside the range of the type it has
+-- is a compile error, never a wrap (@syntax.md@ S5, @docs\/m1b-int.md@ §I20).
+--
+-- Here rather than in the lowering, which is where §I8.3 put it, because the
+-- lowering has no way to report an error and its result is lazy — a build that
+-- generates no code never forces it. Here rather than in the solver, because a
+-- literal's type is not final until the solve ends and the /defaulting/ after
+-- it. What the solver contributes is the pairing of a literal's region with
+-- the type it came out at, which is the one thing this phase could not
+-- reconstruct: a pattern literal has no node id and no recorded type (§N9).
+--
+-- @Float@ and @Float32@ are not range-checked. S5's rule is about integer
+-- literals; a number written without a decimal point at a float type is a
+-- float, and "too large for a `Float`" is a rounding to an infinity rather
+-- than a value the type cannot hold.
+checkLiterals :: [(A.Region, Integer, Maybe Name.Name)] -> Either E.Error ()
+checkLiterals widths =
+  -- Sorted, because the solver visits a module in constraint order and not in
+  -- source order — a `CLet` body before the definitions after it — and a person
+  -- reading six of these wants them the way the file is written.
+  case List.sortOn sourceOrder (Maybe.mapMaybe outOfRange widths) of
+    [] -> Right ()
+    e : es -> Left (E.BadLiterals (NE.List e es))
+
+sourceOrder :: Literal.Error -> (Word16, Word16)
+sourceOrder err =
+  case Literal.regionOf err of
+    A.Region (A.Position row col) _ -> (row, col)
+
+-- | One literal, checked against the range of the type it has.
+--
+-- A literal whose type is still a /variable/ is checked against @Int@\'s
+-- range, and not because a variable is an @Int@: it is because
+-- 'Core.Lower.Literal' gives such a literal the @Int@ case (D149's registered
+-- hole), so that is the width it will have. The check and the lowering answer
+-- the same question and must not answer it differently.
+outOfRange :: (A.Region, Integer, Maybe Name.Name) -> Maybe Literal.Error
+outOfRange (region, value, tipe) =
+  case range tipe of
+    Just (low, high)
+      | value < low || value > high ->
+          Just (Literal.OutOfRange region value (Maybe.fromMaybe Name.int tipe) low high)
+    _ ->
+      Nothing
+
+range :: Maybe Name.Name -> Maybe (Integer, Integer)
+range tipe =
+  case tipe of
+    Nothing -> Just (-2147483648, 2147483647)
+    Just name
+      | name == Name.int -> Just (-2147483648, 2147483647)
+      | name == Name.int64 -> Just (-9223372036854775808, 9223372036854775807)
+      | name == Name.uint32 -> Just (0, 4294967295)
+      | name == Name.uint64 -> Just (0, 18446744073709551615)
+    _ -> Nothing
 
 nitpick :: Can.Module -> Either E.Error ()
 nitpick canonical =

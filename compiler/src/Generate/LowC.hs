@@ -830,10 +830,12 @@ repOfExpr expr =
 
 -- | A constant, printed at the representation it is used at.
 --
--- The 'Rep' and not the 'Lit' decides, and the two disagree often enough that
--- it matters: Core spells every M1a integer literal @LIntLegacy@, so the @2@ in
--- @x / 2@ over @Float@ arrives here as an integer and has to print as
--- @2.0@. "Core.Low" resolved that; this only obeys.
+-- The 'Rep' and not the 'Lit' decides. The two used to disagree often: Core
+-- spelled every M1a integer literal @LIntLegacy@, so the @2@ in @x / 2@ over
+-- @Float@ arrived here as an integer and had to print as @2.0@. D2's flag day
+-- (@docs\/m1b-int.md@ §I20) made that literal an @LFloat@ at the lowering, so
+-- what is left for this to obey is the case where the type is still a variable.
+-- "Core.Low" resolves it; this only obeys.
 literal :: Lit -> Rep -> B.Builder
 literal lit rep =
   case (rep, lit) of

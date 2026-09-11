@@ -259,11 +259,11 @@ data Lit
 data Expr
   = -- | A scalar constant, __with the representation it is used at__.
     --
-    -- The 'Rep' is not derivable from the 'Lit'. At M1a Core spells every
-    -- integer literal 'Core.AST.LIntLegacy', so the @2@ in @x / 2@ where @x@ is
-    -- a @Float@ is an integer literal at @double@ -- and a printer that read the
-    -- constructor would emit @INT32_C(2)@ and call the wrong kernel function.
-    -- The representation comes from the node's Core type.
+    -- The 'Rep' is not derivable from the 'Lit' where the literal's type is
+    -- still a variable, which is the one case left: an unannotated literal
+    -- keeps Gren's numeric constraint and Core does not say whether it is an
+    -- @int32_t@ or a @double@. The representation comes from the node's Core
+    -- type wherever that type is concrete.
     XLit !Lit !Rep
   | XVar !Name !Rep
   | -- | Read a captured variable out of the environment.
@@ -1025,28 +1025,18 @@ crashText kind =
     Core.StackExhausted -> "stack exhausted"
     Core.Unreachable -> "unreachable"
 
--- | Core's @Int@ literal is 'Core.AST.LIntLegacy' at M1a and carries no width.
+-- | Core's literals, at the widths their constructors give them.
 --
--- This is a real finding and it is worth stating precisely. D2 makes @Int@
--- 32-bit; 'Core.AST.LIntLegacy' holds an unbounded 'Integer' because M1a's gate
--- is that the existing JS suite passes, and a JS @Int@ is a double exact to
--- 2^53. So the literal itself does not say what C type it has: @Low@ takes the
--- width from the binder's type, which is @Basics.Int@, and the literal would
--- not have said. When D2 lands and 'Core.AST.LInt' replaces it, this note goes
--- away — which is exactly the sort of thing the list is for.
+-- __This used to carry the spike's one `Absent` finding__ and no longer does.
+-- Core spelled every integer literal 'Core.AST.LIntLegacy' at M1a — an
+-- unbounded @Integer@ that did not say it was 32 bits — so @Low@ took the width
+-- from the binder's type and noted that Core could not have told it. D2's flag
+-- day deleted the constructor (@docs\/m1b-int.md@ §I20) and every literal now
+-- says its own width, which is what @harness\/spike\/FINDING.txt@ losing its
+-- @absent@ section records.
 lowerLit :: Core.Literal -> L Lit
 lowerLit lit =
   case lit of
-    Core.LIntLegacy n ->
-      do
-        note
-          "the width of an integer literal"
-          ( Absent
-              "Core.AST.LIntLegacy carries an unbounded Integer, so the literal \
-              \does not say it is 32 bits; Low takes the width from the type. \
-              \D2's LInt at M1b removes this"
-          )
-        return (LInt n)
     Core.LInt n -> return (LInt (fromIntegral n))
     Core.LInt64 n -> return (LInt (fromIntegral n))
     Core.LUInt32 n -> return (LInt (fromIntegral n))
@@ -1058,21 +1048,18 @@ lowerLit lit =
 
 -- | A literal's representation, which is a harder question than it looks.
 --
--- Two facts about M1a Core meet here.
+-- __Two facts about M1a Core met here and D2 spent both of them.__ An integer
+-- literal did not say its own width — every one was the transitional
+-- @LIntLegacy@, an unbounded @Integer@ — and it did not say it was an integer
+-- either: @core@ declares @(\/) : Float -> Float -> Float@, so the @2@ in
+-- @x \/ 2@ is a @Float@ and was spelled @LIntLegacy@ all the same, because
+-- that is what was written. Reading the constructor gave @int32_t@ and called
+-- @geng_kernel_Basics_fdiv_d_i@, which does not exist; it was measured on the
+-- @float-arith@ program. §I18 made an integer literal at a float type an
+-- @LFloat@ and §I20 deleted @LIntLegacy@, so a literal now says its own width
+-- whenever its type has one.
 --
--- __An integer literal does not say its own width.__ 'Core.AST.LIntLegacy'
--- holds an unbounded 'Integer' because M1a\'s gate is that the existing JS
--- suite passes and a JS @Int@ is a double exact to 2^53. D2\'s @LInt@ at M1b
--- replaces it.
---
--- __An integer literal does not even say it is an integer.__ @core@ declares
--- @(\/) : Float -> Float -> Float@, so in @x \/ 2@ the @2@ is a @Float@ — and
--- Core spells it 'Core.AST.LIntLegacy' all the same, because that is what was
--- written. Reading the constructor gives @int32_t@ and calls
--- @geng_kernel_Basics_fdiv_d_i@, which does not exist. Measured on the
--- @float-arith@ program before this was here.
---
--- So the type wins where the type is concrete. Where it is a bare @number@ —
+-- The type still wins where the type is concrete. Where it is a bare number —
 -- an unannotated literal the solver left polymorphic — there is nothing to
 -- read, and @Low@ falls back to the literal\'s own shape and says so. That
 -- fallback is a real gap and not a convenience: it is R1\'s specialization

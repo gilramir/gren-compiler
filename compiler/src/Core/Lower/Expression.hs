@@ -452,6 +452,21 @@ expr env (Can.Expr nid region value) =
           node (Core.ELit (Literal.float tipe f))
         Can.Array items ->
           node (Core.EArray (map (expr env) items))
+        -- A negative literal is one literal (`syntax.md` S5,
+        -- `docs/m1b-int.md` §I20). Gren parses `-1` as `Negate (Int 1)`, so
+        -- without this the Core for every negative number is a call, and
+        -- `-9223372036854775808` is a call that arrives at the right answer by
+        -- wrapping twice — the literal is one past the signed width's top,
+        -- `fromIntegral` wraps it to the bottom, and `negate` wraps it back
+        -- (§I16.4). The range check has already folded the sign to decide the
+        -- literal is legal; this folds it to decide what it *is*, and the two
+        -- agree because they fold the same way.
+        --
+        -- Integers only. A float carries its digits as text, so folding one
+        -- means negating the `Double` after reading it rather than choosing a
+        -- constructor, and `negate` at a float is exact anyway.
+        Can.Negate (Can.Expr _ _ (Can.Int value _)) ->
+          node (Core.ELit (Literal.int tipe (negate value)))
         Can.Negate inner ->
           -- `-x` is `Basics.negate` at `x`'s type, and since D144 that is a
           -- method rather than a binding, so this resolves the way an operator

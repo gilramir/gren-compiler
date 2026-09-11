@@ -22,9 +22,8 @@
 --     GHC's `Read Double` goes through an exact `Rational` and `fromRat`, which
 --     is round-to-nearest-even, so it meets it.
 --
---   * __Integers are already values__, and stay 'Core.AST.LIntLegacy' /at an
---     @Int@/ until D2's flag day at §I8 step 6. See 'Core.AST.LIntLegacy' for
---     why that is its own constructor rather than a widened `LInt64`.
+--   * __Integers are already values__, and the only work is choosing the
+--     constructor for the width the type gives them.
 --
 -- __A literal takes its width from its type__ (D149, @docs/m1b-int.md@ §I13).
 -- Both integer and float literals are lowered against the type the solver gave
@@ -95,20 +94,24 @@ float tipe number =
 
 -- | An integer literal at the width its type says.
 --
--- The @Int@ case is 'Core.AST.LIntLegacy' and stays that way until §I8 step 6
--- deletes it; the three widths D2 adds are the specified constructors. A
--- literal whose type is still a /variable/ — the body of a
+-- A literal whose type is still a /variable/ — the body of a
 -- @f : Num a => a -> a@ that says @x + 1@ — has no width to read, and takes the
 -- @Int@ case. That is `docs/open-items.md`\'s registered hole and not a
 -- decision made here: `classes.md` §0 closes an /ambiguous/ numeric variable
 -- and a rigid one is not ambiguous, so nothing closes it and @Num@ has no
--- @fromInt@ method for a witness to carry.
+-- @fromInt@ method for a witness to carry. D63's range check makes the same
+-- assumption, and the two have to agree (@docs\/m1b-int.md@ §I20).
 --
 -- __An integer literal at a float type is a float__, which is what @2 : Float@
 -- has always meant and what @42f32@ now says outright. Before §I18 both fell
--- through to 'Core.AST.LIntLegacy', so a @Float32@ written without a decimal
--- point was a legacy @Int@ in the IR — invisible on JavaScript, where both are
--- a double, and not invisible anywhere else.
+-- through to the transitional @LIntLegacy@, so a @Float32@ written without a
+-- decimal point was a legacy @Int@ in the IR — invisible on JavaScript, where
+-- both are a double, and not invisible anywhere else.
+--
+-- __The value is narrowed rather than checked here.__ @fromInteger@ at an
+-- 'Int32' wraps, and nothing out of range reaches this point: D63's check
+-- refuses such a literal in `Compile` (§I20), which is the phase that can
+-- report an error against a source region.
 int :: Core.Type -> Integer -> Core.Literal
 int tipe n =
   case numericType tipe of
@@ -118,7 +121,7 @@ int tipe n =
       | name == Name.uint64 -> Core.LUInt64 (fromIntegral n)
       | name == Name.float -> Core.LFloat (fromInteger n)
       | name == Name.float32 -> Core.LFloat32 (fromInteger n)
-    _ -> Core.LIntLegacy (toInteger n)
+    _ -> Core.LInt (fromInteger n)
 
 -- | The name of the @Basics@ type this literal has, when it has one.
 --

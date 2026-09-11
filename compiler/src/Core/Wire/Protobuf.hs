@@ -85,7 +85,7 @@ keyWire key = wireFromCode (fromIntegral (key .&. 7))
 
 -- | @sint32@ and @sint64@ are zigzag: a small negative number costs one byte
 -- rather than ten. Every signed field in the schema is one of those, because
--- Core's negative numbers — an @LInt@, a negative @LIntLegacy@ — are ordinary
+-- Core's negative numbers — an @LInt@, a negative @LInt64@ — are ordinary
 -- rather than exceptional.
 zigzag32 :: Int32 -> Word64
 zigzag32 n = fromIntegral (fromIntegral ((n `shiftL` 1) `xor` (n `shiftR` 31)) :: Word32)

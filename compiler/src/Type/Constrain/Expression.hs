@@ -67,6 +67,32 @@ recordDefType :: Can.NodeId -> Type -> Constraint -> Constraint
 recordDefType nid tipe constraint =
   CAnd [CNode nid tipe, constraint]
 
+-- | A numeric literal directly under a @Negate@, with the sign folded into it.
+--
+-- @syntax.md@ S5: D63's range check is applied "to a literal after folding a
+-- directly enclosing @Negate@", so @-2147483648 : Int@ compiles and is @Int@'s
+-- minimum rather than its maximum plus one. Gren parses @-1@ as
+-- @Negate (Int 1)@, so a literal on its own is always a magnitude and this is
+-- the only place in the pipeline where the sign exists.
+--
+-- Constraining a negated /copy/ of the node is the whole implementation, and it
+-- is safe for a reason worth stating: a @Can.Int@\'s value is read by exactly
+-- two passes, and the other one — 'Core.Lower.Literal' — reads the real tree.
+-- Nothing here can see a value except 'CLiteral'.
+--
+-- __S5's parenthesised half is not implementable here and has been dropped__
+-- (@docs\/m1b-int.md@ §I20). It said @-(2147483648)@ should still be an error;
+-- 'Canonicalize.Expression' discards @Src.Parens@, so by the time a type
+-- exists — which is what decides /which/ range to check — the two spellings
+-- are the same tree.
+foldNegation :: Can.Expr -> Can.Expr
+foldNegation expr =
+  case expr of
+    Can.Expr nid litRegion (Can.Int value suffix) ->
+      Can.Expr nid litRegion (Can.Int (negate value) suffix)
+    _ ->
+      expr
+
 expectedType :: Expected Type -> Type
 expectedType expected =
   case expected of
@@ -109,12 +135,13 @@ constrainHelp rtv _nid region expression expected =
       return $ CEqual region String Type.string expected
     Can.Chr _ ->
       return $ CEqual region Char Type.char expected
-    Can.Int _ (Just suffix) ->
-      return $ CEqual region E.Number (Type.suffixed suffix) expected
-    Can.Int _ Nothing ->
+    Can.Int value (Just suffix) ->
+      let tipe = Type.suffixed suffix
+       in return $ CAnd [CEqual region E.Number tipe expected, CLiteral region value tipe]
+    Can.Int value Nothing ->
       do
         var <- mkFlexNumber
-        return $ exists [var] $ CEqual region E.Number (VarN var) expected
+        return $ exists [var] $ CAnd [CEqual region E.Number (VarN var) expected, CLiteral region value (VarN var)]
     Can.Float _ (Just suffix) ->
       return $ CEqual region Float (Type.suffixed suffix) expected
     Can.Float _ Nothing ->
@@ -127,7 +154,7 @@ constrainHelp rtv _nid region expression expected =
       do
         numberVar <- mkFlexNumber
         let numberType = VarN numberVar
-        numberCon <- constrain rtv expr (FromContext region Negate numberType)
+        numberCon <- constrain rtv (foldNegation expr) (FromContext region Negate numberType)
         let negateCon = CEqual region E.Number numberType expected
         return $ exists [numberVar] $ CAnd [numberCon, negateCon]
     Can.Binop op _ annotation leftExpr rightExpr ->

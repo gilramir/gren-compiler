@@ -9,7 +9,7 @@
         "direct": {
             "gren-lang/core": "local:../../gren-lang/core",
             "gren-lang/node": "local:../../gren-lang/node",
-            "gren-lang/compiler-node": "5.0.0",
+            "gren-lang/compiler-node": "local:../../gren-lang/compiler-node",
             "gren-lang/compiler-common": "local:../../gren-lang/compiler-common",
             "gilramir/gren-format-lib": "local:../../gilramir/gren-format-lib"
         },

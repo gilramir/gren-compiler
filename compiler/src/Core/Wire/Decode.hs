@@ -1292,8 +1292,10 @@ literalP =
         (5, WFixed64, LFloat <$> fixed64AsDouble),
         (6, WFixed32, LFloat32 <$> fixed32AsFloat),
         (7, WVarint, LChar . unzigzag32 <$> varint),
-        (8, WVarint, LString <$> indexText),
-        (9, WVarint, LIntLegacy . toInteger . unzigzag64 <$> varint)
+        (8, WVarint, LString <$> indexText)
+        -- Tag 9 was `int_legacy` and is `reserved` in the schema. A file
+        -- carrying one is refused rather than read: a pre-D2 `Int` literal is
+        -- not a number this compiler has a type for (`docs/m1b-int.md` §I20).
       ]
 
 narrow32 :: Word64 -> Word32

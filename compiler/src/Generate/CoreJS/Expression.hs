@@ -249,7 +249,6 @@ localBind env (Core.Bind binder body) =
 literal :: Env -> A.Position -> Core.Literal -> JS.Expr
 literal env pos lit =
   case lit of
-    Core.LIntLegacy n -> JS.TrackedInt (_home env) pos (fromInteger n)
     Core.LInt n -> JS.TrackedInt (_home env) pos (fromIntegral n)
     -- A 64-bit literal is a BigInt literal, which is the digits with an `n`
     -- after them -- the representation `Generate.CoreJS.Prim` gives both 64-bit
@@ -955,7 +954,6 @@ scrutinised env lit value =
 patternLiteral :: Core.Literal -> JS.Expr
 patternLiteral lit =
   case lit of
-    Core.LIntLegacy n -> JS.Int (fromInteger n)
     Core.LInt n -> JS.Int (fromIntegral n)
     Core.LInt64 n -> bigint (toInteger n)
     Core.LUInt32 n -> JS.Int (fromIntegral n)

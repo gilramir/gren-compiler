@@ -582,7 +582,7 @@ intT :: Core.Type
 intT = Core.TCon (Core.QualName (ModuleName.Canonical Pkg.core "Basics") "Int") []
 
 one :: Core.Expr
-one = Core.Expr (Core.ELit (Core.LIntLegacy 1)) intT span0
+one = Core.Expr (Core.ELit (Core.LInt 1)) intT span0
 
 globalE :: Core.QualName -> Core.Expr
 globalE name = Core.Expr (Core.EGlobal name) intT span0

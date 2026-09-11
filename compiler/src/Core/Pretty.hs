@@ -423,7 +423,6 @@ literal l =
     LFloat32 f -> B.floatDec f <> "f32"
     LChar c -> "char#" <> B.int32Dec c
     LString s -> "\"" <> B.stringUtf8 (Utf8.toChars s) <> "\""
-    LIntLegacy n -> B.stringUtf8 (show n) <> "int"
 
 crash :: CrashKind -> B.Builder
 crash k =
