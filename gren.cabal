@@ -73,6 +73,7 @@ Library common
         Gren.Docs
         Gren.Fingerprint
         Gren.Int
+        Gren.Number
         Gren.Float
         Gren.Interface
         Gren.Kernel

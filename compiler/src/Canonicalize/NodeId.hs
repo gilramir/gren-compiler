@@ -179,8 +179,8 @@ expr_ e =
     Can.VarOperator _ _ _ _ -> pure e
     Can.Chr _ -> pure e
     Can.Str _ -> pure e
-    Can.Int _ -> pure e
-    Can.Float _ -> pure e
+    Can.Int _ _ -> pure e
+    Can.Float _ _ -> pure e
     Can.Accessor _ -> pure e
     Can.Array items ->
       Can.Array <$> traverse expr items

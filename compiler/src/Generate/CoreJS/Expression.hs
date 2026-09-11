@@ -943,14 +943,23 @@ scrutinised env lit value =
     (Core.LChar _, Mode.Dev) -> JS.Call (JS.Access value (JsName.fromLocal "valueOf")) []
     _ -> value
 
+-- | The value a pattern's literal is compared against, which is the same
+-- JavaScript the expression case emits and not a second opinion about it.
+--
+-- It used to be one 'JS.Int' for every integer width, which was right while
+-- @Int@ was the only integer there was and silently wrong afterwards: a
+-- @Int64@ is a @BigInt@ at run time (D74) and @42n === 42@ is @false@, so
+-- @when (n : Int64) is 42 ->@ compiled and then matched nothing. Nothing asked
+-- until §I18, because 'Type.Constrain.Pattern' had constrained every literal
+-- pattern to @Int@ and no such program could be written.
 patternLiteral :: Core.Literal -> JS.Expr
 patternLiteral lit =
   case lit of
     Core.LIntLegacy n -> JS.Int (fromInteger n)
     Core.LInt n -> JS.Int (fromIntegral n)
-    Core.LInt64 n -> JS.Int (fromIntegral n)
+    Core.LInt64 n -> bigint (toInteger n)
     Core.LUInt32 n -> JS.Int (fromIntegral n)
-    Core.LUInt64 n -> JS.Int (fromIntegral n)
+    Core.LUInt64 n -> bigint (toInteger n)
     Core.LString text -> JS.String (text_ (Utf8.toChars text))
     -- A character pattern tests the one-character string, not the dev-mode
     -- `_Utils_chr` wrapper: `_Utils_chr` returns a `String` object in dev, and
@@ -958,6 +967,11 @@ patternLiteral lit =
     Core.LChar code -> JS.String (text_ [toEnum (fromIntegral code)])
     Core.LFloat _ -> error "Generate.CoreJS: a float pattern — the frontend rejects one"
     Core.LFloat32 _ -> error "Generate.CoreJS: a float pattern — the frontend rejects one"
+
+-- | A @BigInt@ literal: the digits with an @n@ after them, the way 'literal'
+-- writes one.
+bigint :: Integer -> JS.Expr
+bigint n = JS.Float (B.string7 (show n ++ "n"))
 
 -- SPANS
 

@@ -103,6 +103,12 @@ float tipe number =
 -- decision made here: `classes.md` §0 closes an /ambiguous/ numeric variable
 -- and a rigid one is not ambiguous, so nothing closes it and @Num@ has no
 -- @fromInt@ method for a witness to carry.
+--
+-- __An integer literal at a float type is a float__, which is what @2 : Float@
+-- has always meant and what @42f32@ now says outright. Before §I18 both fell
+-- through to 'Core.AST.LIntLegacy', so a @Float32@ written without a decimal
+-- point was a legacy @Int@ in the IR — invisible on JavaScript, where both are
+-- a double, and not invisible anywhere else.
 int :: Core.Type -> Integer -> Core.Literal
 int tipe n =
   case numericType tipe of
@@ -110,6 +116,8 @@ int tipe n =
       | name == Name.int64 -> Core.LInt64 (fromIntegral n)
       | name == Name.uint32 -> Core.LUInt32 (fromIntegral n)
       | name == Name.uint64 -> Core.LUInt64 (fromIntegral n)
+      | name == Name.float -> Core.LFloat (fromInteger n)
+      | name == Name.float32 -> Core.LFloat32 (fromInteger n)
     _ -> Core.LIntLegacy (toInteger n)
 
 -- | The name of the @Basics@ type this literal has, when it has one.

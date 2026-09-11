@@ -86,7 +86,7 @@ name :: String -> A.Located Name.Name
 name = A.At region . Name.fromChars
 
 int :: Integer -> Can.Expr
-int n = Can.at region (Can.Int n)
+int n = Can.at region (Can.Int n Nothing)
 
 arr :: [Can.Expr] -> Can.Expr
 arr items = Can.at region (Can.Array items)

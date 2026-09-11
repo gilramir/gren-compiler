@@ -60,6 +60,7 @@ import Data.Name (Name)
 import Data.Name qualified as Name
 import Gren.Float qualified as EF
 import Gren.Int qualified as GI
+import Gren.Number qualified as GN
 import Gren.String qualified as ES
 import Parse.Primitives qualified as P
 import Reporting.Annotation qualified as A
@@ -71,8 +72,8 @@ type Expr = A.Located Expr_
 data Expr_
   = Chr ES.String
   | Str ES.String ES.StringFormat
-  | Int Integer GI.IntFormat
-  | Float EF.Float
+  | Int Integer GI.IntFormat (Maybe GN.Suffix)
+  | Float EF.Float (Maybe GN.Suffix)
   | Var VarType Name
   | VarQual VarType Name Name
   | Array [ArrayEntry]
@@ -140,7 +141,7 @@ data Pattern_
   | PArray [PArrayEntry]
   | PChr ES.String
   | PStr ES.String
-  | PInt Integer GI.IntFormat
+  | PInt Integer GI.IntFormat (Maybe GN.Suffix)
   deriving (Show)
 
 type RecordFieldPattern = A.Located RecordFieldPattern_

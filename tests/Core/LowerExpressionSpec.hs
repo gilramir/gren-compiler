@@ -88,7 +88,7 @@ spec = do
       -- is what keeps the node describing the program rather than the AST.
       value
         [(1, Can.TType home "Maybe" [intT]), (2, Can.TLambda intT (Can.TType home "Maybe" [intT])), (3, intT)]
-        (at 1 (Can.Call (at 2 just) [at 3 (Can.Int 5)]))
+        (at 1 (Can.Call (at 2 just) [at 3 (Can.Int 5 Nothing)]))
         `shouldBe` Core.ECtor (qual "Just") 1 [expr (core intT) (Core.ELit (Core.LIntLegacy 5))]
 
     it "eta-expands a constructor used as a value" $
@@ -107,7 +107,7 @@ spec = do
     it "becomes a when on Bool" $
       value
         [(1, intT), (2, boolT), (3, intT), (4, intT)]
-        (at 1 (Can.If [(at 2 true, at 3 (Can.Int 1))] (at 4 (Can.Int 2))))
+        (at 1 (Can.If [(at 2 true, at 3 (Can.Int 1 Nothing))] (at 4 (Can.Int 2 Nothing))))
         `shouldBe` Core.ECase
           (expr (core boolT) (Core.ECtor (qual' ModuleName.basics "True") 0 []))
           [ Core.Alt (Core.PCtor (qual' ModuleName.basics "True") 0 []) (expr (core intT) (Core.ELit (Core.LIntLegacy 1))),
@@ -121,8 +121,8 @@ spec = do
               [(1, intT), (2, boolT), (3, intT), (4, boolT), (5, intT), (6, intT)]
               ( at 1 $
                   Can.If
-                    [(at 2 true, at 3 (Can.Int 1)), (at 4 true, at 5 (Can.Int 2))]
-                    (at 6 (Can.Int 3))
+                    [(at 2 true, at 3 (Can.Int 1 Nothing)), (at 4 true, at 5 (Can.Int 2 Nothing))]
+                    (at 6 (Can.Int 3 Nothing))
               )
        in case lowered of
             Core.ECase _ [_, Core.Alt _ (Core.Expr (Core.ECase _ inner _) _ _)] _ ->
@@ -143,7 +143,7 @@ spec = do
       fieldNames
         ( value
             [(1, Can.TRecord (Map.fromList [("b", Can.FieldType 0 intT), ("a", Can.FieldType 1 intT)]) Nothing), (2, intT), (3, intT)]
-            (at 1 (Can.Record (Map.fromList [(located "b", at 2 (Can.Int 1)), (located "a", at 3 (Can.Int 2))])))
+            (at 1 (Can.Record (Map.fromList [(located "b", at 2 (Can.Int 1 Nothing)), (located "a", at 3 (Can.Int 2 Nothing))])))
         )
         `shouldBe` ["a", "b"]
 
@@ -254,7 +254,7 @@ spec = do
     it "makes a binop a call of the function it names" $
       case value
         [(1, intT), (2, intT), (3, intT)]
-        (at 1 (Can.Binop "+" (Can.OpValue ModuleName.basics "add") plusAnnotation (at 2 (Can.Int 1)) (at 3 (Can.Int 2)))) of
+        (at 1 (Can.Binop "+" (Can.OpValue ModuleName.basics "add") plusAnnotation (at 2 (Can.Int 1 Nothing)) (at 3 (Can.Int 2 Nothing)))) of
         Core.EApp (Core.Expr (Core.EGlobal name) tipe _) [_, _] -> do
           name `shouldBe` qual' ModuleName.basics "add"
           tipe `shouldBe` Core.TFun [core intT, core intT] (core intT)
@@ -326,7 +326,7 @@ negated use =
   Core._exprValue $
     Lower.expr
       (env [(1, intT), (2, intT)]) {Lower._uses = Map.singleton (Can.NodeId 1) use}
-      (at 1 (Can.Negate (at 2 (Can.Int 1))))
+      (at 1 (Can.Negate (at 2 (Can.Int 1 Nothing))))
 
 -- | A class-method node, lowered under one elaboration.
 lowered :: Resolve.Use -> Core.Expr

@@ -109,11 +109,15 @@ constrainHelp rtv _nid region expression expected =
       return $ CEqual region String Type.string expected
     Can.Chr _ ->
       return $ CEqual region Char Type.char expected
-    Can.Int _ ->
+    Can.Int _ (Just suffix) ->
+      return $ CEqual region E.Number (Type.suffixed suffix) expected
+    Can.Int _ Nothing ->
       do
         var <- mkFlexNumber
         return $ exists [var] $ CEqual region E.Number (VarN var) expected
-    Can.Float _ ->
+    Can.Float _ (Just suffix) ->
+      return $ CEqual region Float (Type.suffixed suffix) expected
+    Can.Float _ Nothing ->
       do
         var <- mkFlexFractional
         return $ exists [var] $ CEqual region Float (VarN var) expected

@@ -81,11 +81,24 @@ add (A.At region pattern) expectation state =
               _vars = map snd fieldVars ++ extVar : vars,
               _revCons = recordCon : revCons
             }
-    Can.PInt _ ->
+    -- A literal pattern takes its width from the scrutinee, the way a
+    -- literal expression takes it from its type (D154, @docs\/m1b-int.md@
+    -- §I18). Before D2 there was one integer type and this constrained to
+    -- @T.int@ outright, which since §I13 made @when (n : Int64) is 42 ->@ a
+    -- TYPE MISMATCH — @42@ meant something different on the two sides of a
+    -- @when@. A @Num@ variable here is the same thing the expression case
+    -- makes, and the scrutinee is what it unifies with; a suffix pins it.
+    Can.PInt _ (Just suffix) ->
       do
         let (State headers vars revCons) = state
-        let intCon = CPattern region E.PInt T.int expectation
+        let intCon = CPattern region E.PInt (T.suffixed suffix) expectation
         return $ State headers vars (intCon : revCons)
+    Can.PInt _ Nothing ->
+      do
+        let (State headers vars revCons) = state
+        var <- mkFlexNumber
+        let intCon = CPattern region E.PInt (T.VarN var) expectation
+        return $ State headers (var : vars) (intCon : revCons)
     Can.PStr _ ->
       do
         let (State headers vars revCons) = state

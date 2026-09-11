@@ -446,9 +446,9 @@ expr env (Can.Expr nid region value) =
           node (Core.ELit (Literal.chr c))
         Can.Str s ->
           node (Core.ELit (Literal.str s))
-        Can.Int n ->
+        Can.Int n _ ->
           node (Core.ELit (Literal.int tipe n))
-        Can.Float f ->
+        Can.Float f _ ->
           node (Core.ELit (Literal.float tipe f))
         Can.Array items ->
           node (Core.EArray (map (expr env) items))
@@ -880,7 +880,7 @@ pattern env tipe (A.At region p) =
           Core.PLit (Literal.chr c)
         Can.PStr s ->
           Core.PLit (Literal.str s)
-        Can.PInt n ->
+        Can.PInt n _ ->
           Core.PLit (Literal.int tipe n)
         Can.PCtor home _ union name index args ->
           -- The type Canonical caches on a constructor argument is the one the

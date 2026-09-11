@@ -86,6 +86,7 @@ import Data.Name (Name)
 import Data.Name qualified as Name
 import Gren.Float qualified as EF
 import Gren.ModuleName qualified as ModuleName
+import Gren.Number qualified as GN
 import Gren.String qualified as ES
 import Reporting.Annotation qualified as A
 
@@ -156,8 +157,8 @@ data Expr_
   | VarOperator Name ModuleName.Canonical Name Annotation -- CACHE real name for optimization
   | Chr ES.String
   | Str ES.String
-  | Int Integer
-  | Float EF.Float
+  | Int Integer (Maybe GN.Suffix)
+  | Float EF.Float (Maybe GN.Suffix)
   | Array [Expr]
   | Negate Expr
   | -- | A use of an infix operator, with what its declaration named
@@ -219,7 +220,7 @@ data Pattern_
   | PBool Union Bool
   | PChr ES.String
   | PStr ES.String
-  | PInt Integer
+  | PInt Integer (Maybe GN.Suffix)
   | PCtor
       { _p_home :: ModuleName.Canonical,
         _p_type :: Name,

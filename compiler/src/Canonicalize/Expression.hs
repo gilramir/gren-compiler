@@ -54,10 +54,10 @@ canonicalize env (A.At region expression) =
         Result.ok (Can.Str string)
       Src.Chr char ->
         Result.ok (Can.Chr char)
-      Src.Int int _ ->
-        Result.ok (Can.Int int)
-      Src.Float float ->
-        Result.ok (Can.Float float)
+      Src.Int int _ suffix ->
+        Result.ok (Can.Int int suffix)
+      Src.Float float suffix ->
+        Result.ok (Can.Float float suffix)
       Src.Var varType name ->
         case varType of
           Src.LowVar -> findVar region env name
@@ -297,7 +297,7 @@ addBindingsHelp bindings (A.At region pattern) =
       bindings
     Src.PStr _ ->
       bindings
-    Src.PInt _ _ ->
+    Src.PInt _ _ _ ->
       bindings
 
 -- BUILD BINDINGS GRAPH
@@ -400,7 +400,7 @@ getPatternNames names (A.At region pattern) =
     Src.PArray patterns -> List.foldl' getPatternNames names (fmap fst patterns)
     Src.PChr _ -> names
     Src.PStr _ -> names
-    Src.PInt _ _ -> names
+    Src.PInt _ _ _ -> names
 
 extractRecordFieldPattern :: Src.RecordFieldPattern -> Src.Pattern
 extractRecordFieldPattern (A.At _ (Src.RFPattern _ pattern)) = pattern
