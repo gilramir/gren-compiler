@@ -61,6 +61,7 @@ data Expr
   | If Expr Expr Expr
   | Assign LValue Expr
   | Call Expr [Expr]
+  | New Expr [Expr]
   | TrackedNormalCall ModuleName.Canonical A.Position Expr Expr [Expr]
   | Function (Maybe Name) [Name] [Stmt]
   | TrackedFunction ModuleName.Canonical A.Position [A.Located Name] [Stmt]
@@ -606,6 +607,18 @@ fromExpr level@(Level indent nextLevel) grouping expression builder =
         & addAscii "("
         & commaSepExpr (fromExpr nextLevel Whatever) args
         & addAscii ")"
+    -- `new C(a)` is itself a MemberExpression, so `new C(a)[0]` and
+    -- `new C(a).b` already mean what they read as. The parentheses are here
+    -- anyway, because `Atomic` is the caller saying it wants one expression and
+    -- a reader should not have to know that rule to believe the output.
+    New constructor args ->
+      parensFor grouping builder $ \b ->
+        b
+          & addAscii "new "
+          & fromExpr level Atomic constructor
+          & addAscii "("
+          & commaSepExpr (fromExpr nextLevel Whatever) args
+          & addAscii ")"
     TrackedNormalCall position moduleName helper function args ->
       let trackedHelper =
             case (trackedNameFromExpr function, helper) of

@@ -10,11 +10,9 @@
 -- own. So @i32_div@ is @(a \/ b) | 0@ with a non-zero divisor as a
 -- precondition, and a backend may treat a violation as unreachable.
 --
--- __What is here is what can be declared.__ All six numeric types are Gren
--- types as of @docs\/m1b-int.md@ §I8 step 4, so every arithmetic, comparison
--- and bitwise primitive has its JavaScript here. What is still missing is the
--- four @*_bits@ conversions: nothing declares them, because taking a float
--- apart is A9's requirement and @docs\/m1b-ryu.md@ §Y7 is what will need it.
+-- __Every primitive C13 names has its JavaScript here__, as of
+-- @docs\/m1b-ryu.md@ §Y11: the four @*_bits@ conversions were the last hole,
+-- and they are two typed arrays over one buffer.
 --
 -- __The five representations__, which is the whole of what this module knows
 -- that the rest of the compiler does not: an @Int@ is a number brought back
@@ -257,10 +255,9 @@ float w p args =
 -- Geng in the four width modules; what is here is the truncation or the
 -- widening itself, with the precondition C13 gives it.
 --
--- The four @*_bits@ conversions are not here. Nothing declares them: taking a
--- float apart is A9's requirement, and @docs\/m1b-ryu.md@ §Y7's port is what
--- will need it. They stay a hole rather than a guess, which is
--- 'Canonicalize.Prim.primType''s rule read at the other end of the pipeline.
+-- The four @*_bits@ conversions are here too, and they are the one group that
+-- is neither: a reinterpretation changes no value at all, which is why A9's
+-- fdlibm port and §Y7's Ryu can both be written over it.
 conversion :: ConvPrim -> JS.Expr -> JS.Expr
 conversion p a =
   case p of
@@ -295,6 +292,22 @@ conversion p a =
     -- ends with.
     F32ToF64 -> a
     F64ToF32 -> fround a
+    -- A FLOAT'S BITS (A9, and `docs/m1b-ryu.md` §Y11). JavaScript has no
+    -- operator that reads a double's bit pattern, so the conversion is two
+    -- typed arrays over one buffer: the value is stored through the float view
+    -- and read back through the integer one, and `new Float64Array([a])` is
+    -- the shortest way to say "a buffer holding this double". Both views are
+    -- native-endian, so the pair agrees with itself on a big-endian machine as
+    -- well -- the bytes move, the bits do not.
+    --
+    -- The allocation is per call and is not free. It is what the host offers
+    -- without a scratch buffer living somewhere, and a scratch buffer would
+    -- have to live in a kernel module that nothing here can make the linker
+    -- include (C13: a primitive is an expression, not a dependency).
+    F64Bits -> viewThrough "BigUint64Array" "Float64Array" a
+    F64FromBits -> viewThrough "Float64Array" "BigUint64Array" a
+    F32Bits -> viewThrough "Uint32Array" "Float32Array" a
+    F32FromBits -> viewThrough "Float32Array" "Uint32Array" a
     -- A `Char` is a one-character JavaScript string, which is what
     -- `_Char_toCode` and `_Char_fromCode` in `core`'s kernel already assume.
     -- `chr` is the kernel's own wrapper, and it is what boxes the string in
@@ -304,11 +317,6 @@ conversion p a =
       JS.Call
         (JS.Ref (JsName.fromKernel Name.utils "chr"))
         [JS.Call (global "String" "fromCodePoint") [a]]
-    _ ->
-      error $
-        "Generate.CoreJS.Prim: no JavaScript for "
-          ++ Name.toChars (Prim.primVarName (ConvOp p))
-          ++ " yet (docs/m1b-ryu.md §Y7)"
 
 -- PIECES
 
@@ -320,6 +328,21 @@ coerce e = JS.Infix JS.OpBitwiseOr e (JS.Int 0)
 -- @UInt32@ 32 bits wide.
 unsign :: JS.Expr -> JS.Expr
 unsign e = JS.Infix JS.OpZfRShift e (JS.Int 0)
+
+-- | @new Out(new In([x]).buffer)[0]@ -- one value written through one typed
+-- array and read back through another, which is a reinterpretation of its bits
+-- and not a conversion of its value.
+viewThrough :: Name.Name -> Name.Name -> JS.Expr -> JS.Expr
+viewThrough out in_ e =
+  JS.Index
+    ( JS.New
+        (JS.Ref (JsName.fromLocalHumanReadable out))
+        [ JS.Access
+            (JS.New (JS.Ref (JsName.fromLocalHumanReadable in_)) [JS.Array [e]])
+            (JsName.fromLocalHumanReadable "buffer")
+        ]
+    )
+    (JS.Int 0)
 
 -- | @Math.fround(x)@ -- the rounding that makes a @Float32@ single precision.
 fround :: JS.Expr -> JS.Expr

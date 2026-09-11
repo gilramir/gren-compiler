@@ -205,7 +205,7 @@ globalE :: Name -> Core.Expr
 globalE n = node (Core.EGlobal (Core.QualName home n))
 
 one :: Core.Expr
-one = node (Core.ELit (Core.LIntLegacy 1))
+one = node (Core.ELit (Core.LInt 1))
 
 call :: Core.Expr -> [Core.Expr] -> Core.Expr
 call fn args = node (Core.EApp fn args)
