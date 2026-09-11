@@ -103,7 +103,7 @@ float tipe number =
 -- decision made here: `classes.md` §0 closes an /ambiguous/ numeric variable
 -- and a rigid one is not ambiguous, so nothing closes it and @Num@ has no
 -- @fromInt@ method for a witness to carry.
-int :: Core.Type -> Int -> Core.Literal
+int :: Core.Type -> Integer -> Core.Literal
 int tipe n =
   case numericType tipe of
     Just name

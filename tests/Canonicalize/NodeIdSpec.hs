@@ -85,7 +85,7 @@ region = A.Region (A.Position 1 1) (A.Position 1 2)
 name :: String -> A.Located Name.Name
 name = A.At region . Name.fromChars
 
-int :: Int -> Can.Expr
+int :: Integer -> Can.Expr
 int n = Can.at region (Can.Int n)
 
 arr :: [Can.Expr] -> Can.Expr
@@ -110,7 +110,7 @@ letChain n body =
   Can.at
     region
     ( Can.Let
-        (Can.Def Can.unnumbered (name "x") [] (int n))
+        (Can.Def Can.unnumbered (name "x") [] (int (toInteger n)))
         (letChain (n - 1) body)
     )
 

@@ -156,7 +156,7 @@ data Expr_
   | VarOperator Name ModuleName.Canonical Name Annotation -- CACHE real name for optimization
   | Chr ES.String
   | Str ES.String
-  | Int Int
+  | Int Integer
   | Float EF.Float
   | Array [Expr]
   | Negate Expr
@@ -219,7 +219,7 @@ data Pattern_
   | PBool Union Bool
   | PChr ES.String
   | PStr ES.String
-  | PInt Int
+  | PInt Integer
   | PCtor
       { _p_home :: ModuleName.Canonical,
         _p_type :: Name,

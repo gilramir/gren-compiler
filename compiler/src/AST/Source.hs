@@ -71,7 +71,7 @@ type Expr = A.Located Expr_
 data Expr_
   = Chr ES.String
   | Str ES.String ES.StringFormat
-  | Int Int GI.IntFormat
+  | Int Integer GI.IntFormat
   | Float EF.Float
   | Var VarType Name
   | VarQual VarType Name Name
@@ -140,7 +140,7 @@ data Pattern_
   | PArray [PArrayEntry]
   | PChr ES.String
   | PStr ES.String
-  | PInt Int GI.IntFormat
+  | PInt Integer GI.IntFormat
   deriving (Show)
 
 type RecordFieldPattern = A.Located RecordFieldPattern_

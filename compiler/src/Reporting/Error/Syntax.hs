@@ -520,7 +520,7 @@ data Escape
 
 data Number
   = NumberEnd
-  | NumberDot Int
+  | NumberDot Integer
   | NumberHexDigit
   | NumberNoLeadingZero
   deriving (Show)

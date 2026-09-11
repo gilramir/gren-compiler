@@ -316,8 +316,8 @@ eatUnicode pos end row col =
                         E.BadUnicodeLength
                           (3 + fromIntegral (minusPtr newPos pos))
                           numDigits
-                          code
-                    else EscapeUnicode (numDigits + 4) code
+                          (fromInteger code)
+                    else EscapeUnicode (numDigits + 4) (fromInteger code)
 
 singleQuote :: ES.Chunk
 singleQuote =

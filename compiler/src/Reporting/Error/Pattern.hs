@@ -116,7 +116,7 @@ patternToDoc context pattern =
         P.Str str ->
           "\"" <> D.fromChars (ES.toChars str) <> "\""
         P.Int int ->
-          D.fromInt int
+          D.fromChars (show int)
     P.Ctor _ name args ->
       let ctorDoc =
             D.hsep (D.fromName name : map (patternToDoc Arg) args)

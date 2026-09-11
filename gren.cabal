@@ -295,6 +295,7 @@ Test-Suite gren-tests
         Parse.ClassSpec
         Parse.ConstraintSpec
         Parse.InstanceSpec
+        Parse.NumberSpec
         Parse.PrimSpec
         Parse.RecordUpdateSpec
         Parse.SpaceSpec

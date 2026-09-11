@@ -64,7 +64,7 @@ data Test
   = IsCtor ModuleName.Canonical Name.Name Index.ZeroBased Int Can.CtorOpts
   | IsArray Int
   | IsRecord
-  | IsInt Int
+  | IsInt Integer
   | IsChr ES.String
   | IsStr ES.String
   | IsBool Bool

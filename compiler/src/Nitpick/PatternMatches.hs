@@ -42,7 +42,7 @@ data Pattern
 data Literal
   = Chr ES.String
   | Str ES.String
-  | Int Int
+  | Int Integer
   deriving (Eq)
 
 -- CREATE SIMPLIFIED PATTERNS

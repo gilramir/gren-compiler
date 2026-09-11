@@ -35,7 +35,7 @@ isDecimalDigit word =
 -- NUMBERS
 
 data Number
-  = Int Int GI.IntFormat
+  = Int Integer GI.IntFormat
   | Float EF.Float
 
 number :: (Row -> Col -> x) -> (E.Number -> Row -> Col -> x) -> Parser x Number
@@ -74,12 +74,12 @@ number toExpectation toError =
 --
 data Outcome
   = Err (Ptr Word8) E.Number
-  | OkInt (Ptr Word8) GI.IntFormat Int
+  | OkInt (Ptr Word8) GI.IntFormat Integer
   | OkFloat (Ptr Word8)
 
 -- CHOMP INT
 
-chompInt :: Ptr Word8 -> Ptr Word8 -> Int -> Outcome
+chompInt :: Ptr Word8 -> Ptr Word8 -> Integer -> Outcome
 chompInt !pos end !n =
   if pos >= end
     then OkInt pos GI.DecimalInt n
@@ -100,7 +100,7 @@ chompInt !pos end !n =
 
 -- CHOMP FRACTION
 
-chompFraction :: Ptr Word8 -> Ptr Word8 -> Int -> Outcome
+chompFraction :: Ptr Word8 -> Ptr Word8 -> Integer -> Outcome
 chompFraction pos end n =
   let !pos1 = plusPtr pos 1
    in if pos1 >= end
@@ -187,11 +187,11 @@ chompHexInt pos end =
 -- Return -1 if it has NO digits
 -- Return -2 if it has BAD digits
 
-chompHex :: Ptr Word8 -> Ptr Word8 -> (# Ptr Word8, Int #)
+chompHex :: Ptr Word8 -> Ptr Word8 -> (# Ptr Word8, Integer #)
 chompHex pos end =
   chompHexHelp pos end (-1) 0
 
-chompHexHelp :: Ptr Word8 -> Ptr Word8 -> Int -> Int -> (# Ptr Word8, Int #)
+chompHexHelp :: Ptr Word8 -> Ptr Word8 -> Integer -> Integer -> (# Ptr Word8, Integer #)
 chompHexHelp pos end answer accumulator =
   if pos >= end
     then (# pos, answer #)
@@ -202,7 +202,7 @@ chompHexHelp pos end answer accumulator =
             then (# pos, if newAnswer == -1 then answer else -2 #)
             else chompHexHelp (plusPtr pos 1) end newAnswer newAnswer
 
-stepHex :: Ptr Word8 -> Ptr Word8 -> Word8 -> Int -> Int
+stepHex :: Ptr Word8 -> Ptr Word8 -> Word8 -> Integer -> Integer
 stepHex pos end word acc
   | 0x30 {-0-} <= word && word <= 0x39 {-9-} = 16 * acc + fromIntegral (word - 0x30 {-0-})
   | 0x61 {-a-} <= word && word <= 0x66 {-f-} = 16 * acc + 10 + fromIntegral (word - 0x61 {-a-})
