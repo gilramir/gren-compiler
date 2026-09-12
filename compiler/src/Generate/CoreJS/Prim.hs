@@ -308,15 +308,19 @@ conversion p a =
     F64FromBits -> viewThrough "Float64Array" "BigUint64Array" a
     F32Bits -> viewThrough "Uint32Array" "Float32Array" a
     F32FromBits -> viewThrough "Float32Array" "Uint32Array" a
-    -- A `Char` is a one-character JavaScript string, which is what
-    -- `_Char_toCode` and `_Char_fromCode` in `core`'s kernel already assume.
-    -- `chr` is the kernel's own wrapper, and it is what boxes the string in
-    -- dev builds so the untyped printer can tell a `Char` from a `String`.
-    CharToI32 -> JS.Call (JS.Access a (JsName.fromLocalHumanReadable "codePointAt")) [JS.Int 0]
-    I32ToChar ->
-      JS.Call
-        (JS.Ref (JsName.fromKernel Name.utils "chr"))
-        [JS.Call (global "String" "fromCodePoint") [a]]
+    -- A `Char` *is* its code point (C8, `docs/m1b-str.md` §T12), so both of
+    -- these are the identity and `core`'s `Char.toCode`/`fromCode` are the
+    -- primitive unchanged. They were a `codePointAt(0)` and a
+    -- `String.fromCodePoint` through the kernel's `chr` box, because a `Char`
+    -- was a one-character string; this is the whole of what that
+    -- representation cost on this backend, and the two lines that replace it
+    -- are what `Generate.LowC` already did.
+    --
+    -- `i32_to_char` is unchecked, and that is `core`'s to guard: `Char.fromCode`
+    -- answers `Nothing` outside the two valid ranges and nothing else in `core`
+    -- may reach the primitive.
+    CharToI32 -> a
+    I32ToChar -> a
 
 -- PIECES
 

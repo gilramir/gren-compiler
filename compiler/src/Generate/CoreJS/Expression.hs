@@ -263,13 +263,16 @@ literal env pos lit =
     Core.LFloat d -> JS.TrackedFloat (_home env) pos (Utf8.toBuilder (Literal.float d))
     Core.LFloat32 f -> JS.TrackedFloat (_home env) pos (Utf8.toBuilder (Literal.float (realToFrac f)))
     Core.LString text -> JS.TrackedString (_home env) pos (text_ (Utf8.toChars text))
-    -- A `Char` is a one-character string, wrapped in dev mode by the kernel
-    -- `_Utils_chr` so that `Debug.toString` can tell one from a string.
-    Core.LChar code ->
-      let one = JS.TrackedString (_home env) pos (text_ [toEnum (fromIntegral code)])
-       in case _mode env of
-            Mode.Dev -> JS.Call (JS.Ref (JsName.fromKernel Name.utils "chr")) [one]
-            Mode.Prod _ -> one
+    -- A `Char` is its code point (C8, `docs/m1b-str.md` §T12), which on
+    -- JavaScript is an ordinary number in `[0, 0x10FFFF]` -- the same
+    -- representation `Generate.LowC` has always emitted for one.
+    --
+    -- It was a one-character string, and in dev mode that string boxed in a
+    -- `String` object by the kernel's `_Utils_chr`, so that the untyped printer
+    -- could tell a `Char` from a `String`. Three other places in this module
+    -- knew about the box; none of them is here any more, and dev and release
+    -- now write the same thing.
+    Core.LChar code -> JS.TrackedInt (_home env) pos (fromIntegral code)
 
 text_ :: [Char] -> B.Builder
 text_ = Utf8.toBuilder . Literal.string
@@ -481,28 +484,26 @@ primAt env q args =
       | Prim.inlines op && length args == CorePrim.primArity op -> Just op
     _ -> Nothing
 
--- | The two kernel primitives that are an operator rather than a function.
+-- | The one kernel primitive that is an operator rather than a function.
 --
 -- `Eq`'s five primitive instances are reference equality (D142,
 -- @docs/m1b-classes.md@ §G40), and reference equality is @===@: routing it
 -- through @A2@ and a kernel @F2@ would cost more than the comparison. Every
 -- other kernel value is an ordinary global, so this is a saturated call to one
--- of two names and nothing else.
+-- name and nothing else. It was two until a @Char@ became a code point.
 --
---   * @Utils.identical@ is @===@ at an @Int@, a @Float@, a @Bool@ or a
---     @String@, all four of which are a JavaScript primitive.
---   * @Char.identical@ is @===@ at a @Char@, which is a primitive in @Mode.Prod@
---     and a boxed @String@ object under @_Utils_chr__DEBUG@ in @Mode.Dev@ — so
---     dev compares what 'scrutinised' compares, for the same reason.
+-- @Utils.identical@ is @===@ at an @Int@, a @Float@, a @Bool@, a @String@ or a
+-- @Char@, all five of which are a JavaScript primitive. @Char@ is the newest of
+-- the five and used to be the exception: a @Char@ was a one-character string
+-- that @Mode.Dev@ boxed in a @String@ object, so `core` reached @===@ through a
+-- @Char.identical@ of its own that unwrapped both sides. A @Char@ is a code
+-- point now (C8, `docs/m1b-str.md` §T12) and @Eq Char@ is @Utils.identical@
+-- like the rest, so the second name and the mode split are both gone.
 kernelCall :: Env -> A.Position -> Core.QualName -> Name -> Name -> [JS.Expr] -> JS.Expr
 kernelCall env pos q home name args =
   case (home, name, args) of
     (_, "identical", [left, right])
       | home == Name.utils -> identical left right
-      | home == Name.char ->
-          case _mode env of
-            Mode.Prod _ -> identical left right
-            Mode.Dev -> identical (valueOf left) (valueOf right)
     _ -> globalCall env pos q args
 
 -- | @===@, and only that. Not 'strictEq', which collapses @x === 0@ to @!x@ and
@@ -515,10 +516,6 @@ kernelCall env pos q home name args =
 identical :: JS.Expr -> JS.Expr -> JS.Expr
 identical =
   JS.Infix JS.OpEq
-
-valueOf :: JS.Expr -> JS.Expr
-valueOf value =
-  JS.Call (JS.Access value (JsName.fromLocal "valueOf")) []
 
 -- | A call to a name whose arity is known and matched goes straight to the
 -- uncurried @name$@; anything else goes through @A2@ … @A9@.
@@ -888,7 +885,7 @@ match env value pattern =
     Core.PAs binder inner ->
       let (tests, binds) = match env value inner
        in (tests, JS.Var (JsName.fromLocal (Core._binderName binder)) value : binds)
-    Core.PLit lit -> ([strictEq (scrutinised env lit value) (patternLiteral lit)], [])
+    Core.PLit lit -> ([strictEq value (patternLiteral lit)], [])
     Core.PRecord fields ->
       collect [match env (JS.Access value (generateField (_mode env) f)) p | (f, p) <- fields]
     Core.PArray items Nothing ->
@@ -932,16 +929,6 @@ unboxed env value =
     Mode.Dev -> JS.Access value (JsName.fromIndex Index.first)
     Mode.Prod _ -> value
 
--- | A `Char` value is @_Utils_chr('a')@ in dev mode, which is a @String@
--- __object__ and not a primitive: @===@ against a string literal is false for
--- it whatever the characters are. `Optimize.DecisionTree` unwraps it the same
--- way, and this is where the naive matcher has to.
-scrutinised :: Env -> Core.Literal -> JS.Expr -> JS.Expr
-scrutinised env lit value =
-  case (lit, _mode env) of
-    (Core.LChar _, Mode.Dev) -> JS.Call (JS.Access value (JsName.fromLocal "valueOf")) []
-    _ -> value
-
 -- | The value a pattern's literal is compared against, which is the same
 -- JavaScript the expression case emits and not a second opinion about it.
 --
@@ -959,10 +946,9 @@ patternLiteral lit =
     Core.LUInt32 n -> JS.Int (fromIntegral n)
     Core.LUInt64 n -> bigint (toInteger n)
     Core.LString text -> JS.String (text_ (Utf8.toChars text))
-    -- A character pattern tests the one-character string, not the dev-mode
-    -- `_Utils_chr` wrapper: `_Utils_chr` returns a `String` object in dev, and
-    -- `Optimize.DecisionTree` compares against the bare string for that reason.
-    Core.LChar code -> JS.String (text_ [toEnum (fromIntegral code)])
+    -- A character pattern tests the code point, which is what the expression
+    -- case emits for the same literal (C8, `docs/m1b-str.md` §T12).
+    Core.LChar code -> JS.Int (fromIntegral code)
     Core.LFloat _ -> error "Generate.CoreJS: a float pattern — the frontend rejects one"
     Core.LFloat32 _ -> error "Generate.CoreJS: a float pattern — the frontend rejects one"
 
