@@ -809,8 +809,15 @@ expr env tops scope (Can.Expr nid region value) =
           constrainedUse env scope nid region (E.ForValue op) (Just annotation)
         Can.VarCtor _ _ _ _ _ ->
           return ()
-        Can.VarDebug _ _ _ ->
-          return ()
+        Can.VarDebug _ name annotation ->
+          -- `Debug.log` carries `Inspect a =>` (D158), so a reference to it is
+          -- a constrained use like any other and the witness is inserted here.
+          -- It was `return ()` while `Debug` exposed nothing constrained, and
+          -- that is what made the constraint compile and then misapply: the
+          -- call site passed two arguments to a function that had grown a
+          -- witness parameter. `Debug.todo` has no context and reaches the same
+          -- path, which finds none.
+          constrainedUse env scope nid region (E.ForValue name) (Just annotation)
         Can.VarKernel _ _ ->
           return ()
         Can.VarPrim _ _ ->

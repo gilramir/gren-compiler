@@ -439,7 +439,11 @@ expr env (Can.Expr nid region value) =
         Can.VarDebug _ name _ ->
           -- The module on the node is the one doing the referring, not the one
           -- being referred to.
-          node (Core.EGlobal (Core.QualName ModuleName.debug name))
+          --
+          -- Witnessed like a foreign reference, because `Debug.log` is one in
+          -- every way that matters here: it is `core`'s binding, and since D158
+          -- its type carries `Inspect a =>`.
+          applied env nid sp (node (Core.EGlobal (Core.QualName ModuleName.debug name)))
         Can.VarCtor _ home name index _ ->
           ctorValue tipe sp (Core.QualName home name) (Index.toMachine index)
         Can.Chr c ->
