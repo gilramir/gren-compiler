@@ -22,6 +22,7 @@ import AST.Canonical qualified as Can
 import Data.Index qualified as Index
 import Data.Map qualified as Map
 import Data.Name qualified as Name
+import Gren.ModuleName qualified as ModuleName
 import Reporting.Annotation qualified as A
 import Reporting.Doc qualified as D
 import Reporting.Render.Code qualified as Code
@@ -1110,6 +1111,18 @@ isInt tipe =
     _ ->
       False
 
+-- | One of the six numeric types, all of which `Basics` declares (D148).
+isNumeric :: T.Type -> Bool
+isNumeric tipe =
+  case tipe of
+    T.Type home name []
+      | home == ModuleName.basics ->
+          name `elem` [Name.int, Name.float, Name.int64, Name.uint32, Name.uint64, Name.float32]
+    T.Alias _ _ _ real ->
+      isNumeric real
+    _ ->
+      False
+
 isFloat :: T.Type -> Bool
 isFloat tipe =
   case tipe of
@@ -1493,7 +1506,33 @@ badArrayMul localizer category direction tipe expected =
     ]
 
 badMath :: L.Localizer -> Category -> String -> String -> String -> T.Type -> T.Type -> [D.Doc] -> (D.Doc, D.Doc)
-badMath localizer category operation direction op tipe expected otherHints =
+badMath localizer category operation direction op tipe expected otherHints
+  | isNumeric tipe && isNumeric expected =
+      -- Two numeric types that are not the same one. Elm's text below says the
+      -- operator "only works with Int and Float", which was true with two numeric
+      -- types and is false of every pair D2 added: `UInt64` works with (+), it
+      -- just does not work with an `Int`. D157 made this the error a value
+      -- binding used at two widths gets (`classes.md` §0.3), so it says what
+      -- happened instead.
+      ( D.reflow $
+          "The two sides of (" ++ op ++ ") are different numeric types:",
+        typeComparison
+          localizer
+          tipe
+          expected
+          (addCategory ("The " <> direction <> " side of (" <> op <> ") is") category)
+          "But the other side is:"
+          [ D.reflow $
+              "Arithmetic needs both sides to be the same type, and Gren never converts\
+              \ between numeric types for you. A value defined without an annotation and\
+              \ without arguments has one numeric type, the one its first use gives it.",
+            D.toSimpleHint $
+              "Give the value a type annotation, write one value per type, or convert\
+              \ explicitly with a function from the module named after the type, like\
+              \ `UInt64.fromInt` or `Int64.toInt`."
+          ]
+      )
+  | otherwise =
   ( D.reflow $
       operation ++ " does not work with this value:",
     loneType

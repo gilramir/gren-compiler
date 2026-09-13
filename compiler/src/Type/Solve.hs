@@ -218,7 +218,17 @@ solve env rank pools state constraint =
         let newEnv = Map.union env (Map.map A.toValue locals)
         state2 <- solve newEnv rank pools state1 subCon
         foldM occurs state2 $ Map.toList locals
+    CRestrict (CLet rigids flexs header headerCon subCon) ->
+      solveLet True env rank pools state rigids flexs header headerCon subCon
+    CRestrict other ->
+      solve env rank pools state other
     CLet rigids flexs header headerCon subCon ->
+      solveLet False env rank pools state rigids flexs header headerCon subCon
+
+-- | The general 'CLet': solve the header one rank deeper, pop that rank, then
+-- the body. @restricted@ is 'CRestrict' (D157).
+solveLet :: Bool -> Env -> Int -> Pools -> State -> [Variable] -> [Variable] -> Map.Map Name.Name (A.Located Type) -> Constraint -> Constraint -> IO State
+solveLet restricted env rank pools state rigids flexs header headerCon subCon =
       do
         -- work in the next pool to localize header
         let nextRank = rank + 1
@@ -246,7 +256,7 @@ solve env rank pools state constraint =
         let finalMark = nextMark headerMark
 
         -- pop pool
-        generalized <- generalize youngMark visitMark nextRank nextPools
+        generalized <- generalize restricted youngMark visitMark nextRank nextPools
         MVector.write nextPools nextRank []
 
         -- close the ambiguous constrained variables (`classes.md` §0)
@@ -331,8 +341,8 @@ occurs state (name, A.At region variable) =
 -- needs and the only reason this is not @IO ()@. They are the candidates and
 -- not the answer: a generalized variable is ambiguous only if the header does
 -- not mention it, which is a question this function has no way to ask.
-generalize :: Mark -> Mark -> Int -> Pools -> IO [Variable]
-generalize youngMark visitMark youngRank pools =
+generalize :: Bool -> Mark -> Mark -> Int -> Pools -> IO [Variable]
+generalize restricted youngMark visitMark youngRank pools =
   do
     youngVars <- MVector.read pools youngRank
     rankTable <- poolToRankTable youngMark youngRank youngVars
@@ -371,9 +381,28 @@ generalize youngMark visitMark youngRank pools =
                 then do
                   MVector.modify pools (var :) rank
                   return Nothing
-                else do
-                  UF.set var $ Descriptor content noRank mark copy
-                  return (Just var)
+                else
+                  if restricted && isConstrained content
+                    then do
+                      -- D157 (`classes.md` §0.3): what monomorphic is in this
+                      -- solver's vocabulary. The variable goes where a variable
+                      -- that was never young would, one rank out and in that
+                      -- rank's pool, so it stays unifiable by whatever comes
+                      -- next and a use site can pin it.
+                      UF.set var $ Descriptor content (youngRank - 1) mark copy
+                      MVector.modify pools (var :) (youngRank - 1)
+                      return Nothing
+                    else do
+                      UF.set var $ Descriptor content noRank mark copy
+                      return (Just var)
+
+-- | A variable a class constraint qualifies. Only the closed classes reach the
+-- unifier (D130); an open one is 'Type.Resolve'\'s half of the same rule (D137).
+isConstrained :: Content -> Bool
+isConstrained content =
+  case content of
+    FlexSuper _ _ -> True
+    _ -> False
 
 -- DEFAULTING
 
@@ -440,19 +469,32 @@ defaultAmbiguous headerMark headerVars generalized =
 -- nothing can unify with and nothing can instantiate.
 --
 -- __The @noRank@ half of that test is what protects a local polymorphic
--- binding.__ @let n = 1 in …@ generalizes @n@ to @number@ and each use
--- instantiates a copy; the generic variable is in no top-level type, so the
--- environment test alone would default it and leave a binder typed @Int@ under
--- uses typed @Float@. It was already generalized, so it is somebody's, and it
--- is left alone.
+-- binding.__ @let double x = x + x in …@ generalizes to @number -> number@ and
+-- each use instantiates a copy; the generic variable is in no top-level type,
+-- so the environment test alone would default it and leave a binder typed @Int@
+-- under uses typed @Float@. It was already generalized, so it is somebody's,
+-- and it is left alone. (This example was @let n = 1@ until D157, which keeps
+-- that binding's variable monomorphic, so that the use pins it and this moment
+-- closes it only when nothing does. `m1b-ryu.md` §Y13 is what the generic
+-- version cost.)
 --
 -- The sweep is over the recorded node types because that — with the annotations,
 -- which come out of the same environment — is everything anything downstream
 -- reads. A variable in neither is one no one asks about.
+--
+-- __The environment is swept too, since D157__ (@classes.md@ §0.3). It used to
+-- be marked reachable first and skipped, on the grounds that a variable a
+-- top-level type contains is that definition's. A generalized one still is, and
+-- the @noRank@ test says so on its own. What D157 adds is a top-level value's
+-- constrained variable that was kept monomorphic and that no use pinned —
+-- @loose = 1@ — and that one is exactly what this moment closes. Left for
+-- 'Type.Resolve' instead, it was closed by a substitution keyed by the
+-- variable's /name/, and @loose = 1@ beside @looseFraction = 0.5@ came out a
+-- @Float@, because both variables are called @number@.
 defaultStuck :: Mark -> [Variable] -> [Type] -> IO ()
 defaultStuck mark envVars nodeTypes =
   do
-    mapM_ (markReachable mark) envVars
+    mapM_ (sweepVar mark) envVars
     mapM_ (sweepType mark) nodeTypes
 
 -- | Walk a recorded node type down to its variables.

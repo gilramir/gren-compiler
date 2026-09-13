@@ -510,9 +510,12 @@ constrainDef rtv def bodyCon =
         exprCon <-
           constrain rtv expr (NoExpectation resultType)
 
+        -- D157: a definition with no argument patterns and no annotation
+        -- generalizes no class-constrained variable (`classes.md` §0.3).
+        let restrict = if null args then CRestrict else id
         return $
           recordDefType nid tipe $
-            CLet
+            restrict $ CLet
               { _rigidVars = [],
                 _flexVars = vars,
                 _header = Map.singleton name (A.At region tipe),

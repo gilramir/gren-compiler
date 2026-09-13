@@ -83,6 +83,13 @@ data Constraint
     -- and no recorded type (§N9), so this is also the only way its width is
     -- knowable outside the lowering.
     CLiteral LiteralSite A.Region Integer Type
+  | -- | A 'CLet' whose generalization keeps every class-constrained variable
+    -- monomorphic: D157 (@classes.md@ §0.3). What it wraps is always the
+    -- 'CLet' of one unannotated definition that takes no arguments. Such a
+    -- variable is lowered to the enclosing rank instead of made generic, so a
+    -- use site can still pin it and 'Type.Solve.defaultStuck' closes what none
+    -- does.
+    CRestrict Constraint
   | CAnd [Constraint]
   | CLet
       { _rigidVars :: [Variable],
