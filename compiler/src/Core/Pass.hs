@@ -2,17 +2,20 @@
 
 -- | The Core→Core passes, and which of them run.
 --
--- @docs/core.md@ C11 puts the passes in Haskell through M1b and gives M1a's
--- pipeline none of them, so these are off unless @GENG_CORE_PASSES@ asks:
+-- @docs/core.md@ C11 puts the passes in Haskell through M1b. M1a's pipeline
+-- had none of them; since D169 all three run unless @GENG_CORE_PASSES@ says
+-- otherwise ('Core.Dump.corePasses'):
 --
+-- > GENG_CORE_PASSES=none          -- none of them
 -- > GENG_CORE_PASSES=case          -- decision trees (C4, "Core.Pass.Case")
 -- > GENG_CORE_PASSES=case,tailcall -- and self tail calls ("Core.Pass.TailCall")
 -- > GENG_CORE_PASSES=specialize    -- witness erasure ("Core.Pass.Specialize")
 --
 -- A switch rather than a mode, for the reason C4 gives: the pass is optional,
 -- its output is still Core, and a program has to answer the same either way.
--- The differential harness runs the corpus through both — @geng-core-js@ and
--- @geng-core-js-passes@ — which is what makes that a test rather than a claim.
+-- The differential harness runs the corpus through both — @geng-hs@, the
+-- default, and @geng-hs-nopasses@ — which is what makes that a test rather
+-- than a claim.
 --
 -- __Order__: tail calls first, then decision trees. The tail-call pass looks for
 -- self calls in tail position, and a case that has not been compiled yet has its

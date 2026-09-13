@@ -98,9 +98,38 @@ moduleName toError =
                   Good ->
                     let !name = Name.fromPtr pos newPos
                         !newState = P.State src newPos end indent row newCol
-                     in cok name newState
+                     in if name == Name.replModule || isAsciiModuleName (Name.toChars name)
+                          then cok name newState
+                          else cerr row col toError
                   Bad ->
                     cerr row newCol toError
+
+-- | D171: a module name is dot-separated segments of an ASCII capital followed
+-- by ASCII letters and digits — @Compiler.ModuleName.fromString@'s rule, which
+-- is also what a source file's name has to satisfy. A module name is a file
+-- name, and file systems disagree about case and about Unicode normalization,
+-- so a name the parser accepted and no project could contain is refused here
+-- instead (@docs/m1b-str.md@ §T25).
+--
+-- 'Name.replModule', @Gren_Repl@, is the one exception, and it is exempt by
+-- name. The REPL wraps each entry in a module of that name, which the compiler
+-- writes and no file holds. Its @_@ was chosen so that no user module could be
+-- called it, and D171 makes that stronger rather than breaking it: no user
+-- module name can contain @_@ at all.
+isAsciiModuleName :: [Char] -> Bool
+isAsciiModuleName chars =
+  all segment (splitDots chars)
+  where
+    segment s =
+      case s of
+        c : cs -> 'A' <= c && c <= 'Z' && all asciiAlphaNum cs
+        [] -> False
+    asciiAlphaNum c =
+      ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9')
+    splitDots str =
+      case break (== '.') str of
+        (before, _ : after) -> before : splitDots after
+        (before, []) -> [before]
 
 data ModuleNameStatus
   = Good

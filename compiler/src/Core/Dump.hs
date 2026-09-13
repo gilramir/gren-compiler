@@ -102,13 +102,6 @@ linkEveryExport =
   unsafePerformIO ((== Just "exports") <$> Env.lookupEnv "GENG_LINK_ROOTS")
 {-# NOINLINE linkEveryExport #-}
 
--- | @GENG_CORE_PASSES=case,tailcall@: which Core→Core passes to run before the
--- backend reads the program.
---
--- Off by default, because C11 gives M1a's pipeline no passes and C4 says the
--- decision-tree pass is optional in the first place. A switch is also what lets
--- the corpus run the same programs with and without them, which is the
--- obligation C12 attaches to @accept\/pattern-shapes@.
 -- | @GENG_SPECIALIZE_STRICT=1@: refuse to emit a program that still carries a
 -- witness node (§G27.4, D127).
 --
@@ -122,9 +115,31 @@ specializeStrict =
   unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_SPECIALIZE_STRICT")
 {-# NOINLINE specializeStrict #-}
 
+-- | @GENG_CORE_PASSES@: which Core→Core passes run before the backend reads
+-- the program.
+--
+-- __All three by default__ (@docs/m1b-classes.md@ §G47.7, D169). Without
+-- @specialize@ every class method is a witness projection at run time, which
+-- §G47.5 measured at 5.5× stock for a loop of @<@ and 2.4× for a @Dict@, and
+-- §G47.6 found specialization costs no bundle size. M1a's pipeline had none
+-- (C11) and this was off until M1b's classes made "off" the slow program.
+--
+-- The switch stays, because C4 says the passes are optional and C12 asks that
+-- the same programs answer the same with and without them:
+--
+-- > GENG_CORE_PASSES=none          -- no passes (the harness's geng-hs-nopasses)
+-- > GENG_CORE_PASSES=specialize    -- one of them
+-- > GENG_CORE_PASSES=case,tailcall -- any list
 corePasses :: [String]
 corePasses =
-  unsafePerformIO (maybe [] (splitOn ',') <$> Env.lookupEnv "GENG_CORE_PASSES")
+  unsafePerformIO (fromSetting <$> Env.lookupEnv "GENG_CORE_PASSES")
+  where
+    fromSetting setting =
+      case setting of
+        Nothing -> ["specialize", "case", "tailcall"]
+        Just "none" -> []
+        Just "" -> []
+        Just list -> splitOn ',' list
 {-# NOINLINE corePasses #-}
 
 -- | @GENG_WIRE=1@: put every module through the wire format before the backend

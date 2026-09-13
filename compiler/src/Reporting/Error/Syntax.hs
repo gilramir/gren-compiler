@@ -769,7 +769,7 @@ toParseErrorReport source modul =
                           D.fillSep [D.cyan "module", "Json.Decode", D.cyan "exposing", "(..)"]
                         ],
                     D.reflow $
-                      "Notice that the module names all start with capital letters. That is required!"
+                      "Notice that the module names all start with a capital letter and use only ASCII letters and digits after it. That is required: a module name is also a file name, and file systems disagree about everything else."
                   ]
               )
     ModuleExposing exposing row col ->
@@ -812,7 +812,7 @@ toParseErrorReport source modul =
                           D.fillSep [D.cyan "port", D.cyan "module", "Maps", D.cyan "exposing", "(Location, goto)"]
                         ],
                     D.reflow $
-                      "Notice that the module names start with capital letters. That is required!"
+                      "Notice that the module names all start with a capital letter and use only ASCII letters and digits after it. That is required: a module name is also a file name, and file systems disagree about everything else."
                   ]
               )
     PortModuleExposing exposing row col ->
@@ -897,7 +897,7 @@ toParseErrorReport source modul =
                           D.fillSep [D.cyan "import", "Json.Decode", D.cyan "exposing", "(..)"]
                         ],
                     D.reflow $
-                      "Notice that the module names all start with capital letters. That is required!",
+                      "Notice that the module names all start with a capital letter and use only ASCII letters and digits after it. That is required: a module name is also a file name, and file systems disagree about everything else.",
                     D.reflowLink "Read" "imports" "to learn more."
                   ]
               )
@@ -922,7 +922,7 @@ toParseErrorReport source modul =
                           D.fillSep [D.cyan "import", "Json.Decode", D.cyan "as", "D"]
                         ],
                     D.reflow $
-                      "Notice that the alias always starts with a capital letter. That is required!",
+                      "Notice that the alias always starts with a capital letter and uses only ASCII letters and digits after it. That is required: an alias is written where a module name is, and follows the same rule.",
                     D.reflowLink "Read" "imports" "to learn more."
                   ]
               )
