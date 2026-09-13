@@ -44,6 +44,7 @@ module Core.Pass.Specialize
 where
 
 import Core.AST qualified as Core
+import Core.Lower.Literal qualified as Literal
 import Core.Order qualified as Order
 import Core.Refs qualified as Refs
 import Data.Functor.Const (Const (..))
@@ -494,6 +495,12 @@ tables cores =
 -- knows the identity of — which was the cost the pass exists to remove — so a
 -- specialization that stopped at the parameter would have made a copy per
 -- instance and bought nothing.
+--
+-- __And @fromInt 1@ becomes @1@__ (D170). A literal at a type variable is lowered
+-- as @$w.fromInt 1@, and once the projection above has named the instance's
+-- method the call is a conversion of a constant, so it is folded here, where the
+-- instance is first known. Without it every generic literal in a specialized
+-- copy is a function call, which is the cost the pass exists to remove.
 project :: Map Core.QualName [(Core.Field, Core.Expr)] -> Core.Expr -> Core.Expr
 project tbl = go
   where
@@ -504,7 +511,37 @@ project tbl = go
             Just fields <- Map.lookup name tbl,
             Just found <- List.lookup field fields ->
               Core.Expr (Core._exprValue found) (Core.typeOf e) (Core.spanOf e)
+        Core.EApp fn [arg]
+          | Core.ELit value <- Core._exprValue arg,
+            Core.EGlobal name <- Core._exprValue (go fn),
+            Just width <- conversion name,
+            Just folded <- Literal.converted width value ->
+              Core.Expr (Core.ELit folded) width (Core.spanOf e)
         _ -> runIdentity (childrenA (Identity . go) e)
+
+-- | The type a @Basics@ instance's @fromInt@ or @fromFloat@ converts to, read
+-- off the binding's name.
+--
+-- By name, because the name is what the instance /is/ (§G23's
+-- @Canonicalize.Instance.witnessNameOf@): @$i$Num$Int64$fromInt@ is @Num Int64@'s
+-- method and nothing else can be called that, since a @$@ cannot be written and
+-- only @core@ may declare an instance of a closed class. The call's own type
+-- would say the same thing where the copy was fully retyped, and the name says
+-- it everywhere.
+conversion :: Core.QualName -> Maybe Core.Type
+conversion (Core.QualName home name)
+  | home /= ModuleName.basics = Nothing
+  | otherwise =
+      case splitOn '$' (Name.toChars name) of
+        ["", "i", cls, con, method]
+          | (cls, method) == ("Num", "fromInt") || (cls, method) == ("Fractional", "fromFloat") ->
+              Just (Core.TCon (Core.QualName ModuleName.basics (Name.fromChars con)) [])
+        _ -> Nothing
+  where
+    splitOn c chars =
+      case break (== c) chars of
+        (before, []) -> [before]
+        (before, _ : rest) -> before : splitOn c rest
 
 -- | One rule for "every expression a module holds", so 'demand', the collapse
 -- and the fold cannot disagree about the set. 'exprsOf' is its read-only twin.

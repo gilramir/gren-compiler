@@ -36,6 +36,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import Type.Constrain.Module qualified as Type
 import Type.Resolve qualified as Resolve
 import Type.Solve qualified as Type
+import Type.Type qualified as Type (LiteralSite (..))
 
 -- COMPILE
 
@@ -329,12 +330,20 @@ dumpCore canonical core =
 -- literals; a number written without a decimal point at a float type is a
 -- float, and "too large for a `Float`" is a rounding to an infinity rather
 -- than a value the type cannot hold.
-checkLiterals :: [(A.Region, Integer, Maybe Name.Name)] -> Either E.Error ()
+--
+-- __A literal pattern is checked for its type as well__ (D172,
+-- @docs\/m1b-classes.md@ §G49). D170 gives a literal /expression/ at a type
+-- variable a witness to be converted through; a pattern has nothing to be
+-- converted through, because it is matched by the backend's own comparison
+-- against a constant the lowering picked the width of. So a pattern at a
+-- variable is refused rather than lowered at @Int@, and so is one at a float
+-- type, which the backend had no pattern for at all.
+checkLiterals :: [(Type.LiteralSite, A.Region, Integer, Maybe Name.Name)] -> Either E.Error ()
 checkLiterals widths =
   -- Sorted, because the solver visits a module in constraint order and not in
   -- source order — a `CLet` body before the definitions after it — and a person
   -- reading six of these wants them the way the file is written.
-  case List.sortOn sourceOrder (Maybe.mapMaybe outOfRange widths) of
+  case List.sortOn sourceOrder (Maybe.mapMaybe checkLiteral widths) of
     [] -> Right ()
     e : es -> Left (E.BadLiterals (NE.List e es))
 
@@ -343,13 +352,25 @@ sourceOrder err =
   case Literal.regionOf err of
     A.Region (A.Position row col) _ -> (row, col)
 
+checkLiteral :: (Type.LiteralSite, A.Region, Integer, Maybe Name.Name) -> Maybe Literal.Error
+checkLiteral (site, region, value, tipe) =
+  case (site, tipe) of
+    (Type.InPattern, Nothing) ->
+      Just (Literal.PatternAtVariable region value)
+    (Type.InPattern, Just name)
+      | name == Name.float || name == Name.float32 ->
+          Just (Literal.PatternAtFloat region value name)
+    _ ->
+      outOfRange (region, value, tipe)
+
 -- | One literal, checked against the range of the type it has.
 --
 -- A literal whose type is still a /variable/ is checked against @Int@\'s
--- range, and not because a variable is an @Int@: it is because
--- 'Core.Lower.Literal' gives such a literal the @Int@ case (D149's registered
--- hole), so that is the width it will have. The check and the lowering answer
--- the same question and must not answer it differently.
+-- range, and not because a variable is an @Int@: it is because D170 makes such
+-- a literal the argument of @fromInt : Int -> a@, so an @Int@ is what it has to
+-- be. The rule holds at @Int@ itself, which is what makes it a rule rather than
+-- a limitation: @3000000000@ in a @Num a =>@ body has no width it could be
+-- written at that every instance shares.
 outOfRange :: (A.Region, Integer, Maybe Name.Name) -> Maybe Literal.Error
 outOfRange (region, value, tipe) =
   case range tipe of

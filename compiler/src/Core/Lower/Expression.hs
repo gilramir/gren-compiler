@@ -451,9 +451,9 @@ expr env (Can.Expr nid region value) =
         Can.Str s ->
           node (Core.ELit (Literal.str s))
         Can.Int n _ ->
-          node (Core.ELit (Literal.int tipe n))
+          literal env nid sp tipe Name.int (Literal.int tipe n)
         Can.Float f _ ->
-          node (Core.ELit (Literal.float tipe f))
+          literal env nid sp tipe Name.float (Literal.float tipe f)
         Can.Array items ->
           node (Core.EArray (map (expr env) items))
         -- A negative literal is one literal (`syntax.md` S5,
@@ -470,7 +470,7 @@ expr env (Can.Expr nid region value) =
         -- means negating the `Double` after reading it rather than choosing a
         -- constructor, and `negate` at a float is exact anyway.
         Can.Negate (Can.Expr _ _ (Can.Int value _)) ->
-          node (Core.ELit (Literal.int tipe (negate value)))
+          literal env nid sp tipe Name.int (Literal.int tipe (negate value))
         Can.Negate inner ->
           -- `-x` is `Basics.negate` at `x`'s type, and since D144 that is a
           -- method rather than a binding, so this resolves the way an operator
@@ -545,6 +545,38 @@ expr env (Can.Expr nid region value) =
         Can.Record fields ->
           node
             (Core.ERecord [(name, expr env value') | (A.At _ name, value') <- Map.toAscList fields])
+
+-- | A numeric literal: the value, or @fromInt@ / @fromFloat@ applied to it
+-- (D170, @docs/m1b-classes.md@ §G49).
+--
+-- 'Type.Resolve.literal' records a use only where the literal's type is a
+-- variable, and then the literal is lowered at the argument's type — @Int@ or
+-- @Float@, which is exactly the value 'Literal.int' and 'Literal.float' give a
+-- variable — and handed to the method. Specialization folds the call back into
+-- a literal wherever it learns the instance (@Core.Pass.Specialize@).
+--
+-- __The method is checked by name, and it has to be.__ A negative literal's
+-- node is a @Negate@, and at a known type 'Type.Resolve.negation' has already
+-- recorded @negate@'s instance against it, which the fold above ignores. Taking
+-- any use found there as the conversion turned every @-1@ at an @Int@ into
+-- @negate -1@; the front end's own path handling was what showed it. A variable's
+-- witness is always a parameter, so a conversion is always a projection.
+literal :: Env -> Can.NodeId -> Core.Span -> Core.Type -> Name -> Core.Literal -> Core.Expr
+literal env nid sp tipe argName value =
+  let argType = Core.TCon (Core.QualName ModuleName.basics argName) []
+      methodType = Core.TFun [argType] tipe
+   in case useOf env nid of
+        Just (Resolve.Projected w methodName)
+          | methodName == Name.fromInt || methodName == Name.fromFloat ->
+              Core.Expr
+                ( Core.EApp
+                    (Core.Expr (Core.EAccess (witness sp w) methodName) methodType sp)
+                    [Core.Expr (Core.ELit value) argType sp]
+                )
+                tipe
+                sp
+        _ ->
+          Core.Expr (Core.ELit value) tipe sp
 
 typeOfExpr :: Env -> Can.Expr -> Core.Type
 typeOfExpr env (Can.Expr nid _ _) = typeOf env nid

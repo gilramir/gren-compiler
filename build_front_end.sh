@@ -27,4 +27,21 @@ if [ ! -f app ]; then
 fi
 
 GREN_BIN="$PWD/gren" node app make Main --output=app.new
+
+# A bootstrap is one bad bundle away from having nothing to build with: an `app`
+# that cannot find `gren.json` cannot build its own fix, and it happened once
+# (`docs/m1b-classes.md` §G49.2 in geng-lang). So the new bundle has to build
+# `Main` itself -- from the artifacts just cached, so this is quick -- and agree
+# byte for byte with what the old one built, before it replaces it. The old one
+# is kept as `app.prev` either way.
+if ! GREN_BIN="$PWD/gren" node app.new make Main --output=app.check >/dev/null 2>&1; then
+  echo "build_front_end.sh: the new app.new cannot build Main; app is unchanged" >&2
+  exit 1
+fi
+if ! cmp -s app.new app.check; then
+  echo "build_front_end.sh: app.new builds a different bundle than itself; app is unchanged" >&2
+  exit 1
+fi
+rm app.check
+cp app app.prev
 mv app.new app

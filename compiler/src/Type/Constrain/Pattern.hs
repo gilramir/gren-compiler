@@ -93,7 +93,7 @@ add (A.At region pattern) expectation state =
         let (State headers vars revCons) = state
         let tipe = T.suffixed suffix
         let intCon = CPattern region E.PInt tipe expectation
-        return $ State headers vars (T.CLiteral region value tipe : intCon : revCons)
+        return $ State headers vars (T.CLiteral T.InPattern region value tipe : intCon : revCons)
     Can.PInt value Nothing ->
       do
         let (State headers vars revCons) = state
@@ -102,7 +102,7 @@ add (A.At region pattern) expectation state =
         -- No `Negate` to fold: the parser refuses a negative literal pattern
         -- outright ("It is not possible to pattern match on negative numbers"),
         -- so a `Can.PInt` is always the magnitude it was written as.
-        return $ State headers (var : vars) (T.CLiteral region value (T.VarN var) : intCon : revCons)
+        return $ State headers (var : vars) (T.CLiteral T.InPattern region value (T.VarN var) : intCon : revCons)
     Can.PStr _ ->
       do
         let (State headers vars revCons) = state

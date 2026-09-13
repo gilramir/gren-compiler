@@ -22,9 +22,17 @@ import Reporting.Report qualified as Report
 -- name alone.
 data Error
   = OutOfRange A.Region Integer Name.Name Integer Integer
+  | -- | A literal pattern whose type is a variable (D172).
+    PatternAtVariable A.Region Integer
+  | -- | A literal pattern at @Float@ or @Float32@ (D172).
+    PatternAtFloat A.Region Integer Name.Name
 
 regionOf :: Error -> A.Region
-regionOf (OutOfRange region _ _ _ _) = region
+regionOf err =
+  case err of
+    OutOfRange region _ _ _ _ -> region
+    PatternAtVariable region _ -> region
+    PatternAtFloat region _ _ -> region
 
 toReport :: Code.Source -> Error -> Report.Report
 toReport source err =
@@ -58,9 +66,52 @@ toReport source err =
                   \ say so with a suffix: 42i64, 42u32, 42u64."
               ]
           )
+    PatternAtVariable region value ->
+      Report.Report "NUMBER PATTERN AT A TYPE VARIABLE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This pattern is a number, and the value it is matched against can be more than one numeric type:",
+            D.stack
+              [ D.reflow $
+                  "A pattern is compared with the value exactly, and `"
+                    ++ show value
+                    ++ "` is a different value at an `Int` than at an `Int64` or a `Float`, so which one this\
+                       \ pattern means would depend on who calls it.",
+                D.toSimpleNote $
+                  "Compare with `==` instead, which works at every numeric type once the annotation\
+                  \ says the type has `Eq`. Or give the value a specific type, and the pattern\
+                  \ will have that one."
+              ]
+          )
+    PatternAtFloat region value tipe ->
+      Report.Report "NUMBER PATTERN AT A FLOAT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This pattern is a number, and the value it is matched against is "
+                ++ article (Name.toChars tipe)
+                ++ " `"
+                ++ Name.toChars tipe
+                ++ "`:",
+            D.stack
+              [ D.reflow $
+                  "Only the integer types can be matched against a number. A float is rarely exactly\
+                  \ anything, and `-0.0` and `NaN` each break half of what `"
+                    ++ show value
+                    ++ " ->` would promise.",
+                D.toSimpleNote $
+                  "Compare with `==` if an exact value is what you mean, or use `round` or `truncate`\
+                  \ first if you meant a whole number."
+              ]
+          )
 
 -- | @Int@ and @Int64@ take "an"; @UInt32@ and @UInt64@ take "a", because they
--- are read out as "you-int".
+-- are read out as "you-int". @Float@ and @Float32@ take "a".
 article :: [Char] -> [Char]
 article name =
   case name of

@@ -64,6 +64,8 @@ module Data.Name
     math,
     utils,
     negate,
+    fromInt,
+    fromFloat,
     true,
     false,
     value,
@@ -506,6 +508,15 @@ utils = fromChars "Utils"
 
 negate :: Name
 negate = fromChars "negate"
+
+-- | The methods a literal is elaborated through where its type is a variable:
+-- `Num`'s for an integer and `Fractional`'s for one with a point (D170,
+-- `docs/m1b-classes.md` §G49).
+fromInt :: Name
+fromInt = fromChars "fromInt"
+
+fromFloat :: Name
+fromFloat = fromChars "fromFloat"
 
 true :: Name
 true = fromChars "True"

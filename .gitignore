@@ -15,3 +15,6 @@ node_modules
 # Gren build stuff
 .gren
 app
+app.new
+app.check
+app.prev

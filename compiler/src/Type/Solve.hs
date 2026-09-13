@@ -82,14 +82,14 @@ data Solved = Solved
     --
     -- 'Nothing' for the type is a literal whose type is still a variable,
     -- which 'Core.Lower.Literal' lowers at the @Int@ case.
-    _literalWidths :: [(A.Region, Integer, Maybe Name.Name)]
+    _literalWidths :: [(LiteralSite, A.Region, Integer, Maybe Name.Name)]
   }
 
-resolveWidth :: (A.Region, Integer, Type) -> IO (A.Region, Integer, Maybe Name.Name)
-resolveWidth (region, value, tipe) =
+resolveWidth :: (LiteralSite, A.Region, Integer, Type) -> IO (LiteralSite, A.Region, Integer, Maybe Name.Name)
+resolveWidth (site, region, value, tipe) =
   do
     name <- Type.numericName tipe
-    return (region, value, name)
+    return (site, region, value, name)
 
 emptyState :: State
 emptyState =
@@ -113,7 +113,7 @@ data State = State
     _nodes :: Map.Map Can.NodeId Type,
     -- | 'CLiteral's, newest first; reversed once at the end so that a module's
     -- errors come out in source order.
-    _literals :: [(A.Region, Integer, Type)]
+    _literals :: [(LiteralSite, A.Region, Integer, Type)]
   }
 
 atom :: (ModuleName.Canonical, Name.Name) -> Can.Type
@@ -198,9 +198,9 @@ solve env rank pools state constraint =
                     category
                     actualType
                     (Error.ptypeReplace expectation expectedType)
-    CLiteral region value tipe ->
+    CLiteral site region value tipe ->
       -- Recorded and not checked: the type is a variable until the solve ends.
-      return state {_literals = (region, value, tipe) : _literals state}
+      return state {_literals = (site, region, value, tipe) : _literals state}
     CNode nid tipe ->
       -- Recording only. Nothing is unified and no variable is allocated, so a
       -- CNode cannot change what typechecks or what generalizes.

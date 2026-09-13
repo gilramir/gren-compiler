@@ -855,7 +855,18 @@ expr env tops scope (Can.Expr nid region value) =
                 methodUse env scope nid region cls param name annotation actual
             go left
             go right
+        Can.Int _ _ ->
+          literal env scope nid region Name.num Name.fromInt Name.int (typeOf env nid)
+        Can.Float _ _ ->
+          literal env scope nid region Name.fractional Name.fromFloat Name.float (typeOf env nid)
         Can.Array items -> mapM_ go items
+        Can.Negate (Can.Expr _ _ (Can.Int _ _))
+          | isVariable (typeOf env nid) ->
+              -- `-1` is one literal (`Core.Lower.Expression` folds it, §I20),
+              -- so at a variable it is one `fromInt` of a negative number and
+              -- not a `negate` of a `fromInt`. Recorded against the `Negate`
+              -- node, which is the one the lowering reads.
+              literal env scope nid region Name.num Name.fromInt Name.int (typeOf env nid)
         Can.Negate inner ->
           do
             negation env scope nid region (typeOf env (nodeIdOf inner)) (typeOf env nid)
@@ -958,6 +969,42 @@ negation env scope nid region operand result =
               methodUse env scope nid region cls param Name.negate annotation (Can.TLambda operand result)
         _ ->
           return ()
+
+-- | A numeric literal, which is a use of @fromInt@ or @fromFloat@ when its type
+-- is a variable (D170, @docs/m1b-classes.md@ §G49).
+--
+-- D149 reads a literal's width off its solved type, and a variable has none:
+-- the @1@ in @double : Num a => a -> a@ is every width at once. So it is
+-- elaborated the way 'negation' elaborates @-x@ — as a method of @Basics@'s
+-- class, taken from the witness the definition was handed, at the type
+-- @Int -> a@ — and a literal at a known type is left to the lowering, which has
+-- always given it its width directly.
+--
+-- __Nothing new can be refused here.__ A literal adds its class to its variable,
+-- so a rigid one without it has already failed to unify, and an unannotated
+-- definition's is attributed or defaulted by 'refuse' exactly as the @+@ beside
+-- the literal would be.
+literal :: Env -> Scope -> Can.NodeId -> A.Region -> Name -> Name -> Name -> Can.Type -> Walk ()
+literal env scope nid region className methodName argName result
+  | isVariable result =
+      let cls = Can.Class ModuleName.basics className
+       in case Map.lookup cls (_envClasses env) of
+            Just (Can.ClassDecl param methods)
+              | Just annotation <- Map.lookup methodName methods ->
+                  methodUse env scope nid region cls param methodName annotation $
+                    Can.TLambda (Can.TType ModuleName.basics argName []) result
+            _ ->
+              -- A `core` from before D170, whose class has no such method.
+              return ()
+  | otherwise =
+      return ()
+
+-- | Whether a type is still a variable once its aliases are gone.
+isVariable :: Can.Type -> Bool
+isVariable tipe =
+  case Type.iteratedDealias tipe of
+    Can.TVar _ -> True
+    _ -> False
 
 -- | A use of a class method.
 --

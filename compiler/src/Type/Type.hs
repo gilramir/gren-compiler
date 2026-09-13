@@ -3,6 +3,7 @@
 
 module Type.Type
   ( Constraint (..),
+    LiteralSite (..),
     exists,
     Variable,
     FlatType (..),
@@ -81,7 +82,7 @@ data Constraint
     -- thing a later pass cannot reconstruct. A pattern literal has no node id
     -- and no recorded type (§N9), so this is also the only way its width is
     -- knowable outside the lowering.
-    CLiteral A.Region Integer Type
+    CLiteral LiteralSite A.Region Integer Type
   | CAnd [Constraint]
   | CLet
       { _rigidVars :: [Variable],
@@ -90,6 +91,15 @@ data Constraint
         _headerCon :: Constraint,
         _bodyCon :: Constraint
       }
+
+-- | Where a 'CLiteral' was written. A pattern's literal is checked for more
+-- than its range: D172 refuses one whose type is not an integer type, because a
+-- pattern is compared with the scrutinee by the backend's own equality and
+-- there is no witness to do it through (@docs\/m1b-classes.md@ §G49).
+data LiteralSite
+  = InExpression
+  | InPattern
+  deriving (Eq)
 
 exists :: [Variable] -> Constraint -> Constraint
 exists flexVars constraint =

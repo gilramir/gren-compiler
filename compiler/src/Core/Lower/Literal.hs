@@ -38,6 +38,7 @@ module Core.Lower.Literal
     chr,
     float,
     int,
+    converted,
     decode,
   )
 where
@@ -96,11 +97,10 @@ float tipe number =
 --
 -- A literal whose type is still a /variable/ — the body of a
 -- @f : Num a => a -> a@ that says @x + 1@ — has no width to read, and takes the
--- @Int@ case. That is `docs/open-items.md`\'s registered hole and not a
--- decision made here: `classes.md` §0 closes an /ambiguous/ numeric variable
--- and a rigid one is not ambiguous, so nothing closes it and @Num@ has no
--- @fromInt@ method for a witness to carry. D63's range check makes the same
--- assumption, and the two have to agree (@docs\/m1b-int.md@ §I20).
+-- @Int@ case. That is not a guess any more (D170): 'Type.Resolve' has made such
+-- a literal the argument of @fromInt@, whose argument /is/ an @Int@, and this is
+-- the value it is handed. D63's range check reads a variable as @Int@ for the
+-- same reason, and the two have to agree (@docs\/m1b-int.md@ §I20).
 --
 -- __An integer literal at a float type is a float__, which is what @2 : Float@
 -- has always meant and what @42f32@ now says outright. Before §I18 both fell
@@ -122,6 +122,24 @@ int tipe n =
       | name == Name.float -> Core.LFloat (fromInteger n)
       | name == Name.float32 -> Core.LFloat32 (fromInteger n)
     _ -> Core.LInt (fromInteger n)
+
+-- | @fromInt n@ or @fromFloat x@ at a type specialization has learned, as the
+-- literal it evaluates to (D170, @docs/m1b-classes.md@ §G49).
+--
+-- The instance bodies in @Basics@ and this function say the same thing twice,
+-- and the corpus holds them together: an unsigned type wraps a negative @n@,
+-- which is what 'fromIntegral' does at a 'Data.Word.Word32', and a @Float32@
+-- rounds to nearest, which is what 'realToFrac' and 'fromInteger' do at a
+-- 'Float'. 'Nothing' for anything but those two literals at a numeric type.
+converted :: Core.Type -> Core.Literal -> Maybe Core.Literal
+converted tipe value =
+  case (numericType tipe, value) of
+    (Nothing, _) -> Nothing
+    (Just _, Core.LInt n) -> Just (int tipe (toInteger n))
+    (Just name, Core.LFloat x)
+      | name == Name.float32 -> Just (Core.LFloat32 (realToFrac x))
+      | name == Name.float -> Just (Core.LFloat x)
+    _ -> Nothing
 
 -- | The name of the @Basics@ type this literal has, when it has one.
 --

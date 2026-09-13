@@ -137,11 +137,11 @@ constrainHelp rtv _nid region expression expected =
       return $ CEqual region Char Type.char expected
     Can.Int value (Just suffix) ->
       let tipe = Type.suffixed suffix
-       in return $ CAnd [CEqual region E.Number tipe expected, CLiteral region value tipe]
+       in return $ CAnd [CEqual region E.Number tipe expected, CLiteral InExpression region value tipe]
     Can.Int value Nothing ->
       do
         var <- mkFlexNumber
-        return $ exists [var] $ CAnd [CEqual region E.Number (VarN var) expected, CLiteral region value (VarN var)]
+        return $ exists [var] $ CAnd [CEqual region E.Number (VarN var) expected, CLiteral InExpression region value (VarN var)]
     Can.Float _ (Just suffix) ->
       return $ CEqual region Float (Type.suffixed suffix) expected
     Can.Float _ Nothing ->
