@@ -160,6 +160,7 @@ Library common
         Parse.Declaration
         Parse.Expression
         Parse.Keyword
+        Parse.Letters
         Parse.Module
         Parse.Number
         Parse.Pattern

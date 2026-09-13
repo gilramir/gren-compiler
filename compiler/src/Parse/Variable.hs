@@ -22,13 +22,13 @@ module Parse.Variable
 where
 
 import AST.Source qualified as Src
-import Data.Char qualified as Char
 import Data.Name qualified as Name
 import Data.Set qualified as Set
 import Data.Word (Word8)
 import Foreign.Ptr (Ptr, plusPtr)
 import GHC.Exts (Char (C#), Int#, chr#, uncheckedIShiftL#, word2Int#, word8ToWord#, (+#), (-#))
 import GHC.Word (Word8 (W8#))
+import Parse.Letters qualified as Letters
 import Parse.Primitives (Col, Parser, Row, unsafeIndex)
 import Parse.Primitives qualified as P
 
@@ -211,9 +211,9 @@ getUpperWidthHelp :: Ptr Word8 -> Ptr Word8 -> Word8 -> Int
 getUpperWidthHelp pos _ word
   | 0x41 {- A -} <= word && word <= 0x5A {- Z -} = 1
   | word < 0xc0 = 0
-  | word < 0xe0 = if Char.isUpper (chr2 pos word) then 2 else 0
-  | word < 0xf0 = if Char.isUpper (chr3 pos word) then 3 else 0
-  | word < 0xf8 = if Char.isUpper (chr4 pos word) then 4 else 0
+  | word < 0xe0 = if isUpperLetter (chr2 pos word) then 2 else 0
+  | word < 0xf0 = if isUpperLetter (chr3 pos word) then 3 else 0
+  | word < 0xf8 = if isUpperLetter (chr4 pos word) then 4 else 0
   | True = 0
 
 -- LOWER CHARS
@@ -235,9 +235,9 @@ getLowerWidthHelp :: Ptr Word8 -> Ptr Word8 -> Word8 -> Int
 getLowerWidthHelp pos _ word
   | 0x61 {- a -} <= word && word <= 0x7A {- z -} = 1
   | word < 0xc0 = 0
-  | word < 0xe0 = if Char.isLower (chr2 pos word) then 2 else 0
-  | word < 0xf0 = if Char.isLower (chr3 pos word) then 3 else 0
-  | word < 0xf8 = if Char.isLower (chr4 pos word) then 4 else 0
+  | word < 0xe0 = if isLowerLetter (chr2 pos word) then 2 else 0
+  | word < 0xf0 = if isLowerLetter (chr3 pos word) then 3 else 0
+  | word < 0xf8 = if isLowerLetter (chr4 pos word) then 4 else 0
   | True = 0
 
 -- INNER CHARS
@@ -262,10 +262,30 @@ getInnerWidthHelp pos _ word
   | 0x30 {- 0 -} <= word && word <= 0x39 {- 9 -} = 1
   | word == 0x5F {- _ -} = 1
   | word < 0xc0 = 0
-  | word < 0xe0 = if Char.isAlpha (chr2 pos word) then 2 else 0
-  | word < 0xf0 = if Char.isAlpha (chr3 pos word) then 3 else 0
-  | word < 0xf8 = if Char.isAlpha (chr4 pos word) then 4 else 0
+  | word < 0xe0 = if isLetter (chr2 pos word) then 2 else 0
+  | word < 0xf0 = if isLetter (chr3 pos word) then 3 else 0
+  | word < 0xf8 = if isLetter (chr4 pos word) then 4 else 0
   | True = 0
+
+-- LETTERS
+--
+-- Above ASCII, what a letter is comes from @Parse.Letters@, generated from
+-- @core@'s pinned Unicode version, not from GHC's @Data.Char@. GHC 9.10
+-- answers from Unicode 15, so letters added in 16.0 and 17.0 were not letters
+-- here while @compiler-common@ accepted them (@docs/m1b-str.md@ §T23). These
+-- are only asked about codepoints of two bytes or more, which are never ASCII.
+
+isUpperLetter :: Char -> Bool
+isUpperLetter c =
+  Letters.letterClass c == Letters.upper
+
+isLowerLetter :: Char -> Bool
+isLowerLetter c =
+  Letters.letterClass c == Letters.lower
+
+isLetter :: Char -> Bool
+isLetter c =
+  Letters.letterClass c /= 0
 
 -- EXTRACT CHARACTERS
 
