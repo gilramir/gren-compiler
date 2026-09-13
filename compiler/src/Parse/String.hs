@@ -307,7 +307,10 @@ eatUnicode pos end row col =
        in if newPos >= end || P.unsafeIndex newPos /= 0x7D {- } -}
             then EscapeProblem row col $ E.BadUnicodeFormat (2 + fromIntegral (minusPtr newPos pos))
             else
-              if code < 0 || 0x10FFFF < code
+              -- A surrogate is half of a UTF-16 pair and not a character (C8), so
+              -- an escape naming one is refused like one past 0x10FFFF, which is
+              -- what compiler-common's parser does (docs/m1b-str.md §T24).
+              if code < 0 || 0x10FFFF < code || (0xD800 <= code && code <= 0xDFFF)
                 then EscapeProblem row col $ E.BadUnicodeCode (3 + fromIntegral (minusPtr newPos pos))
                 else
                   if numDigits < 4 || 6 < numDigits

@@ -3426,7 +3426,7 @@ toEscapeReport source escape row col =
               ( D.reflow $
                   "This is not a valid code point:",
                 D.reflow $
-                  "The valid code points are between 0 and 10FFFF inclusive."
+                  "The valid code points are between 0 and 10FFFF inclusive, except D800 to DFFF: those are the halves of a UTF-16 surrogate pair, and half of one is not a character."
               )
     BadUnicodeLength width numDigits badCode ->
       let region = toWiderRegion row col width

@@ -151,6 +151,9 @@ witnessWith bound tipe =
     Left (E.NoInstance {}) -> Left NoInstance
     Left (E.NotConstrained {}) -> Left NotConstrained
     Left (E.MethodContext {}) -> Left NotConstrained
+    -- 'witnessFor' never answers this: an ambiguity is 'NotConstrained' restated
+    -- by 'Resolve.refuse', which knows whose variable it is (§G47.1).
+    Left (E.Ambiguous {}) -> Left NotConstrained
 
 shapeOf :: Resolve.Witness -> Shape
 shapeOf w =

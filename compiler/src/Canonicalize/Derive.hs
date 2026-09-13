@@ -278,7 +278,7 @@ body ctx verb union@(Can.Union _ ctors _ _) args =
 branch :: Ctx -> Verb -> Can.Union -> Can.Ctor -> Result i w (Name.Name -> Can.CaseBranch)
 branch ctx verb union ctor@(Can.Ctor _ index _ argTypes) =
   do
-    comparisons <- traverse (field ctx verb) (zip [0 :: Int ..] argTypes)
+    comparisons <- traverse (field ctx verb []) (zip [0 :: Int ..] argTypes)
     Result.ok $ \right ->
       let lefts = [Name.fromChars ("$l" ++ show i) | i <- [0 .. length argTypes - 1]]
           rights = [Name.fromChars ("$r" ++ show i) | i <- [0 .. length argTypes - 1]]
@@ -326,15 +326,18 @@ namedCtors (Can.Union _ ctors _ _) =
 -- witness case, which reports itself. A record has no constructor and so no
 -- instance, and is compared field by field. A function derives nothing, which
 -- §2.3 calls the single most visible correctness improvement in the spec.
-field :: Ctx -> Verb -> (Int, Can.Type) -> Result i w (Can.Expr -> Can.Expr -> Can.Expr)
-field ctx verb (index, tipe) =
+--
+-- The path is the record fields walked to reach this component, so that the
+-- error for a function can name the field (§7) and not only the argument.
+field :: Ctx -> Verb -> [Name.Name] -> (Int, Can.Type) -> Result i w (Can.Expr -> Can.Expr -> Can.Expr)
+field ctx verb path (index, tipe) =
   case Type.iteratedDealias tipe of
     Can.TLambda _ _ ->
       Result.throw $
-        Error.DeriveComponentIsFunction (_region ctx) (_typeName ctx) index
+        Error.DeriveComponentIsFunction (_region ctx) (_typeName ctx) index path
     Can.TRecord fields Nothing ->
       do
-        comparisons <- traverse (field ctx verb) (zip (repeat index) (map fieldType (Map.elems fields)))
+        comparisons <- traverse (\(name, t) -> field ctx verb (path ++ [name]) (index, t)) (Map.toList (Map.map fieldType fields))
         let names = Map.keys fields
         Result.ok $ \left right ->
           _v_combine
@@ -347,7 +350,7 @@ field ctx verb (index, tipe) =
       -- An extensible record reaches here only through an alias, and its row
       -- variable is a component whose type nothing knows.
       Result.throw $
-        Error.DeriveComponentIsFunction (_region ctx) (_typeName ctx) index
+        Error.DeriveComponentIsFunction (_region ctx) (_typeName ctx) index path
     _ ->
       -- A component at a type variable is the same call as one at a type:
       -- @Eq a => Eq (Box a)@ is the head 'instanceHead' already writes, the
@@ -385,7 +388,7 @@ inspectBody ctx union@(Can.Union _ ctors _ _) args =
 inspectBranch :: Ctx -> Can.Union -> Can.Ctor -> Result i w Can.CaseBranch
 inspectBranch ctx union ctor@(Can.Ctor name _ _ argTypes) =
   do
-    renderings <- traverse (inspectField ctx) (zip [0 :: Int ..] argTypes)
+    renderings <- traverse (inspectField ctx []) (zip [0 :: Int ..] argTypes)
     let binders = [Name.fromChars ("$c" ++ show i) | i <- [0 .. length argTypes - 1]]
     let rendered =
           [ call ctx (foreign_ ctx nameArg oneString) [render (local ctx binder)]
@@ -406,15 +409,15 @@ inspectBranch ctx union ctor@(Can.Ctor name _ _ argTypes) =
 -- refuses, a record has no instance and is rendered field by field in the
 -- alphabetical order 'Map.toAscList' gives, and everything else goes to the
 -- class's own method.
-inspectField :: Ctx -> (Int, Can.Type) -> Result i w (Can.Expr -> Can.Expr)
-inspectField ctx (index, tipe) =
+inspectField :: Ctx -> [Name.Name] -> (Int, Can.Type) -> Result i w (Can.Expr -> Can.Expr)
+inspectField ctx path (index, tipe) =
   case Type.iteratedDealias tipe of
     Can.TLambda _ _ ->
       Result.throw $
-        Error.DeriveComponentIsFunction (_region ctx) (_typeName ctx) index
+        Error.DeriveComponentIsFunction (_region ctx) (_typeName ctx) index path
     Can.TRecord fields Nothing ->
       do
-        renderings <- traverse (inspectField ctx) (zip (repeat index) (map fieldType (Map.elems fields)))
+        renderings <- traverse (\(name, t) -> inspectField ctx (path ++ [name]) (index, t)) (Map.toList (Map.map fieldType fields))
         let names = Map.keys fields
         Result.ok $ \subject ->
           call
@@ -434,7 +437,7 @@ inspectField ctx (index, tipe) =
             ]
     Can.TRecord _ (Just _) ->
       Result.throw $
-        Error.DeriveComponentIsFunction (_region ctx) (_typeName ctx) index
+        Error.DeriveComponentIsFunction (_region ctx) (_typeName ctx) index path
     _ ->
       Result.ok $ \subject ->
         call ctx (inspectMethod ctx) [subject]

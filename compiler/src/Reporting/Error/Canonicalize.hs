@@ -45,7 +45,7 @@ data Error
   | ConstraintDuplicate A.Region Name.Name Name.Name
   | ConstraintNotAClass A.Region Name.Name
   | ConstraintVarUnbound A.Region Name.Name Name.Name
-  | DeriveComponentIsFunction A.Region Name.Name Int
+  | DeriveComponentIsFunction A.Region Name.Name Int [Name.Name]
   | DeriveMethodMissing A.Region Name.Name Name.Name
   | DeriveMethodShape A.Region Name.Name Name.Name
   | DeriveNotStructural A.Region Name.Name Name.Name
@@ -505,7 +505,7 @@ toReport source err =
                 ++ "` twice:",
             D.reflow "Remove one of them."
           )
-    DeriveComponentIsFunction region typeName index ->
+    DeriveComponentIsFunction region typeName index path ->
       Report.Report "CANNOT DERIVE THIS" region [] $
         Code.toSnippet
           source
@@ -514,7 +514,12 @@ toReport source err =
           ( D.reflow $
               "`"
                 ++ Name.toChars typeName
-                ++ "` holds a function in argument "
+                ++ "` holds a function in "
+                ++ ( case path of
+                       [] -> ""
+                       _ -> "the field `" ++ List.intercalate "." (map Name.toChars path) ++ "` of "
+                   )
+                ++ "argument "
                 ++ show (index + 1)
                 ++ " of one of its constructors, so it cannot be derived:",
             D.reflow

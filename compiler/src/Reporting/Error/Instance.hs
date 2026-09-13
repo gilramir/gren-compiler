@@ -48,6 +48,10 @@ data Error
     NoInstance A.Region Wanted Can.Class Can.Type [(Can.Class, Can.Type)]
   | -- | The same, when the type is a variable nothing constrains.
     NotConstrained A.Region Wanted Can.Class Name.Name [(Can.Class, Can.Type)]
+  | -- | The same again, when the variable is nobody's: no signature names it,
+    -- so no context could supply the instance, and §0's rule has no default for
+    -- its classes. `classes.md` §0's ambiguity error (D12).
+    Ambiguous A.Region Wanted Can.Class Name.Name [(Can.Class, Can.Type)]
   | -- | A class method whose own signature names a second class.
     MethodContext A.Region Name.Name Can.Class Can.Class
 
@@ -65,12 +69,18 @@ noInstance className wanted tipe =
   let use = case wanted of ForMethod _ -> "call to use."; ForValue _ -> "to use."
    in case Type.iteratedDealias tipe of
         Can.TLambda _ _ ->
-          "A function has no structure to compare, and no `instance "
-            ++ Name.toChars className
-            ++ "` can give it one: an instance is declared for a type\
-               \ constructor, and a function is not one. So there is no\
-               \ definition for this "
+          opening
+            ++ ": an instance is declared for a type constructor, and a\
+               \ function is not one. So there is no definition for this "
             ++ use
+          where
+            -- The verb is the class's: `Eq` and `Ord` compare, `Inspect` shows,
+            -- and a class with no such verb is not given one (§G46.4).
+            opening = case Name.toChars className of
+              "Eq" -> "A function has no structure to compare, and no `instance Eq` can give it one"
+              "Ord" -> "A function has no structure to compare, and no `instance Ord` can give it one"
+              "Inspect" -> "A function has no structure to show, and no `instance Inspect` can give it one"
+              other -> "There is no `instance " ++ other ++ "` for a function, and there cannot be one"
         _ ->
           "There is no `instance "
             ++ Name.toChars className
@@ -115,6 +125,31 @@ toReport localizer source err =
                          ++ Name.toChars var
                          ++ " =>` in the signature of the definition this is in says that the\
                             \ caller supplies it."
+                   ]
+          )
+    Ambiguous region wanted (Can.Class _ className) var because ->
+      Report.Report "AMBIGUOUS TYPE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( case because of
+              [] -> atVariable wanted className var
+              _ -> introduction wanted className,
+            D.stack $
+              (case because of [] -> []; _ -> chain localizer className (Can.TVar var) because)
+                ++ [ D.reflow $
+                       "Nothing in the program says what type `"
+                         ++ Name.toChars var
+                         ++ "` is, and an `instance "
+                         ++ Name.toChars className
+                         ++ "` is picked by its type, so there is no way to choose one. Only a\
+                            \ numeric variable takes a default type, and nothing makes `"
+                         ++ Name.toChars var
+                         ++ "` numeric.",
+                     D.reflow $
+                       "Giving the value a type says which: a signature on the definition, or on a\
+                       \ `let` that holds the value."
                    ]
           )
     MethodContext region methodName (Can.Class _ className) (Can.Class _ other) ->

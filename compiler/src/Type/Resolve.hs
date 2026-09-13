@@ -468,11 +468,10 @@ refuse env scope err =
             then attribute (_qDef q) (_qVars q) var cls
             else case Map.lookup var (_envDefaults env) of
               Just tipe -> close q var tipe
-              -- §0's ambiguity error, which nothing produces yet: the variable
-              -- is constrained by an open class alone, so there is no candidate
-              -- to pick. What is said instead is true and the fix it names
-              -- works — write the context down.
-              Nothing -> failure err
+              -- §0's ambiguity error: a value's context is not inferred (D137),
+              -- and the variable is constrained by an open class alone, so there
+              -- is no candidate to pick.
+              Nothing -> failure (ambiguous err)
         Nothing ->
           -- No definition's type mentions the variable, which is what a
           -- __use__ of a polymorphic local at a literal looks like: `isEven 4`
@@ -484,9 +483,21 @@ refuse env scope err =
             (Just d, Just tipe)
               | not (Set.member var (_scopeRigid scope)) ->
                   closeIn d var tipe
-            _ -> failure err
+            -- A rigid variable is the annotation's, and writing the context
+            -- there is the fix. Any other variable is nobody's, and that is §0's
+            -- ambiguity error rather than a missing context.
+            _
+              | Set.member var (_scopeRigid scope) -> failure err
+              | otherwise -> failure (ambiguous err)
     _ ->
       failure err
+
+-- | A 'E.NotConstrained' restated as §0's ambiguity error.
+ambiguous :: E.Error -> E.Error
+ambiguous err =
+  case err of
+    E.NotConstrained region wanted cls var because -> E.Ambiguous region wanted cls var because
+    _ -> err
 
 -- | Record that a variable inside a definition takes §0's default.
 --
