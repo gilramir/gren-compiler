@@ -3,13 +3,18 @@ module Terminal.Protobuf exposing
     , run
     )
 
-{-| `geng protobuf` — reading proto3 files (K5, D185, `m1b-protobuf.md` §Q17).
+{-| `geng protobuf` — Geng modules from proto3 files (K5, D185,
+`m1b-protobuf.md` §Q17, §Q18).
 
-This is §Q8's step 4: each file is parsed (`Proto.Parser`) and checked
-(`Proto.Check`), and every refusal is printed as `path:line:column: reason`.
+Each file is parsed (`Proto.Parser`) and checked (`Proto.Check`), and every
+refusal is printed as `path:line:column: reason`. Then `Proto.Generate` writes
+its module under `--output`, at the path the module name gives it. The module
+name comes from the file's path below `--proto-path`, as protoc's does, and the
+current directory stands in when that is not given.
+
 `--describe` prints what the file declares instead (`Proto.Schema.describe`),
-which is how `harness/proto.py` holds an accepted file to something. Writing a
-Geng module from the schema is step 5.
+and generates nothing. It is how `harness/proto.py` holds an accepted file to
+something.
 
 -}
 
@@ -17,6 +22,7 @@ import Bytes
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Proto.Check
+import Proto.Generate
 import Proto.Parser
 import Proto.Schema
 import Task exposing (Task)
@@ -27,6 +33,8 @@ type alias Config =
     , pathToString : Path -> String
     , paths : Array Path
     , describe : Bool
+    , protoPath : Maybe Path
+    , output : Maybe Path
     }
 
 
@@ -35,6 +43,9 @@ run : Config -> Task String String
 run config =
     if Array.isEmpty config.paths then
         Task.fail "geng protobuf: name at least one .proto file\n"
+
+    else if not config.describe && config.output == Nothing then
+        Task.fail "geng protobuf: name the directory to write the modules into with --output=DIR, or print what the files declare with --describe\n"
 
     else
         Array.foldl
@@ -73,30 +84,138 @@ readOne config path =
             config.pathToString path
     in
     FileSystem.readFile config.fsPermission path
-        |> Task.map
+        |> Task.andThen
             (\bytes ->
                 when Bytes.toString bytes is
                     Nothing ->
-                        Err (display ++ ": the file is not UTF-8\n")
+                        Task.succeed (Err (display ++ ": the file is not UTF-8\n"))
 
                     Just source ->
                         when Proto.Parser.parse source is
                             Err error ->
-                                Err (located display error)
+                                Task.succeed (Err (located display error))
 
                             Ok file ->
                                 when Proto.Check.check file is
                                     Err errors ->
-                                        Err (String.join "" (Array.map (located display) errors))
+                                        Task.succeed (Err (String.join "" (Array.map (located display) errors)))
 
                                     Ok schema ->
                                         if config.describe then
-                                            Ok (Proto.Schema.describe schema)
+                                            Task.succeed (Ok (Proto.Schema.describe schema))
 
                                         else
-                                            Ok (display ++ ": no problems found; generating a Geng module from it is not built yet\n")
+                                            generateOne config path schema
             )
         |> Task.onError (\fsError -> Task.succeed (Err (display ++ ": " ++ FileSystem.errorToString fsError ++ "\n")))
+
+
+generateOne : Config -> Path -> Proto.Schema.Schema -> Task FileSystem.Error (Result String String)
+generateOne config path schema =
+    FileSystem.currentWorkingDirectory config.fsPermission
+        |> Task.andThen (\cwd -> generateBelow config path schema (below cwd config.protoPath path))
+
+
+generateBelow : Config -> Path -> Proto.Schema.Schema -> Result {} { directory : Array String, filename : String } -> Task FileSystem.Error (Result String String)
+generateBelow config path schema placed =
+    let
+        display =
+            config.pathToString path
+    in
+    when placed is
+        Err {} ->
+            Task.succeed
+                (Err
+                    (display
+                        ++ ": the file is not below "
+                        ++ (when config.protoPath is
+                                Just protoPath ->
+                                    "the proto path `" ++ config.pathToString protoPath ++ "`"
+
+                                Nothing ->
+                                    "the current directory"
+                           )
+                        ++ ", which its module name is taken from; name a directory holding it with --proto-path\n"
+                    )
+                )
+
+        Ok { directory, filename } ->
+            when Proto.Generate.moduleName (directory ++ [ filename ]) is
+                Err reason ->
+                    Task.succeed (Err (display ++ ": " ++ reason ++ "\n"))
+
+                Ok moduleName ->
+                    when Proto.Generate.generate { module_ = moduleName, source = String.join "/" (directory ++ [ Path.filenameWithExtension path ]) } schema is
+                        Err errors ->
+                            Task.succeed (Err (String.join "" (Array.map (located display) errors)))
+
+                        Ok text ->
+                            let
+                                output =
+                                    Maybe.withDefault Path.empty config.output
+
+                                target =
+                                    Path.append (Path.fromPosixString (String.replace "." "/" moduleName ++ ".gren")) output
+                            in
+                            (when Path.parentPath target is
+                                Just parent ->
+                                    FileSystem.makeDirectory config.fsPermission { recursive = True } parent
+
+                                Nothing ->
+                                    Task.succeed output
+                            )
+                                |> Task.andThen (\_ -> FileSystem.writeFile config.fsPermission (Bytes.fromString text) target)
+                                |> Task.map (\_ -> Ok (display ++ ": wrote " ++ config.pathToString target ++ "\n"))
+
+
+{-| The directories between the proto path and the file, and the file's name
+without its extension, or nothing when the file is not below the proto path.
+Both are taken from the current directory when they are relative, and `.` and
+`..` are resolved, so `demo.proto`, `./demo.proto` and its absolute path all
+name the same module.
+-}
+below : Path -> Maybe Path -> Path -> Result {} { directory : Array String, filename : String }
+below cwd protoPath file =
+    let
+        absolute p =
+            if p.root == "" then
+                { root = cwd.root, segments = cwd.directory ++ [ Path.filenameWithExtension cwd ] ++ p.directory ++ [ Path.filenameWithExtension p ] }
+
+            else
+                { root = p.root, segments = p.directory ++ [ Path.filenameWithExtension p ] }
+
+        resolve segments =
+            Array.foldl
+                (\segment acc ->
+                    if segment == "" || segment == "." then
+                        acc
+
+                    else if segment == ".." then
+                        Array.dropLast 1 acc
+
+                    else
+                        Array.pushLast segment acc
+                )
+                []
+                segments
+
+        base =
+            absolute (Maybe.withDefault Path.empty protoPath)
+
+        baseParts =
+            resolve base.segments
+
+        target =
+            absolute { file | filename = "", extension = "" }
+
+        fileParts =
+            resolve target.segments
+    in
+    if target.root /= base.root || Array.takeFirst (Array.length baseParts) fileParts /= baseParts then
+        Err {}
+
+    else
+        Ok { directory = Array.dropFirst (Array.length baseParts) fileParts, filename = file.filename }
 
 
 located : String -> { row : Int, col : Int, message : String } -> String

@@ -1,0 +1,1171 @@
+module Proto.Generate exposing
+    ( Error
+    , generate
+    , moduleName
+    )
+
+{-| A Geng module from a checked `.proto` file: `packaging.md` K5's mangling,
+written out (`m1b-protobuf.md` §Q18).
+
+The shape is the one `corpus/accept/protobuf-messages`' `Demo` and
+`protobuf-edges`' `Edges` were written in by hand before this existed, and
+`harness/proto.py` holds the output to those two files byte for byte. So every
+choice below that is not K5's is one those files made first:
+
+  - top-level enums come before top-level messages, and inside a message its
+    enums before its messages, which is `Proto.Schema`'s order;
+  - a declaration's types come before its values, so a message's `type`, its
+    `oneof` types and every nested type precede `defaultX`, `decodeX` and
+    `encodeX`;
+  - a record lists its fields in declaration order, a `oneof` where its first
+    member is declared, and `unknown_fields` last;
+  - the encoder lists fields by number, since the order it writes them in is
+    the order they reach the wire (D181), and unknown fields after them.
+
+The layout is the one thing those files did not settle: it is whatever
+`geng fmt` leaves alone (D189), so the exposing list is sorted with a name a
+line, and a record or list with one entry is written on one line. A project
+that checks its formatting is not failed by a module it did not write.
+
+A name that mangles to one another declaration also mangles to is refused,
+naming both (D182), and so is a name that mangles to something that is not a
+Geng name. Neither is renamed.
+
+-}
+
+import Dict exposing (Dict)
+import Proto.Schema as Schema exposing (Field, FieldType(..), Label(..), Message(..), Scalar(..), Schema)
+import Proto.Syntax exposing (Position)
+import Set exposing (Set)
+
+
+type alias Error =
+    { row : Int
+    , col : Int
+    , message : String
+    }
+
+
+errorAt : Position -> String -> Error
+errorAt at message =
+    { row = at.row, col = at.col, message = message }
+
+
+
+-- NAMES
+
+
+{-| The module a `.proto` file becomes, from its path below the proto path with
+the `.proto` taken off: each segment is mangled as a type name is, so
+`geng/core/v5` is `Geng.Core.V5`. The error names the segment that does not
+become a module name.
+-}
+moduleName : Array String -> Result String String
+moduleName segments =
+    let
+        mangled =
+            Array.map (\segment -> { segment = segment, name = typeName segment }) segments
+
+        bad =
+            Array.findFirst (\s -> not (isUpperName s.name)) mangled
+    in
+    when bad is
+        Just found ->
+            Err ("the path segment `" ++ found.value.segment ++ "` does not become a Geng module name: it becomes `" ++ found.value.name ++ "`, and a module name's every part starts with a letter and holds only letters, digits and underscores")
+
+        Nothing ->
+            if Array.isEmpty segments then
+                Err "there is no file name to make a module name from"
+
+            else
+                Ok (String.join "." (Array.map .name mangled))
+
+
+{-| A message, enum or `oneof` name, or a path segment: each `_`-separated
+part's first letter capitalized and the rest kept (K5).
+-}
+typeName : String -> String
+typeName proto =
+    String.split "_" proto
+        |> Array.map capitalize
+        |> String.join ""
+
+
+{-| An enum value: each part lower-cased, then capitalized (D176). -}
+valueName : String -> String
+valueName proto =
+    String.split "_" proto
+        |> Array.map (\part -> capitalize (String.toLower part))
+        |> String.join ""
+
+
+capitalize : String -> String
+capitalize text =
+    String.toUpper (String.takeFirst 1 text) ++ String.dropFirst 1 text
+
+
+{-| protoc's JSON name with its first letter lower-cased, and a reserved word
+given a trailing underscore (K5). protoc's rule drops every `_` and upper-cases
+the character after one.
+-}
+recordFieldName : String -> String
+recordFieldName proto =
+    let
+        json =
+            String.foldl
+                (\c acc ->
+                    if c == '_' then
+                        { acc | upper = True }
+
+                    else if acc.upper then
+                        { text = acc.text ++ String.toUpper (String.fromChar c), upper = False }
+
+                    else
+                        { acc | text = acc.text ++ String.fromChar c }
+                )
+                { text = "", upper = False }
+                proto
+
+        lowered =
+            String.toLower (String.takeFirst 1 json.text) ++ String.dropFirst 1 json.text
+    in
+    if Set.member lowered reservedWords then
+        lowered ++ "_"
+
+    else
+        lowered
+
+
+{-| The words a record field cannot be, which are `Compiler.Parse.Variable`'s. -}
+reservedWords : Set String
+reservedWords =
+    Set.fromArray [ "if", "then", "else", "when", "is", "let", "in", "type", "module", "where", "import", "exposing", "as", "port" ]
+
+
+isUpperName : String -> Bool
+isUpperName name =
+    startsWith Char.isUpper name && String.all isInner name
+
+
+isLowerName : String -> Bool
+isLowerName name =
+    startsWith Char.isLower name && String.all isInner name
+
+
+startsWith : (Char -> Bool) -> String -> Bool
+startsWith test text =
+    when String.popFirst text is
+        Just { first } ->
+            test first
+
+        Nothing ->
+            False
+
+
+isInner : Char -> Bool
+isInner c =
+    Char.isAlphaNum c || c == '_'
+
+
+
+-- WHAT IS GENERATED, NAMED
+
+
+type Item
+    = EnumItem EnumInfo
+    | MessageItem MessageInfo
+
+
+type alias EnumInfo =
+    { geng : String
+    , fullName : String
+    , at : Position
+    , values : Array { ctor : String, name : String, number : Int, at : Position }
+    , unrecognized : String
+    }
+
+
+type alias MessageInfo =
+    { geng : String
+    , fullName : String
+    , at : Position
+    , fields : Array FieldInfo
+    , oneofs : Array OneofInfo
+    , nested : Array Item
+    }
+
+
+type alias FieldInfo =
+    { field : Field
+    , record : String
+    }
+
+
+type alias OneofInfo =
+    { geng : String
+    , record : String
+    , name : String
+    , at : Position
+    , members : Array { field : Field, ctor : String }
+    }
+
+
+enumItem : String -> Schema.Enum -> EnumInfo
+enumItem prefix e =
+    let
+        geng =
+            prefix ++ typeName e.name
+    in
+    { geng = geng
+    , fullName = e.fullName
+    , at = e.at
+    , values =
+        Array.map
+            (\v -> { ctor = prefix ++ valueName v.name, name = v.name, number = v.number, at = v.at })
+            e.values
+    , unrecognized = geng ++ "_Unrecognized"
+    }
+
+
+messageItem : String -> Message -> MessageInfo
+messageItem prefix (Message m) =
+    let
+        geng =
+            prefix ++ typeName m.name
+
+        inner =
+            geng ++ "_"
+    in
+    { geng = geng
+    , fullName = m.fullName
+    , at = m.at
+    , fields = Array.map (\f -> { field = f, record = recordFieldName f.name }) m.fields
+    , oneofs =
+        Array.indexedMap
+            (\i o ->
+                { geng = inner ++ typeName o.name
+                , record = recordFieldName o.name
+                , name = o.name
+                , at = o.at
+                , members =
+                    m.fields
+                        |> Array.keepIf (\f -> f.oneof == Just i)
+                        |> Array.map (\f -> { field = f, ctor = inner ++ typeName f.name })
+                }
+            )
+            m.oneofs
+    , nested =
+        Array.map (\e -> EnumItem (enumItem inner e)) m.enums
+            ++ Array.map (\n -> MessageItem (messageItem inner n)) m.messages
+    }
+
+
+{-| Every item, depth first in generation order. -}
+flatten : Array Item -> Array Item
+flatten items =
+    Array.mapAndFlatten
+        (\item ->
+            when item is
+                EnumItem _ ->
+                    [ item ]
+
+                MessageItem info ->
+                    [ item ] ++ flatten info.nested
+        )
+        items
+
+
+{-| Where a proto full name went: a message's type, or an enum's type and the
+constructor its default is.
+-}
+type alias Names =
+    Dict String { geng : String, zero : String }
+
+
+namesOf : Array Item -> Names
+namesOf items =
+    Array.foldl
+        (\item acc ->
+            when item is
+                EnumItem info ->
+                    Dict.set info.fullName
+                        { geng = info.geng
+                        , zero =
+                            Array.first info.values
+                                |> Maybe.map .ctor
+                                |> Maybe.withDefault info.unrecognized
+                        }
+                        acc
+
+                MessageItem info ->
+                    Dict.set info.fullName { geng = info.geng, zero = "Maybe.Nothing" } acc
+        )
+        Dict.empty
+        (flatten items)
+
+
+gengOf : Names -> String -> String
+gengOf names fullName =
+    Dict.get fullName names
+        |> Maybe.map .geng
+        |> Maybe.withDefault fullName
+
+
+
+-- REFUSALS
+
+
+type alias Claim =
+    { name : String
+    , what : String
+    , at : Position
+    }
+
+
+{-| D182: a collision after mangling, and a name that is not a Geng name. -}
+refusals : Array Item -> Array Error
+refusals items =
+    let
+        all =
+            flatten items
+
+        types =
+            Array.mapAndFlatten
+                (\item ->
+                    when item is
+                        EnumItem info ->
+                            [ { name = info.geng, what = "the enum `" ++ info.fullName ++ "`", at = info.at } ]
+
+                        MessageItem info ->
+                            [ { name = info.geng, what = "the message `" ++ info.fullName ++ "`", at = info.at } ]
+                                ++ Array.map (\o -> { name = o.geng, what = "the oneof `" ++ info.fullName ++ "." ++ o.name ++ "`", at = o.at }) info.oneofs
+                )
+                all
+
+        ctors =
+            Array.mapAndFlatten
+                (\item ->
+                    when item is
+                        EnumItem info ->
+                            Array.map (\v -> { name = v.ctor, what = "the enum value `" ++ info.fullName ++ "." ++ v.name ++ "`", at = v.at }) info.values
+                                ++ [ { name = info.unrecognized, what = "the enum `" ++ info.fullName ++ "`'s constructor for unrecognized numbers", at = info.at } ]
+
+                        MessageItem info ->
+                            [ { name = info.geng, what = "the message `" ++ info.fullName ++ "`", at = info.at } ]
+                                ++ Array.mapAndFlatten
+                                    (\o -> Array.map (\member -> { name = member.ctor, what = "the oneof member `" ++ info.fullName ++ "." ++ member.field.name ++ "`", at = member.field.at }) o.members)
+                                    info.oneofs
+                )
+                all
+
+        recordNames =
+            Array.mapAndFlatten
+                (\item ->
+                    when item is
+                        EnumItem _ ->
+                            []
+
+                        MessageItem info ->
+                            [ recordClaims info ]
+                )
+                all
+
+        -- A message's constructor is its type's name, so it is checked once.
+        unnamed =
+            Array.mapAndFlatten (notAName isUpperName) types
+                ++ Array.mapAndFlatten (notAName isUpperName) (Array.keepIf (\c -> not (Array.any (\t -> t.name == c.name && t.at == c.at) types)) ctors)
+                ++ Array.mapAndFlatten (Array.mapAndFlatten (notAName isLowerName)) recordNames
+    in
+    if Array.isEmpty unnamed then
+        collisions "type" types
+            ++ collisions "constructor" ctors
+            ++ Array.mapAndFlatten (collisions "record field") recordNames
+
+    else
+        unnamed
+
+
+{-| A message's record fields: its fields that are not `oneof` members, and its
+`oneof`s.
+-}
+recordClaims : MessageInfo -> Array Claim
+recordClaims info =
+    Array.mapAndKeepJust
+        (\f ->
+            if f.field.oneof == Nothing then
+                Just { name = f.record, what = "the field `" ++ info.fullName ++ "." ++ f.field.name ++ "`", at = f.field.at }
+
+            else
+                Nothing
+        )
+        info.fields
+        ++ Array.map (\o -> { name = o.record, what = "the oneof `" ++ info.fullName ++ "." ++ o.name ++ "`", at = o.at }) info.oneofs
+
+
+notAName : (String -> Bool) -> Claim -> Array Error
+notAName isName claim =
+    if isName claim.name then
+        []
+
+    else if claim.name == "" then
+        [ errorAt claim.at (claim.what ++ " becomes an empty name, since mangling drops its underscores") ]
+
+    else
+        [ errorAt claim.at (claim.what ++ " becomes `" ++ claim.name ++ "`, which is not a Geng name: a name starts with a letter") ]
+
+
+{-| The second of two claims on one name is the one refused, and it names the
+first.
+-}
+collisions : String -> Array Claim -> Array Error
+collisions kind claims =
+    Array.foldl
+        (\claim acc ->
+            when Dict.get claim.name acc.seen is
+                Just first ->
+                    { acc
+                        | errors =
+                            Array.pushLast
+                                (errorAt claim.at (claim.what ++ " becomes the " ++ kind ++ " `" ++ claim.name ++ "`, the same as " ++ first.what ++ " at line " ++ String.fromInt first.at.row))
+                                acc.errors
+                    }
+
+                Nothing ->
+                    { acc | seen = Dict.set claim.name claim acc.seen }
+        )
+        { seen = Dict.empty, errors = [] }
+        (Array.sortWith byPosition claims)
+        |> .errors
+
+
+byPosition : { a | at : Position } -> { a | at : Position } -> Order
+byPosition a b =
+    if a.at.row == b.at.row then
+        compare a.at.col b.at.col
+
+    else
+        compare a.at.row b.at.row
+
+
+
+-- THE MODULE
+
+
+{-| The module's source, or every refusal sorted by position. `source` is the
+`.proto` file's path as the module's documentation names it.
+-}
+generate : { module_ : String, source : String } -> Schema -> Result (Array Error) String
+generate config schema =
+    let
+        items =
+            Array.map (\e -> EnumItem (enumItem "" e)) schema.enums
+                ++ Array.map (\m -> MessageItem (messageItem "" m)) schema.messages
+
+        errors =
+            if Array.isEmpty items then
+                [ errorAt { row = 1, col = 1 } "the file declares no message and no enum, so there is no module to generate" ]
+
+            else
+                refusals items
+    in
+    if Array.isEmpty errors then
+        Ok (render config (namesOf items) items)
+
+    else
+        Err (Array.sortWith (\a b -> byPosition { at = { row = a.row, col = a.col } } { at = { row = b.row, col = b.col } }) errors)
+
+
+render : { module_ : String, source : String } -> Names -> Array Item -> String
+render config names items =
+    let
+        all =
+            flatten items
+
+        exposed =
+            all
+                |> Array.mapAndFlatten
+                    (\item ->
+                        when item is
+                            EnumItem info ->
+                                [ info.geng ++ "(..)", "decode" ++ info.geng, "encode" ++ info.geng ]
+
+                            MessageItem info ->
+                                [ info.geng ++ "(..)", "decode" ++ info.geng, "encode" ++ info.geng, "default" ++ info.geng ]
+                                    ++ Array.map (\o -> o.geng ++ "(..)") info.oneofs
+                    )
+                |> Array.sort
+
+        header =
+            "module "
+                ++ config.module_
+                ++ " exposing\n"
+                ++ bracketed "(" ")" "    " exposed
+                ++ "\n{-| Generated by `geng protobuf` from `"
+                ++ config.source
+                ++ "`. Edit that file, not this one.\n\n-}\n\n"
+                ++ String.join "" (Array.map (\i -> "import " ++ i ++ "\n") (imports all))
+
+        declarations =
+            Array.mapAndFlatten
+                (\item -> typeDeclarations names item ++ valueDeclarations names item)
+                items
+    in
+    header ++ String.join "" (Array.map (\d -> "\n\n" ++ d) declarations)
+
+
+{-| The modules the generated code names, in alphabetical order. -}
+imports : Array Item -> Array String
+imports all =
+    let
+        scalarModule s =
+            when s is
+                StringType ->
+                    "String"
+
+                BytesType ->
+                    "Bytes"
+
+                _ ->
+                    "Basics"
+
+        valueModules t =
+            when t is
+                ScalarType s ->
+                    [ scalarModule s ]
+
+                MapType m ->
+                    [ "Dict", scalarModule m.key ] ++ valueModules m.value
+
+                _ ->
+                    []
+
+        used =
+            Array.mapAndFlatten
+                (\item ->
+                    when item is
+                        EnumItem _ ->
+                            [ "Basics", "Maybe", "Protobuf.Decode", "Protobuf.Encode" ]
+
+                        MessageItem info ->
+                            [ "Array", "Maybe", "Protobuf.Decode", "Protobuf.Encode", "Protobuf.Unknown" ]
+                                ++ Array.mapAndFlatten (\f -> valueModules f.field.fieldType) info.fields
+                )
+                all
+    in
+    Set.toArray (Set.fromArray used)
+
+
+typeDeclarations : Names -> Item -> Array String
+typeDeclarations names item =
+    when item is
+        EnumItem info ->
+            [ enumType info ]
+
+        MessageItem info ->
+            [ messageType names info ]
+                ++ Array.map (oneofType names) info.oneofs
+                ++ Array.mapAndFlatten (typeDeclarations names) info.nested
+
+
+valueDeclarations : Names -> Item -> Array String
+valueDeclarations names item =
+    when item is
+        EnumItem info ->
+            [ enumDecoder info, enumEncoder info ]
+
+        MessageItem info ->
+            [ messageDefault names info, messageDecoder names info, messageEncoder names info ]
+                ++ Array.mapAndFlatten (valueDeclarations names) info.nested
+
+
+
+-- ENUMS
+
+
+enumType : EnumInfo -> String
+enumType info =
+    "type "
+        ++ info.geng
+        ++ "\n"
+        ++ String.join ""
+            (Array.indexedMap
+                (\i v ->
+                    (if i == 0 then
+                        "    = "
+
+                     else
+                        "    | "
+                    )
+                        ++ v.ctor
+                        ++ "\n"
+                )
+                info.values
+            )
+        ++ "    | "
+        ++ info.unrecognized
+        ++ " Basics.Int\n"
+
+
+enumDecoder : EnumInfo -> String
+enumDecoder info =
+    let
+        branch pattern body =
+            "                " ++ pattern ++ " ->\n                    " ++ body ++ "\n"
+
+        nonNegative =
+            Array.keepIf (\v -> v.number >= 0) info.values
+
+        negative =
+            Array.keepIf (\v -> v.number < 0) info.values
+
+        fallback =
+            if Array.isEmpty negative then
+                "Maybe.Nothing"
+
+            else
+                String.join " "
+                    (Array.map
+                        (\v -> "if n == " ++ String.fromInt v.number ++ " then\n                        Maybe.Just " ++ v.ctor ++ "\n\n                    else")
+                        negative
+                    )
+                    ++ "\n                        Maybe.Nothing"
+    in
+    "decode"
+        ++ info.geng
+        ++ " : Protobuf.Decode.Decoder "
+        ++ info.geng
+        ++ "\ndecode"
+        ++ info.geng
+        ++ " =\n    Protobuf.Decode.enum\n        (\\n ->\n            when n is\n"
+        ++ String.join "\n" (Array.map (\v -> branch (String.fromInt v.number) ("Maybe.Just " ++ v.ctor)) nonNegative)
+        ++ "\n"
+        ++ branch "_" fallback
+        ++ "        )\n        "
+        ++ info.unrecognized
+        ++ "\n"
+
+
+enumEncoder : EnumInfo -> String
+enumEncoder info =
+    let
+        branch pattern body =
+            "                " ++ pattern ++ " ->\n                    " ++ body ++ "\n"
+    in
+    "encode"
+        ++ info.geng
+        ++ " : Protobuf.Encode.Encoder "
+        ++ info.geng
+        ++ "\nencode"
+        ++ info.geng
+        ++ " =\n    Protobuf.Encode.enum\n        (\\e ->\n            when e is\n"
+        ++ String.join "\n"
+            (Array.map (\v -> branch v.ctor (String.fromInt v.number)) info.values
+                ++ [ branch (info.unrecognized ++ " n") "n" ]
+            )
+        ++ "        )\n"
+
+
+
+-- MESSAGES
+
+
+{-| Each record entry in declaration order: a field, or a `oneof` where its
+first member is.
+-}
+recordEntries : MessageInfo -> Array { record : String, entry : Entry }
+recordEntries info =
+    Array.foldl
+        (\f acc ->
+            when f.field.oneof is
+                Just i ->
+                    if Set.member i acc.seen then
+                        acc
+
+                    else
+                        when Array.get i info.oneofs is
+                            Just o ->
+                                { seen = Set.set i acc.seen, entries = Array.pushLast { record = o.record, entry = OneofEntry o } acc.entries }
+
+                            Nothing ->
+                                acc
+
+                Nothing ->
+                    { acc | entries = Array.pushLast { record = f.record, entry = FieldEntry f.field } acc.entries }
+        )
+        { seen = Set.empty, entries = [] }
+        info.fields
+        |> .entries
+
+
+type Entry
+    = FieldEntry Field
+    | OneofEntry OneofInfo
+
+
+scalarType : Scalar -> String
+scalarType s =
+    when s is
+        DoubleType ->
+            "Basics.Float"
+
+        FloatType ->
+            "Basics.Float32"
+
+        Int32Type ->
+            "Basics.Int"
+
+        SInt32Type ->
+            "Basics.Int"
+
+        SFixed32Type ->
+            "Basics.Int"
+
+        Int64Type ->
+            "Basics.Int64"
+
+        SInt64Type ->
+            "Basics.Int64"
+
+        SFixed64Type ->
+            "Basics.Int64"
+
+        UInt32Type ->
+            "Basics.UInt32"
+
+        Fixed32Type ->
+            "Basics.UInt32"
+
+        UInt64Type ->
+            "Basics.UInt64"
+
+        Fixed64Type ->
+            "Basics.UInt64"
+
+        BoolType ->
+            "Basics.Bool"
+
+        StringType ->
+            "String.String"
+
+        BytesType ->
+            "Bytes.Bytes"
+
+
+{-| The type of one value: a scalar, an enum or a message, never wrapped. -}
+valueType : Names -> FieldType -> String
+valueType names t =
+    when t is
+        ScalarType s ->
+            scalarType s
+
+        MessageType n ->
+            gengOf names n
+
+        EnumType n ->
+            gengOf names n
+
+        MapType m ->
+            "Dict.Dict " ++ scalarType m.key ++ " " ++ valueType names m.value
+
+
+fieldType : Names -> Field -> String
+fieldType names f =
+    when f.fieldType is
+        MapType _ ->
+            valueType names f.fieldType
+
+        MessageType _ ->
+            if f.label == Repeated then
+                "Array.Array " ++ valueType names f.fieldType
+
+            else
+                "Maybe.Maybe " ++ valueType names f.fieldType
+
+        _ ->
+            when f.label is
+                Repeated ->
+                    "Array.Array " ++ valueType names f.fieldType
+
+                Optional ->
+                    "Maybe.Maybe " ++ valueType names f.fieldType
+
+                Singular ->
+                    valueType names f.fieldType
+
+
+fieldDefault : Names -> Field -> String
+fieldDefault names f =
+    when f.fieldType is
+        MapType _ ->
+            "Dict.empty"
+
+        _ ->
+            when f.label is
+                Repeated ->
+                    "[]"
+
+                Optional ->
+                    "Maybe.Nothing"
+
+                Singular ->
+                    when f.fieldType is
+                        ScalarType BoolType ->
+                            "Basics.False"
+
+                        ScalarType StringType ->
+                            "\"\""
+
+                        ScalarType BytesType ->
+                            "Bytes.empty"
+
+                        ScalarType _ ->
+                            "0"
+
+                        EnumType n ->
+                            Dict.get n names
+                                |> Maybe.map .zero
+                                |> Maybe.withDefault "0"
+
+                        _ ->
+                            "Maybe.Nothing"
+
+
+{-| A record's lines, `{ a : T` then `, b : T` then `}`, each indented. -}
+recordLines : String -> Array String -> String
+recordLines =
+    bracketed "{" "}"
+
+
+{-| `recordLines` with other brackets. One entry is written on one line, and
+more than one a line each, which is what `geng fmt` leaves alone.
+-}
+bracketed : String -> String -> String -> Array String -> String
+bracketed open close indent lines =
+    if Array.length lines == 1 then
+        indent ++ open ++ " " ++ String.join "" lines ++ " " ++ close ++ "\n"
+
+    else
+        String.join ""
+            (Array.indexedMap
+                (\i line ->
+                    indent
+                        ++ (if i == 0 then
+                                open ++ " "
+
+                            else
+                                ", "
+                           )
+                        ++ line
+                        ++ "\n"
+                )
+                lines
+            )
+            ++ indent
+            ++ close
+            ++ "\n"
+
+
+messageType : Names -> MessageInfo -> String
+messageType names info =
+    "type "
+        ++ info.geng
+        ++ "\n    = "
+        ++ info.geng
+        ++ (if Array.isEmpty info.fields then
+                " "
+
+            else
+                "\n"
+           )
+        ++ recordLines
+            (if Array.isEmpty info.fields then
+                ""
+
+             else
+                "        "
+            )
+            (Array.map
+                (\e ->
+                    e.record
+                        ++ " : "
+                        ++ (when e.entry is
+                                FieldEntry f ->
+                                    fieldType names f
+
+                                OneofEntry o ->
+                                    "Maybe.Maybe " ++ o.geng
+                           )
+                )
+                (recordEntries info)
+                ++ [ "unknown_fields : Array.Array Protobuf.Unknown.Field" ]
+            )
+
+
+oneofType : Names -> OneofInfo -> String
+oneofType names o =
+    "type "
+        ++ o.geng
+        ++ "\n"
+        ++ String.join ""
+            (Array.indexedMap
+                (\i member ->
+                    (if i == 0 then
+                        "    = "
+
+                     else
+                        "    | "
+                    )
+                        ++ member.ctor
+                        ++ " "
+                        ++ valueType names member.field.fieldType
+                        ++ "\n"
+                )
+                o.members
+            )
+
+
+messageDefault : Names -> MessageInfo -> String
+messageDefault names info =
+    "default"
+        ++ info.geng
+        ++ " : "
+        ++ info.geng
+        ++ "\ndefault"
+        ++ info.geng
+        ++ " =\n    "
+        ++ info.geng
+        ++ "\n"
+        ++ recordLines "        "
+            (Array.map
+                (\e ->
+                    e.record
+                        ++ " = "
+                        ++ (when e.entry is
+                                FieldEntry f ->
+                                    fieldDefault names f
+
+                                OneofEntry _ ->
+                                    "Maybe.Nothing"
+                           )
+                )
+                (recordEntries info)
+                ++ [ "unknown_fields = []" ]
+            )
+
+
+decoderOf : Names -> FieldType -> String
+decoderOf names t =
+    when t is
+        ScalarType s ->
+            "Protobuf.Decode." ++ Schema.scalarName s
+
+        _ ->
+            "decode" ++ valueType names t
+
+
+encoderOf : Names -> FieldType -> String
+encoderOf names t =
+    when t is
+        ScalarType s ->
+            "Protobuf.Encode." ++ Schema.scalarName s
+
+        _ ->
+            "encode" ++ valueType names t
+
+
+messageDecoder : Names -> MessageInfo -> String
+messageDecoder names info =
+    let
+        t =
+            info.geng
+
+        setter record value =
+            "(\\v (" ++ t ++ " m) -> " ++ t ++ " { m | " ++ record ++ " = " ++ value ++ " })"
+
+        getter record =
+            "(\\(" ++ t ++ " m) -> m." ++ record ++ ")"
+
+        oneofOf f =
+            f.oneof
+                |> Maybe.andThen (\i -> Array.get i info.oneofs)
+                |> Maybe.andThen
+                    (\o ->
+                        Array.findFirst (\member -> member.field.number == f.number) o.members
+                            |> Maybe.map (\found -> { oneof = o, ctor = found.value.ctor })
+                    )
+
+        body fieldInfo =
+            let
+                f =
+                    fieldInfo.field
+
+                record =
+                    fieldInfo.record
+            in
+            when oneofOf f is
+                Just { oneof, ctor } ->
+                    when f.fieldType is
+                        MessageType _ ->
+                            "Maybe.Just\n                            (Protobuf.Decode.oneof "
+                                ++ String.fromInt (Maybe.withDefault 0 f.oneof)
+                                ++ "\n                                (Protobuf.Decode.merge "
+                                ++ decoderOf names f.fieldType
+                                ++ "\n                                    (\\("
+                                ++ t
+                                ++ " m) ->\n                                        when m."
+                                ++ oneof.record
+                                ++ " is\n                                            Maybe.Just ("
+                                ++ ctor
+                                ++ " v) ->\n                                                Maybe.Just v\n\n                                            _ ->\n                                                Maybe.Nothing\n                                    )\n                                    "
+                                ++ setter oneof.record ("Maybe.Just (" ++ ctor ++ " v)")
+                                ++ "\n                                )\n                            )"
+
+                        _ ->
+                            "Maybe.Just (Protobuf.Decode.oneof "
+                                ++ String.fromInt (Maybe.withDefault 0 f.oneof)
+                                ++ " (Protobuf.Decode.field "
+                                ++ decoderOf names f.fieldType
+                                ++ " "
+                                ++ setter oneof.record ("Maybe.Just (" ++ ctor ++ " v)")
+                                ++ "))"
+
+                Nothing ->
+                    "Maybe.Just ("
+                        ++ (when f.fieldType is
+                                MapType m ->
+                                    "Protobuf.Decode.dict " ++ decoderOf names (ScalarType m.key) ++ " " ++ decoderOf names m.value ++ " " ++ getter record ++ " " ++ setter record "v"
+
+                                MessageType _ ->
+                                    if f.label == Repeated then
+                                        "Protobuf.Decode.repeated " ++ decoderOf names f.fieldType ++ " " ++ getter record ++ " " ++ setter record "v"
+
+                                    else
+                                        "Protobuf.Decode.merge " ++ decoderOf names f.fieldType ++ " " ++ getter record ++ " " ++ setter record "Maybe.Just v"
+
+                                _ ->
+                                    when f.label is
+                                        Repeated ->
+                                            "Protobuf.Decode.repeated " ++ decoderOf names f.fieldType ++ " " ++ getter record ++ " " ++ setter record "v"
+
+                                        Optional ->
+                                            "Protobuf.Decode.optional " ++ decoderOf names f.fieldType ++ " " ++ setter record "Maybe.Just v"
+
+                                        Singular ->
+                                            "Protobuf.Decode.field " ++ decoderOf names f.fieldType ++ " " ++ setter record "v"
+                           )
+                        ++ ")"
+
+        cases =
+            info.fields
+                |> Array.sortBy (\fieldInfo -> fieldInfo.field.number)
+                |> Array.map
+                    (\fieldInfo ->
+                        "                    "
+                            ++ String.fromInt fieldInfo.field.number
+                            ++ " ->\n                        "
+                            ++ body fieldInfo
+                            ++ "\n\n"
+                    )
+
+        fieldFunction =
+            if Array.isEmpty info.fields then
+                " \\_ -> Maybe.Nothing\n"
+
+            else
+                "\n            \\number ->\n                when number is\n"
+                    ++ String.join "" cases
+                    ++ "                    _ ->\n                        Maybe.Nothing\n"
+    in
+    "decode"
+        ++ t
+        ++ " : Protobuf.Decode.Decoder "
+        ++ t
+        ++ "\ndecode"
+        ++ t
+        ++ " =\n    Protobuf.Decode.message\n        { default = default"
+        ++ t
+        ++ "\n        , field ="
+        ++ fieldFunction
+        ++ "        , unknown = \\u ("
+        ++ t
+        ++ " m) -> "
+        ++ t
+        ++ " { m | unknown_fields = Array.pushLast u m.unknown_fields }\n        }\n"
+
+
+messageEncoder : Names -> MessageInfo -> String
+messageEncoder names info =
+    let
+        entry fieldInfo =
+            let
+                f =
+                    fieldInfo.field
+
+                n =
+                    String.fromInt f.number
+
+                value =
+                    "m." ++ fieldInfo.record
+
+                member =
+                    f.oneof
+                        |> Maybe.andThen (\i -> Array.get i info.oneofs)
+                        |> Maybe.andThen
+                            (\o ->
+                                Array.findFirst (\m -> m.field.number == f.number) o.members
+                                    |> Maybe.map (\found -> { oneof = o, ctor = found.value.ctor })
+                            )
+            in
+            when member is
+                Just { oneof, ctor } ->
+                    "when m."
+                        ++ oneof.record
+                        ++ " is\n                Maybe.Just ("
+                        ++ ctor
+                        ++ " v) ->\n                    Protobuf.Encode.always "
+                        ++ encoderOf names f.fieldType
+                        ++ " "
+                        ++ n
+                        ++ " v\n\n                _ ->\n                    Protobuf.Encode.none"
+
+                Nothing ->
+                    when f.fieldType is
+                        MapType m ->
+                            "Protobuf.Encode.dict " ++ encoderOf names (ScalarType m.key) ++ " " ++ encoderOf names m.value ++ " " ++ n ++ " " ++ value
+
+                        MessageType _ ->
+                            if f.label == Repeated then
+                                "Protobuf.Encode.repeated " ++ encoderOf names f.fieldType ++ " " ++ n ++ " " ++ value
+
+                            else
+                                "Protobuf.Encode.optional " ++ encoderOf names f.fieldType ++ " " ++ n ++ " " ++ value
+
+                        _ ->
+                            when f.label is
+                                Repeated ->
+                                    "Protobuf.Encode.repeated " ++ encoderOf names f.fieldType ++ " " ++ n ++ " " ++ value
+
+                                Optional ->
+                                    "Protobuf.Encode.optional " ++ encoderOf names f.fieldType ++ " " ++ n ++ " " ++ value
+
+                                Singular ->
+                                    "Protobuf.Encode.field " ++ encoderOf names f.fieldType ++ " " ++ n ++ " " ++ value
+
+        entries =
+            (info.fields
+                |> Array.sortBy (\fieldInfo -> fieldInfo.field.number)
+                |> Array.map entry
+            )
+                ++ [ "Protobuf.Encode.unknown m.unknown_fields" ]
+    in
+    "encode"
+        ++ info.geng
+        ++ " : Protobuf.Encode.Encoder "
+        ++ info.geng
+        ++ "\nencode"
+        ++ info.geng
+        ++ " =\n    Protobuf.Encode.message\n        (\\("
+        ++ info.geng
+        ++ " m) ->\n"
+        ++ bracketed "[" "]" "            " entries
+        ++ "        )\n"

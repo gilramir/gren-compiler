@@ -66,6 +66,8 @@ type alias FormatFlags =
 type alias ProtobufFlags =
     { paths : Array Path
     , describe : Bool
+    , protoPath : Maybe Path
+    , output : Maybe Path
     }
 
 
@@ -263,35 +265,40 @@ parser =
                     Cli.Parser.zeroOrMoreArgs Cli.Parser.pathParser
                 , flags =
                     Cli.Parser.initFlags
-                        (\describe ->
+                        (\describe protoPath output ->
                             { describe = describe
+                            , protoPath = protoPath
+                            , output = output
                             }
                         )
-                        |> Cli.Parser.toggle "describe" "Print what each file declares, with every type name resolved, one declaration a line."
+                        |> Cli.Parser.toggle "describe" "Print what each file declares, with every type name resolved, one declaration a line, and generate nothing."
+                        |> Cli.Parser.flag "proto-path" Cli.Parser.pathParser "The directory each file's module name is taken from, as protoc's --proto_path is: schema/geng/core/v5.proto below schema is the module Geng.Core.V5. The current directory when it is not given."
+                        |> Cli.Parser.flag "output" Cli.Parser.pathParser "The directory to write the modules into, each at the path its module name gives it."
                 , commonDescription = Nothing
                 , summary =
-                    "Read proto3 files."
+                    "Generate Geng modules from proto3 files."
                 , example =
                     PP.verticalBlock
                         [ PP.words
                             """
                             Reads each .proto file and refuses what proto3 refuses, and what this
                             compiler does not read yet (proto2, editions, imports, services), with the
-                            line and column of each. Generating Geng modules from them is not built
-                            yet.
+                            line and column of each. Then it writes one Geng module per file, with a
+                            type, a decoder and an encoder for every message and enum.
                             """
                         , PP.empty
-                        , PP.words "geng protobuf --describe schema.proto"
+                        , PP.words "geng protobuf --proto-path=proto --output=src proto/shapes/demo.proto"
                             |> PP.indent
                             |> PP.color PP.Green
                         , PP.empty
                         , PP.words
                             """
-                            This prints every message, enum and field the file declares.
+                            This writes the module Shapes.Demo to src/Shapes/Demo.gren. With --describe
+                            it prints every message, enum and field the file declares instead.
                             """
                         ]
                 , builder =
-                    \args flags -> Protobuf { paths = args, describe = flags.describe }
+                    \args flags -> Protobuf { paths = args, describe = flags.describe, protoPath = flags.protoPath, output = flags.output }
                 }
             |> Cli.Parser.withCommand
                 { word = "make"

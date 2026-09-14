@@ -1666,7 +1666,8 @@ buildMessage symbols scope (Syntax.Message m) =
                     Schema.ScalarType Schema.BytesType
 
         plainField oneofIndex f =
-            { name = f.name
+            { at = f.nameAt
+            , name = f.name
             , number = Maybe.withDefault 0 f.number.value
             , label =
                 when f.label is
@@ -1683,7 +1684,8 @@ buildMessage symbols scope (Syntax.Message m) =
             }
 
         mapFieldOf mapField =
-            { name = mapField.name
+            { at = mapField.nameAt
+            , name = mapField.name
             , number = Maybe.withDefault 0 mapField.number.value
             , label = Schema.Singular
             , fieldType =
@@ -1723,7 +1725,7 @@ buildMessage symbols scope (Syntax.Message m) =
                                         )
                                         o.elements
                             in
-                            { acc | oneofs = Array.pushLast o.name acc.oneofs, fields = acc.fields ++ members }
+                            { acc | oneofs = Array.pushLast { at = o.at, name = o.name } acc.oneofs, fields = acc.fields ++ members }
 
                         Syntax.NestedMessage nested ->
                             { acc | messages = Array.pushLast (buildMessage symbols full nested) acc.messages }
@@ -1738,7 +1740,8 @@ buildMessage symbols scope (Syntax.Message m) =
                 m.elements
     in
     Schema.Message
-        { name = m.name
+        { at = m.at
+        , name = m.name
         , fullName = full
         , fields = gathered.fields
         , oneofs = gathered.oneofs
@@ -1749,14 +1752,15 @@ buildMessage symbols scope (Syntax.Message m) =
 
 buildEnum : String -> Syntax.Enum -> Schema.Enum
 buildEnum scope e =
-    { name = e.name
+    { at = e.at
+    , name = e.name
     , fullName = qualify scope e.name
     , values =
         Array.mapAndFlatten
             (\element ->
                 when element is
                     Syntax.ValueElement v ->
-                        [ { name = v.name, number = Maybe.withDefault 0 v.number.value } ]
+                        [ { at = v.at, name = v.name, number = Maybe.withDefault 0 v.number.value } ]
 
                     _ ->
                         []

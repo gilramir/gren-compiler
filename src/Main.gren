@@ -873,6 +873,8 @@ parseUserArgs model compilerPath =
                         , pathToString = model.pathToString
                         , paths = protobufFlags.paths
                         , describe = protobufFlags.describe
+                        , protoPath = protobufFlags.protoPath
+                        , output = protobufFlags.output
                         }
                         |> Task.andThen (Stream.Log.string model.stdout)
                         |> Task.map (\_ -> Cmd.none)

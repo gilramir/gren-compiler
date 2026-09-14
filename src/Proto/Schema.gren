@@ -21,6 +21,8 @@ are compared against.
 
 -}
 
+import Proto.Syntax exposing (Position)
+
 
 type alias Schema =
     { package : String
@@ -31,20 +33,23 @@ type alias Schema =
 
 type Message
     = Message
-        { name : String
+        { at : Position
+        , name : String
         , fullName : String
         , fields : Array Field
-        , oneofs : Array String
+        , oneofs : Array { at : Position, name : String }
         , messages : Array Message
         , enums : Array Enum
         }
 
 
-{-| A field. `oneof` is the index into its message's `oneofs` when the field is
+{-| A field. `at` is where its name is written, which is where a refusal about
+the name points. `oneof` is the index into its message's `oneofs` when the field is
 a member of one.
 -}
 type alias Field =
-    { name : String
+    { at : Position
+    , name : String
     , number : Int
     , label : Label
     , fieldType : FieldType
@@ -87,9 +92,10 @@ type Scalar
 
 
 type alias Enum =
-    { name : String
+    { at : Position
+    , name : String
     , fullName : String
-    , values : Array { name : String, number : Int }
+    , values : Array { at : Position, name : String, number : Int }
     }
 
 
@@ -239,7 +245,7 @@ describeMessage indent (Message m) =
             indent ++ "  "
     in
     [ indent ++ "message " ++ m.fullName ]
-        ++ Array.indexedMap (\i name -> inner ++ "oneof " ++ String.fromInt i ++ " " ++ name) m.oneofs
+        ++ Array.indexedMap (\i o -> inner ++ "oneof " ++ String.fromInt i ++ " " ++ o.name) m.oneofs
         ++ Array.map (describeField inner) m.fields
         ++ Array.mapAndFlatten (describeEnum inner) m.enums
         ++ Array.mapAndFlatten (describeMessage inner) m.messages
