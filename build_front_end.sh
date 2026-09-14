@@ -11,13 +11,15 @@
 #
 # That makes this step a bootstrap: it needs an `app` to build the next `app`.
 # A checkout with none can produce the first one with stock Gren against `core`
-# at the last commit before class syntax landed there.
+# at the last commit before class syntax landed there. An `app` from before the
+# command was renamed (D174) reads `GREN_BIN` rather than `GENG_BIN`; give it
+# that name for the first build, and the self-check below still applies.
 set -e
 
 cd "$(dirname "$(realpath "$0")")"
 
-if [ ! -x gren ]; then
-  echo "build_front_end.sh: no ./gren — run ./build_dev_bin.sh first" >&2
+if [ ! -x geng ]; then
+  echo "build_front_end.sh: no ./geng — run ./build_dev_bin.sh first" >&2
   exit 1
 fi
 
@@ -26,7 +28,7 @@ if [ ! -f app ]; then
   exit 1
 fi
 
-GREN_BIN="$PWD/gren" node app make Main --output=app.new
+GENG_BIN="$PWD/geng" node app make Main --output=app.new
 
 # A bootstrap is one bad bundle away from having nothing to build with: an `app`
 # that cannot find `gren.json` cannot build its own fix, and it happened once
@@ -34,7 +36,7 @@ GREN_BIN="$PWD/gren" node app make Main --output=app.new
 # `Main` itself -- from the artifacts just cached, so this is quick -- and agree
 # byte for byte with what the old one built, before it replaces it. The old one
 # is kept as `app.prev` either way.
-if ! GREN_BIN="$PWD/gren" node app.new make Main --output=app.check >/dev/null 2>&1; then
+if ! GENG_BIN="$PWD/geng" node app.new make Main --output=app.check >/dev/null 2>&1; then
   echo "build_front_end.sh: the new app.new cannot build Main; app is unchanged" >&2
   exit 1
 fi

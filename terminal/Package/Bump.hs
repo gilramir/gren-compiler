@@ -87,7 +87,7 @@ suggestVersion flags@(Flags _ root _ (Command.ProjectInfo _ currentSources curre
               <> " => "
               <> new
               <> ")\n"
-              <> "Bail out of this command and run 'gren diff' for a full explanation.\n"
+              <> "Bail out of this command and run 'geng diff' for a full explanation.\n"
               <> "\n"
               <> "Should I perform the update ("
               <> old

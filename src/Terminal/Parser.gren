@@ -86,7 +86,7 @@ parser =
         versionString =
             SemanticVersion.toString Meta.version
     in
-    { name = "gren"
+    { name = "geng"
     , version = versionString
     , intro = 
         PP.verticalBlock
@@ -101,7 +101,7 @@ parser =
                     """
                     -------------------------------------------------------------------------------
                     I highly recommend working through <https://gren-lang.org/learn> to get started
-                    It teaches many important concepts, including how to use `gren` in the terminal
+                    It teaches the important concepts. Where it says `gren`, this compiler is `geng`
                     -------------------------------------------------------------------------------
                     """
             ]
@@ -198,7 +198,7 @@ parser =
                     PP.verticalBlock
                         [ PP.words "For example:"
                         , PP.empty
-                        , PP.words "gren paths --backend"
+                        , PP.words "geng paths --backend"
                             |> PP.indent
                             |> PP.color PP.Green
                         , PP.empty
@@ -235,7 +235,7 @@ parser =
                             way down.
                             """
                         , PP.empty
-                        , PP.words "gren fmt --check"
+                        , PP.words "geng fmt --check"
                             |> PP.indent
                             |> PP.color PP.Green
                         , PP.empty
@@ -274,7 +274,7 @@ parser =
                     PP.verticalBlock
                         [ PP.words "For example:"
                         , PP.empty
-                        , PP.words "gren make Main"
+                        , PP.words "geng make Main"
                             |> PP.indent
                             |> PP.color PP.Green
                         , PP.empty
@@ -313,7 +313,7 @@ parser =
                     PP.verticalBlock
                         [ PP.words "For example:"
                         , PP.empty
-                        , PP.words "gren run Main"
+                        , PP.words "geng run Main"
                             |> PP.indent
                             |> PP.color PP.Green
                         , PP.empty
@@ -351,7 +351,7 @@ parser =
                 , example = 
                     PP.verticalBlock
                         [ PP.words "For example:"
-                        , PP.words "gren docs"
+                        , PP.words "geng docs"
                             |> PP.indent
                             |> PP.color PP.Green
                         , PP.words
@@ -393,7 +393,7 @@ packageCommands =
                         you would say:
                         """
                     , PP.empty
-                    , PP.text "gren package install gren-lang/browser"
+                    , PP.text "geng package install gren-lang/browser"
                         |> PP.indent
                         |> PP.color PP.Green
                     , PP.empty
@@ -432,7 +432,7 @@ packageCommands =
                         you would say:
                         """
                     , PP.empty
-                    , PP.text "gren package uninstall gren-lang/browser"
+                    , PP.text "geng package uninstall gren-lang/browser"
                         |> PP.indent
                         |> PP.color PP.Green
                     , PP.empty
@@ -462,7 +462,7 @@ packageCommands =
                 "The `outdated` command lists the latest version of your dependencies,"
                     ++ " if you're not already up to date:"
             , example = 
-                PP.text "gren package outdated"
+                PP.text "geng package outdated"
                     |> PP.indent
                     |> PP.color PP.Green
             , builder =
@@ -577,7 +577,7 @@ packageCommands =
                         versions 1.0.0 and 2.0.0, you can say:
                         """
                     , PP.empty
-                    , PP.text "gren package diff gren-lang/browser 1.0.0 2.0.0"
+                    , PP.text "geng package diff gren-lang/browser 1.0.0 2.0.0"
                         |> PP.indent
                         |> PP.color PP.Green
                     , PP.empty

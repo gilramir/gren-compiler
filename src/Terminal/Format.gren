@@ -581,6 +581,6 @@ prettifyError error =
                     [ PP.verticalBlock (Array.map PP.text paths)
                         |> PP.indent
                     , PP.empty
-                    , PP.words "Run gren fmt to format them."
+                    , PP.words "Run geng fmt to format them."
                     ]
                 )

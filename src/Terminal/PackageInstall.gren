@@ -1321,7 +1321,7 @@ prettifyProjectOutlineError error =
                     , PP.empty
                     , PP.words "You can create new projects using"
                     , PP.empty
-                    , PP.text "gren init"
+                    , PP.text "geng init"
                         |> PP.indent
                         |> PP.color PP.Green
                     ]

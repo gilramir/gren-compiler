@@ -225,7 +225,7 @@ Library common
         base64-bytestring >= 1.2 && < 2,
         indexed-traversable
 
-Executable gren
+Executable geng
     default-language: GHC2021
 
     if flag(dev)

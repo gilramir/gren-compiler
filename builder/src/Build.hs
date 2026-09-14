@@ -321,7 +321,7 @@ crawlModule env@(Env _ _ projectType _ _ _ _ foreigns) mvar sources docsNeed nam
 -- __A module whose docs are wanted is never cached__, because the cache does
 -- not hold any. `SCached` compiles with `DocsNeed False` when it compiles at
 -- all and `toDocs` gives `Nothing` when it does not, so taking this path for an
--- exposed module means @gren docs@ writes @{}@ and exits 0 — a silent wrong
+-- exposed module means @geng docs@ writes @{}@ and exits 0 — a silent wrong
 -- answer, and the second run of it differs from the first. Only the exposed
 -- roots ask for docs, so what this costs is recompiling those.
 crawlKnown :: Env -> MVar StatusDict -> Sources -> DocsNeed -> ModuleName.Raw -> Source -> IO Status

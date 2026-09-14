@@ -5,7 +5,7 @@ module Terminal.Run exposing
     , prettifyError
     )
 
-{-| Support the `gren run ModuleName` command.
+{-| Support the `geng run ModuleName` command.
 -}
 
 import Cli.PrettyPrinter as PP

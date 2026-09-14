@@ -20,7 +20,7 @@
     "bin/compiler"
   ],
   "bin": {
-    "gren": "bin/compiler"
+    "geng": "bin/compiler"
   },
   "keywords": [
     "gren",

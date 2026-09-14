@@ -136,8 +136,8 @@ data Dependency = Dependency
 -- module must be recompiled when its '_lastCompile' is __less than__ the
 -- '_lastChange' of anything it imports — which is not the same question as (1),
 -- because the module's own source need not have moved. It happens whenever a
--- project has more than one entrypoint: @gren make A@ then @gren make B@ then
--- @gren make A@ again, where B's build changed an interface that A's modules
+-- project has more than one entrypoint: @geng make A@ then @geng make B@ then
+-- @geng make A@ again, where B's build changed an interface that A's modules
 -- had already been compiled against. Reason (1) sees nothing there at all.
 data Local = Local
   { _path :: FilePath,
@@ -395,7 +395,7 @@ verifyDependencies header fingerprint prints outline solution directDeps =
       case sequence deps of
         Left _ ->
           do
-            home <- Dirs.getGrenHome
+            home <- Dirs.getGengHome
             return $
               Left $
                 Exit.DetailsBadDeps home $

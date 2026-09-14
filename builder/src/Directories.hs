@@ -11,7 +11,7 @@ module Directories
     getArtifactCache,
     packageArtifacts,
     getReplCache,
-    getGrenHome,
+    getGengHome,
   )
 where
 
@@ -52,7 +52,7 @@ compilerVersion =
 
 -- | Names the compiler *build* that wrote an artifact -- both the project's,
 -- under @<project>/.gren/<key>/@, and the dependencies', under
--- @~/.cache/gren/<key>/artifacts/@.
+-- @~/.cache/geng/<key>/artifacts/@.
 --
 -- Stock keys that directory on the language version, which is the version a
 -- project's `gren-version` is checked against. Those are two different
@@ -168,12 +168,14 @@ newtype ArtifactCache = ArtifactCache FilePath
 -- whole reason that key exists: these are artifacts stock would never have
 -- written, and a directory shared with stock on the strength of a version
 -- number they agree on by design is how a stale artifact becomes a wrong answer
--- with nothing on screen to say so. @~\/.cache\/gren\/0.6.3-geng.<hex>\/@ sits
--- beside @~\/.cache\/gren\/0.6.3\/@ and says which build wrote it.
+-- with nothing on screen to say so. @~\/.cache\/geng\/0.6.3-geng.<hex>\/@ says
+-- which build wrote it. Since D174 the whole home is @geng@ rather than stock's
+-- @gren@, so the two no longer share a directory at all; the key still
+-- separates one build of the fork from the next.
 getArtifactCache :: IO ArtifactCache
 getArtifactCache =
   do
-    home <- getGrenHome
+    home <- getGengHome
     let root = home </> artifactKey </> "artifacts"
     Dir.createDirectoryIfMissing True root
     return (ArtifactCache root)
@@ -202,15 +204,15 @@ getReplCache =
 getCacheDir :: FilePath -> IO FilePath
 getCacheDir projectName =
   do
-    home <- getGrenHome
+    home <- getGengHome
     let root = home </> compilerVersion </> projectName
     Dir.createDirectoryIfMissing True root
     return root
 
-getGrenHome :: IO FilePath
-getGrenHome =
+getGengHome :: IO FilePath
+getGengHome =
   do
-    maybeCustomHome <- Env.lookupEnv "GREN_HOME"
+    maybeCustomHome <- Env.lookupEnv "GENG_HOME"
     case maybeCustomHome of
       Just customHome -> return customHome
-      Nothing -> Dir.getXdgDirectory Dir.XdgCache "gren"
+      Nothing -> Dir.getXdgDirectory Dir.XdgCache "geng"

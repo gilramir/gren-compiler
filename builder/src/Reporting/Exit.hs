@@ -94,9 +94,9 @@ diffToReport diff =
         "DIFF WHAT?"
         Nothing
         "I cannot find an gren.json so I am not sure what you want me to diff.\
-        \ Normally you run `gren diff` from within a project!"
+        \ Normally you run `geng diff` from within a project!"
         [ D.reflow $ "If you are just curious to see a diff, try running this command:",
-          D.indent 4 $ D.green $ "gren diff gren/http 1.0.0 2.0.0"
+          D.indent 4 $ D.green $ "geng diff gren/http 1.0.0 2.0.0"
         ]
     DiffBadOutline outline ->
       toOutlineReport outline
@@ -104,10 +104,10 @@ diffToReport diff =
       Help.report
         "CANNOT DIFF APPLICATIONS"
         (Just "gren.json")
-        "Your gren.json says this project is an application, but `gren diff` only works\
+        "Your gren.json says this project is an application, but `geng diff` only works\
         \ with packages."
         [ D.reflow $ "If you are just curious to see a diff, try running this command:",
-          D.indent 4 $ D.dullyellow $ "gren diff gren/json 1.0.0 1.1.2"
+          D.indent 4 $ D.dullyellow $ "geng diff gren/json 1.0.0 1.1.2"
         ]
     DiffNoExposed ->
       Help.report
@@ -501,10 +501,10 @@ validateToReport validate =
               "by",
               "running:"
             ],
-          D.indent 4 $ D.green "gren bump",
+          D.indent 4 $ D.green "geng bump",
           D.reflow $
             "If you want more insight on the API changes Gren detects, you\
-            \ can run `gren diff` at this point as well."
+            \ can run `geng diff` at this point as well."
         ]
     ValidateBadBump old new magnitude realNew realMagnitude ->
       Help.docReport
@@ -541,7 +541,7 @@ validateToReport validate =
         )
         [ D.indent 4 $
             D.fromChars $
-              "gren diff " ++ V.toChars old,
+              "geng diff " ++ V.toChars old,
           D.fillSep $
             [ "This",
               "command",
@@ -560,7 +560,7 @@ validateToReport validate =
               D.green (D.fromVersion realNew) <> "."
             ],
           D.reflow $
-            "Also, next time use `gren bump` and I'll figure all this out for you!"
+            "Also, next time use `geng bump` and I'll figure all this out for you!"
         ]
     ValidateNoSummary ->
       Help.docReport
@@ -893,7 +893,7 @@ toSolverReport problem =
         )
         [ D.reflow
             "Verify that the path is correct, and that the project is setup correctly. \
-            \It might help to run gren make at this location."
+            \It might help to run geng make at this location."
         ]
     SolverLocalDepNotFound filePath expectedPkgName ->
       Help.report
@@ -959,7 +959,7 @@ toSolverReport problem =
               "packages",
               "with",
               "the",
-              D.green "gren package install",
+              D.green "geng package install",
               "command,",
               "as",
               "it",
@@ -992,7 +992,7 @@ toSolverReport problem =
               "packages",
               "with",
               "the",
-              D.green "gren package install",
+              D.green "geng package install",
               "command,",
               "as",
               "it",
@@ -1135,7 +1135,7 @@ toOutlineReport problem =
         [ D.reflow $
             "If you modified your gren.json by hand, try to change it back! And if you are\
             \ having trouble getting back to a working gren.json, it may be easier to delete it\
-            \ and use `gren init` to start fresh."
+            \ and use `geng init` to start fresh."
         ]
 
 toOutlineProblemReport :: FilePath -> Code.Source -> Json.Context -> A.Region -> OutlineProblem -> Help.Report
@@ -1511,7 +1511,7 @@ toOutlineProblemReport path source _ region problem =
                       "packages",
                       "with",
                       "the",
-                      D.green "gren package install",
+                      D.green "geng package install",
                       "command!"
                     ]
                 ]
@@ -1674,7 +1674,7 @@ toDetailsReport details =
               "add",
               "dependencies",
               "with",
-              D.green "gren package install" <> "."
+              D.green "geng package install" <> "."
             ],
           D.reflow $
             "Please ask for help on the community forums if you try those paths and are still\
@@ -1870,7 +1870,7 @@ makeToReport make =
         "NO gren.json FILE"
         Nothing
         "It looks like you are starting a new Gren project. Very exciting! Try running:"
-        [ D.indent 4 $ D.green $ "gren init",
+        [ D.indent 4 $ D.green $ "geng init",
           D.reflow $
             "It will help you get set up. It is really simple!"
         ]
@@ -1898,7 +1898,7 @@ makeToReport make =
         )
         [ D.reflow $
             "If you only wanted to verify that your package builds correctly, try to remove the `--output` flag\
-            \ from your `gren make` command.",
+            \ from your `geng make` command.",
           D.reflow $
             "Your project is defined as `\"type\": \"package\"` in your `gren.json`. This means that your project\
             \ is meant to be used as a Gren package and cannot be compiled to any kind of output. Instead, it's \
@@ -1935,7 +1935,7 @@ makeToReport make =
             ],
           D.reflow $
             "If you only wanted to verify that your package builds correctly, try to remove the output paths to\
-            \ these modules from your `gren make` command or remove the main functions from the mentioned modules.",
+            \ these modules from your `geng make` command or remove the main functions from the mentioned modules.",
           D.reflow $
             "Your project is defined as `\"type\": \"package\"` in your `gren.json`. This means that your project\
             \ is meant to be used as a Gren package and cannot be compiled to any kind of output. Instead, it's \
@@ -1951,8 +1951,8 @@ makeToReport make =
         Nothing
         "What should I make though? I need specific files like:"
         [ D.vcat
-            [ D.indent 4 $ D.green "gren make Main",
-              D.indent 4 $ D.green "gren make This That"
+            [ D.indent 4 $ D.green "geng make Main",
+              D.indent 4 $ D.green "geng make This That"
             ],
           D.reflow $
             "I recommend reading through https://gren-lang.org/learn for guidance on what to\
@@ -1964,8 +1964,8 @@ makeToReport make =
         Nothing
         "What should I make though? I need specific files like:"
         [ D.vcat
-            [ D.indent 4 $ D.green "gren make Main",
-              D.indent 4 $ D.green "gren make This That"
+            [ D.indent 4 $ D.green "geng make Main",
+              D.indent 4 $ D.green "geng make This That"
             ],
           D.reflow $
             "You can also entries to the \"exposed-modules\" list in your gren.json file, and\

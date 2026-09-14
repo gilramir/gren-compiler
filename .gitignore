@@ -6,7 +6,7 @@
 dist
 dist-newstyle
 cabal-dev
-gren
+geng
 cabal.project.local
 
 # node build stuff

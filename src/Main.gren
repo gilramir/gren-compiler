@@ -90,7 +90,7 @@ init env =
                 Compiler.Paths.backendBinary env.platform cacheRoot                
 
             maybePaths =
-                when { platform = env.platform, override = Dict.get "GREN_BIN" envVars } is
+                when { platform = env.platform, override = Dict.get "GENG_BIN" envVars } is
                     { override = Just overridePath, platform = Node.Win32 } ->
                         Just <|
                             { remotePath = Nothing
@@ -103,15 +103,16 @@ init env =
                             , localPath = Path.fromPosixString overridePath
                             }
 
+                    -- Stock downloads its backend from gren-lang's releases.
+                    -- That binary is stock Gren, never this compiler's backend,
+                    -- and saving it under `geng` is the confusion D174 renamed
+                    -- the command to end. So nothing is downloaded: the backend
+                    -- is `GENG_BIN`, or one already put at the cache path.
                     _ ->
-                        Compiler.Backend.downloadUrl Meta.version env.platform env.cpuArchitecture
-                            |> Result.map 
-                                (\url ->
-                                    { remotePath = Just url
-                                    , localPath = backendBinary
-                                    }
-                                )
-                            |> Result.toMaybe
+                        Just
+                            { remotePath = Nothing
+                            , localPath = backendBinary
+                            }
 
         in
         Node.startProgram
@@ -209,7 +210,11 @@ update msg model =
                             |> Task.attempt (\result -> CompilerDownloaded { localPath = localPath, downloadResult = result })
             
                     Nothing ->
-                        endWithError ("Compiler not found at " ++ model.pathToString localPath)
+                        endWithError
+                            ("Compiler backend not found at "
+                                ++ model.pathToString localPath
+                                ++ ". Set GENG_BIN to the `geng` a build of the compiler produced."
+                            )
 
             ExistanceChecked { existanceResult = Ok compilerPath } ->
                 parseUserArgs model compilerPath
@@ -863,7 +868,7 @@ parseUserArgs model compilerPath =
 
                 CliParser.Format formatFlags ->
                     -- Only the no-argument form is a question about a project;
-                    -- `gren fmt Some/File.gren` must work wherever the file is.
+                    -- `geng fmt Some/File.gren` must work wherever the file is.
                     (if formatFlags.paths == [] then
                         Terminal.PackageInstall.readProjectOutline model.fsPermission
                             |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError

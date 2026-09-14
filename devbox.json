@@ -23,7 +23,7 @@
         "cabal test -f dev"
       ],
       "compiler": [
-        "GREN_BIN=$PWD/gren node cli.js"
+        "GENG_BIN=$PWD/geng node cli.js"
       ],
       "format": [
         "ormolu --mode inplace $(git ls-files '*.hs')",
