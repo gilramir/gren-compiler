@@ -1,0 +1,1004 @@
+module Proto.Parser exposing
+    ( Error
+    , parse
+    )
+
+{-| `.proto` text into `Proto.Syntax` (`m1b-protobuf.md` §Q17).
+
+The grammar is protobuf's language specification for proto3, read the way
+`protoc`'s parser reads it where the specification is loose: a keyword is a
+keyword where a declaration begins (so `optional` there is a label, and a type
+called `optional` needs a leading `.`), adjacent string literals join, and
+`group`, `required`, `extensions`, `extend` and `service` parse so that
+`Proto.Check` can refuse them with a reason.
+
+It stops at the first syntax error. There is no recovery, since what follows a
+syntax error is guesswork and a guess is a worse message than none.
+
+-}
+
+import Proto.Lexer as Lexer exposing (Located, Token(..))
+import Proto.Syntax as Syntax exposing (Position)
+
+
+type alias Error =
+    Lexer.Error
+
+
+type alias Parsed a =
+    Result Error { value : a, next : Int }
+
+
+type alias Tokens =
+    Array Located
+
+
+parse : String -> Result Error Syntax.File
+parse source =
+    when Lexer.tokenize source is
+        Err error ->
+            Err error
+
+        Ok tokens ->
+            repeatUntil (\t -> t.token == End) (statement tokens) tokens 0 []
+                |> Result.map (\found -> { statements = found.value })
+
+
+
+-- PLUMBING
+
+
+tokenAt : Tokens -> Int -> Located
+tokenAt tokens i =
+    when Array.get (min i (Array.length tokens - 1)) tokens is
+        Just t ->
+            t
+
+        Nothing ->
+            { token = End, row = 1, col = 1 }
+
+
+positionOf : Located -> Position
+positionOf t =
+    { row = t.row, col = t.col }
+
+
+{-| Carry on with what was parsed, from where it stopped. -}
+next : Parsed a -> (a -> Int -> Parsed b) -> Parsed b
+next parsed continue =
+    when parsed is
+        Ok p ->
+            continue p.value p.next
+
+        Err e ->
+            Err e
+
+
+done : a -> Int -> Parsed a
+done value i =
+    Ok { value = value, next = i }
+
+
+failAt : Located -> String -> Result Error x
+failAt t problem =
+    Err { row = t.row, col = t.col, message = problem }
+
+
+expected : Located -> String -> Result Error x
+expected t what =
+    failAt t ("expected " ++ what ++ ", found " ++ Lexer.describe t.token)
+
+
+isSymbol : Char -> Located -> Bool
+isSymbol c t =
+    t.token == Symbol c
+
+
+isWord : String -> Located -> Bool
+isWord word t =
+    t.token == Identifier word
+
+
+{-| Parse one thing after another until `isEnd` holds of the next token. Each
+step may produce nothing, as an empty statement `;` does. A self tail call, so
+a long message does not grow the stack.
+-}
+repeatUntil : (Located -> Bool) -> (Int -> Parsed (Maybe a)) -> Tokens -> Int -> Array a -> Parsed (Array a)
+repeatUntil isEnd one tokens i acc =
+    if isEnd (tokenAt tokens i) then
+        Ok { value = acc, next = i }
+
+    else
+        when one i is
+            Err e ->
+                Err e
+
+            Ok p ->
+                repeatUntil isEnd
+                    one
+                    tokens
+                    p.next
+                    (when p.value is
+                        Just v ->
+                            Array.pushLast v acc
+
+                        Nothing ->
+                            acc
+                    )
+
+
+symbol : Char -> String -> Tokens -> Int -> Parsed {}
+symbol c context tokens i =
+    let
+        t =
+            tokenAt tokens i
+    in
+    if isSymbol c t then
+        done {} (i + 1)
+
+    else
+        expected t ("`" ++ String.fromChar c ++ "` " ++ context)
+
+
+identifier : String -> Tokens -> Int -> Parsed { name : String, at : Position }
+identifier what tokens i =
+    let
+        t =
+            tokenAt tokens i
+    in
+    when t.token is
+        Identifier name ->
+            done { name = name, at = positionOf t } (i + 1)
+
+        _ ->
+            expected t what
+
+
+{-| `a.b.c`, with a leading `.` when `absolute` allows one. -}
+dottedName : Bool -> String -> Tokens -> Int -> Parsed { name : String, at : Position }
+dottedName absolute what tokens i =
+    let
+        start =
+            tokenAt tokens i
+
+        lead =
+            absolute && isSymbol '.' start
+
+        first =
+            if lead then
+                i + 1
+
+            else
+                i
+    in
+    next (identifier what tokens first) <| \part j ->
+        dottedRest tokens
+            j
+            (if lead then
+                "." ++ part.name
+
+             else
+                part.name
+            )
+            |> Result.map (\found -> { value = { name = found.value, at = positionOf start }, next = found.next })
+
+
+dottedRest : Tokens -> Int -> String -> Parsed String
+dottedRest tokens i acc =
+    if isSymbol '.' (tokenAt tokens i) then
+        when (tokenAt tokens (i + 1)).token is
+            Identifier part ->
+                dottedRest tokens (i + 2) (acc ++ "." ++ part)
+
+            _ ->
+                expected (tokenAt tokens (i + 1)) "a name after `.`"
+
+    else
+        done acc i
+
+
+{-| One or more adjacent string literals, joined. -}
+text : String -> Tokens -> Int -> Parsed String
+text what tokens i =
+    let
+        t =
+            tokenAt tokens i
+    in
+    when t.token is
+        Text value ->
+            textRest tokens (i + 1) value
+
+        _ ->
+            expected t what
+
+
+textRest : Tokens -> Int -> String -> Parsed String
+textRest tokens i acc =
+    when (tokenAt tokens i).token is
+        Text value ->
+            textRest tokens (i + 1) (acc ++ value)
+
+        _ ->
+            done acc i
+
+
+{-| Skip a `{ ... }` block whose inside is not read, counting braces. -}
+skipBlock : String -> Tokens -> Int -> Parsed {}
+skipBlock what tokens i =
+    let
+        open =
+            tokenAt tokens i
+    in
+    if isSymbol '{' open then
+        skipBlockFrom open what tokens (i + 1) 1
+
+    else
+        expected open ("`{` to open " ++ what)
+
+
+skipBlockFrom : Located -> String -> Tokens -> Int -> Int -> Parsed {}
+skipBlockFrom open what tokens i depth =
+    let
+        t =
+            tokenAt tokens i
+    in
+    when t.token is
+        End ->
+            neverClosed open what t
+
+        Symbol '{' ->
+            skipBlockFrom open what tokens (i + 1) (depth + 1)
+
+        Symbol '}' ->
+            if depth == 1 then
+                done {} (i + 1)
+
+            else
+                skipBlockFrom open what tokens (i + 1) (depth - 1)
+
+        _ ->
+            skipBlockFrom open what tokens (i + 1) depth
+
+
+neverClosed : Located -> String -> Located -> Result Error x
+neverClosed open what t =
+    failAt t ("the file ends inside " ++ what ++ ", whose `{` is at line " ++ String.fromInt open.row ++ ", column " ++ String.fromInt open.col)
+
+
+{-| The body of a braced declaration: its elements, then the `}`. -}
+block : String -> (Int -> Parsed (Maybe a)) -> Tokens -> Int -> Parsed (Array a)
+block what element tokens i =
+    let
+        open =
+            tokenAt tokens i
+    in
+    if not (isSymbol '{' open) then
+        expected open ("`{` to open " ++ what)
+
+    else
+        next (repeatUntil (\t -> isSymbol '}' t || t.token == End) element tokens (i + 1) []) <| \elements j ->
+            let
+                close =
+                    tokenAt tokens j
+            in
+            if isSymbol '}' close then
+                done elements (j + 1)
+
+            else
+                neverClosed open what close
+
+
+
+-- NUMBERS
+
+
+{-| An integer literal's value, if it is one an `Int` holds: decimal, `0x`
+hexadecimal or `0` octal, negated first when `negative`. Computed without
+wrapping, so a number past the range answers `Nothing` rather than a wrong one.
+-}
+integerValue : Bool -> String -> Maybe Int
+integerValue negative literal =
+    let
+        lower =
+            String.toLower literal
+
+        base =
+            if String.startsWith "0x" lower then
+                16
+
+            else if String.startsWith "0" lower && String.count lower > 1 then
+                8
+
+            else
+                10
+
+        digits =
+            if base == 16 then
+                String.dropFirst 2 lower
+
+            else
+                lower
+    in
+    String.foldl
+        (\c acc ->
+            Maybe.andThen
+                (\value ->
+                    let
+                        code =
+                            Char.toCode c
+
+                        d =
+                            if code >= 97 then
+                                code - 87
+
+                            else
+                                code - 48
+                    in
+                    -- `//` truncates toward zero, which is the ceiling for a
+                    -- negative bound and the floor for a positive one.
+                    if negative then
+                        if value < (-2147483648 + d) // base then
+                            Nothing
+
+                        else
+                            Just (value * base - d)
+
+                    else if value > (2147483647 - d) // base then
+                        Nothing
+
+                    else
+                        Just (value * base + d)
+                )
+                acc
+        )
+        (Just 0)
+        digits
+
+
+{-| A field number, an enum value or a range bound: an integer, with a `-` in
+front where `signed` allows one.
+-}
+number : Bool -> String -> Tokens -> Int -> Parsed Syntax.Number
+number signed what tokens i =
+    let
+        t =
+            tokenAt tokens i
+
+        minus =
+            signed && isSymbol '-' t
+
+        digits =
+            if minus then
+                tokenAt tokens (i + 1)
+
+            else
+                t
+    in
+    when digits.token is
+        Integer literal ->
+            done
+                { at = positionOf t
+                , text =
+                    if minus then
+                        "-" ++ literal
+
+                    else
+                        literal
+                , value = integerValue minus literal
+                }
+                (if minus then
+                    i + 2
+
+                 else
+                    i + 1
+                )
+
+        _ ->
+            expected digits what
+
+
+
+-- STATEMENTS
+
+
+statement : Tokens -> Int -> Parsed (Maybe Syntax.Statement)
+statement tokens i =
+    let
+        t =
+            tokenAt tokens i
+
+        at =
+            positionOf t
+    in
+    when t.token is
+        Symbol ';' ->
+            done Nothing (i + 1)
+
+        Identifier "syntax" ->
+            syntaxStatement "syntax" tokens i
+
+        Identifier "edition" ->
+            syntaxStatement "edition" tokens i
+
+        Identifier "import" ->
+            let
+                modifierToken =
+                    tokenAt tokens (i + 1)
+
+                modifier =
+                    if isWord "weak" modifierToken || isWord "public" modifierToken then
+                        when modifierToken.token is
+                            Identifier word ->
+                                Just word
+
+                            _ ->
+                                Nothing
+
+                    else
+                        Nothing
+
+                pathAt =
+                    if modifier == Nothing then
+                        i + 1
+
+                    else
+                        i + 2
+            in
+            next (text "the imported file's path, in quotes" tokens pathAt) <| \path j ->
+                next (symbol ';' "after the import" tokens j) <| \_ k ->
+                    done (Just (Syntax.Import { at = at, modifier = modifier, path = path })) k
+
+        Identifier "package" ->
+            next (dottedName False "the package's name" tokens (i + 1)) <| \name j ->
+                next (symbol ';' "after the package's name" tokens j) <| \_ k ->
+                    done (Just (Syntax.Package { at = at, name = name.name })) k
+
+        Identifier "option" ->
+            next (optionStatement tokens i) <| \option j ->
+                done (Just (Syntax.FileOption option)) j
+
+        Identifier "message" ->
+            next (message tokens i) <| \m j ->
+                done (Just (Syntax.MessageStatement m)) j
+
+        Identifier "enum" ->
+            next (enum tokens i) <| \e j ->
+                done (Just (Syntax.EnumStatement e)) j
+
+        Identifier "service" ->
+            next (identifier "the service's name" tokens (i + 1)) <| \name j ->
+                next (skipBlock ("the service `" ++ name.name ++ "`") tokens j) <| \_ k ->
+                    done (Just (Syntax.Service { at = at, name = name.name })) k
+
+        Identifier "extend" ->
+            next (dottedName True "the name of the message being extended" tokens (i + 1)) <| \name j ->
+                next (skipBlock ("the `extend " ++ name.name ++ "`") tokens j) <| \_ k ->
+                    done (Just (Syntax.Extend { at = at, extendee = name.name })) k
+
+        _ ->
+            expected t "`syntax`, `package`, `import`, `option`, `message`, `enum` or `service`"
+
+
+syntaxStatement : String -> Tokens -> Int -> Parsed (Maybe Syntax.Statement)
+syntaxStatement keyword tokens i =
+    let
+        at =
+            positionOf (tokenAt tokens i)
+    in
+    next (symbol '=' ("after `" ++ keyword ++ "`") tokens (i + 1)) <| \_ j ->
+        next (text "a quoted name such as \"proto3\"" tokens j) <| \value k ->
+            next (symbol ';' ("after the " ++ keyword) tokens k) <| \_ l ->
+                done (Just (Syntax.Syntax { at = at, keyword = keyword, value = value })) l
+
+
+
+-- OPTIONS
+
+
+optionStatement : Tokens -> Int -> Parsed Syntax.Option
+optionStatement tokens i =
+    next (optionBody tokens (i + 1)) <| \option j ->
+        next (symbol ';' "after the option's value" tokens j) <| \_ k ->
+            done option k
+
+
+{-| `name = value`, where a name is dotted parts and a part in parentheses is a
+custom option.
+-}
+optionBody : Tokens -> Int -> Parsed Syntax.Option
+optionBody tokens i =
+    let
+        at =
+            positionOf (tokenAt tokens i)
+    in
+    next (optionName tokens i []) <| \name j ->
+        next (symbol '=' "after the option's name" tokens j) <| \_ k ->
+            next (constant tokens k) <| \value l ->
+                done { at = at, name = name, value = value } l
+
+
+optionName : Tokens -> Int -> Array Syntax.OptionPart -> Parsed (Array Syntax.OptionPart)
+optionName tokens i acc =
+    let
+        t =
+            tokenAt tokens i
+
+        continue part j =
+            if isSymbol '.' (tokenAt tokens j) then
+                optionName tokens (j + 1) (Array.pushLast part acc)
+
+            else
+                done (Array.pushLast part acc) j
+    in
+    when t.token is
+        Identifier name ->
+            continue (Syntax.Simple name) (i + 1)
+
+        Symbol '(' ->
+            next (dottedName True "the custom option's name" tokens (i + 1)) <| \name j ->
+                next (symbol ')' "after the custom option's name" tokens j) <| \_ k ->
+                    continue (Syntax.Extension name.name) k
+
+        _ ->
+            expected t "an option's name"
+
+
+constant : Tokens -> Int -> Parsed Syntax.Constant
+constant tokens i =
+    let
+        t =
+            tokenAt tokens i
+
+        sign =
+            isSymbol '-' t || isSymbol '+' t
+
+        negative =
+            isSymbol '-' t
+
+        value =
+            if sign then
+                tokenAt tokens (i + 1)
+
+            else
+                t
+
+        after =
+            if sign then
+                i + 2
+
+            else
+                i + 1
+    in
+    when value.token is
+        Integer literal ->
+            done (Syntax.Integer { negative = negative, text = literal }) after
+
+        Floating literal ->
+            done (Syntax.Floating { negative = negative, text = literal }) after
+
+        Identifier word ->
+            if sign then
+                if word == "inf" || word == "nan" then
+                    done (Syntax.Floating { negative = negative, text = word }) after
+
+                else
+                    expected value "a number after the sign"
+
+            else
+                next (dottedName False "a name" tokens i) <| \name j ->
+                    done (Syntax.Identifier name.name) j
+
+        Text _ ->
+            if sign then
+                expected value "a number after the sign"
+
+            else
+                next (text "a string" tokens i) <| \s j ->
+                    done (Syntax.Text s) j
+
+        Symbol '{' ->
+            if sign then
+                expected value "a number after the sign"
+
+            else
+                next (skipBlock "the option's value" tokens i) <| \_ j ->
+                    done Syntax.Aggregate j
+
+        _ ->
+            expected value "an option's value"
+
+
+{-| `[a = b, c = d]` after a field, or nothing. -}
+fieldOptions : Tokens -> Int -> Parsed (Array Syntax.Option)
+fieldOptions tokens i =
+    if isSymbol '[' (tokenAt tokens i) then
+        fieldOptionsFrom tokens (i + 1) []
+
+    else
+        done [] i
+
+
+fieldOptionsFrom : Tokens -> Int -> Array Syntax.Option -> Parsed (Array Syntax.Option)
+fieldOptionsFrom tokens i acc =
+    next (optionBody tokens i) <| \option j ->
+        let
+            t =
+                tokenAt tokens j
+        in
+        if isSymbol ',' t then
+            fieldOptionsFrom tokens (j + 1) (Array.pushLast option acc)
+
+        else if isSymbol ']' t then
+            done (Array.pushLast option acc) (j + 1)
+
+        else
+            expected t "`,` or `]` after an option"
+
+
+
+-- MESSAGES
+
+
+message : Tokens -> Int -> Parsed Syntax.Message
+message tokens i =
+    let
+        at =
+            positionOf (tokenAt tokens i)
+    in
+    next (identifier "the message's name" tokens (i + 1)) <| \name j ->
+        next (block ("the message `" ++ name.name ++ "`") (messageElement tokens) tokens j) <| \elements k ->
+            done (Syntax.Message { at = at, name = name.name, elements = elements }) k
+
+
+messageElement : Tokens -> Int -> Parsed (Maybe Syntax.Element)
+messageElement tokens i =
+    let
+        t =
+            tokenAt tokens i
+
+        at =
+            positionOf t
+    in
+    when t.token is
+        Symbol ';' ->
+            done Nothing (i + 1)
+
+        Identifier "message" ->
+            next (message tokens i) <| \m j ->
+                done (Just (Syntax.NestedMessage m)) j
+
+        Identifier "enum" ->
+            next (enum tokens i) <| \e j ->
+                done (Just (Syntax.NestedEnum e)) j
+
+        Identifier "option" ->
+            next (optionStatement tokens i) <| \option j ->
+                done (Just (Syntax.OptionElement option)) j
+
+        Identifier "reserved" ->
+            next (reserved tokens i) <| \r j ->
+                done (Just (Syntax.ReservedElement r)) j
+
+        Identifier "oneof" ->
+            next (oneof tokens i) <| \o j ->
+                done (Just (Syntax.OneofElement o)) j
+
+        Identifier "extensions" ->
+            next (skipTo ';' tokens (i + 1)) <| \_ j ->
+                done (Just (Syntax.Extensions at)) j
+
+        Identifier "extend" ->
+            next (dottedName True "the name of the message being extended" tokens (i + 1)) <| \name j ->
+                next (skipBlock ("the `extend " ++ name.name ++ "`") tokens j) <| \_ k ->
+                    done (Just (Syntax.NestedExtend at)) k
+
+        _ ->
+            next (fieldLike tokens i) <| \found j ->
+                done
+                    (Just
+                        (when found is
+                            PlainField f ->
+                                Syntax.FieldElement f
+
+                            MapLike m ->
+                                Syntax.MapElement m
+
+                            GroupLike g ->
+                                Syntax.Group g
+                        )
+                    )
+                    j
+
+
+skipTo : Char -> Tokens -> Int -> Parsed {}
+skipTo c tokens i =
+    let
+        t =
+            tokenAt tokens i
+    in
+    if isSymbol c t then
+        done {} (i + 1)
+
+    else if t.token == End then
+        expected t ("`" ++ String.fromChar c ++ "`")
+
+    else
+        skipTo c tokens (i + 1)
+
+
+type FieldLike
+    = PlainField Syntax.Field
+    | MapLike Syntax.MapField
+    | GroupLike { at : Position, name : String }
+
+
+{-| A field, a `map` field or a group, from its label or its type. -}
+fieldLike : Tokens -> Int -> Parsed FieldLike
+fieldLike tokens i =
+    let
+        t =
+            tokenAt tokens i
+
+        label =
+            if isWord "optional" t then
+                Syntax.Optional
+
+            else if isWord "repeated" t then
+                Syntax.Repeated
+
+            else if isWord "required" t then
+                Syntax.Required
+
+            else
+                Syntax.NoLabel
+
+        j =
+            if label == Syntax.NoLabel then
+                i
+
+            else
+                i + 1
+
+        typeToken =
+            tokenAt tokens j
+    in
+    if isWord "map" typeToken && isSymbol '<' (tokenAt tokens (j + 1)) then
+        if label /= Syntax.NoLabel then
+            failAt t "a `map` field has no label: it is repeated already, and cannot be optional or required"
+
+        else
+            next (mapField tokens j) <| \m k ->
+                done (MapLike m) k
+
+    else if isWord "group" typeToken && isIdentifier (tokenAt tokens (j + 1)) && isSymbol '=' (tokenAt tokens (j + 2)) then
+        next (identifier "the group's name" tokens (j + 1)) <| \name k ->
+            next (number False "the group's field number" tokens (k + 1)) <| \_ l ->
+                next (fieldOptions tokens l) <| \_ m ->
+                    next (block ("the group `" ++ name.name ++ "`") (messageElement tokens) tokens m) <| \_ n ->
+                        done (GroupLike { at = positionOf t, name = name.name }) n
+
+    else
+        next (dottedName True "a field's type" tokens j) <| \typeName k ->
+            next (identifier "the field's name" tokens k) <| \name l ->
+                next (symbol '=' ("after the field `" ++ name.name ++ "`") tokens l) <| \_ m ->
+                    next (number False "the field's number" tokens m) <| \fieldNumber n ->
+                        next (fieldOptions tokens n) <| \options o ->
+                            next (symbol ';' ("after the field `" ++ name.name ++ "`") tokens o) <| \_ p ->
+                                done
+                                    (PlainField
+                                        { at = positionOf t
+                                        , label = label
+                                        , labelAt = positionOf t
+                                        , typeName = typeName.name
+                                        , typeAt = typeName.at
+                                        , name = name.name
+                                        , nameAt = name.at
+                                        , number = fieldNumber
+                                        , options = options
+                                        }
+                                    )
+                                    p
+
+
+isIdentifier : Located -> Bool
+isIdentifier t =
+    when t.token is
+        Identifier _ ->
+            True
+
+        _ ->
+            False
+
+
+mapField : Tokens -> Int -> Parsed Syntax.MapField
+mapField tokens i =
+    let
+        at =
+            positionOf (tokenAt tokens i)
+    in
+    next (dottedName True "the map's key type" tokens (i + 2)) <| \key j ->
+        next (symbol ',' "after the map's key type" tokens j) <| \_ k ->
+            next (dottedName True "the map's value type" tokens k) <| \value l ->
+                next (symbol '>' "after the map's value type" tokens l) <| \_ m ->
+                    next (identifier "the map's name" tokens m) <| \name n ->
+                        next (symbol '=' ("after the map `" ++ name.name ++ "`") tokens n) <| \_ o ->
+                            next (number False "the map's field number" tokens o) <| \fieldNumber p ->
+                                next (fieldOptions tokens p) <| \options q ->
+                                    next (symbol ';' ("after the map `" ++ name.name ++ "`") tokens q) <| \_ r ->
+                                        done
+                                            { at = at
+                                            , keyType = key.name
+                                            , keyAt = key.at
+                                            , valueType = value.name
+                                            , valueAt = value.at
+                                            , name = name.name
+                                            , nameAt = name.at
+                                            , number = fieldNumber
+                                            , options = options
+                                            }
+                                            r
+
+
+oneof : Tokens -> Int -> Parsed Syntax.Oneof
+oneof tokens i =
+    let
+        at =
+            positionOf (tokenAt tokens i)
+    in
+    next (identifier "the oneof's name" tokens (i + 1)) <| \name j ->
+        next (block ("the oneof `" ++ name.name ++ "`") (oneofElement tokens) tokens j) <| \elements k ->
+            done { at = at, name = name.name, elements = elements } k
+
+
+oneofElement : Tokens -> Int -> Parsed (Maybe Syntax.OneofElement)
+oneofElement tokens i =
+    let
+        t =
+            tokenAt tokens i
+    in
+    when t.token is
+        Symbol ';' ->
+            done Nothing (i + 1)
+
+        Identifier "option" ->
+            next (optionStatement tokens i) <| \option j ->
+                done (Just (Syntax.OneofOption option)) j
+
+        _ ->
+            next (fieldLike tokens i) <| \found j ->
+                done
+                    (Just
+                        (when found is
+                            PlainField f ->
+                                Syntax.OneofField f
+
+                            MapLike m ->
+                                Syntax.OneofMap m
+
+                            GroupLike g ->
+                                Syntax.OneofGroup g
+                        )
+                    )
+                    j
+
+
+
+-- RESERVED
+
+
+reserved : Tokens -> Int -> Parsed Syntax.Reserved
+reserved tokens i =
+    let
+        at =
+            positionOf (tokenAt tokens i)
+
+        first =
+            tokenAt tokens (i + 1)
+    in
+    when first.token is
+        Text _ ->
+            next (reservedNames tokens (i + 1) []) <| \names j ->
+                done { at = at, items = Syntax.Names names } j
+
+        _ ->
+            next (reservedRanges tokens (i + 1) []) <| \ranges j ->
+                done { at = at, items = Syntax.Ranges ranges } j
+
+
+reservedNames : Tokens -> Int -> Array { at : Position, name : String } -> Parsed (Array { at : Position, name : String })
+reservedNames tokens i acc =
+    let
+        at =
+            positionOf (tokenAt tokens i)
+    in
+    next (text "a reserved field name, in quotes" tokens i) <| \name j ->
+        let
+            t =
+                tokenAt tokens j
+
+            names =
+                Array.pushLast { at = at, name = name } acc
+        in
+        if isSymbol ',' t then
+            reservedNames tokens (j + 1) names
+
+        else if isSymbol ';' t then
+            done names (j + 1)
+
+        else
+            expected t "`,` or `;` after a reserved name"
+
+
+reservedRanges : Tokens -> Int -> Array { from : Syntax.Number, to : Syntax.RangeEnd } -> Parsed (Array { from : Syntax.Number, to : Syntax.RangeEnd })
+reservedRanges tokens i acc =
+    next (number True "a reserved number, or a reserved field name in quotes" tokens i) <| \from j ->
+        let
+            continue to k =
+                let
+                    t =
+                        tokenAt tokens k
+
+                    ranges =
+                        Array.pushLast { from = from, to = to } acc
+                in
+                if isSymbol ',' t then
+                    reservedRanges tokens (k + 1) ranges
+
+                else if isSymbol ';' t then
+                    done ranges (k + 1)
+
+                else
+                    expected t "`,`, `to` or `;` after a reserved number"
+        in
+        if isWord "to" (tokenAt tokens j) then
+            if isWord "max" (tokenAt tokens (j + 1)) then
+                continue Syntax.ToMax (j + 2)
+
+            else
+                next (number True "a number or `max` after `to`" tokens (j + 1)) <| \to k ->
+                    continue (Syntax.To to) k
+
+        else
+            continue Syntax.Single j
+
+
+
+-- ENUMS
+
+
+enum : Tokens -> Int -> Parsed Syntax.Enum
+enum tokens i =
+    let
+        at =
+            positionOf (tokenAt tokens i)
+    in
+    next (identifier "the enum's name" tokens (i + 1)) <| \name j ->
+        next (block ("the enum `" ++ name.name ++ "`") (enumElement tokens) tokens j) <| \elements k ->
+            done { at = at, name = name.name, elements = elements } k
+
+
+enumElement : Tokens -> Int -> Parsed (Maybe Syntax.EnumElement)
+enumElement tokens i =
+    let
+        t =
+            tokenAt tokens i
+    in
+    when t.token is
+        Symbol ';' ->
+            done Nothing (i + 1)
+
+        Identifier "option" ->
+            next (optionStatement tokens i) <| \option j ->
+                done (Just (Syntax.EnumOption option)) j
+
+        Identifier "reserved" ->
+            next (reserved tokens i) <| \r j ->
+                done (Just (Syntax.EnumReserved r)) j
+
+        _ ->
+            next (identifier "an enum value's name" tokens i) <| \name j ->
+                next (symbol '=' ("after the enum value `" ++ name.name ++ "`") tokens j) <| \_ k ->
+                    next (number True ("the number of `" ++ name.name ++ "`") tokens k) <| \value l ->
+                        next (fieldOptions tokens l) <| \options m ->
+                            next (symbol ';' ("after the enum value `" ++ name.name ++ "`") tokens m) <| \_ n ->
+                                done (Just (Syntax.ValueElement { at = name.at, name = name.name, number = value, options = options })) n

@@ -1,0 +1,1765 @@
+module Proto.Check exposing
+    ( Error
+    , check
+    )
+
+{-| The rules a parsed `.proto` file must hold, and its names resolved
+(`m1b-protobuf.md` §Q17).
+
+Two kinds of refusal, and every one names a line, a column and a reason.
+
+  - **What `protoc` refuses** for a single proto3 file: a field number out of
+    range, reused or reserved; a name declared twice in one scope, remembering
+    that an enum's values belong to the scope around the enum; a type name that
+    names nothing, or names something that is not a type; a map key that is not
+    an integer, `bool` or `string`; an enum whose first value is not 0; two
+    fields whose JSON names are equal; two enum values equal once the enum's
+    name is stripped from their front; an option `protoc` does not know. The
+    wording is Geng's own. `harness/proto.py`'s refused files were each checked
+    once against `protoc` 35.1 (§Q17).
+  - **What `geng protobuf` does not read yet**, which `protoc` accepts: proto2 and
+    editions (D178), `import` and so every custom option (D186), `service`,
+    `packed = false`, and `allow_alias`. Each says it is not supported rather
+    than that it is wrong.
+
+Every error is collected, then sorted by position, so one run reports all of
+them. Name resolution is `protoc`'s: a relative name's first part is looked up
+from the innermost scope outward, a part that is not a message, an enum or a
+package does not stop the search, and the rest of the name must then be found
+under whatever the first part found.
+
+-}
+
+import Dict exposing (Dict)
+import Proto.Schema as Schema exposing (Schema)
+import Proto.Syntax as Syntax exposing (Position)
+
+
+type alias Error =
+    { row : Int
+    , col : Int
+    , message : String
+    }
+
+
+errorAt : Position -> String -> Error
+errorAt at message =
+    { row = at.row, col = at.col, message = message }
+
+
+check : Syntax.File -> Result (Array Error) Schema
+check file =
+    let
+        package =
+            packageName file
+
+        table =
+            collect file package
+
+        errors =
+            fileErrors file
+                ++ table.errors
+                ++ Array.mapAndFlatten (statementErrors table.symbols package) file.statements
+    in
+    if Array.isEmpty errors then
+        Ok (build table.symbols package file)
+
+    else
+        Err
+            (Array.sortWith
+                (\a b ->
+                    if a.row == b.row then
+                        compare a.col b.col
+
+                    else
+                        compare a.row b.row
+                )
+                errors
+            )
+
+
+packageName : Syntax.File -> String
+packageName file =
+    Array.foldl
+        (\s soFar ->
+            when { statement = s, soFar = soFar } is
+                { statement = Syntax.Package p, soFar = "" } ->
+                    p.name
+
+                _ ->
+                    soFar
+        )
+        ""
+        file.statements
+
+
+qualify : String -> String -> String
+qualify scope name =
+    if scope == "" then
+        name
+
+    else
+        scope ++ "." ++ name
+
+
+scopeText : String -> String
+scopeText scope =
+    if scope == "" then
+        "the file"
+
+    else
+        "`" ++ scope ++ "`"
+
+
+line : Position -> String
+line at =
+    "line " ++ String.fromInt at.row
+
+
+
+-- THE FILE
+
+
+fileErrors : Syntax.File -> Array Error
+fileErrors file =
+    let
+        syntax =
+            when Array.first file.statements is
+                Just (Syntax.Syntax s) ->
+                    if s.keyword == "edition" then
+                        [ errorAt s.at ("this file is written in edition " ++ s.value ++ ", and geng protobuf reads proto3 only; editions are not supported yet (D178)") ]
+
+                    else if s.value == "proto3" then
+                        []
+
+                    else if s.value == "proto2" then
+                        [ errorAt s.at "this file is proto2, and geng protobuf reads proto3 only (D178)" ]
+
+                    else
+                        [ errorAt s.at ("`" ++ s.value ++ "` is not a syntax protobuf has; the syntax is \"proto3\"") ]
+
+                _ ->
+                    [ errorAt { row = 1, col = 1 } "the file does not start with `syntax = \"proto3\";`, and a file without it is proto2, which geng protobuf does not read (D178)" ]
+
+        rest =
+            Array.dropFirst 1 file.statements
+
+        later =
+            Array.mapAndFlatten
+                (\s ->
+                    when s is
+                        Syntax.Syntax misplaced ->
+                            [ errorAt misplaced.at ("`" ++ misplaced.keyword ++ "` must be the first statement in the file") ]
+
+                        _ ->
+                            []
+                )
+                (if isSyntax (Array.first file.statements) then
+                    rest
+
+                 else
+                    file.statements
+                )
+
+        packages =
+            Array.mapAndFlatten
+                (\s ->
+                    when s is
+                        Syntax.Package p ->
+                            [ p.at ]
+
+                        _ ->
+                            []
+                )
+                file.statements
+                |> Array.dropFirst 1
+                |> Array.map (\at -> errorAt at "a file has one `package`, and this is a second")
+
+        each =
+            Array.mapAndFlatten
+                (\s ->
+                    when s is
+                        Syntax.Import i ->
+                            [ errorAt i.at ("`import \"" ++ i.path ++ "\"` is not supported yet: geng protobuf reads one file on its own (D186)") ]
+
+                        Syntax.Service service ->
+                            [ errorAt service.at ("the service `" ++ service.name ++ "` is not supported: geng protobuf generates messages and enums, not services (D178)") ]
+
+                        Syntax.Extend e ->
+                            [ errorAt e.at ("`extend " ++ e.extendee ++ "` is proto2's extensions, which proto3 allows only for custom options, and those need an import (D186)") ]
+
+                        Syntax.FileOption o ->
+                            optionErrors FileScope [ o ]
+
+                        _ ->
+                            []
+                )
+                file.statements
+
+        duplicateFileOptions =
+            duplicateOptions
+                (Array.mapAndFlatten
+                    (\s ->
+                        when s is
+                            Syntax.FileOption o ->
+                                [ o ]
+
+                            _ ->
+                                []
+                    )
+                    file.statements
+                )
+    in
+    syntax ++ later ++ packages ++ each ++ duplicateFileOptions
+
+
+isSyntax : Maybe Syntax.Statement -> Bool
+isSyntax statement =
+    when statement is
+        Just (Syntax.Syntax _) ->
+            True
+
+        _ ->
+            False
+
+
+
+-- SYMBOLS
+
+
+type Kind
+    = PackageKind
+    | MessageKind
+    | EnumKind
+    | EnumValueKind
+    | FieldKind
+    | OneofKind
+
+
+type alias Symbol =
+    { kind : Kind
+    , at : Position
+    , mapEntryOf : Maybe String
+    }
+
+
+type alias Table =
+    { symbols : Dict String Symbol
+    , errors : Array Error
+    }
+
+
+article : Kind -> String
+article kind =
+    when kind is
+        EnumKind ->
+            "an enum"
+
+        EnumValueKind ->
+            "an enum value"
+
+        OneofKind ->
+            "a oneof"
+
+        _ ->
+            "a " ++ kindName kind
+
+
+kindName : Kind -> String
+kindName kind =
+    when kind is
+        PackageKind ->
+            "package"
+
+        MessageKind ->
+            "message"
+
+        EnumKind ->
+            "enum"
+
+        EnumValueKind ->
+            "enum value"
+
+        FieldKind ->
+            "field"
+
+        OneofKind ->
+            "oneof"
+
+
+collect : Syntax.File -> String -> Table
+collect file package =
+    let
+        packages =
+            if package == "" then
+                Dict.empty
+
+            else
+                String.split "." package
+                    |> Array.foldl
+                        (\part acc ->
+                            { prefix = qualify acc.prefix part
+                            , symbols = Dict.set (qualify acc.prefix part) { kind = PackageKind, at = { row = 1, col = 1 }, mapEntryOf = Nothing } acc.symbols
+                            }
+                        )
+                        { prefix = "", symbols = Dict.empty }
+                    |> (\folded -> folded.symbols)
+    in
+    Array.foldl
+        (\s table ->
+            when s is
+                Syntax.MessageStatement m ->
+                    collectMessage package m table
+
+                Syntax.EnumStatement e ->
+                    collectEnum package e table
+
+                _ ->
+                    table
+        )
+        { symbols = packages, errors = [] }
+        file.statements
+
+
+define : String -> String -> Symbol -> Table -> Table
+define scope name symbol table =
+    let
+        full =
+            qualify scope name
+    in
+    when Dict.get full table.symbols is
+        Just earlier ->
+            let
+                note =
+                    if symbol.kind == EnumValueKind || earlier.kind == EnumValueKind then
+                        "; an enum's values belong to the scope around the enum, not to the enum, so they must be unique in " ++ scopeText scope
+
+                    else
+                        ""
+
+                what =
+                    when { now = symbol.mapEntryOf, before = earlier.mapEntryOf } is
+                        { now = Just field } ->
+                            "the map `" ++ field ++ "` declares a message `" ++ name ++ "` for its entries, and "
+
+                        { before = Just field } ->
+                            "the map `" ++ field ++ "` declares a message `" ++ name ++ "` for its entries at " ++ line earlier.at ++ ", and "
+
+                        _ ->
+                            ""
+
+                message =
+                    if what == "" then
+                        "`" ++ name ++ "` is already declared in " ++ scopeText scope ++ ", as " ++ article earlier.kind ++ " at " ++ line earlier.at ++ note
+
+                    else
+                        what ++ "`" ++ name ++ "` is also declared in " ++ scopeText scope
+            in
+            { table | errors = Array.pushLast (errorAt symbol.at message) table.errors }
+
+        Nothing ->
+            { table | symbols = Dict.set full symbol table.symbols }
+
+
+plain : Kind -> Position -> Symbol
+plain kind at =
+    { kind = kind, at = at, mapEntryOf = Nothing }
+
+
+collectMessage : String -> Syntax.Message -> Table -> Table
+collectMessage scope (Syntax.Message m) table =
+    let
+        full =
+            qualify scope m.name
+
+        withSelf =
+            define scope m.name (plain MessageKind m.at) table
+    in
+    Array.foldl
+        (\element acc ->
+            when element is
+                Syntax.FieldElement f ->
+                    define full f.name (plain FieldKind f.nameAt) acc
+
+                Syntax.MapElement mapField ->
+                    acc
+                        |> define full mapField.name (plain FieldKind mapField.nameAt)
+                        |> define full (mapEntryName mapField.name) { kind = MessageKind, at = mapField.at, mapEntryOf = Just mapField.name }
+
+                Syntax.OneofElement o ->
+                    Array.foldl
+                        (\member inner ->
+                            when member is
+                                Syntax.OneofField f ->
+                                    define full f.name (plain FieldKind f.nameAt) inner
+
+                                Syntax.OneofMap mapField ->
+                                    define full mapField.name (plain FieldKind mapField.nameAt) inner
+
+                                _ ->
+                                    inner
+                        )
+                        (define full o.name (plain OneofKind o.at) acc)
+                        o.elements
+
+                Syntax.NestedMessage nested ->
+                    collectMessage full nested acc
+
+                Syntax.NestedEnum e ->
+                    collectEnum full e acc
+
+                _ ->
+                    acc
+        )
+        withSelf
+        m.elements
+
+
+collectEnum : String -> Syntax.Enum -> Table -> Table
+collectEnum scope e table =
+    Array.foldl
+        (\element acc ->
+            when element is
+                Syntax.ValueElement v ->
+                    define scope v.name (plain EnumValueKind v.at) acc
+
+                _ ->
+                    acc
+        )
+        (define scope e.name (plain EnumKind e.at) table)
+        e.elements
+
+
+{-| `protoc`'s name for a map field's entry message: the field's name with each
+`_` removed and the letter after it capitalized, the first letter capitalized,
+and `Entry` after.
+-}
+mapEntryName : String -> String
+mapEntryName field =
+    let
+        camel =
+            String.foldl
+                (\c acc ->
+                    if c == '_' then
+                        { acc | upper = True }
+
+                    else if acc.upper then
+                        { text = acc.text ++ String.toUpper (String.fromChar c), upper = False }
+
+                    else
+                        { text = acc.text ++ String.fromChar c, upper = False }
+                )
+                { text = "", upper = True }
+                field
+    in
+    camel.text ++ "Entry"
+
+
+{-| `protoc`'s default JSON name: each `_` removed and the letter after it
+capitalized, the first letter left as it is.
+-}
+jsonName : String -> String
+jsonName field =
+    String.foldl
+        (\c acc ->
+            if c == '_' then
+                { acc | upper = True }
+
+            else if acc.upper then
+                { text = acc.text ++ String.toUpper (String.fromChar c), upper = False }
+
+            else
+                { text = acc.text ++ String.fromChar c, upper = False }
+        )
+        { text = "", upper = False }
+        field
+        |> (\folded -> folded.text)
+
+
+
+-- RESOLUTION
+
+
+type Resolved
+    = ResolvedScalar Schema.Scalar
+    | ResolvedMessage String
+    | ResolvedEnum String
+    | NotAType { full : String, kind : Kind }
+    | Undeclared { lookedUp : Maybe String, firstPart : String, firstFound : String }
+
+
+{-| What a type name written in a field names. `relativeTo` is the field's full
+name, as `protoc` has it, so the first scope searched is the field's message.
+-}
+resolve : Dict String Symbol -> String -> String -> Resolved
+resolve symbols relativeTo name =
+    when Schema.scalarFromName name is
+        Just scalar ->
+            ResolvedScalar scalar
+
+        Nothing ->
+            if String.startsWith "." name then
+                found symbols (String.dropFirst 1 name) (Dict.get (String.dropFirst 1 name) symbols) Nothing
+
+            else
+                let
+                    firstPart =
+                        when String.firstIndexOf "." name is
+                            Just i ->
+                                String.takeFirst i name
+
+                            Nothing ->
+                                name
+
+                    rest =
+                        String.dropFirst (String.count firstPart) name
+                in
+                search symbols name firstPart rest relativeTo
+
+
+search : Dict String Symbol -> String -> String -> String -> String -> Resolved
+search symbols name firstPart rest scope =
+    when String.lastIndexOf "." scope is
+        Nothing ->
+            found symbols name (Dict.get name symbols) Nothing
+
+        Just i ->
+            let
+                outer =
+                    String.takeFirst i scope
+
+                candidate =
+                    qualify outer firstPart
+            in
+            when Dict.get candidate symbols is
+                Just symbol ->
+                    if rest /= "" then
+                        if isAggregate symbol.kind then
+                            found symbols (candidate ++ rest) (Dict.get (candidate ++ rest) symbols) (Just { firstPart = firstPart, firstFound = candidate })
+
+                        else
+                            search symbols name firstPart rest outer
+
+                    else if isType symbol.kind then
+                        found symbols candidate (Just symbol) Nothing
+
+                    else
+                        search symbols name firstPart rest outer
+
+                Nothing ->
+                    search symbols name firstPart rest outer
+
+
+found : Dict String Symbol -> String -> Maybe Symbol -> Maybe { firstPart : String, firstFound : String } -> Resolved
+found _ full symbol partial =
+    when symbol is
+        Just s ->
+            when s.kind is
+                MessageKind ->
+                    ResolvedMessage full
+
+                EnumKind ->
+                    ResolvedEnum full
+
+                other ->
+                    NotAType { full = full, kind = other }
+
+        Nothing ->
+            when partial is
+                Just p ->
+                    Undeclared { lookedUp = Just full, firstPart = p.firstPart, firstFound = p.firstFound }
+
+                Nothing ->
+                    Undeclared { lookedUp = Nothing, firstPart = "", firstFound = "" }
+
+
+isAggregate : Kind -> Bool
+isAggregate kind =
+    kind == PackageKind || kind == MessageKind || kind == EnumKind
+
+
+isType : Kind -> Bool
+isType kind =
+    kind == MessageKind || kind == EnumKind
+
+
+resolutionError : Position -> String -> Resolved -> Array Error
+resolutionError at name resolved =
+    when resolved is
+        NotAType n ->
+            [ errorAt at ("`" ++ name ++ "` names the " ++ kindName n.kind ++ " `" ++ n.full ++ "`, which is not a message or an enum") ]
+
+        Undeclared u ->
+            when u.lookedUp is
+                Just full ->
+                    [ errorAt at
+                        ("`"
+                            ++ name
+                            ++ "` is not declared: `"
+                            ++ u.firstPart
+                            ++ "` was found first as `"
+                            ++ u.firstFound
+                            ++ "`, and `"
+                            ++ full
+                            ++ "` does not exist. The innermost scope is searched first, and a name that starts with `.` is looked up from the top instead"
+                        )
+                    ]
+
+                Nothing ->
+                    [ errorAt at ("`" ++ name ++ "` is not declared") ]
+
+        _ ->
+            []
+
+
+
+-- DECLARATIONS
+
+
+statementErrors : Dict String Symbol -> String -> Syntax.Statement -> Array Error
+statementErrors symbols package s =
+    when s is
+        Syntax.MessageStatement m ->
+            messageErrors symbols package m
+
+        Syntax.EnumStatement e ->
+            enumErrors e
+
+        _ ->
+            []
+
+
+{-| A number a field has, with where and for what. -}
+type alias Numbered =
+    { number : Syntax.Number
+    , name : String
+    , at : Position
+    }
+
+
+messageErrors : Dict String Symbol -> String -> Syntax.Message -> Array Error
+messageErrors symbols scope (Syntax.Message m) =
+    let
+        full =
+            qualify scope m.name
+
+        fieldsOf =
+            Array.mapAndFlatten
+                (\element ->
+                    when element is
+                        Syntax.FieldElement f ->
+                            [ { number = f.number, name = f.name, at = f.nameAt } ]
+
+                        Syntax.MapElement mapField ->
+                            [ { number = mapField.number, name = mapField.name, at = mapField.nameAt } ]
+
+                        Syntax.OneofElement o ->
+                            Array.mapAndFlatten
+                                (\member ->
+                                    when member is
+                                        Syntax.OneofField f ->
+                                            [ { number = f.number, name = f.name, at = f.nameAt } ]
+
+                                        Syntax.OneofMap mapField ->
+                                            [ { number = mapField.number, name = mapField.name, at = mapField.nameAt } ]
+
+                                        _ ->
+                                            []
+                                )
+                                o.elements
+
+                        _ ->
+                            []
+                )
+                m.elements
+
+        reserveds =
+            Array.mapAndFlatten
+                (\element ->
+                    when element is
+                        Syntax.ReservedElement r ->
+                            [ r ]
+
+                        _ ->
+                            []
+                )
+                m.elements
+
+        elements =
+            Array.mapAndFlatten
+                (\element ->
+                    when element is
+                        Syntax.FieldElement f ->
+                            fieldErrors symbols full False f
+
+                        Syntax.MapElement mapField ->
+                            mapErrors symbols full False mapField
+
+                        Syntax.OneofElement o ->
+                            oneofErrors symbols full o
+
+                        Syntax.NestedMessage nested ->
+                            messageErrors symbols full nested
+
+                        Syntax.NestedEnum e ->
+                            enumErrors e
+
+                        Syntax.OptionElement o ->
+                            optionErrors MessageScope [ o ]
+
+                        Syntax.Extensions at ->
+                            [ errorAt at "`extensions` is proto2; proto3 has no extension ranges (D178)" ]
+
+                        Syntax.NestedExtend at ->
+                            [ errorAt at "`extend` is proto2's extensions, which proto3 allows only for custom options, and those need an import (D186)" ]
+
+                        Syntax.Group g ->
+                            [ errorAt g.at ("the group `" ++ g.name ++ "` is proto2; proto3 has no groups, and a nested message does the same") ]
+
+                        Syntax.ReservedElement _ ->
+                            []
+                )
+                m.elements
+
+        options =
+            duplicateOptions
+                (Array.mapAndFlatten
+                    (\element ->
+                        when element is
+                            Syntax.OptionElement o ->
+                                [ o ]
+
+                            _ ->
+                                []
+                    )
+                    m.elements
+                )
+    in
+    elements
+        ++ options
+        ++ numberErrors ("the message `" ++ m.name ++ "`") fieldNumberRange True fieldsOf reserveds
+        ++ jsonErrors fieldsOf
+
+
+{-| Field numbers run from 1 to 2^29 - 1, and 19000 to 19999 are protobuf's own. -}
+fieldNumberRange : { low : Int, high : Int, what : String }
+fieldNumberRange =
+    { low = 1, high = 536870911, what = "a field number" }
+
+
+enumNumberRange : { low : Int, high : Int, what : String }
+enumNumberRange =
+    { low = -2147483648, high = 2147483647, what = "an enum value" }
+
+
+{-| The numbers in one message or enum: each in range, none twice, and none in
+a reserved range; the reserved ranges themselves in order and apart, and no
+name both declared and reserved.
+-}
+numberErrors : String -> { low : Int, high : Int, what : String } -> Bool -> Array Numbered -> Array Syntax.Reserved -> Array Error
+numberErrors owner range sharedNumbersRefused numbered reserveds =
+    let
+        isField =
+            range.low == 1
+
+        inRange n =
+            when n.value is
+                Just v ->
+                    if v < range.low || v > range.high then
+                        Nothing
+
+                    else
+                        Just v
+
+                Nothing ->
+                    Nothing
+
+        rangeText =
+            String.fromInt range.low ++ " to " ++ String.fromInt range.high
+
+        numberRangeErrors =
+            Array.mapAndFlatten
+                (\f ->
+                    when inRange f.number is
+                        Nothing ->
+                            [ errorAt f.number.at (range.what ++ " runs from " ++ rangeText ++ ", and `" ++ f.name ++ "` has " ++ f.number.text) ]
+
+                        Just v ->
+                            if isField && v >= 19000 && v <= 19999 then
+                                [ errorAt f.number.at ("the field numbers 19000 to 19999 are reserved for protobuf's own use, and `" ++ f.name ++ "` has " ++ String.fromInt v) ]
+
+                            else
+                                []
+                )
+                numbered
+
+        duplicates =
+            Array.foldl
+                (\f acc ->
+                    when inRange f.number is
+                        Just v ->
+                            when Dict.get v acc.seen is
+                                Just earlier ->
+                                    { acc | errors = Array.pushLast (errorAt f.number.at ("`" ++ f.name ++ "` has the number " ++ String.fromInt v ++ ", which `" ++ earlier ++ "` already has in " ++ owner)) acc.errors }
+
+                                Nothing ->
+                                    { acc | seen = Dict.set v f.name acc.seen }
+
+                        Nothing ->
+                            acc
+                )
+                { seen = Dict.empty, errors = [] }
+                numbered
+                |> (\folded ->
+                        if sharedNumbersRefused then
+                            folded.errors
+
+                        else
+                            []
+                   )
+
+        ranges =
+            Array.mapAndFlatten
+                (\r ->
+                    when r.items is
+                        Syntax.Ranges items ->
+                            Array.map (\item -> { item = item, at = item.from.at }) items
+
+                        Syntax.Names _ ->
+                            []
+                )
+                reserveds
+
+        checkedRanges =
+            Array.foldl
+                (\entry acc ->
+                    let
+                        from =
+                            inRange entry.item.from
+
+                        to =
+                            when entry.item.to is
+                                Syntax.Single ->
+                                    from
+
+                                Syntax.ToMax ->
+                                    Just range.high
+
+                                Syntax.To n ->
+                                    inRange n
+
+                        shown =
+                            entry.item.from.text
+                                ++ (when entry.item.to is
+                                        Syntax.Single ->
+                                            ""
+
+                                        Syntax.ToMax ->
+                                            " to max"
+
+                                        Syntax.To n ->
+                                            " to " ++ n.text
+                                   )
+                    in
+                    when { low = from, high = to } is
+                        { low = Just low, high = Just high } ->
+                            if low > high then
+                                { acc | errors = Array.pushLast (errorAt entry.at ("the reserved range " ++ shown ++ " ends before it starts")) acc.errors }
+
+                            else
+                                when Array.findFirst (\earlier -> low <= earlier.high && earlier.low <= high) acc.ranges is
+                                    Just earlier ->
+                                        { acc | errors = Array.pushLast (errorAt entry.at ("the reserved range " ++ shown ++ " overlaps " ++ earlier.value.shown ++ ", reserved at " ++ line earlier.value.at)) acc.errors }
+
+                                    Nothing ->
+                                        { acc | ranges = Array.pushLast { low = low, high = high, shown = shown, at = entry.at } acc.ranges }
+
+                        _ ->
+                            { acc | errors = Array.pushLast (errorAt entry.at ("a reserved " ++ range.what ++ " runs from " ++ rangeText ++ ", and " ++ shown ++ " does not")) acc.errors }
+                )
+                { ranges = [], errors = [] }
+                ranges
+
+        names =
+            Array.mapAndFlatten
+                (\r ->
+                    when r.items is
+                        Syntax.Names items ->
+                            items
+
+                        Syntax.Ranges _ ->
+                            []
+                )
+                reserveds
+
+        checkedNames =
+            Array.foldl
+                (\entry acc ->
+                    if Dict.member entry.name acc.seen then
+                        { acc | errors = Array.pushLast (errorAt entry.at ("the name `" ++ entry.name ++ "` is reserved twice in " ++ owner)) acc.errors }
+
+                    else
+                        { acc | seen = Dict.set entry.name {} acc.seen }
+                )
+                { seen = Dict.empty, errors = [] }
+                names
+
+        uses =
+            Array.mapAndFlatten
+                (\f ->
+                    let
+                        byNumber =
+                            when inRange f.number is
+                                Just v ->
+                                    when Array.findFirst (\r -> r.low <= v && v <= r.high) checkedRanges.ranges is
+                                        Just r ->
+                                            [ errorAt f.number.at ("`" ++ f.name ++ "` has the number " ++ String.fromInt v ++ ", which " ++ owner ++ " reserves at " ++ line r.value.at) ]
+
+                                        Nothing ->
+                                            []
+
+                                Nothing ->
+                                    []
+
+                        byName =
+                            if Dict.member f.name checkedNames.seen then
+                                [ errorAt f.at ("the name `" ++ f.name ++ "` is reserved in " ++ owner) ]
+
+                            else
+                                []
+                    in
+                    byName ++ byNumber
+                )
+                numbered
+    in
+    numberRangeErrors ++ duplicates ++ checkedRanges.errors ++ checkedNames.errors ++ uses
+
+
+{-| proto3 refuses two fields whose default JSON names are equal. -}
+jsonErrors : Array Numbered -> Array Error
+jsonErrors numbered =
+    Array.foldl
+        (\f acc ->
+            let
+                json =
+                    jsonName f.name
+            in
+            when Dict.get json acc.seen is
+                Just earlier ->
+                    if earlier == f.name then
+                        acc
+
+                    else
+                        { acc | errors = Array.pushLast (errorAt f.at ("the JSON name of `" ++ f.name ++ "` is `" ++ json ++ "`, which is also the JSON name of `" ++ earlier ++ "`, and proto3 refuses two fields with one JSON name")) acc.errors }
+
+                Nothing ->
+                    { acc | seen = Dict.set json f.name acc.seen }
+        )
+        { seen = Dict.empty, errors = [] }
+        numbered
+        |> (\folded -> folded.errors)
+
+
+fieldErrors : Dict String Symbol -> String -> Bool -> Syntax.Field -> Array Error
+fieldErrors symbols message inOneof f =
+    let
+        label =
+            when f.label is
+                Syntax.Required ->
+                    [ errorAt f.labelAt ("`required` is proto2; a proto3 field is never required, so `" ++ f.name ++ "` cannot be") ]
+
+                Syntax.NoLabel ->
+                    []
+
+                _ ->
+                    if inOneof then
+                        [ errorAt f.labelAt ("`" ++ f.name ++ "` is a member of a oneof, and a member has no label") ]
+
+                    else
+                        []
+
+        resolved =
+            resolve symbols (qualify message f.name) f.typeName
+
+        packable =
+            f.label == Syntax.Repeated
+                && (when resolved is
+                        ResolvedScalar s ->
+                            s /= Schema.StringType && s /= Schema.BytesType
+
+                        ResolvedEnum _ ->
+                            True
+
+                        _ ->
+                            False
+                   )
+    in
+    label
+        ++ resolutionError f.typeAt f.typeName resolved
+        ++ optionErrors (FieldScope { packable = packable }) f.options
+        ++ duplicateOptions f.options
+
+
+mapErrors : Dict String Symbol -> String -> Bool -> Syntax.MapField -> Array Error
+mapErrors symbols message inOneof m =
+    let
+        relativeTo =
+            qualify message m.name
+
+        key =
+            when resolve symbols relativeTo m.keyType is
+                ResolvedScalar s ->
+                    if s == Schema.DoubleType || s == Schema.FloatType || s == Schema.BytesType then
+                        [ errorAt m.keyAt ("a map's key is an integer type, `bool` or `string`, and `" ++ m.keyType ++ "` is not") ]
+
+                    else
+                        []
+
+                ResolvedEnum _ ->
+                    [ errorAt m.keyAt ("a map's key is an integer type, `bool` or `string`, and `" ++ m.keyType ++ "` is an enum") ]
+
+                ResolvedMessage _ ->
+                    [ errorAt m.keyAt ("a map's key is an integer type, `bool` or `string`, and `" ++ m.keyType ++ "` is a message") ]
+
+                other ->
+                    resolutionError m.keyAt m.keyType other
+
+        oneofError =
+            if inOneof then
+                [ errorAt m.at ("the map `" ++ m.name ++ "` is in a oneof, and a map cannot be a member of one") ]
+
+            else
+                []
+    in
+    oneofError
+        ++ key
+        ++ resolutionError m.valueAt m.valueType (resolve symbols relativeTo m.valueType)
+        ++ optionErrors (FieldScope { packable = False }) m.options
+        ++ duplicateOptions m.options
+
+
+oneofErrors : Dict String Symbol -> String -> Syntax.Oneof -> Array Error
+oneofErrors symbols message o =
+    let
+        members =
+            Array.mapAndFlatten
+                (\element ->
+                    when element is
+                        Syntax.OneofField f ->
+                            fieldErrors symbols message True f
+
+                        Syntax.OneofMap m ->
+                            mapErrors symbols message True m
+
+                        Syntax.OneofGroup g ->
+                            [ errorAt g.at ("the group `" ++ g.name ++ "` is proto2; proto3 has no groups, and a nested message does the same") ]
+
+                        Syntax.OneofOption option ->
+                            optionErrors OneofScope [ option ]
+                )
+                o.elements
+
+        empty =
+            if Array.any isMember o.elements then
+                []
+
+            else
+                [ errorAt o.at ("the oneof `" ++ o.name ++ "` has no members, and a oneof needs at least one") ]
+    in
+    empty ++ members
+
+
+isMember : Syntax.OneofElement -> Bool
+isMember element =
+    when element is
+        Syntax.OneofOption _ ->
+            False
+
+        _ ->
+            True
+
+
+
+-- ENUMS
+
+
+enumErrors : Syntax.Enum -> Array Error
+enumErrors e =
+    let
+        values =
+            Array.mapAndFlatten
+                (\element ->
+                    when element is
+                        Syntax.ValueElement v ->
+                            [ v ]
+
+                        _ ->
+                            []
+                )
+                e.elements
+
+        options =
+            Array.mapAndFlatten
+                (\element ->
+                    when element is
+                        Syntax.EnumOption o ->
+                            [ o ]
+
+                        _ ->
+                            []
+                )
+                e.elements
+
+        reserveds =
+            Array.mapAndFlatten
+                (\element ->
+                    when element is
+                        Syntax.EnumReserved r ->
+                            [ r ]
+
+                        _ ->
+                            []
+                )
+                e.elements
+
+        aliased =
+            Array.any (\o -> o.name == [ Syntax.Simple "allow_alias" ] && o.value == Syntax.Identifier "true") options
+
+        first =
+            when Array.first values is
+                Nothing ->
+                    [ errorAt e.at ("the enum `" ++ e.name ++ "` has no values, and an enum needs at least one") ]
+
+                Just v ->
+                    if v.number.value == Just 0 then
+                        []
+
+                    else
+                        [ errorAt v.number.at ("the first value of a proto3 enum is its default and must be 0, and `" ++ v.name ++ "` is " ++ v.number.text) ]
+
+        numbered =
+            Array.map (\v -> { number = v.number, name = v.name, at = v.at }) values
+
+        -- With `allow_alias`, which is refused below, two values sharing a number
+        -- are what it asked for, and saying so once per value would only repeat
+        -- that refusal.
+        numbers =
+            numberErrors ("the enum `" ++ e.name ++ "`") enumNumberRange (not aliased) numbered reserveds
+
+        stripped =
+            Array.foldl
+                (\v acc ->
+                    let
+                        key =
+                            pascalCase (removePrefix e.name v.name)
+                    in
+                    when Dict.get key acc.seen is
+                        Just earlier ->
+                            if aliased && earlier.number == v.number.value then
+                                acc
+
+                            else
+                                { acc
+                                    | errors =
+                                        Array.pushLast
+                                            (errorAt v.at ("`" ++ v.name ++ "` and `" ++ earlier.name ++ "` are the same name once `" ++ e.name ++ "` is taken off the front and case is ignored, which proto3 refuses"))
+                                            acc.errors
+                                }
+
+                        Nothing ->
+                            { acc | seen = Dict.set key { name = v.name, number = v.number.value } acc.seen }
+                )
+                { seen = Dict.empty, errors = [] }
+                values
+                |> (\folded -> folded.errors)
+    in
+    first
+        ++ numbers
+        ++ stripped
+        ++ optionErrors EnumScope options
+        ++ duplicateOptions options
+        ++ Array.mapAndFlatten (\v -> optionErrors EnumValueScope v.options ++ duplicateOptions v.options) values
+
+
+{-| `protoc`'s `PrefixRemover`: the enum's name, ignoring case and `_`, taken off
+the front of a value's name, with the `_`s after it, unless that leaves nothing.
+-}
+removePrefix : String -> String -> String
+removePrefix enumName value =
+    let
+        prefix =
+            String.toArray (String.toLower (String.replace "_" "" enumName))
+
+        chars =
+            String.toArray value
+
+        step i j =
+            if j >= Array.length prefix then
+                Just i
+
+            else
+                when Array.get i chars is
+                    Nothing ->
+                        Nothing
+
+                    Just '_' ->
+                        step (i + 1) j
+
+                    Just c ->
+                        if Just (String.toLower (String.fromChar c)) == Maybe.map String.fromChar (Array.get j prefix) then
+                            step (i + 1) (j + 1)
+
+                        else
+                            Nothing
+
+        skipUnderscores i =
+            if Array.get i chars == Just '_' then
+                skipUnderscores (i + 1)
+
+            else
+                i
+    in
+    when step 0 0 is
+        Just matched ->
+            let
+                after =
+                    skipUnderscores matched
+            in
+            if after >= Array.length chars then
+                value
+
+            else
+                String.fromArray (Array.dropFirst after chars)
+
+        Nothing ->
+            value
+
+
+{-| `protoc`'s `EnumValueToPascalCase`. -}
+pascalCase : String -> String
+pascalCase value =
+    String.foldl
+        (\c acc ->
+            if c == '_' then
+                { acc | upper = True }
+
+            else if acc.upper then
+                { text = acc.text ++ String.toUpper (String.fromChar c), upper = False }
+
+            else
+                { text = acc.text ++ String.toLower (String.fromChar c), upper = False }
+        )
+        { text = "", upper = True }
+        value
+        |> (\folded -> folded.text)
+
+
+
+-- OPTIONS
+
+
+type OptionScope
+    = FileScope
+    | MessageScope
+    | FieldScope { packable : Bool }
+    | OneofScope
+    | EnumScope
+    | EnumValueScope
+
+
+type OptionKind
+    = BoolOption
+    | StringOption
+    | EnumOption (Array String)
+    | Refused String
+
+
+scopeName : OptionScope -> String
+scopeName scope =
+    when scope is
+        FileScope ->
+            "a file"
+
+        MessageScope ->
+            "a message"
+
+        FieldScope _ ->
+            "a field"
+
+        OneofScope ->
+            "a oneof"
+
+        EnumScope ->
+            "an enum"
+
+        EnumValueScope ->
+            "an enum value"
+
+
+{-| The options `descriptor.proto` gives each kind of declaration, and what
+each takes. The ones that change what is on the wire are refused.
+-}
+knownOption : OptionScope -> String -> Maybe OptionKind
+knownOption scope name =
+    let
+        common =
+            when name is
+                "deprecated" ->
+                    Just BoolOption
+
+                "features" ->
+                    Just (Refused "`features` belongs to editions, which geng protobuf does not read (D178)")
+
+                _ ->
+                    Nothing
+
+        own =
+            when scope is
+                FileScope ->
+                    when name is
+                        "java_package" ->
+                            Just StringOption
+
+                        "java_outer_classname" ->
+                            Just StringOption
+
+                        "java_multiple_files" ->
+                            Just BoolOption
+
+                        "java_generate_equals_and_hash" ->
+                            Just BoolOption
+
+                        "java_string_check_utf8" ->
+                            Just BoolOption
+
+                        "optimize_for" ->
+                            Just (EnumOption [ "SPEED", "CODE_SIZE", "LITE_RUNTIME" ])
+
+                        "go_package" ->
+                            Just StringOption
+
+                        "cc_generic_services" ->
+                            Just BoolOption
+
+                        "java_generic_services" ->
+                            Just BoolOption
+
+                        "py_generic_services" ->
+                            Just BoolOption
+
+                        "cc_enable_arenas" ->
+                            Just BoolOption
+
+                        "objc_class_prefix" ->
+                            Just StringOption
+
+                        "csharp_namespace" ->
+                            Just StringOption
+
+                        "swift_prefix" ->
+                            Just StringOption
+
+                        "php_class_prefix" ->
+                            Just StringOption
+
+                        "php_namespace" ->
+                            Just StringOption
+
+                        "php_metadata_namespace" ->
+                            Just StringOption
+
+                        "ruby_package" ->
+                            Just StringOption
+
+                        _ ->
+                            Nothing
+
+                MessageScope ->
+                    when name is
+                        "message_set_wire_format" ->
+                            Just (Refused "a message set is proto2's, and proto3 has none")
+
+                        "no_standard_descriptor_accessor" ->
+                            Just BoolOption
+
+                        "map_entry" ->
+                            Just (Refused "`map_entry` is not written by hand; a `map<K, V>` field declares its entry message")
+
+                        "deprecated_legacy_json_field_conflicts" ->
+                            Just BoolOption
+
+                        _ ->
+                            Nothing
+
+                FieldScope _ ->
+                    when name is
+                        "ctype" ->
+                            Just (EnumOption [ "STRING", "CORD", "STRING_PIECE" ])
+
+                        "jstype" ->
+                            Just (EnumOption [ "JS_NORMAL", "JS_STRING", "JS_NUMBER" ])
+
+                        "lazy" ->
+                            Just BoolOption
+
+                        "unverified_lazy" ->
+                            Just BoolOption
+
+                        "debug_redact" ->
+                            Just BoolOption
+
+                        "weak" ->
+                            Just (Refused "a weak field needs a weak import, and geng protobuf reads one file on its own (D186)")
+
+                        "json_name" ->
+                            Just StringOption
+
+                        "default" ->
+                            Just (Refused "proto3 has no default values; a field's default is its type's zero")
+
+                        "retention" ->
+                            Just (EnumOption [ "RETENTION_UNKNOWN", "RETENTION_RUNTIME", "RETENTION_SOURCE" ])
+
+                        "targets" ->
+                            Just
+                                (EnumOption
+                                    [ "TARGET_TYPE_UNKNOWN"
+                                    , "TARGET_TYPE_FILE"
+                                    , "TARGET_TYPE_EXTENSION_RANGE"
+                                    , "TARGET_TYPE_MESSAGE"
+                                    , "TARGET_TYPE_FIELD"
+                                    , "TARGET_TYPE_ONEOF"
+                                    , "TARGET_TYPE_ENUM"
+                                    , "TARGET_TYPE_ENUM_ENTRY"
+                                    , "TARGET_TYPE_SERVICE"
+                                    , "TARGET_TYPE_METHOD"
+                                    ]
+                                )
+
+                        "packed" ->
+                            Just BoolOption
+
+                        _ ->
+                            Nothing
+
+                OneofScope ->
+                    Nothing
+
+                EnumScope ->
+                    when name is
+                        "allow_alias" ->
+                            Just BoolOption
+
+                        "deprecated_legacy_json_field_conflicts" ->
+                            Just BoolOption
+
+                        _ ->
+                            Nothing
+
+                EnumValueScope ->
+                    when name is
+                        "debug_redact" ->
+                            Just BoolOption
+
+                        _ ->
+                            Nothing
+    in
+    when own is
+        Just kind ->
+            Just kind
+
+        Nothing ->
+            if scope == OneofScope && name == "deprecated" then
+                Nothing
+
+            else
+                common
+
+
+optionErrors : OptionScope -> Array Syntax.Option -> Array Error
+optionErrors scope options =
+    Array.mapAndFlatten (optionError scope) options
+
+
+optionError : OptionScope -> Syntax.Option -> Array Error
+optionError scope option =
+    when option.name is
+        [ Syntax.Simple name ] ->
+            when knownOption scope name is
+                Nothing ->
+                    [ errorAt option.at ("`" ++ name ++ "` is not an option protobuf has for " ++ scopeName scope) ]
+
+                Just (Refused reason) ->
+                    [ errorAt option.at ("the option `" ++ name ++ "` is not supported: " ++ reason) ]
+
+                Just kind ->
+                    let
+                        wrongValue expectation =
+                            [ errorAt option.at ("the option `" ++ name ++ "` takes " ++ expectation) ]
+
+                        valueErrors =
+                            when { kind = kind, value = option.value } is
+                                { kind = BoolOption, value = Syntax.Identifier "true" } ->
+                                    []
+
+                                { kind = BoolOption, value = Syntax.Identifier "false" } ->
+                                    []
+
+                                { kind = BoolOption } ->
+                                    wrongValue "`true` or `false`"
+
+                                { kind = StringOption, value = Syntax.Text _ } ->
+                                    []
+
+                                { kind = StringOption } ->
+                                    wrongValue "a string"
+
+                                { kind = EnumOption allowed, value = Syntax.Identifier word } ->
+                                    if Array.member word allowed then
+                                        []
+
+                                    else
+                                        wrongValue ("one of " ++ String.join ", " (Array.map (\a -> "`" ++ a ++ "`") allowed))
+
+                                { kind = EnumOption allowed } ->
+                                    wrongValue ("one of " ++ String.join ", " (Array.map (\a -> "`" ++ a ++ "`") allowed))
+
+                                _ ->
+                                    []
+
+                        meaning =
+                            if valueErrors /= [] then
+                                []
+
+                            else
+                                when { name = name, scope = scope, value = option.value } is
+                                    { name = "packed", scope = FieldScope field } ->
+                                        if not field.packable then
+                                            [ errorAt option.at "`packed` applies to a repeated number, `bool` or enum, and this field is not one" ]
+
+                                        else if option.value == Syntax.Identifier "false" then
+                                            [ errorAt option.at "`packed = false` is not supported yet: geng protobuf writes every repeated number packed (D181)" ]
+
+                                        else
+                                            []
+
+                                    { name = "allow_alias", value = Syntax.Identifier "true" } ->
+                                        [ errorAt option.at "`allow_alias` is not supported yet: an enum with two names for one number would need a rule for which constructor a decoded number becomes (D176)" ]
+
+                                    _ ->
+                                        []
+                    in
+                    valueErrors ++ meaning
+
+        parts ->
+            if Array.any isExtension parts then
+                [ errorAt option.at ("the custom option `" ++ optionText parts ++ "` is not supported yet: a custom option is declared in an imported file, and geng protobuf reads one file on its own (D186)") ]
+
+            else
+                when Array.first parts is
+                    Just (Syntax.Simple "features") ->
+                        [ errorAt option.at "the option `features` is not supported: `features` belongs to editions, which geng protobuf does not read (D178)" ]
+
+                    _ ->
+                        [ errorAt option.at ("`" ++ optionText parts ++ "` is not an option protobuf has for " ++ scopeName scope) ]
+
+
+isExtension : Syntax.OptionPart -> Bool
+isExtension part =
+    when part is
+        Syntax.Extension _ ->
+            True
+
+        Syntax.Simple _ ->
+            False
+
+
+optionText : Array Syntax.OptionPart -> String
+optionText parts =
+    parts
+        |> Array.map
+            (\part ->
+                when part is
+                    Syntax.Simple name ->
+                        name
+
+                    Syntax.Extension name ->
+                        "(" ++ name ++ ")"
+            )
+        |> String.join "."
+
+
+duplicateOptions : Array Syntax.Option -> Array Error
+duplicateOptions options =
+    Array.foldl
+        (\option acc ->
+            let
+                key =
+                    optionText option.name
+            in
+            when Dict.get key acc.seen is
+                Just earlier ->
+                    { acc | errors = Array.pushLast (errorAt option.at ("the option `" ++ key ++ "` is already set, at " ++ line earlier)) acc.errors }
+
+                Nothing ->
+                    { acc | seen = Dict.set key option.at acc.seen }
+        )
+        { seen = Dict.empty, errors = [] }
+        options
+        |> (\folded -> folded.errors)
+
+
+
+-- BUILDING
+
+
+{-| The schema, once `check` has found nothing wrong. Every name resolves by
+then, so a resolution that fails here cannot happen; it becomes a `bytes`
+field rather than a crash.
+-}
+build : Dict String Symbol -> String -> Syntax.File -> Schema
+build symbols package file =
+    { package = package
+    , messages =
+        Array.mapAndFlatten
+            (\s ->
+                when s is
+                    Syntax.MessageStatement m ->
+                        [ buildMessage symbols package m ]
+
+                    _ ->
+                        []
+            )
+            file.statements
+    , enums =
+        Array.mapAndFlatten
+            (\s ->
+                when s is
+                    Syntax.EnumStatement e ->
+                        [ buildEnum package e ]
+
+                    _ ->
+                        []
+            )
+            file.statements
+    }
+
+
+buildMessage : Dict String Symbol -> String -> Syntax.Message -> Schema.Message
+buildMessage symbols scope (Syntax.Message m) =
+    let
+        full =
+            qualify scope m.name
+
+        typeOf relativeTo name =
+            when resolve symbols relativeTo name is
+                ResolvedScalar s ->
+                    Schema.ScalarType s
+
+                ResolvedMessage n ->
+                    Schema.MessageType n
+
+                ResolvedEnum n ->
+                    Schema.EnumType n
+
+                _ ->
+                    Schema.ScalarType Schema.BytesType
+
+        plainField oneofIndex f =
+            { name = f.name
+            , number = Maybe.withDefault 0 f.number.value
+            , label =
+                when f.label is
+                    Syntax.Optional ->
+                        Schema.Optional
+
+                    Syntax.Repeated ->
+                        Schema.Repeated
+
+                    _ ->
+                        Schema.Singular
+            , fieldType = typeOf (qualify full f.name) f.typeName
+            , oneof = oneofIndex
+            }
+
+        mapFieldOf mapField =
+            { name = mapField.name
+            , number = Maybe.withDefault 0 mapField.number.value
+            , label = Schema.Singular
+            , fieldType =
+                Schema.MapType
+                    { key =
+                        Schema.scalarFromName mapField.keyType
+                            |> Maybe.withDefault Schema.StringType
+                    , value = typeOf (qualify full mapField.name) mapField.valueType
+                    }
+            , oneof = Nothing
+            }
+
+        gathered =
+            Array.foldl
+                (\element acc ->
+                    when element is
+                        Syntax.FieldElement f ->
+                            { acc | fields = Array.pushLast (plainField Nothing f) acc.fields }
+
+                        Syntax.MapElement mapField ->
+                            { acc | fields = Array.pushLast (mapFieldOf mapField) acc.fields }
+
+                        Syntax.OneofElement o ->
+                            let
+                                index =
+                                    Array.length acc.oneofs
+
+                                members =
+                                    Array.mapAndFlatten
+                                        (\member ->
+                                            when member is
+                                                Syntax.OneofField f ->
+                                                    [ plainField (Just index) f ]
+
+                                                _ ->
+                                                    []
+                                        )
+                                        o.elements
+                            in
+                            { acc | oneofs = Array.pushLast o.name acc.oneofs, fields = acc.fields ++ members }
+
+                        Syntax.NestedMessage nested ->
+                            { acc | messages = Array.pushLast (buildMessage symbols full nested) acc.messages }
+
+                        Syntax.NestedEnum e ->
+                            { acc | enums = Array.pushLast (buildEnum full e) acc.enums }
+
+                        _ ->
+                            acc
+                )
+                { fields = [], oneofs = [], messages = [], enums = [] }
+                m.elements
+    in
+    Schema.Message
+        { name = m.name
+        , fullName = full
+        , fields = gathered.fields
+        , oneofs = gathered.oneofs
+        , messages = gathered.messages
+        , enums = gathered.enums
+        }
+
+
+buildEnum : String -> Syntax.Enum -> Schema.Enum
+buildEnum scope e =
+    { name = e.name
+    , fullName = qualify scope e.name
+    , values =
+        Array.mapAndFlatten
+            (\element ->
+                when element is
+                    Syntax.ValueElement v ->
+                        [ { name = v.name, number = Maybe.withDefault 0 v.number.value } ]
+
+                    _ ->
+                        []
+            )
+            e.elements
+    }

@@ -17,6 +17,7 @@ import Terminal.Help
 import Terminal.Repl
 import Cli.Report as Report exposing (Report)
 import Terminal.Format
+import Terminal.Protobuf
 import Compiler.Backend
 import Compiler.PackageName as PackageName exposing (PackageName)
 import Compiler.Paths
@@ -863,6 +864,18 @@ parseUserArgs model compilerPath =
                         opts
                         |> Task.map (\_ -> Cmd.none)
                         |> Task.mapError Terminal.Paths.errorToString
+                        |> Task.onError endWithErrorString
+                        |> Task.perform RunCmd
+
+                CliParser.Protobuf protobufFlags ->
+                    Terminal.Protobuf.run
+                        { fsPermission = model.fsPermission
+                        , pathToString = model.pathToString
+                        , paths = protobufFlags.paths
+                        , describe = protobufFlags.describe
+                        }
+                        |> Task.andThen (Stream.Log.string model.stdout)
+                        |> Task.map (\_ -> Cmd.none)
                         |> Task.onError endWithErrorString
                         |> Task.perform RunCmd
 

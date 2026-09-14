@@ -1,0 +1,104 @@
+module Terminal.Protobuf exposing
+    ( Config
+    , run
+    )
+
+{-| `geng protobuf` — reading proto3 files (K5, D185, `m1b-protobuf.md` §Q17).
+
+This is §Q8's step 4: each file is parsed (`Proto.Parser`) and checked
+(`Proto.Check`), and every refusal is printed as `path:line:column: reason`.
+`--describe` prints what the file declares instead (`Proto.Schema.describe`),
+which is how `harness/proto.py` holds an accepted file to something. Writing a
+Geng module from the schema is step 5.
+
+-}
+
+import Bytes
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Proto.Check
+import Proto.Parser
+import Proto.Schema
+import Task exposing (Task)
+
+
+type alias Config =
+    { fsPermission : FileSystem.Permission
+    , pathToString : Path -> String
+    , paths : Array Path
+    , describe : Bool
+    }
+
+
+{-| What to print on success, or every refusal as the error. -}
+run : Config -> Task String String
+run config =
+    if Array.isEmpty config.paths then
+        Task.fail "geng protobuf: name at least one .proto file\n"
+
+    else
+        Array.foldl
+            (\path task ->
+                task
+                    |> Task.andThen
+                        (\acc ->
+                            readOne config path
+                                |> Task.map
+                                    (\result ->
+                                        when result is
+                                            Ok out ->
+                                                { acc | out = acc.out ++ out }
+
+                                            Err errors ->
+                                                { acc | errors = acc.errors ++ errors }
+                                    )
+                        )
+            )
+            (Task.succeed { out = "", errors = "" })
+            config.paths
+            |> Task.andThen
+                (\acc ->
+                    if acc.errors == "" then
+                        Task.succeed acc.out
+
+                    else
+                        Task.fail acc.errors
+                )
+
+
+readOne : Config -> Path -> Task x (Result String String)
+readOne config path =
+    let
+        display =
+            config.pathToString path
+    in
+    FileSystem.readFile config.fsPermission path
+        |> Task.map
+            (\bytes ->
+                when Bytes.toString bytes is
+                    Nothing ->
+                        Err (display ++ ": the file is not UTF-8\n")
+
+                    Just source ->
+                        when Proto.Parser.parse source is
+                            Err error ->
+                                Err (located display error)
+
+                            Ok file ->
+                                when Proto.Check.check file is
+                                    Err errors ->
+                                        Err (String.join "" (Array.map (located display) errors))
+
+                                    Ok schema ->
+                                        if config.describe then
+                                            Ok (Proto.Schema.describe schema)
+
+                                        else
+                                            Ok (display ++ ": no problems found; generating a Geng module from it is not built yet\n")
+            )
+        |> Task.onError (\fsError -> Task.succeed (Err (display ++ ": " ++ FileSystem.errorToString fsError ++ "\n")))
+
+
+located : String -> { row : Int, col : Int, message : String } -> String
+located display error =
+    display ++ ":" ++ String.fromInt error.row ++ ":" ++ String.fromInt error.col ++ ": " ++ error.message ++ "\n"

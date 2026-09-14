@@ -1,0 +1,502 @@
+module Proto.Lexer exposing
+    ( Token(..)
+    , Located
+    , Error
+    , tokenize
+    , describe
+    )
+
+{-| The tokens of a `.proto` file (`m1b-protobuf.md` §Q17).
+
+Protobuf's language specification gives the lexical grammar: identifiers of
+ASCII letters, digits and `_`; decimal, octal and hexadecimal integers; floats;
+string literals in either quote with C's escapes; `//` and `/* */` comments.
+Keywords are not reserved at this level. `message` is an identifier here, and
+`Proto.Parser` decides where it is a keyword, as `protoc` does.
+
+A column counts codepoints, so a tab is one column. `protoc` moves a tab to the
+next multiple of eight, and its columns therefore differ on a line with a tab
+before the error.
+
+-}
+
+import Bytes
+import Bytes.Encode
+import Char
+
+
+type Token
+    = Identifier String
+    | Integer String
+    | Floating String
+    | Text String
+    | Symbol Char
+    | End
+
+
+type alias Located =
+    { token : Token
+    , row : Int
+    , col : Int
+    }
+
+
+type alias Error =
+    { row : Int
+    , col : Int
+    , message : String
+    }
+
+
+{-| How a token is named in an error: "`}`", "the name `foo`". -}
+describe : Token -> String
+describe token =
+    when token is
+        Identifier name ->
+            "the name `" ++ name ++ "`"
+
+        Integer text ->
+            "the number " ++ text
+
+        Floating text ->
+            "the number " ++ text
+
+        Text _ ->
+            "a string"
+
+        Symbol c ->
+            "`" ++ String.fromChar c ++ "`"
+
+        End ->
+            "the end of the file"
+
+
+type alias State =
+    { index : Int
+    , row : Int
+    , col : Int
+    , tokens : Array Located
+    }
+
+
+{-| The file's tokens, ending with one `End` at the position after the last
+character.
+-}
+tokenize : String -> Result Error (Array Located)
+tokenize source =
+    go (String.toArray source) { index = 0, row = 1, col = 1, tokens = [] }
+
+
+go : Array Char -> State -> Result Error (Array Located)
+go chars state =
+    when Array.get state.index chars is
+        Nothing ->
+            Ok (Array.pushLast { token = End, row = state.row, col = state.col } state.tokens)
+
+        Just c ->
+            if c == '\n' then
+                go chars { state | index = state.index + 1, row = state.row + 1, col = 1 }
+
+            else if c == ' ' || c == '\t' || c == '\r' || c == '\u{000C}' || c == '\u{000B}' then
+                go chars (advance 1 state)
+
+            else if c == '/' then
+                when Array.get (state.index + 1) chars is
+                    Just '/' ->
+                        go chars (lineComment chars (advance 2 state))
+
+                    Just '*' ->
+                        when blockComment chars (advance 2 state) is
+                            Just after ->
+                                go chars after
+
+                            Nothing ->
+                                Err { row = state.row, col = state.col, message = "this comment is never closed: there is no `*/` after it" }
+
+                    _ ->
+                        Err { row = state.row, col = state.col, message = "a `/` on its own is not part of the language; a comment starts with `//` or `/*`" }
+
+            else if Char.isAlpha c || c == '_' then
+                let
+                    length =
+                        runLength chars state.index isIdentifierChar
+                in
+                go chars (push (Identifier (sliceChars chars state.index length)) state |> advance length)
+
+            else if Char.isDigit c || (c == '.' && Maybe.map Char.isDigit (Array.get (state.index + 1) chars) == Just True) then
+                when number chars state is
+                    Ok found ->
+                        go chars (push found.token state |> advance found.length)
+
+                    Err error ->
+                        Err error
+
+            else if c == '"' || c == '\'' then
+                when string chars c (advance 1 state) [] is
+                    Ok found ->
+                        let
+                            after =
+                                found.state
+                        in
+                        go chars { after | tokens = Array.pushLast { token = Text found.value, row = state.row, col = state.col } state.tokens }
+
+                    Err error ->
+                        Err error
+
+            else if String.contains (String.fromChar c) ";={}[]()<>,.-+:" then
+                go chars (push (Symbol c) state |> advance 1)
+
+            else
+                Err { row = state.row, col = state.col, message = "the character `" ++ String.fromChar c ++ "` is not part of the language here" }
+
+
+advance : Int -> State -> State
+advance n state =
+    { state | index = state.index + n, col = state.col + n }
+
+
+push : Token -> State -> State
+push token state =
+    { state | tokens = Array.pushLast { token = token, row = state.row, col = state.col } state.tokens }
+
+
+isIdentifierChar : Char -> Bool
+isIdentifierChar c =
+    Char.isAlphaNum c || c == '_'
+
+
+runLength : Array Char -> Int -> (Char -> Bool) -> Int
+runLength chars start keep =
+    runLengthFrom chars start keep 0
+
+
+runLengthFrom : Array Char -> Int -> (Char -> Bool) -> Int -> Int
+runLengthFrom chars start keep n =
+    when Array.get (start + n) chars is
+        Just c ->
+            if keep c then
+                runLengthFrom chars start keep (n + 1)
+
+            else
+                n
+
+        Nothing ->
+            n
+
+
+sliceChars : Array Char -> Int -> Int -> String
+sliceChars chars start length =
+    String.fromArray (Array.slice start (start + length) chars)
+
+
+lineComment : Array Char -> State -> State
+lineComment chars state =
+    when Array.get state.index chars is
+        Just '\n' ->
+            state
+
+        Just _ ->
+            lineComment chars (advance 1 state)
+
+        Nothing ->
+            state
+
+
+blockComment : Array Char -> State -> Maybe State
+blockComment chars state =
+    when Array.get state.index chars is
+        Just '*' ->
+            if Array.get (state.index + 1) chars == Just '/' then
+                Just (advance 2 state)
+
+            else
+                blockComment chars (advance 1 state)
+
+        Just '\n' ->
+            blockComment chars { state | index = state.index + 1, row = state.row + 1, col = 1 }
+
+        Just _ ->
+            blockComment chars (advance 1 state)
+
+        Nothing ->
+            Nothing
+
+
+
+-- NUMBERS
+
+
+{-| An integer or a float, and how many characters it takes. A number that runs
+straight into a name, `12ab`, is refused, as `protoc` does.
+-}
+number : Array Char -> State -> Result Error { token : Token, length : Int }
+number chars state =
+    let
+        at offset =
+            Array.get (state.index + offset) chars
+
+        errorAt message =
+            Err { row = state.row, col = state.col, message = message }
+
+        finish token length =
+            when at length is
+                Just c ->
+                    if isIdentifierChar c then
+                        Err
+                            { row = state.row
+                            , col = state.col + length
+                            , message = "a number runs into a name here; put a space between them"
+                            }
+
+                    else
+                        Ok { token = token, length = length }
+
+                Nothing ->
+                    Ok { token = token, length = length }
+    in
+    if at 0 == Just '0' && (at 1 == Just 'x' || at 1 == Just 'X') then
+        let
+            digits =
+                runLength chars (state.index + 2) Char.isHexDigit
+        in
+        if digits == 0 then
+            errorAt "a hexadecimal number needs at least one digit after `0x`"
+
+        else
+            finish (Integer (sliceChars chars state.index (digits + 2))) (digits + 2)
+
+    else
+        let
+            whole =
+                runLength chars state.index Char.isDigit
+
+            fraction =
+                if at whole == Just '.' then
+                    1 + runLength chars (state.index + whole + 1) Char.isDigit
+
+                else
+                    0
+
+            exponent =
+                if at (whole + fraction) == Just 'e' || at (whole + fraction) == Just 'E' then
+                    let
+                        sign =
+                            if at (whole + fraction + 1) == Just '+' || at (whole + fraction + 1) == Just '-' then
+                                1
+
+                            else
+                                0
+
+                        digits =
+                            runLength chars (state.index + whole + fraction + 1 + sign) Char.isDigit
+                    in
+                    if digits == 0 then
+                        -1
+
+                    else
+                        1 + sign + digits
+
+                else
+                    0
+
+            text =
+                sliceChars chars state.index whole
+        in
+        if exponent < 0 then
+            Err
+                { row = state.row
+                , col = state.col + whole + fraction
+                , message = "an exponent needs at least one digit after the `e`"
+                }
+
+        else if fraction > 0 || exponent > 0 then
+            finish (Floating (sliceChars chars state.index (whole + fraction + exponent))) (whole + fraction + exponent)
+
+        else if String.startsWith "0" text && String.count text > 1 && not (String.all Char.isOctDigit text) then
+            errorAt ("`" ++ text ++ "` starts with 0, which makes it octal, and it has a digit octal does not")
+
+        else
+            finish (Integer text) whole
+
+
+
+-- STRINGS
+
+
+{-| A string literal's value, after its closing quote. The escapes are C's, and
+a `\x` or octal escape is a byte, so the bytes are collected and read as UTF-8
+at the end.
+-}
+string : Array Char -> Char -> State -> Array Int -> Result Error { value : String, state : State }
+string chars quote state bytes =
+    let
+        errorHere message =
+            Err { row = state.row, col = state.col, message = message }
+    in
+    when Array.get state.index chars is
+        Nothing ->
+            errorHere "this string is never closed: the file ends inside it"
+
+        Just '\n' ->
+            errorHere "a string cannot contain a line break; close it on the line it opens"
+
+        Just '\\' ->
+            when escape chars (advance 1 state) is
+                Ok escaped ->
+                    string chars quote escaped.state (bytes ++ escaped.bytes)
+
+                Err error ->
+                    Err error
+
+        Just c ->
+            if c == quote then
+                when Bytes.toString (Bytes.Encode.encode (Bytes.Encode.sequence (Array.map Bytes.Encode.unsignedInt8 bytes))) is
+                    Just value ->
+                        Ok { value = value, state = advance 1 state }
+
+                    Nothing ->
+                        errorHere "the bytes this string's escapes write are not UTF-8"
+
+            else
+                string chars quote (advance 1 state) (bytes ++ utf8 (Char.toCode c))
+
+
+escape : Array Char -> State -> Result Error { bytes : Array Int, state : State }
+escape chars state =
+    let
+        at offset =
+            Array.get (state.index + offset) chars
+
+        simple byte =
+            Ok { bytes = [ byte ], state = advance 1 state }
+
+        backslash =
+            { state | col = state.col - 1 }
+    in
+    when at 0 is
+        Just 'a' ->
+            simple 7
+
+        Just 'b' ->
+            simple 8
+
+        Just 'f' ->
+            simple 12
+
+        Just 'n' ->
+            simple 10
+
+        Just 'r' ->
+            simple 13
+
+        Just 't' ->
+            simple 9
+
+        Just 'v' ->
+            simple 11
+
+        Just '\\' ->
+            simple 92
+
+        Just '\'' ->
+            simple 39
+
+        Just '"' ->
+            simple 34
+
+        Just '?' ->
+            simple 63
+
+        Just c ->
+            if c == 'x' || c == 'X' then
+                let
+                    digits =
+                        min 2 (runLength chars (state.index + 1) Char.isHexDigit)
+                in
+                if digits == 0 then
+                    Err { row = backslash.row, col = backslash.col, message = "a `\\x` escape needs a hexadecimal digit after it" }
+
+                else
+                    Ok { bytes = [ digitsValue 16 (Array.slice (state.index + 1) (state.index + 1 + digits) chars) ], state = advance (1 + digits) state }
+
+            else if Char.isOctDigit c then
+                let
+                    digits =
+                        min 3 (runLength chars state.index Char.isOctDigit)
+
+                    value =
+                        digitsValue 8 (Array.slice state.index (state.index + digits) chars)
+                in
+                if value > 255 then
+                    Err { row = backslash.row, col = backslash.col, message = "an octal escape above `\\377` does not fit in a byte" }
+
+                else
+                    Ok { bytes = [ value ], state = advance digits state }
+
+            else if c == 'u' || c == 'U' then
+                let
+                    wanted =
+                        if c == 'u' then
+                            4
+
+                        else
+                            8
+
+                    digits =
+                        runLength chars (state.index + 1) Char.isHexDigit
+                in
+                if digits < wanted then
+                    Err { row = backslash.row, col = backslash.col, message = "a `\\" ++ String.fromChar c ++ "` escape needs exactly " ++ String.fromInt wanted ++ " hexadecimal digits" }
+
+                else
+                    let
+                        code =
+                            digitsValue 16 (Array.slice (state.index + 1) (state.index + 1 + wanted) chars)
+                    in
+                    if code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF) then
+                        Err { row = backslash.row, col = backslash.col, message = "this escape is not a Unicode scalar value" }
+
+                    else
+                        Ok { bytes = utf8 code, state = advance (1 + wanted) state }
+
+            else
+                Err { row = backslash.row, col = backslash.col, message = "`\\" ++ String.fromChar c ++ "` is not an escape a string can have" }
+
+        Nothing ->
+            Err { row = backslash.row, col = backslash.col, message = "this string is never closed: the file ends inside it" }
+
+
+digitsValue : Int -> Array Char -> Int
+digitsValue base digits =
+    Array.foldl (\c acc -> acc * base + digitValue c) 0 digits
+
+
+digitValue : Char -> Int
+digitValue c =
+    let
+        code =
+            Char.toCode c
+    in
+    if code >= 48 && code <= 57 then
+        code - 48
+
+    else if code >= 97 then
+        code - 87
+
+    else
+        code - 55
+
+
+utf8 : Int -> Array Int
+utf8 code =
+    if code < 0x80 then
+        [ code ]
+
+    else if code < 0x800 then
+        [ 0xC0 + code // 64, 0x80 + modBy 64 code ]
+
+    else if code < 0x10000 then
+        [ 0xE0 + code // 4096, 0x80 + modBy 64 (code // 64), 0x80 + modBy 64 code ]
+
+    else
+        [ 0xF0 + code // 262144, 0x80 + modBy 64 (code // 4096), 0x80 + modBy 64 (code // 64), 0x80 + modBy 64 code ]

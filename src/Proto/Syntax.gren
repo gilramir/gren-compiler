@@ -1,0 +1,204 @@
+module Proto.Syntax exposing
+    ( Position
+    , File
+    , Statement(..)
+    , Option
+    , OptionPart(..)
+    , Constant(..)
+    , Message(..)
+    , Element(..)
+    , Label(..)
+    , Field
+    , MapField
+    , Oneof
+    , OneofElement(..)
+    , Enum
+    , EnumElement(..)
+    , EnumValue
+    , Number
+    , Reserved
+    , ReservedItems(..)
+    , RangeEnd(..)
+    )
+
+{-| A `.proto` file as written, before any name is resolved or any rule checked
+(`m1b-protobuf.md` §Q17).
+
+Everything carries the position it was written at, because every refusal
+`Proto.Check` makes names a line and a column. Declarations stay in the order
+the file gives them, since a generated module follows it and an error about the
+second of two things should point at the second.
+
+The tree is wider than what `geng protobuf` accepts. A `service`, an `extend`,
+a `required` field and a group are all parsed, so that the file's shape is
+known, and then refused with a reason by `Proto.Check` rather than as a syntax
+error.
+
+-}
+
+
+{-| A 1-based line and a 1-based column, counted in codepoints. -}
+type alias Position =
+    { row : Int
+    , col : Int
+    }
+
+
+type alias File =
+    { statements : Array Statement
+    }
+
+
+type Statement
+    = Syntax { at : Position, keyword : String, value : String }
+    | Import { at : Position, modifier : Maybe String, path : String }
+    | Package { at : Position, name : String }
+    | FileOption Option
+    | MessageStatement Message
+    | EnumStatement Enum
+    | Service { at : Position, name : String }
+    | Extend { at : Position, extendee : String }
+
+
+{-| `option java_package = "x";`, or one entry of a field's `[...]`. -}
+type alias Option =
+    { at : Position
+    , name : Array OptionPart
+    , value : Constant
+    }
+
+
+{-| One dotted part of an option's name. `(my.ext)` is a custom option, which
+only an import can define.
+-}
+type OptionPart
+    = Simple String
+    | Extension String
+
+
+{-| An option's value. An integer or a float keeps its text as written, since
+option values are checked for their kind and not used.
+-}
+type Constant
+    = Identifier String
+    | Integer { negative : Bool, text : String }
+    | Floating { negative : Bool, text : String }
+    | Text String
+    | Aggregate
+
+
+type Message
+    = Message
+        { at : Position
+        , name : String
+        , elements : Array Element
+        }
+
+
+type Element
+    = FieldElement Field
+    | MapElement MapField
+    | OneofElement Oneof
+    | NestedMessage Message
+    | NestedEnum Enum
+    | ReservedElement Reserved
+    | OptionElement Option
+    | Extensions Position
+    | NestedExtend Position
+    | Group { at : Position, name : String }
+
+
+type Label
+    = NoLabel
+    | Optional
+    | Repeated
+    | Required
+
+
+type alias Field =
+    { at : Position
+    , label : Label
+    , labelAt : Position
+    , typeName : String
+    , typeAt : Position
+    , name : String
+    , nameAt : Position
+    , number : Number
+    , options : Array Option
+    }
+
+
+type alias MapField =
+    { at : Position
+    , keyType : String
+    , keyAt : Position
+    , valueType : String
+    , valueAt : Position
+    , name : String
+    , nameAt : Position
+    , number : Number
+    , options : Array Option
+    }
+
+
+type alias Oneof =
+    { at : Position
+    , name : String
+    , elements : Array OneofElement
+    }
+
+
+type OneofElement
+    = OneofField Field
+    | OneofMap MapField
+    | OneofOption Option
+    | OneofGroup { at : Position, name : String }
+
+
+type alias Enum =
+    { at : Position
+    , name : String
+    , elements : Array EnumElement
+    }
+
+
+type EnumElement
+    = ValueElement EnumValue
+    | EnumReserved Reserved
+    | EnumOption Option
+
+
+type alias EnumValue =
+    { at : Position
+    , name : String
+    , number : Number
+    , options : Array Option
+    }
+
+
+{-| An integer as written, and its value if it is one an `Int` holds. A field
+number past 2^31 - 1 is refused by `Proto.Check` with the text it was written
+as, which is why the text is kept.
+-}
+type alias Number =
+    { at : Position
+    , text : String
+    , value : Maybe Int
+    }
+
+
+type alias Reserved =
+    { at : Position
+    , items : ReservedItems
+    }
+
+
+type ReservedItems
+    = Ranges (Array { from : Number, to : RangeEnd })
+    | Names (Array { at : Position, name : String })
+
+
+type RangeEnd
+    = Single
+    | To Number
+    | ToMax

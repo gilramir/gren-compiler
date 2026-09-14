@@ -2,6 +2,7 @@ module Terminal.Parser exposing
     ( Command (..)
     , MakeFlags
     , FormatFlags
+    , ProtobufFlags
     , DiffArgs (..)
     , parser
     )
@@ -33,6 +34,7 @@ type Command
     | Paths Paths.Options
     | Run RunOptions
     | Format FormatFlags
+    | Protobuf ProtobufFlags
 
 
 type alias InitFlags =
@@ -58,6 +60,12 @@ type alias MakeFlags =
 type alias FormatFlags =
     { paths : Array Path
     , check : Bool
+    }
+
+
+type alias ProtobufFlags =
+    { paths : Array Path
+    , describe : Bool
     }
 
 
@@ -248,6 +256,42 @@ parser =
                         ]
                 , builder =
                     \args flags -> Format { paths = args, check = flags.check }
+                }
+            |> Cli.Parser.withCommand
+                { word = "protobuf"
+                , arguments =
+                    Cli.Parser.zeroOrMoreArgs Cli.Parser.pathParser
+                , flags =
+                    Cli.Parser.initFlags
+                        (\describe ->
+                            { describe = describe
+                            }
+                        )
+                        |> Cli.Parser.toggle "describe" "Print what each file declares, with every type name resolved, one declaration a line."
+                , commonDescription = Nothing
+                , summary =
+                    "Read proto3 files."
+                , example =
+                    PP.verticalBlock
+                        [ PP.words
+                            """
+                            Reads each .proto file and refuses what proto3 refuses, and what this
+                            compiler does not read yet (proto2, editions, imports, services), with the
+                            line and column of each. Generating Geng modules from them is not built
+                            yet.
+                            """
+                        , PP.empty
+                        , PP.words "geng protobuf --describe schema.proto"
+                            |> PP.indent
+                            |> PP.color PP.Green
+                        , PP.empty
+                        , PP.words
+                            """
+                            This prints every message, enum and field the file declares.
+                            """
+                        ]
+                , builder =
+                    \args flags -> Protobuf { paths = args, describe = flags.describe }
                 }
             |> Cli.Parser.withCommand
                 { word = "make"

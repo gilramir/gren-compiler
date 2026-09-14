@@ -1,0 +1,286 @@
+module Proto.Schema exposing
+    ( Schema
+    , Message(..)
+    , Field
+    , Label(..)
+    , FieldType(..)
+    , Scalar(..)
+    , Enum
+    , scalarFromName
+    , scalarName
+    , describe
+    )
+
+{-| A `.proto` file after `Proto.Check`: every rule held, every type name
+resolved to the full name of what it names (`m1b-protobuf.md` §Q17). This is
+what step 5's generator reads, and so it holds only what generation needs.
+
+`describe` writes it out one declaration a line. It is what
+`geng protobuf --describe` prints and what `harness/proto.py`'s accepted files
+are compared against.
+
+-}
+
+
+type alias Schema =
+    { package : String
+    , messages : Array Message
+    , enums : Array Enum
+    }
+
+
+type Message
+    = Message
+        { name : String
+        , fullName : String
+        , fields : Array Field
+        , oneofs : Array String
+        , messages : Array Message
+        , enums : Array Enum
+        }
+
+
+{-| A field. `oneof` is the index into its message's `oneofs` when the field is
+a member of one.
+-}
+type alias Field =
+    { name : String
+    , number : Int
+    , label : Label
+    , fieldType : FieldType
+    , oneof : Maybe Int
+    }
+
+
+{-| `Singular` is implicit presence, and a `oneof` member is `Singular` with
+its `oneof` set.
+-}
+type Label
+    = Singular
+    | Optional
+    | Repeated
+
+
+type FieldType
+    = ScalarType Scalar
+    | MessageType String
+    | EnumType String
+    | MapType { key : Scalar, value : FieldType }
+
+
+type Scalar
+    = DoubleType
+    | FloatType
+    | Int32Type
+    | Int64Type
+    | UInt32Type
+    | UInt64Type
+    | SInt32Type
+    | SInt64Type
+    | Fixed32Type
+    | Fixed64Type
+    | SFixed32Type
+    | SFixed64Type
+    | BoolType
+    | StringType
+    | BytesType
+
+
+type alias Enum =
+    { name : String
+    , fullName : String
+    , values : Array { name : String, number : Int }
+    }
+
+
+scalarFromName : String -> Maybe Scalar
+scalarFromName name =
+    when name is
+        "double" ->
+            Just DoubleType
+
+        "float" ->
+            Just FloatType
+
+        "int32" ->
+            Just Int32Type
+
+        "int64" ->
+            Just Int64Type
+
+        "uint32" ->
+            Just UInt32Type
+
+        "uint64" ->
+            Just UInt64Type
+
+        "sint32" ->
+            Just SInt32Type
+
+        "sint64" ->
+            Just SInt64Type
+
+        "fixed32" ->
+            Just Fixed32Type
+
+        "fixed64" ->
+            Just Fixed64Type
+
+        "sfixed32" ->
+            Just SFixed32Type
+
+        "sfixed64" ->
+            Just SFixed64Type
+
+        "bool" ->
+            Just BoolType
+
+        "string" ->
+            Just StringType
+
+        "bytes" ->
+            Just BytesType
+
+        _ ->
+            Nothing
+
+
+scalarName : Scalar -> String
+scalarName scalar =
+    when scalar is
+        DoubleType ->
+            "double"
+
+        FloatType ->
+            "float"
+
+        Int32Type ->
+            "int32"
+
+        Int64Type ->
+            "int64"
+
+        UInt32Type ->
+            "uint32"
+
+        UInt64Type ->
+            "uint64"
+
+        SInt32Type ->
+            "sint32"
+
+        SInt64Type ->
+            "sint64"
+
+        Fixed32Type ->
+            "fixed32"
+
+        Fixed64Type ->
+            "fixed64"
+
+        SFixed32Type ->
+            "sfixed32"
+
+        SFixed64Type ->
+            "sfixed64"
+
+        BoolType ->
+            "bool"
+
+        StringType ->
+            "string"
+
+        BytesType ->
+            "bytes"
+
+
+{-| One line per declaration, nested by two spaces, in the order the file
+declares them: a message's fields, then its nested enums, then its nested
+messages.
+
+    package demo
+    enum demo.Color
+      value 0 COLOR_UNSPECIFIED
+    message demo.Shape
+      oneof 0 body
+      field 1 name string
+      field 6 child message demo.Shape oneof 0
+      field 8 tags map string enum demo.Color
+
+-}
+describe : Schema -> String
+describe schema =
+    let
+        header =
+            if schema.package == "" then
+                []
+
+            else
+                [ "package " ++ schema.package ]
+    in
+    (header
+        ++ Array.mapAndFlatten (describeEnum "") schema.enums
+        ++ Array.mapAndFlatten (describeMessage "") schema.messages
+    )
+        |> Array.map (\line -> line ++ "\n")
+        |> String.join ""
+
+
+describeEnum : String -> Enum -> Array String
+describeEnum indent e =
+    [ indent ++ "enum " ++ e.fullName ]
+        ++ Array.map (\v -> indent ++ "  value " ++ String.fromInt v.number ++ " " ++ v.name) e.values
+
+
+describeMessage : String -> Message -> Array String
+describeMessage indent (Message m) =
+    let
+        inner =
+            indent ++ "  "
+    in
+    [ indent ++ "message " ++ m.fullName ]
+        ++ Array.indexedMap (\i name -> inner ++ "oneof " ++ String.fromInt i ++ " " ++ name) m.oneofs
+        ++ Array.map (describeField inner) m.fields
+        ++ Array.mapAndFlatten (describeEnum inner) m.enums
+        ++ Array.mapAndFlatten (describeMessage inner) m.messages
+
+
+describeField : String -> Field -> String
+describeField indent f =
+    let
+        label =
+            when f.label is
+                Singular ->
+                    ""
+
+                Optional ->
+                    " optional"
+
+                Repeated ->
+                    " repeated"
+
+        member =
+            when f.oneof is
+                Just i ->
+                    " oneof " ++ String.fromInt i
+
+                Nothing ->
+                    ""
+    in
+    indent ++ "field " ++ String.fromInt f.number ++ " " ++ f.name ++ label ++ " " ++ describeType f.fieldType ++ member
+
+
+describeType : FieldType -> String
+describeType fieldType =
+    when fieldType is
+        ScalarType s ->
+            scalarName s
+
+        MessageType name ->
+            "message " ++ name
+
+        EnumType name ->
+            "enum " ++ name
+
+        MapType m ->
+            "map " ++ scalarName m.key ++ " " ++ describeType m.value
