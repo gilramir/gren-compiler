@@ -64,10 +64,25 @@ spec = do
       typeOf "i64_add" `shouldBe` Just (fn [tInt64, tInt64] tInt64)
 
     it "a group whose Gren-facing type is undecided has no entry" $
-      -- `str_cmp` is a real primitive; what it returns is a design question
-      -- C13's table does not answer, and an answer invented here would be
+      -- `bytes_cmp` is a real primitive; what it returns is a design question
+      -- its group has not answered yet, and an answer invented here would be
       -- speculation compiled into the compiler and checked by nothing.
-      answer "str_cmp" `shouldBe` NoTypeYet
+      answer "bytes_cmp" `shouldBe` NoTypeYet
+
+    it "`str_cmp` answers an Int, and Geng makes the Order (D207)" $
+      typeOf "str_cmp" `shouldBe` Just (fn [tString, tString] tInt)
+
+    it "a string offset is an Int in the table, and core wraps it (D206)" $
+      typeOf "str_find" `shouldBe` Just (fn [tString, tString, tInt] tInt)
+
+    it "a fold is the first polymorphic entry" $
+      answer "str_foldl" `shouldBe` Found
+
+    it "a retired string primitive has no type, so core cannot name it" $
+      (answer "str_index_of", answer "str_to_codepoints") `shouldBe` (NoTypeYet, NoTypeYet)
+
+    it "`f64_from_decimal` reads a String" $
+      typeOf "f64_from_decimal" `shouldBe` Just (fn [tString] tFloat)
 
     it "so does the transient group, whose type does not exist at all" $
       answer "tr_new" `shouldBe` NoTypeYet
@@ -132,3 +147,6 @@ tBool = Can.TType ModuleName.basics "Bool" []
 
 tChar :: Can.Type
 tChar = Can.TType ModuleName.char "Char" []
+
+tString :: Can.Type
+tString = Can.TType ModuleName.string "String" []

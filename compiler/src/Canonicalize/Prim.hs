@@ -17,7 +17,7 @@ module Canonicalize.Prim
 where
 
 import AST.Canonical qualified as Can
-import Core.Prim (ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..))
+import Core.Prim (ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..))
 import Core.Prim qualified as Prim
 import Data.Map qualified as Map
 import Data.Name qualified as Name
@@ -35,9 +35,9 @@ data Lookup
 
 -- | The name @core@ wrote, answered against both tables at once.
 --
--- The annotation has no free variables because no primitive with an entry here
--- is polymorphic; the groups that would be ('Prim.ArrOp', 'Prim.StrOp') are the
--- ones with no entry.
+-- The annotation's free variables are the type's own: the folds are the first
+-- polymorphic entries (@str_foldl@'s accumulator), and none of them is
+-- constrained, since a primitive never is (C13).
 lookup :: Name.Name -> Lookup
 lookup name =
   case Prim.primFromName (Text.pack (Name.toChars name)) of
@@ -45,7 +45,15 @@ lookup name =
     Just op ->
       case primType op of
         Nothing -> NoTypeYet
-        Just tipe -> Found op (Can.Forall Map.empty tipe)
+        Just tipe -> Found op (Can.Forall (Map.fromList [(v, []) | v <- freeVars tipe]) tipe)
+
+freeVars :: Can.Type -> [Name.Name]
+freeVars tipe =
+  case tipe of
+    Can.TVar v -> [v]
+    Can.TLambda a b -> freeVars a ++ freeVars b
+    Can.TType _ _ args -> concatMap freeVars args
+    _ -> []
 
 -- | The type @core@ must declare a primitive with, or 'Nothing' when the table
 -- has no entry for it yet.
@@ -53,13 +61,13 @@ lookup name =
 -- __Why the table has holes.__ Every entry here is mechanical: an integer
 -- primitive's type is read off its width and its shape, a conversion's off the
 -- two widths in its name. Nothing is a judgement call, so nothing here is a
--- guess. The @str_@, @bytes_@, @arr_@, @tr_@, @bt_@ and @task_@ groups are not
--- like that — C13's table says what @str_cmp@ /does/ and not what it returns,
+-- guess. The @bytes_@, @arr_@, @tr_@, @bt_@ and @task_@ groups are not
+-- like that — C13's table said what @str_cmp@ /does/ and not what it returns,
 -- and @Transient@ and @Source@ are types @core@ does not have yet. An entry
 -- invented for one of those would be speculation compiled into the compiler
 -- and checked by nothing, so those primitives have no entry and a @\@prim@
 -- naming one is rejected as not available yet. Each entry lands with the Geng
--- type it names.
+-- type it names, and @str_@'s landed with D206–D211 (@m1b-str-prim.md@ §Z3).
 --
 -- The four widths\' /types/ were named here before they existed, which cost
 -- nothing while a declaration could not mention them. They exist as of
@@ -72,6 +80,7 @@ primType op =
     IntOp t p -> Just (intType (intWidth t) p)
     FloatOp t p -> Just (floatType (floatWidth t) p)
     ConvOp p -> Just (convType p)
+    StrOp p -> strType p
     _ -> Nothing
 
 -- INTEGERS
@@ -149,6 +158,49 @@ convType p =
     F32FromBits -> Can.TLambda tUInt32 tFloat32
     CharToI32 -> Can.TLambda tChar tInt
     I32ToChar -> Can.TLambda tInt tChar
+    F64FromDecimal -> Can.TLambda tString tFloat
+
+-- STRINGS
+
+-- | D206's table. An offset is an @Int@ here: a primitive's JavaScript is an
+-- expression and cannot build @core@'s @String.Offset@, which is a box in a
+-- development build (@m1b-extern.md@ §H16.1), so @String.gren@ wraps what these
+-- answer. The two retired primitives have no type, so no @core@ can name them.
+strType :: StrPrim -> Maybe Can.Type
+strType p =
+  case p of
+    SLength -> Just (fn [tString] tInt)
+    SAppend -> Just (fn [tString, tString] tString)
+    SSlice -> Just (fn [tString, tInt, tInt] tString)
+    SEq -> Just (fn [tString, tString] tBool)
+    SCmp -> Just (fn [tString, tString] tInt)
+    SFoldl -> Just fold
+    SFoldr -> Just fold
+    SToCodepoints -> Nothing
+    SFromCodepoints -> Just (fn [Can.TType ModuleName.array "Array" [tChar]] tString)
+    SIndexOf -> Nothing
+    SToUtf8 -> Just (fn [tString] tBytes)
+    SFromUtf8 -> Just (fn [tBytes] tString)
+    SUtf8Valid -> Just (fn [tBytes] tBool)
+    SEnd -> Just (fn [tString] tInt)
+    SFind -> Just (fn [tString, tString, tInt] tInt)
+    SFindLast -> Just (fn [tString, tString, tInt] tInt)
+    SOffsetToIndex -> Just (fn [tString, tInt] tInt)
+    SNext -> Just (fn [tString, tInt] tInt)
+    SPrev -> Just (fn [tString, tInt] tInt)
+    SCharAt -> Just (fn [tString, tInt] tChar)
+  where
+    b = Can.TVar "b"
+    fold = fn [tString, b, fn [tChar, b] b] b
+
+fn :: [Can.Type] -> Can.Type -> Can.Type
+fn args result = foldr Can.TLambda result args
+
+tString :: Can.Type
+tString = Can.TType ModuleName.string "String" []
+
+tBytes :: Can.Type
+tBytes = Can.TType ModuleName.bytes "Bytes" []
 
 -- SHAPES
 

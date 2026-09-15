@@ -158,31 +158,65 @@ data ConvPrim
     -- since surrogates are not valid @Char@ values (C8).
     CharToI32
   | I32ToChar
+  | -- | A decimal string to the nearest @Float@, correctly rounded (D210).
+    -- Precondition: the string is one R5's grammar admits, checked in Geng by
+    -- @String.toFloat@. __Appended__ to 'allPrims' after every other group, so
+    -- its code follows 'DebugLog''s and nothing before it moved.
+    F64FromDecimal
   deriving (Eq, Ord, Show, Enum, Bounded)
 
--- | @String@ is opaque with a codepoint API (D8), so lengths and indices here
--- are codepoint lengths and indices, and @cmp@ is codepoint order.
+-- | @String@ is opaque with a codepoint API (D8). @length@ counts codepoints
+-- and @cmp@ is codepoint order, but __a position inside a string is an
+-- offset__, not a codepoint index (D206, @docs/m1b-str-prim.md@ §Z2, §Z3): a
+-- code unit offset on JavaScript and a byte offset on a UTF-8 backend, which
+-- only @core@ ever holds, and which becomes a codepoint index only through
+-- 'SOffsetToIndex'. A codepoint index made every search O(n) per call on both.
+--
+-- The constructors from 'SEnd' on were added by D206 and are __appended__ to
+-- 'allPrims' after 'DebugLog', so that no earlier wire code moved. Two of the
+-- originals are retired: 'SToCodepoints' and 'SIndexOf' keep their codes and
+-- have no type, so no @core@ can name them.
 data StrPrim
   = SLength
   | SAppend
-  | -- | Precondition: @0 <= i <= j <= length@.
+  | -- | Precondition: offsets on codepoint boundaries, @0 <= i <= j <= end@.
     SSlice
   | SEq
-  | SCmp
-  | -- | The only higher-order primitives, and what keeps every traversal O(n)
-    -- on a UTF-8 backend rather than O(n) per index.
+  | -- | -1, 0 or 1 (D207); Geng makes the @Order@.
+    SCmp
+  | -- | The only higher-order primitives: string, initial accumulator, step.
     SFoldl
   | SFoldr
-  | SToCodepoints
+  | -- | Retired by D206: @toArray@ is a fold into the transient (D163).
+    SToCodepoints
   | SFromCodepoints
-  | -- | Substring search from an index; @-1@ when absent, wrapped to @Maybe@ in
-    -- Geng.
+  | -- | Retired by D206, for 'SFind'.
     SIndexOf
   | -- | D8's one encoding leak.
     SToUtf8
   | -- | Precondition: 'SUtf8Valid'.
     SFromUtf8
   | SUtf8Valid
+  | -- | The offset past the last codepoint.
+    SEnd
+  | -- | The first offset at or after the given one where the needle occurs on
+    -- codepoint boundaries at both ends (D160), or -1.
+    SFind
+  | -- | The last such offset at or before the given one, or -1.
+    SFindLast
+  | -- | The number of codepoints before an offset. O(n) on both encodings,
+    -- which is why it is only paid where a public function answers an index.
+    SOffsetToIndex
+  | -- | The offset of the codepoint after the one at this offset.
+    -- Precondition: an offset before 'SEnd'.
+    SNext
+  | -- | The offset of the codepoint before the one at this offset. Added as
+    -- built: @popLast@ cannot find the last codepoint without it, since an
+    -- offset is a code unit on one backend and a byte on another.
+    -- Precondition: an offset after 0.
+    SPrev
+  | -- | The codepoint at an offset. Precondition: an offset before 'SEnd'.
+    SCharAt
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | Multi-byte and float accessors are Geng over 'BGetU8' and the @*_from_bits@
@@ -293,13 +327,17 @@ allPrims =
     p /= IShr || isSignedInt t
   ]
     ++ [FloatOp t p | t <- [minBound .. maxBound], p <- [minBound .. maxBound]]
-    ++ map ConvOp [minBound .. maxBound]
-    ++ map StrOp [minBound .. maxBound]
+    ++ map ConvOp [minBound .. I32ToChar]
+    ++ map StrOp [minBound .. SUtf8Valid]
     ++ map BytesOp [minBound .. maxBound]
     ++ map ArrOp [minBound .. maxBound]
     ++ map TransientOp [minBound .. maxBound]
     ++ map TaskOp [minBound .. maxBound]
     ++ [DebugLog]
+    -- Appended by D206 and D210 (m1b-str-prim.md §Z9). Everything above keeps
+    -- its code.
+    ++ map StrOp [SEnd .. maxBound]
+    ++ [ConvOp F64FromDecimal]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -392,6 +430,7 @@ convPrimName p =
     F32FromBits -> "f32_from_bits"
     CharToI32 -> "char_to_i32"
     I32ToChar -> "i32_to_char"
+    F64FromDecimal -> "f64_from_decimal"
 
 strPrimName :: StrPrim -> Text
 strPrimName p =
@@ -409,6 +448,13 @@ strPrimName p =
     SToUtf8 -> "to_utf8"
     SFromUtf8 -> "from_utf8"
     SUtf8Valid -> "utf8_valid"
+    SEnd -> "end"
+    SFind -> "find"
+    SFindLast -> "find_last"
+    SOffsetToIndex -> "offset_to_index"
+    SNext -> "next"
+    SPrev -> "prev"
+    SCharAt -> "char_at"
 
 bytesPrimName :: BytesPrim -> Text
 bytesPrimName p =
@@ -522,7 +568,15 @@ primArity op =
         SToUtf8 -> 1
         SFromUtf8 -> 1
         SUtf8Valid -> 1
+        SEnd -> 1
         SAppend -> 2
+        SOffsetToIndex -> 2
+        SNext -> 2
+        SPrev -> 2
+        SCharAt -> 2
+        -- string, needle, offset
+        SFind -> 3
+        SFindLast -> 3
         SEq -> 2
         SCmp -> 2
         -- string, from-index

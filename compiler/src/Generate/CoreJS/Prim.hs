@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
 {-# OPTIONS_GHC -Wall #-}
 
 -- | A primitive as JavaScript (@docs/core.md@ C13).
@@ -25,14 +26,17 @@
 module Generate.CoreJS.Prim
   ( prim,
     inlines,
+    helpers,
   )
 where
 
-import Core.Prim (ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..))
+import Core.Prim (ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..))
 import Core.Prim qualified as Prim
+import Data.ByteString.Builder qualified as B
 import Data.Name qualified as Name
 import Generate.JavaScript.Builder qualified as JS
 import Generate.JavaScript.Name qualified as JsName
+import Text.RawString.QQ (r)
 
 -- | Whether a saturated call to a binding whose body is this primitive may be
 -- replaced by the primitive itself.
@@ -62,6 +66,7 @@ prim op args =
     (IntOp U64 p, _) -> bigint Unsigned p args
     (FloatOp w p, _) -> float w p args
     (ConvOp p, [a]) -> conversion p a
+    (StrOp p, _) -> string p args
     _ ->
       error $
         "Generate.CoreJS.Prim: no JavaScript for "
@@ -321,6 +326,150 @@ conversion p a =
     -- may reach the primitive.
     CharToI32 -> a
     I32ToChar -> a
+    -- `+s` is correctly rounded, and the precondition (R5's grammar, checked
+    -- by `String.toFloat`) is what keeps JavaScript's wider number syntax --
+    -- hex, whitespace, `Infinity` -- from ever reaching it (D210). `Number` is `+`.
+    F64FromDecimal -> JS.Call (JS.Ref (JsName.fromLocalHumanReadable "Number")) [a]
+
+-- STRINGS
+
+-- | D206's primitives (@docs/m1b-str-prim.md@ §Z3). A @String@ is a JavaScript
+-- string and an offset is a code unit offset, so the searches and the slice
+-- are the host's own. What is not a single expression is a helper in
+-- 'helpers', which is emitted once in a program that reaches any of these.
+-- Each helper names each argument once, so 'inlines' holds for all of them.
+string :: StrPrim -> [JS.Expr] -> JS.Expr
+string p args =
+  case (p, args) of
+    (SAppend, [a, b]) -> JS.Infix JS.OpAdd a b
+    (SEq, [a, b]) -> JS.Infix JS.OpEq a b
+    (SSlice, [s, i, j]) -> method s "slice" [i, j]
+    (SEnd, [s]) -> JS.Access s (JsName.fromLocalHumanReadable "length")
+    (SCharAt, [s, o]) -> method s "codePointAt" [o]
+    (SLength, _) -> helper "_Str_length" args
+    (SCmp, _) -> helper "_Str_cmp" args
+    (SFoldl, _) -> helper "_Str_foldl" args
+    (SFoldr, _) -> helper "_Str_foldr" args
+    (SFromCodepoints, _) -> helper "_Str_fromCodepoints" args
+    (SToUtf8, _) -> helper "_Str_toUtf8" args
+    (SFromUtf8, _) -> helper "_Str_fromUtf8" args
+    (SUtf8Valid, _) -> helper "_Str_utf8Valid" args
+    (SFind, _) -> helper "_Str_find" args
+    (SFindLast, _) -> helper "_Str_findLast" args
+    (SOffsetToIndex, _) -> helper "_Str_offsetToIndex" args
+    (SNext, _) -> helper "_Str_next" args
+    (SPrev, _) -> helper "_Str_prev" args
+    _ -> arityError (StrOp p) args
+  where
+    method obj name as = JS.Call (JS.Access obj (JsName.fromLocalHumanReadable name)) as
+    helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
+
+-- | The @str_@ helpers, which 'Generate.CoreJS' emits once when a program
+-- reaches a string primitive.
+--
+-- __Why a lone surrogate needs no case.__ D209 keeps one out of every
+-- @String@, but these do not rely on it: a lone surrogate is one code unit
+-- and one codepoint, so 'SNext' steps over it, and 'SOffsetToIndex' counts
+-- only pairs, as §T15 already did.
+helpers :: B.Builder
+helpers =
+  [r|
+// A pair is the only thing that spends two code units on one codepoint
+// (docs/m1b-str-prim.md §Z3). V8 answers this regex without reading a string
+// whose every character is at or below U+00FF (m1b-str.md §T15.2).
+var _Str_pair = /[\uD800-\uDBFF][\uDC00-\uDFFF]/g;
+var _Str_surrogate = /[\uD800-\uDFFF]/;
+
+function _Str_pairsBefore(s, u) {
+  _Str_pair.lastIndex = 0;
+  var pairs = 0, m;
+  while ((m = _Str_pair.exec(s)) !== null && m.index + 2 <= u) pairs++;
+  return pairs;
+}
+function _Str_length(s) { return s.length - _Str_pairsBefore(s, s.length); }
+function _Str_offsetToIndex(s, u) { return u - _Str_pairsBefore(s, u); }
+
+// Codepoint order (D8, m1b-str.md §T13): `<` is code unit order, and the two
+// differ only where a surrogate is involved, so the regex guards the scan.
+function _Str_cmp(a, b) {
+  if (a === b) return 0;
+  if (!_Str_surrogate.test(a) && !_Str_surrogate.test(b)) return a < b ? -1 : 1;
+  var n = a.length < b.length ? a.length : b.length, i = 0;
+  while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+  if (i === n) return a.length < b.length ? -1 : 1;
+  return a.codePointAt(i) < b.codePointAt(i) ? -1 : 1;
+}
+
+function _Str_foldl(s, acc, f) {
+  for (var c of s) acc = A2(f, c.codePointAt(0), acc);
+  return acc;
+}
+function _Str_foldr(s, acc, f) {
+  var i = s.length;
+  while (i > 0) {
+    var u = s.charCodeAt(i - 1);
+    var cp = u >= 0xDC00 && u <= 0xDFFF && i > 1 && (s.charCodeAt(i - 2) & 0xFC00) === 0xD800
+      ? s.codePointAt(i - 2) : u;
+    i -= cp > 0xFFFF ? 2 : 1;
+    acc = A2(f, cp, acc);
+  }
+  return acc;
+}
+
+// Not `String.fromCodePoint(...cs)`: an argument list has a length limit.
+function _Str_fromCodepoints(cs) {
+  var out = "";
+  for (var i = 0; i < cs.length; i++) out += String.fromCodePoint(cs[i]);
+  return out;
+}
+
+function _Str_next(s, u) {
+  var c = s.charCodeAt(u);
+  return c >= 0xD800 && c <= 0xDBFF && u + 1 < s.length && (s.charCodeAt(u + 1) & 0xFC00) === 0xDC00 ? u + 2 : u + 1;
+}
+
+function _Str_prev(s, u) {
+  var c = s.charCodeAt(u - 1);
+  return c >= 0xDC00 && c <= 0xDFFF && u >= 2 && (s.charCodeAt(u - 2) & 0xFC00) === 0xD800 ? u - 2 : u - 1;
+}
+
+// D160: a match that splits a surrogate pair at either end is not a match.
+function _Str_splitsPair(s, u) {
+  if (u <= 0 || u >= s.length) return false;
+  var lead = s.charCodeAt(u - 1);
+  if (lead < 0xD800 || lead > 0xDBFF) return false;
+  var trail = s.charCodeAt(u);
+  return trail >= 0xDC00 && trail <= 0xDFFF;
+}
+function _Str_find(s, needle, from) {
+  var u = s.indexOf(needle, from);
+  while (u > -1 && (_Str_splitsPair(s, u) || _Str_splitsPair(s, u + needle.length))) u = s.indexOf(needle, u + 1);
+  return u;
+}
+function _Str_findLast(s, needle, from) {
+  var u = s.lastIndexOf(needle, from);
+  while (u > -1 && (_Str_splitsPair(s, u) || _Str_splitsPair(s, u + needle.length))) u = u === 0 ? -1 : s.lastIndexOf(needle, u - 1);
+  return u;
+}
+
+// Bytes is a DataView over its own slice of a buffer (D202).
+function _Str_toUtf8(s) {
+  var u8 = new TextEncoder().encode(s);
+  return new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+}
+function _Str_fromUtf8(b) {
+  // `ignoreBOM` keeps a leading U+FEFF (m1b-protobuf.md §Q14).
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(b);
+}
+function _Str_utf8Valid(b) {
+  try {
+    new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(b);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+|]
 
 -- PIECES
 

@@ -40,6 +40,7 @@ import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
 import Generate.CoreJS.Expression qualified as Expr
 import Generate.CoreJS.Extern qualified as Extern
+import Generate.CoreJS.Prim qualified as JsPrim
 import Generate.JavaScript.Builder qualified as JS
 import Generate.JavaScript.Functions qualified as Functions
 import Generate.JavaScript.Name qualified as JsName
@@ -70,7 +71,7 @@ generate :: Mode.Mode -> Program -> Map Name [K.Chunk] -> Map (Pkg.Name, Name) B
 generate mode program kernels exts =
   let env = envFor mode program
       started =
-        JS.addByteString (Extern.files exts (_progExterns program)) $
+        JS.addByteString (stringHelpers env <> Extern.files exts (_progExterns program)) $
           List.foldl'
             (flip JS.stmtToBuilder)
             (JS.emptyBuilder firstGeneratedLineNumber)
@@ -104,7 +105,7 @@ generateForRepl ansi localizer program kernels exts home name (Can.Forall _ tipe
   let mode = Mode.Dev
       env = envFor mode program
       started =
-        JS.addByteString (Extern.files exts (_progExterns program)) $
+        JS.addByteString (stringHelpers env <> Extern.files exts (_progExterns program)) $
           List.foldl'
             (flip JS.stmtToBuilder)
             (JS.emptyBuilder 0)
@@ -410,6 +411,19 @@ envFor mode program =
       Expr._home = ModuleName.basics,
       Expr._depth = 0
     }
+
+-- | D206's string helpers, when the program reaches a @str_@ primitive at all
+-- (@docs/m1b-str-prim.md@ §Z3). Every primitive is a binding's whole body in
+-- @core@, so 'Expr._prims' has one for each that is reachable.
+stringHelpers :: Expr.Env -> B.Builder
+stringHelpers env
+  | any isStr (Map.elems (Expr._prims env)) = JsPrim.helpers
+  | otherwise = mempty
+  where
+    isStr op =
+      case op of
+        Prim.StrOp _ -> True
+        _ -> False
 
 -- | The primitive a binding /is/, when its whole body is one applied to its own
 -- parameters in order.
