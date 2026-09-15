@@ -131,8 +131,14 @@ decode input
 -- @harness/wire.py@ said so. The version is outside the @Module@ message and
 -- so outside "Core.Wire.Decode", and a hand-written second reader is a place
 -- for a rule to be forgotten — which is the argument for having one.
+--
+-- __And it was forgotten once more__, the ten-byte limit this time
+-- (@m1b-protobuf.md@ §Q19.2 in geng-lang). @2 ^ shift@ is 0 in 'Word64' from bit
+-- 64 on, so an eleventh byte, or a tenth holding more than bit 63, added
+-- nothing and the version still read as 5: two more encodings of one header.
+-- The two checks are 'Core.Wire.Decode.varint'\'s, with its words.
 readVarint :: BS.ByteString -> Int -> Either Protobuf.Error (Word64, BS.ByteString, Int)
-readVarint = go 0 0
+readVarint input start = go 0 0 input start
   where
     go !shift !acc bs at =
       case BS.uncons bs of
@@ -140,8 +146,14 @@ readVarint = go 0 0
         Just (w, rest) ->
           let acc' = acc + (fromIntegral (w `mod` 0x80) * (2 ^ shift))
            in if w >= 0x80
-                then go (shift + 7 :: Int) acc' rest (at + 1)
+                then
+                  if shift >= (63 :: Int)
+                    then Left (Protobuf.Error start [] "the schema version's varint is longer than ten bytes")
+                    else go (shift + 7) acc' rest (at + 1)
                 else
-                  if shift > (0 :: Int) && w == 0
+                  if shift > 0 && w == 0
                     then Left (Protobuf.Error at [] "the schema version's varint is not minimally encoded")
-                    else Right (acc', rest, at + 1)
+                    else
+                      if shift == 63 && w > 1
+                        then Left (Protobuf.Error start [] "the schema version's varint overflows 64 bits")
+                        else Right (acc', rest, at + 1)
