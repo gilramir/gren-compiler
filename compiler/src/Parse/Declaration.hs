@@ -208,11 +208,39 @@ externDecl maybeDocs first =
         -- constrained, since there is no witness a host function could be
         -- handed.
         ((tipe, commentsAfterTipe), end) <- specialize E.DeclDefType Type.expression
-        let tipeComments = SC.ValueTypeComments commentsBeforeColon commentsAfterColon []
-        let annotation = Src.Annotation Nothing tipe tipeComments
-        let body = A.At (A.Region start nameEnd) (Src.Extern impls)
-        let value = Src.Value (A.at start nameEnd name) [] body (Just annotation) (SC.ValueComments [] [] [])
-        return ((Value maybeDocs (A.at start end value), commentsAfterTipe), end)
+        -- A Geng body is optional (D222): a definition of the same name on the
+        -- next fresh line. `lookAhead` reads the name and throws the reading
+        -- away, so a following declaration with another name is left whole.
+        hasBody <- oneOfWithFallback [lookAhead (definitionAhead name) >> return True] False
+        if hasBody
+          then do
+            defName <- chompMatchingName name
+            commentsAfterMatchingName <- Space.chompAndCheckIndent E.DeclDefSpace E.DeclDefIndentEquals
+            let tipeComments = SC.ValueTypeComments commentsBeforeColon commentsAfterColon commentsAfterTipe
+            let annotation = Src.Annotation Nothing tipe tipeComments
+            ((decl, commentsAfterDef), defEnd) <- chompDefArgsAndBody maybeDocs start defName (Just annotation) [] commentsAfterMatchingName
+            case decl of
+              Value docs (A.At region (Src.Value _ args geng _ comments)) ->
+                let body = A.At (A.Region start nameEnd) (Src.Extern impls (Just geng))
+                    value = Src.Value (A.at start nameEnd name) args body (Just annotation) comments
+                 in return ((Value docs (A.At region value), commentsAfterDef), defEnd)
+              _ ->
+                error "Parse.Declaration.externDecl: a definition parsed as something else"
+          else do
+            let tipeComments = SC.ValueTypeComments commentsBeforeColon commentsAfterColon []
+            let annotation = Src.Annotation Nothing tipe tipeComments
+            let body = A.At (A.Region start nameEnd) (Src.Extern impls Nothing)
+            let value = Src.Value (A.at start nameEnd name) [] body (Just annotation) (SC.ValueComments [] [] [])
+            return ((Value maybeDocs (A.at start end value), commentsAfterTipe), end)
+
+-- | Whether the next thing is the start of a definition of @name@: on a fresh
+-- line, the same name. Only ever run under 'lookAhead'.
+definitionAhead :: Name.Name -> Parser E.DeclDef ()
+definitionAhead name =
+  do
+    Space.checkFreshLine E.DeclDefNameRepeat
+    _ <- chompMatchingName name
+    return ()
 
 -- | Further attribute rows under an @\@extern@, which may only be externs.
 chompMoreExterns :: [Src.ExternImpl] -> Parser E.Decl [Src.ExternImpl]

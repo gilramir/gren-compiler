@@ -76,9 +76,17 @@ spec = do
 
     it "refuses an extern whose languages are out of order, or whose names do not fit its language" $
       do
-        refused ((moduleWith []) {_moduleExterns = [Extern (binder "e") [ExternImpl ExternC [utf8 "geng_e"], ExternImpl ExternJs [utf8 "m", utf8 "e"]] False]})
-        refused ((moduleWith []) {_moduleExterns = [Extern (binder "e") [ExternImpl ExternC [utf8 "m", utf8 "e"]] False]})
-        refused ((moduleWith []) {_moduleExterns = [Extern (binder "e") [] False]})
+        refused ((moduleWith []) {_moduleExterns = [Extern (binder "e") [ExternImpl ExternC [utf8 "geng_e"], ExternImpl ExternJs [utf8 "m", utf8 "e"]] False False]})
+        refused ((moduleWith []) {_moduleExterns = [Extern (binder "e") [ExternImpl ExternC [utf8 "m", utf8 "e"]] False False]})
+        refused ((moduleWith []) {_moduleExterns = [Extern (binder "e") [] False False]})
+
+    it "carries an extern with a Geng body beside its binding (D222)" $
+      roundTrip ((moduleWith [bindOf (lit (LInt 1))]) {_moduleExterns = [Extern (binder "b") [ExternImpl ExternJs [utf8 "m", utf8 "b"]] True True]})
+
+    it "refuses an extern with a body and no binding, or a binding and no body" $
+      do
+        refused ((moduleWith []) {_moduleExterns = [Extern (binder "b") [ExternImpl ExternJs [utf8 "m", utf8 "b"]] True True]})
+        refused ((moduleWith [bindOf (lit (LInt 1))]) {_moduleExterns = [Extern (binder "b") [ExternImpl ExternJs [utf8 "m", utf8 "b"]] True False]})
 
     it "carries each kind of main" $
       mapM_ (\m -> roundTrip ((moduleWith []) {_moduleMain = Just m})) everyMain
@@ -392,8 +400,8 @@ everyCrash = [Todo (utf8 "not done"), Todo (utf8 ""), IncompleteMatch, StackExha
 -- need the string table.
 externs :: [Extern]
 externs =
-  [ Extern (binder "now") [ExternImpl ExternJs [utf8 "geng_time", utf8 "now"], ExternImpl ExternErlang [utf8 "geng_time", utf8 "now"], ExternImpl ExternC [utf8 "geng_time_now"]] False,
-    Extern (binder "sha256") [ExternImpl ExternJs [utf8 "geng_hash", utf8 "sha256"]] True
+  [ Extern (binder "now") [ExternImpl ExternJs [utf8 "geng_time", utf8 "now"], ExternImpl ExternErlang [utf8 "geng_time", utf8 "now"], ExternImpl ExternC [utf8 "geng_time_now"]] False False,
+    Extern (binder "sha256") [ExternImpl ExternJs [utf8 "geng_hash", utf8 "sha256"]] True False
   ]
 
 -- | A module the encoder writes and the reader must refuse: the rules the

@@ -6,6 +6,7 @@ module AST.Canonical
     Expr_ (..),
     ExternImpl (..),
     ExternLanguage (..),
+    ExternBody (..),
     NodeId (..),
     unnumbered,
     at,
@@ -340,8 +341,17 @@ data Module = Module
     -- 'Gren.Interface', which is where the closure can be assembled (D122).
     _instances :: Map.Map InstanceKey Instance,
     _binops :: Map.Map Name Binop,
-    _effects :: Effects
+    _effects :: Effects,
+    -- | The extern declarations with a Geng body (D222, @m1b-json.md@ §O17),
+    -- by name. Each one's definition is an ordinary 'TypedDef' in '_decls',
+    -- and "Core.Lower.Module" makes it an extern entry beside its binding.
+    _externBodies :: Map.Map Name ExternBody
   }
+  deriving (Show)
+
+-- | An extern's rows, when the declaration has a Geng body: its
+-- implementations sorted by language, and whether it is pure.
+data ExternBody = ExternBody [ExternImpl] Bool
   deriving (Show)
 
 data Alias = Alias [Name] Type

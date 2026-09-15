@@ -104,7 +104,9 @@ lower platform annotations types elaboration modul =
           Core._modulePorts = ports (Can._effects modul),
           Core._moduleMain = mainFrom (mainOf platform annotations),
           Core._moduleExterns =
-            List.sortOn (Core._binderName . Core._externBinder) (map (externOf env) externDefs)
+            List.sortOn
+              (Core._binderName . Core._externBinder)
+              (map (externOf env) externDefs ++ concatMap (externWithBody env annotations (Can._externBodies modul)) valueDefs)
         }
 
 -- EXTERNS
@@ -126,10 +128,30 @@ externOf env d =
       Core.Extern
         { Core._externBinder = Core.Binder name (lowerType result) (Expr.span env region),
           Core._externImpls = map externImpl impls,
-          Core._externPure = isPure
+          Core._externPure = isPure,
+          Core._externHasBody = False
         }
     _ ->
       error "Core.Lower.Module.externOf: not an extern definition"
+
+-- | The entry for an extern with a Geng body (D222), whose definition is
+-- lowered as any other and stays among the module's bindings under the same
+-- name. The binder's type is the declaration's.
+externWithBody :: Expr.Env -> Map.Map Name Can.Annotation -> Map.Map Name Can.ExternBody -> Can.Def -> [Core.Extern]
+externWithBody env annotations bodies d =
+  case d of
+    Can.TypedDef (A.At region name) _ _ _ _
+      | Just (Can.ExternBody impls isPure) <- Map.lookup name bodies,
+        Just (Can.Forall _ tipe) <- Map.lookup name annotations ->
+          [ Core.Extern
+              { Core._externBinder = Core.Binder name (lowerType tipe) (Expr.span env region),
+                Core._externImpls = map externImpl impls,
+                Core._externPure = isPure,
+                Core._externHasBody = True
+              }
+          ]
+    _ ->
+      []
 
 externImpl :: Can.ExternImpl -> Core.ExternImpl
 externImpl (Can.ExternImpl language names) =

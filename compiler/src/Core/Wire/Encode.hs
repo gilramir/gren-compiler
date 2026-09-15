@@ -720,12 +720,13 @@ managerEnc (Manager kind entries init_ onEffects onSelfMsg cmdMap subMap) =
     <> optQual 7 subMap
 
 -- | D196. Every field implicit or packed, so a JavaScript extern (code 0) that
--- is not pure writes only its binder and its names.
+-- is not pure and has no body writes only its binder and its names.
 externEnc :: Extern -> Enc
-externEnc (Extern binder impls isPure) =
+externEnc (Extern binder impls isPure hasBody) =
   msg 1 (binderEnc binder)
     <> rep 2 externImplEnc impls
     <> bool_ 3 isPure
+    <> bool_ 4 hasBody
 
 externImplEnc :: ExternImpl -> Enc
 externImplEnc (ExternImpl language names) =

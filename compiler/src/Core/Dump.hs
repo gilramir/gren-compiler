@@ -29,6 +29,7 @@ module Core.Dump
     linkEveryExport,
     corePasses,
     specializeStrict,
+    externBodies,
     spikeFile,
     spikeRoot,
   )
@@ -114,6 +115,18 @@ specializeStrict :: Bool
 specializeStrict =
   unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_SPECIALIZE_STRICT")
 {-# NOINLINE specializeStrict #-}
+
+-- | @GENG_EXTERN_BODIES=1@: every extern with a Geng body is compiled as its
+-- body, even where the backend has an implementation for it (D225,
+-- @m1b-json.md@ §O17).
+--
+-- Off by default, since the implementation is why the extern has a row. On for
+-- @harness/run.py@'s @geng-hs-bodies@ target, which is how the corpus holds an
+-- implementation and its body to the same answers.
+externBodies :: Bool
+externBodies =
+  unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_EXTERN_BODIES")
+{-# NOINLINE externBodies #-}
 
 -- | @GENG_CORE_PASSES@: which Core→Core passes run before the backend reads
 -- the program.

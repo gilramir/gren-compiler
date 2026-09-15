@@ -45,6 +45,7 @@ import Data.ByteString.Unsafe qualified as BS
 import Data.Coerce qualified as Coerce
 import Data.Int (Int32, Int64)
 import Data.Map qualified as Map
+import Data.Set qualified as Set
 import Data.Name qualified as Name
 import Data.Utf8 qualified as Utf8
 import Data.Word (Word32, Word64, Word8)
@@ -942,7 +943,16 @@ moduleBodyP =
     manager <- optMsg "manager" 12 managerP
     ports <- rep "ports" 13 portP
     main_ <- optMsg "main" 14 mainP
+    here <- offset
     externs <- rep "externs" 15 externP
+    let bound = Set.fromList (map (_binderName . _bindBinder) defs)
+    case [e | e <- externs, _externHasBody e /= Set.member (_binderName (_externBinder e)) bound] of
+      [] -> pure ()
+      e : _
+        | _externHasBody e ->
+            failAt here ("the extern " ++ Name.toChars (_binderName (_externBinder e)) ++ " has a body and no binding of its name")
+        | otherwise ->
+            failAt here ("the extern " ++ Name.toChars (_binderName (_externBinder e)) ++ " has no body and a binding of its name")
     pure
       Module
         { _moduleName = name,
@@ -962,21 +972,23 @@ moduleBodyP =
 -- | D196, and three rules the schema cannot state: an extern has at least one
 -- implementation, its implementations are in strictly ascending language order
 -- (so one per language, and one encoding of the set), and each has the names
--- D77's table gives its language.
+-- D77's table gives its language. A fourth is the module's, since it needs the
+-- bindings: an extern has a body exactly when a binding has its name (D222).
 externP :: P Extern
 externP =
-  message "Extern" 3 $
+  message "Extern" 4 $
     do
       here <- offset
       binder <- msg "binder" 1 binderP
       impls <- rep "impls" 2 externImplP
       isPure <- bool_ "pure" 3
+      hasBody <- bool_ "has_body" 4
       let languages = map _implLanguage impls
       when (null impls) $
         failAt here "an extern has no implementation"
       unless (and (zipWith (<) languages (drop 1 languages))) $
         failAt here "an extern's implementations are not in strictly ascending language order"
-      pure (Extern binder impls isPure)
+      pure (Extern binder impls isPure hasBody)
 
 externImplP :: P ExternImpl
 externImplP =

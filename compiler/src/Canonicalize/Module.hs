@@ -85,7 +85,7 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
 
     checkClosedClassesCovered home (fmap snd classes) cclasses cinstances
 
-    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops ceffects
+    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops ceffects (externBodies values)
 
 -- | Every member of a closed class this module declares has an instance here.
 --
@@ -394,7 +394,7 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
             Map.keys freeLocals
           )
     Just (Src.Annotation maybeContext srcType _)
-      | A.At bodyRegion (Src.Extern impls) <- body ->
+      | A.At bodyRegion (Src.Extern impls Nothing) <- body ->
           do
             annotation@(Can.Forall freeVars tipe) <- Type.toAnnotation env maybeContext srcType
             checkExtern aname impls tipe
@@ -408,6 +408,19 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
       do
         (Can.Forall freeVars tipe) <- Type.toAnnotation env maybeContext srcType
 
+        -- An extern with a Geng body (D222) is held to every rule a bodiless
+        -- one is, and is then an ordinary definition of that body.
+        -- 'externBodies' records that it is an extern as well.
+        geng <-
+          case body of
+            A.At _ (Src.Extern impls (Just geng)) ->
+              do
+                checkExtern aname impls tipe
+                checkJsExtern aname impls tipe
+                return geng
+            _ ->
+              return body
+
         ((args, resultType), argBindings) <-
           Pattern.verify (Error.DPFuncArgs name) $
             Expr.gatherTypedArgs env name (fmap snd srcArgs) tipe Index.first []
@@ -416,7 +429,7 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
           Env.addLocals argBindings env
 
         (cbody, freeLocals) <-
-          Expr.verifyBindings W.Pattern argBindings (Expr.canonicalize newEnv body)
+          Expr.verifyBindings W.Pattern argBindings (Expr.canonicalize newEnv geng)
 
         let def = Can.TypedDef aname freeVars args cbody resultType
         return
@@ -426,6 +439,21 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
           )
 
 -- EXTERNS
+
+-- | Every extern declaration with a Geng body, by name, with its
+-- implementations sorted by language and whether it is pure (D222). The
+-- definition itself is among the module's values; 'toNodeOne' has already
+-- checked the rows.
+externBodies :: [A.Located Src.Value] -> Map.Map Name.Name Can.ExternBody
+externBodies values =
+  Map.fromList
+    [ ( name,
+        Can.ExternBody
+          (List.sortOn (\(Can.ExternImpl language _) -> language) (map canonicalImpl impls))
+          (any (\(Src.ExternImpl p _ _) -> p) impls)
+      )
+    | A.At _ (Src.Value (A.At _ name) _ (A.At _ (Src.Extern impls (Just _))) _ _) <- values
+    ]
 
 -- | `ffi.md` F1 and D77, checked on a declaration's attributes and its type.
 --

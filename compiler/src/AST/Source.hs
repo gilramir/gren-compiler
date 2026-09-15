@@ -104,10 +104,14 @@ data Expr_
   | -- | The body an @\@extern@ declaration stands for (@ffi.md@ F1, D42).
     --
     -- A 'Prim''s sibling for the same reason: an extern is a top-level binding
-    -- with an annotation and no equation, and the attributes above it are what
-    -- it is bound to. There is one 'ExternImpl' per attribute, one per
-    -- implementation language, in the order they were written.
-    Extern [ExternImpl]
+    -- with an annotation, and the attributes above it are what it is bound to.
+    -- There is one 'ExternImpl' per attribute, one per implementation language,
+    -- in the order they were written.
+    --
+    -- The expression is the declaration's Geng body, when it has one (D222,
+    -- @m1b-json.md@ §O17): what a backend with no row for its language
+    -- compiles. The body's arguments are the 'Value''s own.
+    Extern [ExternImpl] (Maybe Expr)
   deriving (Show)
 
 -- | One @\@extern(js, "geng_time", "now")@ or @\@externPure(...)@.

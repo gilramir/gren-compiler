@@ -256,8 +256,9 @@ data Module = Module
     _moduleMain :: !(Maybe Main),
     -- | The @\@extern@ declarations this module makes, sorted by name (C6,
     -- D196). An extern is referred to by an 'EGlobal' like any top-level name,
-    -- and it is here rather than among '_moduleDefs' because it has no body a
-    -- backend could compile: what it is bound to is the host's.
+    -- and it is here rather than among '_moduleDefs' because what it is bound
+    -- to is the host's. One with a Geng body (D222) also has that body among
+    -- '_moduleDefs', under the same name, and the backend keeps one of the two.
     _moduleExterns :: ![Extern]
   }
   deriving (Eq, Show)
@@ -272,7 +273,12 @@ data Module = Module
 data Extern = Extern
   { _externBinder :: !Binder,
     _externImpls :: ![ExternImpl],
-    _externPure :: !Bool
+    _externPure :: !Bool,
+    -- | Whether the declaration has a Geng body (D222, @m1b-json.md@ §O17).
+    -- When it does, the body is the module binding of the same name, which a
+    -- backend with no implementation in its language compiles; when it does
+    -- not, no binding has the name.
+    _externHasBody :: !Bool
   }
   deriving (Eq, Show)
 

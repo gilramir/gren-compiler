@@ -239,7 +239,7 @@ linkCore :: Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Ta
 linkCore details artifacts kernels =
   Task.io $
     do
-      cores <- Pass.run <$> programCore details artifacts
+      cores <- Program.chooseExterns Core.ExternJs Dump.externBodies . Pass.run <$> programCore details artifacts
       return (checked (Program.link (backendFor kernels cores) cores (coreRoots artifacts cores)))
 
 -- | @GENG_SPECIALIZE_STRICT=1@: the linked program carries no witness node.
@@ -320,13 +320,14 @@ dumpCore details artifacts kernels =
     (maybeDir, maybeFile) ->
       Task.io $
         do
-          cores <- programCore details artifacts
+          modules <- programCore details artifacts
+          let cores = Program.chooseExterns Core.ExternJs Dump.externBodies modules
           case maybeDir of
             Nothing -> return ()
             Just dir ->
               mapM_
                 (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder Pretty.defaultOptions core))
-                (Map.toAscList cores)
+                (Map.toAscList modules)
           case maybeFile of
             Nothing -> return ()
             Just file ->
@@ -359,7 +360,7 @@ spikeC details artifacts@(Build.Artifacts pkg _ _ _) =
     (Just file, Just (home, name)) ->
       Task.io $
         do
-          cores <- Pass.run <$> programCore details artifacts
+          cores <- Program.chooseExterns Core.ExternC Dump.externBodies . Pass.run <$> programCore details artifacts
           let root =
                 Core.QualName
                   (ModuleName.Canonical pkg (N.fromChars home))
@@ -431,7 +432,7 @@ linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels =
               [ (ModuleName.Canonical (ModuleName._package home) raw, core)
               | (raw, core) <- map replModuleCore modules
               ]
-      cores <- Pass.run <$> throughWire (Map.union own deps)
+      cores <- Program.chooseExterns Core.ExternJs Dump.externBodies . Pass.run <$> throughWire (Map.union own deps)
       return (checked (Program.link (replBackend kernels cores home name) cores (replRoots home name)))
 
 replModuleCore :: Build.Module -> (ModuleName.Raw, Core.Module)

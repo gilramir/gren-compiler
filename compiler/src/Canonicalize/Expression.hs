@@ -133,7 +133,7 @@ canonicalize env (A.At region expression) =
         Can.exprValue <$> canonicalize env expr
       Src.Prim primName ->
         canonicalizePrim env primName
-      Src.Extern _ ->
+      Src.Extern _ _ ->
         -- `Canonicalize.Module.toNodeOne` takes every extern declaration before
         -- its body is canonicalized, since the rules need the annotation. The
         -- parser builds this node nowhere else, so reaching it is the same

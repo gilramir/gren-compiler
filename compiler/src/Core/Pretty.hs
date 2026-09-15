@@ -66,15 +66,18 @@ moduleToBuilder opts m =
       block (map (topBind opts (recNames m)) (_moduleDefs m))
     ]
 
--- | An @\@extern@ declaration (D196): the binder, then one line per language.
+-- | An @\@extern@ declaration (D196): the binder, then one line per language,
+-- and a last line when the declaration has a Geng body (D222), which is the
+-- binding of the same name below.
 externDecl :: Options -> Extern -> B.Builder
-externDecl opts (Extern externBinder impls isPure) =
+externDecl opts (Extern externBinder impls isPure hasBody) =
   (if isPure then "extern pure " else "extern ")
     <> name (_binderName externBinder)
     <> " : "
     <> typeToBuilder opts (_binderType externBinder)
     <> "\n"
     <> mconcat [impl i | i <- impls]
+    <> (if hasBody then "  body\n" else "")
   where
     impl (ExternImpl language names) =
       "  "

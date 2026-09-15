@@ -43,6 +43,7 @@ module Core.Program
     Missing (..),
     MissingKind (..),
     link,
+    chooseExterns,
     unspecialized,
     kernelName,
     qualToChars,
@@ -208,6 +209,38 @@ data MissingKind
     -- Core carries all four.
     MissingValue
   deriving (Eq, Ord, Show)
+
+-- EXTERNS WITH A BODY
+
+-- | Each extern with a Geng body resolved to one of its two definitions, for a
+-- backend whose extern language is @language@ (D222, @m1b-json.md@ §O17).
+--
+-- The implementation is kept, and the binding of the same name dropped, when the
+-- extern has a row in @language@ and @bodies@ is off. Otherwise the binding is
+-- kept and the extern entry dropped, so the program is the body. @bodies@ is
+-- D225's setting, which the harness's @geng-hs-bodies@ target turns on. After
+-- this no name is both, which is what 'link' expects.
+chooseExterns :: Core.ExternLanguage -> Bool -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
+chooseExterns language bodies =
+  Map.map choose
+  where
+    taken e =
+      not bodies && any ((== language) . Core._implLanguage) (Core._externImpls e)
+    choose m =
+      let withBody = filter Core._externHasBody (Core._moduleExterns m)
+          external = Set.fromList [Core._binderName (Core._externBinder e) | e <- withBody, taken e]
+          geng = Set.fromList [Core._binderName (Core._externBinder e) | e <- withBody, not (taken e)]
+          named b = Core._binderName (Core._bindBinder b)
+          qualNamed (Core.QualName _ n) = n
+       in if null withBody
+            then m
+            else
+              m
+                { Core._moduleDefs = filter (\b -> not (Set.member (named b) external)) (Core._moduleDefs m),
+                  Core._moduleDefsRec =
+                    filter (not . null) (map (filter (\q -> not (Set.member (qualNamed q) external))) (Core._moduleDefsRec m)),
+                  Core._moduleExterns = filter (\e -> not (Set.member (Core._binderName (Core._externBinder e)) geng)) (Core._moduleExterns m)
+                }
 
 -- LINK
 
