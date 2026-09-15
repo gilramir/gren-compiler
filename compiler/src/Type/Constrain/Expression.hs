@@ -116,6 +116,10 @@ constrainHelp rtv _nid region expression expected =
       -- this node is the body of, so a disagreement is reported where the two
       -- types differ rather than as "these two do not match".
       return $ CForeign region (Prim.primVarName op) annotation expected
+    Can.VarExtern name _ _ annotation ->
+      -- The declaration's own annotation, so this always holds against the
+      -- definition it is the body of: an extern's type is what it says (F1).
+      return $ CForeign region name annotation expected
     Can.VarForeign _ name annotation ->
       return $ CForeign region name annotation expected
     Can.VarMethod _ _ name annotation ->

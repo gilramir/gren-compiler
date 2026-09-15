@@ -697,6 +697,7 @@ moduleEnc m =
     <> optMsg 12 managerEnc (_moduleManager m)
     <> rep 13 portEnc (_modulePorts m)
     <> optMsg 14 mainEnc (_moduleMain m)
+    <> rep 15 externEnc (_moduleExterns m)
 
 recGroupEnc :: [QualName] -> Enc
 recGroupEnc names = repQual 1 names
@@ -717,6 +718,19 @@ managerEnc (Manager kind entries init_ onEffects onSelfMsg cmdMap subMap) =
     <> qual 5 onSelfMsg
     <> optQual 6 cmdMap
     <> optQual 7 subMap
+
+-- | D196. Every field implicit or packed, so a JavaScript extern (code 0) that
+-- is not pure writes only its binder and its names.
+externEnc :: Extern -> Enc
+externEnc (Extern binder impls isPure) =
+  msg 1 (binderEnc binder)
+    <> rep 2 externImplEnc impls
+    <> bool_ 3 isPure
+
+externImplEnc :: ExternImpl -> Enc
+externImplEnc (ExternImpl language names) =
+  enum_ 1 (fromIntegral (fromEnum language))
+    <> repText 2 names
 
 portEnc :: Port -> Enc
 portEnc (Port binder flow) =

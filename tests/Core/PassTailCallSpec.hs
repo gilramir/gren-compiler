@@ -139,5 +139,6 @@ modul defs =
       Core._moduleManager = Nothing,
       Core._modulePorts = [],
       Core._moduleMain = Nothing,
-      Core._moduleExports = []
+      Core._moduleExports = [],
+      Core._moduleExterns = []
     }

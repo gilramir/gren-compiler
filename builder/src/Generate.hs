@@ -52,6 +52,7 @@ dev details artifacts =
   do
     kernels <- kernelChunks details
     dumpCore details artifacts kernels
+    checkForExterns details artifacts
     spikeC details artifacts
     program <- linkCore details artifacts kernels
     return $ CoreJS.generate Mode.Dev program kernels
@@ -64,6 +65,7 @@ prod details artifacts =
     checkForDebugUses artifacts
     kernels <- kernelChunks details
     dumpCore details artifacts kernels
+    checkForExterns details artifacts
     program <- linkCore details artifacts kernels
     let mode = Mode.Prod (CoreJS.shortenFieldNames (Program._progFields program))
     return $ CoreJS.generate mode program kernels
@@ -468,6 +470,25 @@ replBackend kernels cores home name =
               (Refs.global (Program.kernelName N.debug))
               (Program._backendEdges backend)
         }
+
+-- CHECK FOR EXTERNS
+
+-- | A program whose Core declares an @\@extern@ is refused until the JS backend
+-- can emit one (@m1b-extern.md@ §H8 step 4).
+--
+-- After 'dumpCore', so the Core an extern lowers to can be dumped and read
+-- while nothing can run it yet, which is how §H12 checks step 3.
+checkForExterns :: Details.Details -> Build.Artifacts -> Task ()
+checkForExterns details artifacts =
+  do
+    cores <- Task.io (programCore details artifacts)
+    case [ (ModuleName._module home, map (Core._binderName . Core._externBinder) externs)
+         | (home, modul) <- Map.toAscList cores,
+           let externs = Core._moduleExterns modul,
+           not (null externs)
+         ] of
+      [] -> return ()
+      found -> Task.throw (Exit.GenerateExternNotEmittedYet found)
 
 -- CHECK FOR DEBUG
 

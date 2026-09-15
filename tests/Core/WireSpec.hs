@@ -71,6 +71,15 @@ spec = do
     it "carries every port flow, including the input-less task port" $
       roundTrip ((moduleWith []) {_modulePorts = ports})
 
+    it "carries externs in every language, pure and not (D196)" $
+      roundTrip ((moduleWith []) {_moduleExterns = externs})
+
+    it "refuses an extern whose languages are out of order, or whose names do not fit its language" $
+      do
+        refused ((moduleWith []) {_moduleExterns = [Extern (binder "e") [ExternImpl ExternC [utf8 "geng_e"], ExternImpl ExternJs [utf8 "m", utf8 "e"]] False]})
+        refused ((moduleWith []) {_moduleExterns = [Extern (binder "e") [ExternImpl ExternC [utf8 "m", utf8 "e"]] False]})
+        refused ((moduleWith []) {_moduleExterns = [Extern (binder "e") [] False]})
+
     it "carries each kind of main" $
       mapM_ (\m -> roundTrip ((moduleWith []) {_moduleMain = Just m})) everyMain
 
@@ -301,7 +310,8 @@ moduleWith defs =
       _moduleExports = [qual "b"],
       _moduleManager = Nothing,
       _modulePorts = [],
-      _moduleMain = Nothing
+      _moduleMain = Nothing,
+      _moduleExterns = []
     }
 
 -- | All 21 of them (C2). The list is the point: adding a node to 'Expr_' and
@@ -377,6 +387,25 @@ somePrim =
 
 everyCrash :: [CrashKind]
 everyCrash = [Todo (utf8 "not done"), Todo (utf8 ""), IncompleteMatch, StackExhausted, Unreachable]
+
+-- | One extern in each of D77's languages and one pure one, with names that
+-- need the string table.
+externs :: [Extern]
+externs =
+  [ Extern (binder "now") [ExternImpl ExternJs [utf8 "geng_time", utf8 "now"], ExternImpl ExternErlang [utf8 "geng_time", utf8 "now"], ExternImpl ExternC [utf8 "geng_time_now"]] False,
+    Extern (binder "sha256") [ExternImpl ExternJs [utf8 "geng_hash", utf8 "sha256"]] True
+  ]
+
+-- | A module the encoder writes and the reader must refuse: the rules the
+-- schema cannot state are the reader's to enforce (D196).
+refused :: Module -> Expectation
+refused m =
+  case Wire.encode m of
+    Left problems -> expectationFailure (unwords problems)
+    Right bytes ->
+      case Wire.decode bytes of
+        Left _ -> return ()
+        Right _ -> expectationFailure "the reader accepted an extern it should refuse"
 
 everyMain :: [Main]
 everyMain = [MainString, MainHtml, MainProgram converter]

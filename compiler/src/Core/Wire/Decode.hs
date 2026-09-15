@@ -916,7 +916,7 @@ methodImplP =
 
 moduleP :: P Module
 moduleP =
-  message "Module" 14 $
+  message "Module" 15 $
     do
       strings <- stringTable
       withTable strings $
@@ -942,6 +942,7 @@ moduleBodyP =
     manager <- optMsg "manager" 12 managerP
     ports <- rep "ports" 13 portP
     main_ <- optMsg "main" 14 mainP
+    externs <- rep "externs" 15 externP
     pure
       Module
         { _moduleName = name,
@@ -954,8 +955,46 @@ moduleBodyP =
           _moduleExports = exports,
           _moduleManager = manager,
           _modulePorts = ports,
-          _moduleMain = main_
+          _moduleMain = main_,
+          _moduleExterns = externs
         }
+
+-- | D196, and three rules the schema cannot state: an extern has at least one
+-- implementation, its implementations are in strictly ascending language order
+-- (so one per language, and one encoding of the set), and each has the names
+-- D77's table gives its language.
+externP :: P Extern
+externP =
+  message "Extern" 3 $
+    do
+      here <- offset
+      binder <- msg "binder" 1 binderP
+      impls <- rep "impls" 2 externImplP
+      isPure <- bool_ "pure" 3
+      let languages = map _implLanguage impls
+      when (null impls) $
+        failAt here "an extern has no implementation"
+      unless (and (zipWith (<) languages (drop 1 languages))) $
+        failAt here "an extern's implementations are not in strictly ascending language order"
+      pure (Extern binder impls isPure)
+
+externImplP :: P ExternImpl
+externImplP =
+  message "ExternImpl" 2 $
+    do
+      here <- offset
+      language <- enum_ "language" 1 externLanguageFromCode
+      names <- repText "names" 2
+      let wanted = if language == ExternC then 1 else 2
+      unless (length names == wanted) $
+        failAt here ("an extern in this language takes " ++ show wanted ++ " names and this one has " ++ show (length names))
+      pure (ExternImpl language names)
+
+externLanguageFromCode :: Word32 -> Maybe ExternLanguage
+externLanguageFromCode 0 = Just ExternJs
+externLanguageFromCode 1 = Just ExternErlang
+externLanguageFromCode 2 = Just ExternC
+externLanguageFromCode _ = Nothing
 
 recGroupP :: P [QualName]
 recGroupP = message "RecGroup" 1 (repQual "names" 1)

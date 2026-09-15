@@ -35,6 +35,7 @@
 -- which is most of the arithmetic in @Basics@.
 module Core.Lower.Literal
   ( str,
+    decodeText,
     chr,
     float,
     int,
@@ -54,7 +55,11 @@ import Gren.String qualified as ES
 import Text.Read (readMaybe)
 
 str :: ES.String -> Core.Literal
-str = Core.LString . Utf8.fromChars . decode
+str = Core.LString . decodeText
+
+-- | A source string's characters, escapes resolved, as Core text.
+decodeText :: ES.String -> Core.Text
+decodeText = Utf8.fromChars . decode
 
 -- | A character literal.
 --

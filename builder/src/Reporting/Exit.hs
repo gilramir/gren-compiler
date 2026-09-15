@@ -2367,12 +2367,28 @@ toModuleNameConventionTable srcDir names =
 data Generate
   = GenerateCannotLoadArtifacts
   | GenerateCannotOptimizeDebugValues ModuleName.Raw [ModuleName.Raw]
+  | GenerateExternNotEmittedYet [(ModuleName.Raw, [N.Name])]
 
 toGenerateReport :: Generate -> Help.Report
 toGenerateReport problem =
   case problem of
     GenerateCannotLoadArtifacts ->
       corruptCacheReport
+    GenerateExternNotEmittedYet found ->
+      Help.report
+        "EXTERN NOT COMPILED YET"
+        Nothing
+        "These modules declare externs, and this compiler cannot emit one yet:"
+        [ D.indent 4 $
+            D.vcat
+              [ D.fromChars (ModuleName.toChars m ++ ": " ++ List.intercalate ", " (map N.toChars names))
+              | (m, names) <- found
+              ],
+          D.reflow
+            "Their declarations have been checked and lowered to Core. Emitting an extern\
+            \ for the JavaScript backend is the next step of the work (m1b-extern.md §H8\
+            \ step 4), and until it lands a program that declares one is refused here."
+        ]
     GenerateCannotOptimizeDebugValues m ms ->
       Help.report
         "DEBUG REMNANTS"

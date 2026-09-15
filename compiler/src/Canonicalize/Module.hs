@@ -390,15 +390,15 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
             Map.keys freeLocals
           )
     Just (Src.Annotation maybeContext srcType _)
-      | A.At _ (Src.Extern impls) <- body ->
+      | A.At bodyRegion (Src.Extern impls) <- body ->
           do
-            (Can.Forall _ tipe) <- Type.toAnnotation env maybeContext srcType
+            annotation@(Can.Forall freeVars tipe) <- Type.toAnnotation env maybeContext srcType
             checkExtern aname impls tipe
-            -- Every rule the front half can check has held. What is left is
-            -- Core (`m1b-extern.md` §H8 step 3) and the JS backend (step 4),
-            -- and until they exist the declaration is refused as not compiled
-            -- yet rather than dropped.
-            Result.throw (Error.ExternNotCompiledYet (A.toRegion aname) name)
+            let canImpls = List.sortOn (\(Can.ExternImpl language _) -> language) (map canonicalImpl impls)
+            let isPure = any (\(Src.ExternImpl p _ _) -> p) impls
+            let cbody = Can.at bodyRegion (Can.VarExtern name canImpls isPure annotation)
+            let def = Can.TypedDef aname freeVars [] cbody tipe
+            return (toNodeTwo name srcArgs def Map.empty, name, [])
     Just (Src.Annotation maybeContext srcType _) ->
       do
         (Can.Forall freeVars tipe) <- Type.toAnnotation env maybeContext srcType
@@ -466,6 +466,18 @@ externLanguages =
     ("erlang", 2),
     ("c", 1)
   ]
+
+-- | An attribute row after 'checkExtern' has held, so its language is one of
+-- the table's three.
+canonicalImpl :: Src.ExternImpl -> Can.ExternImpl
+canonicalImpl (Src.ExternImpl _ (A.At _ language) names) =
+  Can.ExternImpl
+    ( case Name.toChars language of
+        "erlang" -> Can.ExternErlang
+        "c" -> Can.ExternC
+        _ -> Can.ExternJs
+    )
+    (map A.toValue names)
 
 -- | Whether a type, past its arguments and through its aliases, is
 -- `Platform.Task`, which `Task.Task` is an alias of.

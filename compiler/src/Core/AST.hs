@@ -41,6 +41,9 @@ module Core.AST
     ManagerKind (..),
     Port (..),
     PortFlow (..),
+    Extern (..),
+    ExternImpl (..),
+    ExternLanguage (..),
     Converter (..),
     Main (..),
 
@@ -250,9 +253,41 @@ data Module = Module
     -- | The @port@s this module declares, by name (C18).
     _modulePorts :: ![Port],
     -- | What this module's @main@ is, if it declares one (C19).
-    _moduleMain :: !(Maybe Main)
+    _moduleMain :: !(Maybe Main),
+    -- | The @\@extern@ declarations this module makes, sorted by name (C6,
+    -- D196). An extern is referred to by an 'EGlobal' like any top-level name,
+    -- and it is here rather than among '_moduleDefs' because it has no body a
+    -- backend could compile: what it is bound to is the host's.
+    _moduleExterns :: ![Extern]
   }
   deriving (Eq, Show)
+
+-- | An @\@extern@ declaration (@ffi.md@ F1, @m1b-extern.md@ §H12, D196).
+--
+-- The binder is the name every reference uses and the declared type, which is
+-- the extern's contract. The implementations are one per language, sorted by
+-- language, and each has the names D77's table gives its language: a module
+-- and a function for 'ExternJs' and 'ExternErlang', a symbol for 'ExternC'.
+-- '_externPure' is @\@externPure@, which S2 publishes a count of.
+data Extern = Extern
+  { _externBinder :: !Binder,
+    _externImpls :: ![ExternImpl],
+    _externPure :: !Bool
+  }
+  deriving (Eq, Show)
+
+data ExternImpl = ExternImpl
+  { _implLanguage :: !ExternLanguage,
+    _implNames :: ![Text]
+  }
+  deriving (Eq, Show)
+
+-- | D77's extern languages, in wire-code order.
+data ExternLanguage
+  = ExternJs
+  | ExternErlang
+  | ExternC
+  deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | A module's entry point, as a declaration (C19, D85).
 --

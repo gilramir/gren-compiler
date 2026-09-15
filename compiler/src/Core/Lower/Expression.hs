@@ -429,6 +429,11 @@ expr env (Can.Expr nid region value) =
           applied env nid sp (node (Core.EGlobal (Core.QualName home name)))
         Can.VarPrim op _ ->
           primValue tipe sp op
+        Can.VarExtern name _ _ _ ->
+          error $
+            "Core.Lower.Expression: the extern "
+              ++ Name.toChars name
+              ++ " was lowered as an expression. Core.Lower.Module moves every extern definition to the module externs table first."
         Can.VarKernel home name ->
           -- @AST.Optimized.toKernelGlobal@ already gave a kernel function a
           -- module: the `gren/kernel` pseudo-package, one module per kernel

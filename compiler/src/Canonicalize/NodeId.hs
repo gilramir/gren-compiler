@@ -172,6 +172,7 @@ expr_ e =
     Can.VarTopLevel _ _ -> pure e
     Can.VarKernel _ _ -> pure e
     Can.VarPrim _ _ -> pure e
+    Can.VarExtern _ _ _ _ -> pure e
     Can.VarForeign _ _ _ -> pure e
     Can.VarMethod _ _ _ _ -> pure e
     Can.VarCtor _ _ _ _ _ -> pure e

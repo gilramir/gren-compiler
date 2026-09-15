@@ -835,6 +835,10 @@ expr env tops scope (Can.Expr nid region value) =
           -- A primitive has no constraints and so nothing to elaborate: the
           -- table's annotation binds no variables at all (`Canonicalize.Prim`).
           return ()
+        Can.VarExtern _ _ _ _ ->
+          -- Nor has an extern: its type is `Type.expression`, never
+          -- constrained (`Parse.Declaration.externDecl`).
+          return ()
         Can.VarMethod cls param name annotation ->
           methodUse env scope nid region cls param name annotation (typeOf env nid)
         Can.Binop op target annotation left right ->

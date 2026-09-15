@@ -43,6 +43,7 @@ import AST.Utils.Type qualified as Type
 import Canonicalize.Effects qualified as Effects
 import Core.AST qualified as Core
 import Core.Lower.Expression qualified as Expr
+import Core.Lower.Literal qualified as Literal
 import Core.Lower.Port qualified as Port
 import Core.Lower.Type (lowerAnnotation, lowerClass, lowerType, lowerUnion)
 import Core.Order qualified as Order
@@ -79,9 +80,11 @@ lower platform annotations types elaboration modul =
       witnessesOf i =
         Map.findWithDefault [] (Can.instanceKey (Can._in_head i)) (Resolve._instanceParams elaboration)
       instances = Map.elems (Can._instances modul)
+      (externDefs, valueDefs) =
+        List.partition isExternDef (concatMap group (declGroups (Can._decls modul)))
       defs =
         definitions home $
-          map (Expr.def env) (concatMap group (declGroups (Can._decls modul)))
+          map (Expr.def env) valueDefs
             ++ entries home (Can._effects modul)
             ++ concatMap (\i -> instanceBinds env (witnessesOf i) i) instances
    in Core.Module
@@ -99,8 +102,45 @@ lower platform annotations types elaboration modul =
           Core._moduleExports = map (Core.QualName home) (exports modul),
           Core._moduleManager = manager home (Can._effects modul),
           Core._modulePorts = ports (Can._effects modul),
-          Core._moduleMain = mainFrom (mainOf platform annotations)
+          Core._moduleMain = mainFrom (mainOf platform annotations),
+          Core._moduleExterns =
+            List.sortOn (Core._binderName . Core._externBinder) (map (externOf env) externDefs)
         }
+
+-- EXTERNS
+
+-- | Whether a definition is an @\@extern@ declaration, whose body is the
+-- 'Can.VarExtern' "Canonicalize.Module" put there.
+isExternDef :: Can.Def -> Bool
+isExternDef d =
+  case d of
+    Can.TypedDef _ _ _ (Can.Expr _ _ (Can.VarExtern {})) _ -> True
+    _ -> False
+
+-- | An extern declaration as Core's entry for it (D196). Its binder is written
+-- as any top-level binder is, against no enclosing span.
+externOf :: Expr.Env -> Can.Def -> Core.Extern
+externOf env d =
+  case d of
+    Can.TypedDef (A.At region name) _ _ (Can.Expr _ _ (Can.VarExtern _ impls isPure _)) result ->
+      Core.Extern
+        { Core._externBinder = Core.Binder name (lowerType result) (Expr.span env region),
+          Core._externImpls = map externImpl impls,
+          Core._externPure = isPure
+        }
+    _ ->
+      error "Core.Lower.Module.externOf: not an extern definition"
+
+externImpl :: Can.ExternImpl -> Core.ExternImpl
+externImpl (Can.ExternImpl language names) =
+  Core.ExternImpl
+    { Core._implLanguage =
+        case language of
+          Can.ExternJs -> Core.ExternJs
+          Can.ExternErlang -> Core.ExternErlang
+          Can.ExternC -> Core.ExternC,
+      Core._implNames = map Literal.decodeText names
+    }
 
 -- | An instance declaration (@docs/m1b-classes.md@ §G22.4).
 --

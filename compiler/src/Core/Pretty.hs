@@ -62,8 +62,29 @@ moduleToBuilder opts m =
       block (maybe [] (pure . managerDecl) (_moduleManager m)),
       block (map (portDecl opts) (_modulePorts m)),
       block (maybe [] (pure . mainDecl opts) (_moduleMain m)),
+      block (map (externDecl opts) (_moduleExterns m)),
       block (map (topBind opts (recNames m)) (_moduleDefs m))
     ]
+
+-- | An @\@extern@ declaration (D196): the binder, then one line per language.
+externDecl :: Options -> Extern -> B.Builder
+externDecl opts (Extern externBinder impls isPure) =
+  (if isPure then "extern pure " else "extern ")
+    <> name (_binderName externBinder)
+    <> " : "
+    <> typeToBuilder opts (_binderType externBinder)
+    <> "\n"
+    <> mconcat [impl i | i <- impls]
+  where
+    impl (ExternImpl language names) =
+      "  "
+        <> ( case language of
+               ExternJs -> "js"
+               ExternErlang -> "erlang"
+               ExternC -> "c"
+           )
+        <> mconcat [" " <> B.stringUtf8 (show (Utf8.toChars n)) | n <- names]
+        <> "\n"
 
 -- | An @effect module@'s manager. The entries are also ordinary bindings below,
 -- so what this adds is the kind and the four or five names a runtime needs.

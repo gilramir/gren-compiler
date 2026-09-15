@@ -4,6 +4,8 @@
 module AST.Canonical
   ( Expr (..),
     Expr_ (..),
+    ExternImpl (..),
+    ExternLanguage (..),
     NodeId (..),
     unnumbered,
     at,
@@ -114,6 +116,19 @@ unnumbered = NodeId 0
 data Expr = Expr !NodeId !A.Region Expr_
   deriving (Show)
 
+-- | One implementation of an extern: the language (D77's table) and its names,
+-- as the source wrote them.
+data ExternImpl = ExternImpl ExternLanguage [ES.String]
+  deriving (Show)
+
+-- | D77's three extern languages. The order is the order implementations are
+-- kept in, so it is part of what makes an extern's Core one value (C6).
+data ExternLanguage
+  = ExternJs
+  | ExternErlang
+  | ExternC
+  deriving (Eq, Ord, Show)
+
 -- | Build an unnumbered node. The counterpart of `A.At`, which `Expr` no
 -- longer is.
 at :: A.Region -> Expr_ -> Expr
@@ -140,6 +155,15 @@ data Expr_
     -- same act as inferring this node against it, so the check is unification
     -- rather than a second comparison written by hand.
     VarPrim Prim.PrimOp Annotation
+  | -- | The body of an @\@extern@ declaration (@ffi.md@ F1,
+    -- @m1b-extern.md@ §H12): its name, its implementations sorted by language,
+    -- whether it is pure, and the annotation it was declared with.
+    --
+    -- The annotation is the __declaration's__, because for an extern the
+    -- declared type is the contract (F1) and there is no table to check it
+    -- against. It is a definition's whole body and appears nowhere else;
+    -- "Core.Lower.Module" moves the definition to 'Core.AST._moduleExterns'.
+    VarExtern Name [ExternImpl] Bool Annotation
   | VarForeign ModuleName.Canonical Name Annotation
   | VarCtor CtorOpts ModuleName.Canonical Name Index.ZeroBased Annotation
   | VarDebug ModuleName.Canonical Name Annotation
