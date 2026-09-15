@@ -27,6 +27,8 @@ module Generate.CoreJS.Prim
   ( prim,
     inlines,
     helpers,
+    bitsHelpers,
+    isFloatBits,
   )
 where
 
@@ -300,19 +302,20 @@ conversion p a =
     -- A FLOAT'S BITS (A9, and `docs/m1b-ryu.md` §Y11). JavaScript has no
     -- operator that reads a double's bit pattern, so the conversion is two
     -- typed arrays over one buffer: the value is stored through the float view
-    -- and read back through the integer one, and `new Float64Array([a])` is
-    -- the shortest way to say "a buffer holding this double". Both views are
-    -- native-endian, so the pair agrees with itself on a big-endian machine as
-    -- well -- the bytes move, the bits do not.
+    -- and read back through the integer one. Both views are native-endian, so
+    -- the pair agrees with itself on a big-endian machine as well -- the bytes
+    -- move, the bits do not.
     --
-    -- The allocation is per call and is not free. It is what the host offers
-    -- without a scratch buffer living somewhere, and a scratch buffer would
-    -- have to live in a kernel module that nothing here can make the linker
-    -- include (C13: a primitive is an expression, not a dependency).
-    F64Bits -> viewThrough "BigUint64Array" "Float64Array" a
-    F64FromBits -> viewThrough "Float64Array" "BigUint64Array" a
-    F32Bits -> viewThrough "Uint32Array" "Float32Array" a
-    F32FromBits -> viewThrough "Float32Array" "Uint32Array" a
+    -- The buffer is shared, in 'bitsHelpers'. It was a new buffer and two views
+    -- per call, because a shared one had nowhere to live until D206 gave
+    -- primitives helpers emitted once per program; that made a float read in
+    -- Geng 5.7 to 6.9 times the kernel's, and 1.3 to 2.4 with the buffer shared
+    -- (@docs/m1b-bytes-prim.md@ §BY3, D235). Each helper writes and reads the
+    -- buffer in one call and names its argument once.
+    F64Bits -> bitsCall "_Float_bits64" a
+    F64FromBits -> bitsCall "_Float_fromBits64" a
+    F32Bits -> bitsCall "_Float_bits32" a
+    F32FromBits -> bitsCall "_Float_fromBits32" a
     -- A `Char` *is* its code point (C8, `docs/m1b-str.md` §T12), so both of
     -- these are the identity and `core`'s `Char.toCode`/`fromCode` are the
     -- primitive unchanged. They were a `codePointAt(0)` and a
@@ -482,20 +485,10 @@ coerce e = JS.Infix JS.OpBitwiseOr e (JS.Int 0)
 unsign :: JS.Expr -> JS.Expr
 unsign e = JS.Infix JS.OpZfRShift e (JS.Int 0)
 
--- | @new Out(new In([x]).buffer)[0]@ -- one value written through one typed
--- array and read back through another, which is a reinterpretation of its bits
--- and not a conversion of its value.
-viewThrough :: Name.Name -> Name.Name -> JS.Expr -> JS.Expr
-viewThrough out in_ e =
-  JS.Index
-    ( JS.New
-        (JS.Ref (JsName.fromLocalHumanReadable out))
-        [ JS.Access
-            (JS.New (JS.Ref (JsName.fromLocalHumanReadable in_)) [JS.Array [e]])
-            (JsName.fromLocalHumanReadable "buffer")
-        ]
-    )
-    (JS.Int 0)
+-- | A call to one of 'bitsHelpers'.
+bitsCall :: Name.Name -> JS.Expr -> JS.Expr
+bitsCall name e =
+  JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) [e]
 
 -- | @Math.fround(x)@ -- the rounding that makes a @Float32@ single precision.
 fround :: JS.Expr -> JS.Expr
@@ -540,3 +533,31 @@ arityError op args =
       ++ show (length args)
       ++ " arguments, not "
       ++ show (Prim.primArity op)
+
+-- | Whether a primitive is one of the four that go through 'bitsHelpers'.
+isFloatBits :: PrimOp -> Bool
+isFloatBits op =
+  case op of
+    ConvOp F64Bits -> True
+    ConvOp F64FromBits -> True
+    ConvOp F32Bits -> True
+    ConvOp F32FromBits -> True
+    _ -> False
+
+-- | The float bits helpers, which 'Generate.CoreJS' emits once when a program
+-- reaches any of the four (@docs/m1b-bytes-prim.md@ §BY3).
+bitsHelpers :: B.Builder
+bitsHelpers =
+  [r|
+// One buffer for every float bits primitive (docs/m1b-bytes-prim.md §BY3). A
+// call writes it and reads it back before returning, so nothing can see it
+// between two calls.
+var _Float_f64 = new Float64Array(1);
+var _Float_u64 = new BigUint64Array(_Float_f64.buffer);
+var _Float_f32 = new Float32Array(1);
+var _Float_u32 = new Uint32Array(_Float_f32.buffer);
+function _Float_bits64(x) { _Float_f64[0] = x; return _Float_u64[0]; }
+function _Float_fromBits64(x) { _Float_u64[0] = x; return _Float_f64[0]; }
+function _Float_bits32(x) { _Float_f32[0] = x; return _Float_u32[0]; }
+function _Float_fromBits32(x) { _Float_u32[0] = x; return _Float_f32[0]; }
+|]

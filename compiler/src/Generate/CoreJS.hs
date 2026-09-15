@@ -71,7 +71,7 @@ generate :: Mode.Mode -> Program -> Map Name [K.Chunk] -> Map (Pkg.Name, Name) B
 generate mode program kernels exts =
   let env = envFor mode program
       started =
-        JS.addByteString (stringHelpers env <> Extern.files exts (_progExterns program)) $
+        JS.addByteString (stringHelpers env <> floatBitsHelpers env <> Extern.files exts (_progExterns program)) $
           List.foldl'
             (flip JS.stmtToBuilder)
             (JS.emptyBuilder firstGeneratedLineNumber)
@@ -105,7 +105,7 @@ generateForRepl ansi localizer program kernels exts home name (Can.Forall _ tipe
   let mode = Mode.Dev
       env = envFor mode program
       started =
-        JS.addByteString (stringHelpers env <> Extern.files exts (_progExterns program)) $
+        JS.addByteString (stringHelpers env <> floatBitsHelpers env <> Extern.files exts (_progExterns program)) $
           List.foldl'
             (flip JS.stmtToBuilder)
             (JS.emptyBuilder 0)
@@ -424,6 +424,13 @@ stringHelpers env
       case op of
         Prim.StrOp _ -> True
         _ -> False
+
+-- | The float bits helpers, when the program reaches @f64_bits@,
+-- @f64_from_bits@, @f32_bits@ or @f32_from_bits@ (@docs/m1b-bytes-prim.md@ §BY3).
+floatBitsHelpers :: Expr.Env -> B.Builder
+floatBitsHelpers env
+  | any JsPrim.isFloatBits (Map.elems (Expr._prims env)) = JsPrim.bitsHelpers
+  | otherwise = mempty
 
 -- | The primitive a binding /is/, when its whole body is one applied to its own
 -- parameters in order.
