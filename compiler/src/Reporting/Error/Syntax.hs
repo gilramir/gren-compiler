@@ -195,6 +195,9 @@ data Attribute
   | AttributePrimString String Row Col
   | AttributeEnd Row Col
   | AttributeNotOnCustomType Row Col
+  | AttributeLanguage Row Col
+  | AttributeExternName Row Col
+  | AttributeAfterExtern Name.Name Row Col
   | --
     AttributeIndentName Row Col
   | AttributeIndentOpen Row Col
@@ -202,6 +205,8 @@ data Attribute
   | AttributeIndentPrimName Row Col
   | AttributeIndentEnd Row Col
   | AttributeIndentDecl Row Col
+  | AttributeIndentLanguage Row Col
+  | AttributeIndentExternName Row Col
   deriving (Show)
 
 -- INSTANCE DECLARATIONS
@@ -1818,7 +1823,7 @@ toAttributeReport source attribute startRow startCol =
                 ( D.reflow "I am partway through an attribute, but I got stuck here:",
                   D.stack
                     [ what,
-                      D.reflow "The two attributes there are look like this:",
+                      D.reflow "The attributes look like this:",
                       D.indent 4 $
                         D.vcat
                           [ "@derive(Eq, Ord, Inspect)",
@@ -1828,6 +1833,12 @@ toAttributeReport source attribute startRow startCol =
                         D.vcat
                           [ "@prim(\"i32_add\")",
                             "addInt : Int -> Int -> Int"
+                          ],
+                      D.indent 4 $
+                        D.vcat
+                          [ "@extern(js, \"geng_time\", \"now\")",
+                            "@extern(c, \"geng_time_now\")",
+                            "now : {} -> Task x Posix"
                           ]
                     ]
                 )
@@ -1886,6 +1897,30 @@ toAttributeReport source attribute startRow startCol =
         AttributeIndentDecl row col ->
           stuck row col "UNFINISHED ATTRIBUTE" $
             D.reflow "I was expecting the declaration this attribute is attached to next."
+        AttributeLanguage row col ->
+          stuck row col "PROBLEM IN ATTRIBUTE" $
+            D.reflow
+              "I was expecting the language this extern is implemented in next, like `js`,\
+              \ `erlang` or `c`."
+        AttributeExternName row col ->
+          stuck row col "PROBLEM IN ATTRIBUTE" $
+            D.reflow
+              "I was expecting a name in quotes next: `js` and `erlang` take a module and a\
+              \ function, as in `@extern(js, \"geng_time\", \"now\")`, and `c` takes a symbol."
+        AttributeAfterExtern name row col ->
+          stuck row col "MISPLACED ATTRIBUTE" $
+            D.reflow $
+              "I found `@"
+                ++ Name.toChars name
+                ++ "` under an `@extern`. The rows above an extern declaration name its\
+                   \ implementations, one language each, so only `@extern` and `@externPure`\
+                   \ may be there."
+        AttributeIndentLanguage row col ->
+          stuck row col "UNFINISHED ATTRIBUTE" $
+            D.reflow "I was expecting the extern's language next."
+        AttributeIndentExternName row col ->
+          stuck row col "UNFINISHED ATTRIBUTE" $
+            D.reflow "I was expecting a name in quotes next."
 
 -- INSTANCE
 

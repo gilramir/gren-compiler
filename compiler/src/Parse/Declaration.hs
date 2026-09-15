@@ -68,6 +68,8 @@ declaration =
         -- else, so an error inside one is that error rather than "this is not
         -- a primitive declaration".
         primDecl maybeDocs start primName
+      Just (Extern first) ->
+        externDecl maybeDocs first
       Nothing ->
         oneOf
           E.DeclStart
@@ -80,16 +82,16 @@ declaration =
 
 -- ATTRIBUTES
 
--- | The two attributes the language has: @\@derive(Eq, Ord, Inspect)@ on a
--- custom type (D53, `classes.md` §8.1) and @\@prim("i32_add")@ on an
--- annotation (`core.md` C13).
---
--- `ffi.md` F1's @\@extern@ is the remaining customer and will land beside
--- them. An attribute follows the doc comment and precedes the declaration,
--- which is the order Rust and Gren's own doc comments already read in.
+-- | The attributes the language has: @\@derive(Eq, Ord, Inspect)@ on a custom
+-- type (D53, `classes.md` §8.1), @\@prim("i32_add")@ on an annotation
+-- (`core.md` C13), and @\@extern@ and @\@externPure@ on an annotation (`ffi.md`
+-- F1, `m1b-extern.md` §H8 step 2). An attribute follows the doc comment and
+-- precedes the declaration, which is the order Rust and Gren's own doc comments
+-- already read in.
 data Attribute
   = Derive [A.Located Name.Name]
   | Prim (A.Located Name.Name)
+  | Extern Src.ExternImpl
 
 chompAttribute :: Parser E.Decl (Maybe Attribute)
 chompAttribute =
@@ -103,7 +105,9 @@ chompAttribute =
             else
               if name == Name.fromChars "prim"
                 then Just . Prim <$> chompPrimArg
-                else attributeUnknown name nameEnd
+                else case externPurity name of
+                  Just isPure -> Just . Extern <$> chompExternArgs isPure
+                  Nothing -> attributeUnknown name nameEnd
     ]
     Nothing
 
@@ -143,6 +147,98 @@ chompPrimName =
   do
     (str, _) <- String.string E.AttributePrimName E.AttributePrimString
     return (Name.fromChars (ES.toChars str))
+
+-- EXTERN ATTRIBUTES
+
+-- | Whether an attribute's name is one of the two extern spellings, and which.
+-- `syntax.md` S2 spells purity differently on purpose, so it is greppable.
+externPurity :: Name.Name -> Maybe Bool
+externPurity name
+  | name == Name.fromChars "extern" = Just False
+  | name == Name.fromChars "externPure" = Just True
+  | otherwise = Nothing
+
+-- | @(js, "geng_time", "now")@: a language, then its names as strings.
+--
+-- How many strings a language takes is D77's table, and canonicalization's
+-- business: `js` and `erlang` take a module and a name, `c` a symbol.
+chompExternArgs :: Bool -> Parser E.Attribute Src.ExternImpl
+chompExternArgs isPure =
+  do
+    Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentOpen
+    word1 0x28 {-(-} E.AttributeOpen
+    Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentLanguage
+    language <- addLocation (Var.lower E.AttributeLanguage)
+    Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentEnd
+    names <- chompExternNames []
+    Space.chomp E.AttributeSpace
+    Space.checkFreshLine E.AttributeIndentDecl
+    return (Src.ExternImpl isPure language names)
+
+chompExternNames :: [A.Located ES.String] -> Parser E.Attribute [A.Located ES.String]
+chompExternNames revNames =
+  oneOf
+    E.AttributeEnd
+    [ do
+        word1 0x2C {-,-} E.AttributeEnd
+        Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentExternName
+        name <- addLocation (fst <$> String.string E.AttributeExternName E.AttributePrimString)
+        Space.chompAndCheckIndent E.AttributeSpace E.AttributeIndentEnd
+        chompExternNames (name : revNames),
+      do
+        word1 0x29 {-)-} E.AttributeEnd
+        return (reverse revNames)
+    ]
+
+-- | The rest of an extern declaration: any further @\@extern@ rows, one per
+-- language, and then the annotation, exactly as 'primDecl' reads it.
+externDecl :: Maybe Src.DocComment -> Src.ExternImpl -> Space.Parser E.Decl (Decl, [Src.Comment])
+externDecl maybeDocs first =
+  do
+    impls <- chompMoreExterns [first]
+    start <- getPosition
+    name <- Var.lower E.DeclStart
+    nameEnd <- getPosition
+    specialize (E.DeclDef name) $
+      do
+        commentsBeforeColon <- Space.chompAndCheckIndent E.DeclDefSpace E.DeclDefIndentEquals
+        word1 0x3A {-:-} E.DeclDefEquals
+        commentsAfterColon <- Space.chompAndCheckIndent E.DeclDefSpace E.DeclDefIndentType
+        -- `Type.expression`, as for a primitive: an extern is never
+        -- constrained, since there is no witness a host function could be
+        -- handed.
+        ((tipe, commentsAfterTipe), end) <- specialize E.DeclDefType Type.expression
+        let tipeComments = SC.ValueTypeComments commentsBeforeColon commentsAfterColon []
+        let annotation = Src.Annotation Nothing tipe tipeComments
+        let body = A.At (A.Region start nameEnd) (Src.Extern impls)
+        let value = Src.Value (A.at start nameEnd name) [] body (Just annotation) (SC.ValueComments [] [] [])
+        return ((Value maybeDocs (A.at start end value), commentsAfterTipe), end)
+
+-- | Further attribute rows under an @\@extern@, which may only be externs.
+chompMoreExterns :: [Src.ExternImpl] -> Parser E.Decl [Src.ExternImpl]
+chompMoreExterns revImpls =
+  oneOfWithFallback
+    [ inContext E.DeclAttribute (word1 0x40 {-\@-} E.DeclStart) $
+        do
+          name <- Var.lower E.AttributeName
+          nameEnd <- getPosition
+          case externPurity name of
+            Just isPure ->
+              do
+                impl <- chompExternArgs isPure
+                return (Just impl)
+            Nothing ->
+              attributeNotExtern name nameEnd
+    ]
+    Nothing
+    >>= \more ->
+      case more of
+        Just impl -> chompMoreExterns (impl : revImpls)
+        Nothing -> return (reverse revImpls)
+
+attributeNotExtern :: Name.Name -> A.Position -> Parser E.Attribute a
+attributeNotExtern name (A.Position row col) =
+  P.Parser $ \_ _ _ cerr _ -> cerr row col (E.AttributeAfterExtern name)
 
 attributeNotOnCustomType :: Space.Parser E.Decl (Decl, [Src.Comment])
 attributeNotOnCustomType =

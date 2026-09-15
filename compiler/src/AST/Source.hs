@@ -7,6 +7,7 @@ module AST.Source
     GREN_COMMENT,
     Expr,
     Expr_ (..),
+    ExternImpl (..),
     VarType (..),
     ArrayEntry,
     BinopsSegment,
@@ -100,6 +101,26 @@ data Expr_
     -- part in duplicate detection — and none of that machinery is worth a
     -- second copy.
     Prim (A.Located Name)
+  | -- | The body an @\@extern@ declaration stands for (@ffi.md@ F1, D42).
+    --
+    -- A 'Prim''s sibling for the same reason: an extern is a top-level binding
+    -- with an annotation and no equation, and the attributes above it are what
+    -- it is bound to. There is one 'ExternImpl' per attribute, one per
+    -- implementation language, in the order they were written.
+    Extern [ExternImpl]
+  deriving (Show)
+
+-- | One @\@extern(js, "geng_time", "now")@ or @\@externPure(...)@.
+--
+-- The parser takes any lower-case language and any number of strings, so that
+-- a language outside D77's table, or the wrong number of names for one inside
+-- it, is refused by canonicalization with a sentence about extern languages
+-- rather than by the parser as a malformed attribute.
+data ExternImpl = ExternImpl
+  { _externPure :: Bool,
+    _externLanguage :: A.Located Name,
+    _externNames :: [A.Located ES.String]
+  }
   deriving (Show)
 
 data VarType = LowVar | CapVar

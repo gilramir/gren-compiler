@@ -22,6 +22,7 @@ import Canonicalize.Type qualified as Type
 import Control.Monad (foldM)
 import Data.Graph qualified as Graph
 import Data.Index qualified as Index
+import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Maybe qualified as Maybe
 import Data.Name qualified as Name
@@ -388,6 +389,16 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
             name,
             Map.keys freeLocals
           )
+    Just (Src.Annotation maybeContext srcType _)
+      | A.At _ (Src.Extern impls) <- body ->
+          do
+            (Can.Forall _ tipe) <- Type.toAnnotation env maybeContext srcType
+            checkExtern aname impls tipe
+            -- Every rule the front half can check has held. What is left is
+            -- Core (`m1b-extern.md` §H8 step 3) and the JS backend (step 4),
+            -- and until they exist the declaration is refused as not compiled
+            -- yet rather than dropped.
+            Result.throw (Error.ExternNotCompiledYet (A.toRegion aname) name)
     Just (Src.Annotation maybeContext srcType _) ->
       do
         (Can.Forall freeVars tipe) <- Type.toAnnotation env maybeContext srcType
@@ -408,6 +419,64 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
             name,
             Map.keys freeLocals
           )
+
+-- EXTERNS
+
+-- | `ffi.md` F1 and D77, checked on a declaration's attributes and its type.
+--
+-- In the order an author would fix them: each attribute on its own (a language
+-- in the table, with the names that language takes), then the attributes
+-- against each other (one per language, and all of one purity), and last the
+-- declared type, which must end in a `Task` unless the extern is pure (F1,
+-- `syntax.md` S2).
+checkExtern :: A.Located Name.Name -> [Src.ExternImpl] -> Can.Type -> Result i w ()
+checkExtern (A.At nameRegion name) impls tipe =
+  do
+    mapM_ checkImpl impls
+    _ <- foldM checkDuplicate Map.empty impls
+    case impls of
+      Src.ExternImpl isPure _ _ : rest
+        | Just (Src.ExternImpl _ (A.At region _) _) <- List.find (\(Src.ExternImpl p _ _) -> p /= isPure) rest ->
+            Result.throw (Error.ExternMixedPurity region name)
+      Src.ExternImpl False _ _ : _
+        | not (endsInTask tipe) ->
+            Result.throw (Error.ExternNotTask nameRegion name tipe)
+      _ ->
+        Result.ok ()
+  where
+    checkImpl (Src.ExternImpl _ (A.At region language) names) =
+      case lookup (Name.toChars language) externLanguages of
+        Nothing ->
+          Result.throw (Error.ExternUnknownLanguage region language)
+        Just wanted
+          | length names /= wanted ->
+              Result.throw (Error.ExternNames region language wanted (length names))
+          | otherwise ->
+              Result.ok ()
+
+    checkDuplicate seen (Src.ExternImpl _ (A.At region language) _) =
+      case Map.lookup language seen of
+        Just first -> Result.throw (Error.ExternDuplicateLanguage region language first)
+        Nothing -> Result.ok (Map.insert language region seen)
+
+-- | D77's table: the extern languages, and how many quoted names each takes.
+externLanguages :: [(String, Int)]
+externLanguages =
+  [ ("js", 2),
+    ("erlang", 2),
+    ("c", 1)
+  ]
+
+-- | Whether a type, past its arguments and through its aliases, is
+-- `Platform.Task`, which `Task.Task` is an alias of.
+endsInTask :: Can.Type -> Bool
+endsInTask tipe =
+  case tipe of
+    Can.TLambda _ result -> endsInTask result
+    Can.TType home typeName _ -> home == ModuleName.platform && typeName == Name.task
+    Can.TAlias _ _ _ (Can.Holey aliased) -> endsInTask aliased
+    Can.TAlias _ _ _ (Can.Filled aliased) -> endsInTask aliased
+    _ -> False
 
 toNodeTwo :: Name.Name -> [arg] -> Can.Def -> Expr.FreeLocals -> NodeTwo
 toNodeTwo name args def freeLocals =

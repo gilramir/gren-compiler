@@ -27,6 +27,7 @@ import Reporting.Doc (Doc, (<+>))
 import Reporting.Doc qualified as D
 import Reporting.Render.Code qualified as Code
 import Reporting.Render.Type qualified as RT
+import Reporting.Render.Type.Localizer qualified as L
 import Reporting.Report qualified as Report
 import Reporting.Suggest qualified as Suggest
 
@@ -93,6 +94,12 @@ data Error
   | PrimOutsideCore A.Region Name.Name
   | PrimUnknown A.Region Name.Name
   | PrimHasNoTypeYet A.Region Name.Name
+  | ExternUnknownLanguage A.Region Name.Name
+  | ExternNames A.Region Name.Name Int Int
+  | ExternDuplicateLanguage A.Region Name.Name A.Region
+  | ExternMixedPurity A.Region Name.Name
+  | ExternNotTask A.Region Name.Name Can.Type
+  | ExternNotCompiledYet A.Region Name.Name
   | RecursiveAlias A.Region Name.Name [Name.Name] Src.Type [Name.Name]
   | RecursiveDecl A.Region Name.Name [Name.Name]
   | RecursiveLet (A.Located Name.Name) [Name.Name]
@@ -1188,6 +1195,96 @@ toReport source err =
               "The compiler checks a `@prim` declaration against its own table of types, and\
               \ that table is filled in group by group as the Gren types each group names\
               \ come to exist. This primitive's group is not in it yet."
+          )
+    ExternUnknownLanguage region language ->
+      Report.Report "UNKNOWN EXTERN LANGUAGE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`" ++ Name.toChars language ++ "` is not a language an extern can be implemented in:",
+            D.reflow
+              "An extern names the language its implementation is written in, and each\
+              \ language serves the targets that can run it: `js` for the JavaScript and\
+              \ WebAssembly targets, `erlang` for the BEAM, and `c` for native code."
+          )
+    ExternNames region language wanted got ->
+      Report.Report "EXTERN NAMES" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "An extern in `"
+                ++ Name.toChars language
+                ++ "` names its implementation with "
+                ++ (if wanted == 1 then "one string" else show wanted ++ " strings")
+                ++ ", and this one has "
+                ++ show got
+                ++ ":",
+            D.reflow
+              "`js` and `erlang` take a module and a function, as in\
+              \ `@extern(js, \"geng_time\", \"now\")`. `c` takes one symbol, as in\
+              \ `@extern(c, \"geng_time_now\")`."
+          )
+    ExternDuplicateLanguage region language first ->
+      Report.Report "DUPLICATE EXTERN LANGUAGE" region [] $
+        Code.toPair
+          source
+          first
+          region
+          ( D.reflow $
+              "This extern names two `" ++ Name.toChars language ++ "` implementations.",
+            D.reflow "Each language has one implementation, so remove one of the two attributes."
+          )
+          ( D.reflow $
+              "This extern names a `" ++ Name.toChars language ++ "` implementation here:",
+            "And a second one here:",
+            D.reflow "Each language has one implementation, so remove one of the two attributes."
+          )
+    ExternMixedPurity region name ->
+      Report.Report "MIXED EXTERN PURITY" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "The attributes on `" ++ Name.toChars name ++ "` mix `@extern` and `@externPure`:",
+            D.reflow
+              "Purity is a property of the declaration and not of one language's\
+              \ implementation, since the same code has to mean the same thing on every\
+              \ target. Write every row with the same one."
+          )
+    ExternNotTask region name tipe ->
+      Report.Report "EXTERN IS NOT A TASK" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`" ++ Name.toChars name ++ "` is an `@extern`, so its type has to end in a `Task`, and it is:",
+            D.stack
+              [ D.indent 4 (RT.canToDoc L.empty RT.None tipe),
+                D.reflow
+                  "Calling the host is an effect, and an effect is a Task. If the host\
+                  \ function really is pure, declare it with `@externPure` instead, which says\
+                  \ so where anyone can find it and is counted in the package interface."
+              ]
+          )
+    ExternNotCompiledYet region name ->
+      Report.Report "EXTERN NOT COMPILED YET" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`" ++ Name.toChars name ++ "` is a well-formed extern, but this compiler cannot compile one yet:",
+            D.reflow
+              "The declaration's attributes and type have been checked. Lowering an extern\
+              \ to Core and emitting it for a backend are the next two steps of the work\
+              \ (m1b-extern.md §H8), and until they land a program that declares one is\
+              \ refused here."
           )
     RecursiveAlias region name args tipe others ->
       aliasRecursionReport source region name args tipe others
