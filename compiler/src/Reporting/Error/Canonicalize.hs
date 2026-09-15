@@ -14,6 +14,11 @@ where
 
 import AST.Canonical qualified as Can
 import AST.Source qualified as Src
+import Core.AST qualified as Core
+import Core.Extern qualified as Extern
+import Core.Pretty qualified as Pretty
+import Data.ByteString.Builder qualified as B
+import Data.ByteString.Lazy.Char8 qualified as LChar8
 import Data.Char qualified as Char
 import Data.Index qualified as Index
 import Data.List qualified as List
@@ -99,6 +104,9 @@ data Error
   | ExternDuplicateLanguage A.Region Name.Name A.Region
   | ExternMixedPurity A.Region Name.Name
   | ExternNotTask A.Region Name.Name Can.Type
+  | ExternJsModule A.Region String
+  | ExternJsFunction A.Region String
+  | ExternDoesNotCross A.Region Name.Name Extern.Problem
   | ExternNotCompiledYet A.Region Name.Name
   | RecursiveAlias A.Region Name.Name [Name.Name] Src.Type [Name.Name]
   | RecursiveDecl A.Region Name.Name [Name.Name]
@@ -1225,7 +1233,7 @@ toReport source err =
                 ++ ":",
             D.reflow
               "`js` and `erlang` take a module and a function, as in\
-              \ `@extern(js, \"geng_time\", \"now\")`. `c` takes one symbol, as in\
+              \ `@extern(js, \"GengTime\", \"now\")`. `c` takes one symbol, as in\
               \ `@extern(c, \"geng_time_now\")`."
           )
     ExternDuplicateLanguage region language first ->
@@ -1271,6 +1279,40 @@ toReport source err =
                   \ function really is pure, declare it with `@externPure` instead, which says\
                   \ so where anyone can find it and is counted in the package interface."
               ]
+          )
+    ExternJsModule region modul ->
+      Report.Report "EXTERN MODULE NAME" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "A `js` extern's module names its implementation file, and `" ++ modul ++ "` cannot:",
+            D.reflow
+              "The file is `src/Ext/<Module>.js`, so the module is written the way a Geng module\
+              \ name's part is: a capital letter, then letters and digits, as in\
+              \ `@extern(js, \"GengTime\", \"now\")`."
+          )
+    ExternJsFunction region function ->
+      Report.Report "EXTERN FUNCTION NAME" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "A `js` extern's function is a declaration in its implementation file, and `" ++ function ++ "` is not a JavaScript name:",
+            D.reflow
+              "Write it as the file declares it: letters, digits, `_` and `$`, not starting with a digit."
+          )
+    ExternDoesNotCross region name problem ->
+      Report.Report "EXTERN TYPE DOES NOT CROSS" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`" ++ Name.toChars name ++ "` has a `js` implementation, and its type cannot cross to JavaScript:",
+            D.stack (externProblem problem)
           )
     ExternNotCompiledYet region name ->
       Report.Report "EXTERN NOT COMPILED YET" region [] $
@@ -1774,3 +1816,38 @@ aliasToUnionDoc name args tipe =
       D.dullyellow $
         D.indent 8 (RT.srcToDoc RT.App tipe)
     ]
+
+-- | The part of an extern's type that does not cross, and why (@m1b-extern.md@
+-- §H13, D192, D201, D203).
+externProblem :: Extern.Problem -> [D.Doc]
+externProblem problem =
+  case problem of
+    Extern.DoesNotCross tipe ->
+      [ D.indent 4 (coreType tipe),
+        D.reflow
+          "Only JavaScript's own values cross an extern: the number types, `Bool`, `Char`,\
+          \ `String`, `Bytes`, an `Array` of those, an `Extern.Handle`, a type variable, and a\
+          \ function passed in. A record or a custom type is built on the Geng side, by a\
+          \ function the extern is handed and calls."
+      ]
+    Extern.UnitArgument ->
+      [ D.reflow
+          "It takes a `{}`, which an implementation has nothing to do with. A Task is\
+          \ already run only when it is performed, so leave the argument out."
+      ]
+    Extern.FunctionPosition tipe ->
+      [ D.indent 4 (coreType tipe),
+        D.reflow
+          "A function crosses only as an argument, and its own arguments and result have to\
+          \ cross as values. An extern cannot return a function, and a function passed in\
+          \ cannot return a Task."
+      ]
+    Extern.NeverPosition ->
+      [ D.reflow
+          "`Never` can only be a Task's error type, where it says the implementation never\
+          \ fails."
+      ]
+
+coreType :: Core.Type -> D.Doc
+coreType tipe =
+  D.fromChars (LChar8.unpack (B.toLazyByteString (Pretty.typeToBuilder Pretty.defaultOptions tipe)))

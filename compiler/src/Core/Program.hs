@@ -95,6 +95,10 @@ data Program = Program
     -- | The kernel modules reachable code reaches, in link order among the
     -- rest. Empty once @ffi.md@ F7 retires the kernel.
     _progKernels :: [Name],
+    -- | The reachable externs, in link order among the rest, each with its
+    -- module. An extern is a declaration and not a binding (D196), so it is not
+    -- in '_progBindings', and a backend emits its wrapper where it falls.
+    _progExterns :: [(ModuleName.Canonical, Core.Extern)],
     -- | What each root's @main@ is (C19), in root order. A root whose module
     -- declares no @main@ is not here, and is a 'Missing' instead.
     _progMains :: [(ModuleName.Canonical, Core.Main)],
@@ -104,13 +108,14 @@ data Program = Program
 
 -- | One thing a backend emits, under the order it is emitted in.
 --
--- A port and a kernel module are not bindings and cannot be ('Core.AST.Port' is
+-- A port, a kernel module and an extern are not bindings and cannot be ('Core.AST.Port' is
 -- a declaration, C18; kernel JavaScript is not Core at all, C16), but all three
 -- define names the others use, so all three are ordered together.
 data Linked
   = LBind !Core.QualName !Core.Bind
   | LPort !ModuleName.Canonical !Core.Port
   | LKernel !Name
+  | LExtern !ModuleName.Canonical !Core.Extern
 
 -- | What the build system tells the linker about the backend it is linking for.
 --
@@ -210,11 +215,12 @@ link :: Backend -> Map ModuleName.Canonical Core.Module -> [Core.QualName] -> Pr
 link backend modules roots =
   let binds = Map.fromList (concatMap moduleBindings (Map.toAscList modules))
       ports = Map.fromList (concatMap modulePorts (Map.toAscList modules))
+      externs = Map.fromList (concatMap moduleExterns (Map.toAscList modules))
       kernelNodes = Map.mapKeys kernelName (_backendKernels backend)
-      -- A port and a kernel module define a name the same way a binding does, so
+      -- A port, a kernel module and an extern define a name the same way a binding does, so
       -- reachability and the order are computed over the three together and
       -- split apart afterwards.
-      defined = Set.unions [Map.keysSet binds, Map.keysSet ports, Map.keysSet kernelNodes]
+      defined = Set.unions [Map.keysSet binds, Map.keysSet ports, Map.keysSet kernelNodes, Map.keysSet externs]
       ctorOwner = Map.fromList (concatMap moduleCtors (Map.toAscList modules))
       datas = Map.fromList (concatMap moduleDatas (Map.toAscList modules))
       refs =
@@ -248,9 +254,13 @@ link backend modules roots =
             -- module it lands in is strict too — which is the ordering
             -- @compiler#387@ is about, stated where every other order is.
             Map.map (Set.map resolve . strictPort . snd) ports,
-            Map.map (Set.map resolve . _refGlobals) (Map.restrictKeys (_backendEdges backend) (Map.keysSet ports))
+            Map.map (Set.map resolve . _refGlobals) (Map.restrictKeys (_backendEdges backend) (Map.keysSet ports)),
+            -- The same for an extern: an argument-less one is a value the
+            -- wrapper builds when it is emitted, out of the runtime the backend
+            -- names.
+            Map.map (Set.map resolve . _refGlobals) (Map.restrictKeys (_backendEdges backend) (Map.keysSet externs))
           ]
-      items = Maybe.mapMaybe (linkedItem binds ports) (concatMap (settle strict) groups)
+      items = Maybe.mapMaybe (linkedItem binds ports externs) (concatMap (settle strict) groups)
    in Program
         { _progRoots = roots,
           _progLinked = items,
@@ -261,6 +271,7 @@ link backend modules roots =
           _progManagers = reachedManagers reached modules,
           _progPorts = [(home, p) | LPort home p <- items],
           _progKernels = [short | LKernel short <- items],
+          _progExterns = [(home, e) | LExtern home e <- items],
           _progMains = mains modules roots,
           _progMissing = missing defined ctorOwner datas roots reachedRefs
         }
@@ -324,15 +335,19 @@ resolve q =
 linkedItem ::
   Map Core.QualName Core.Bind ->
   Map Core.QualName (ModuleName.Canonical, Core.Port) ->
+  Map Core.QualName (ModuleName.Canonical, Core.Extern) ->
   Core.QualName ->
   Maybe Linked
-linkedItem binds ports q =
+linkedItem binds ports externs q =
   case Map.lookup q binds of
     Just b -> Just (LBind q b)
     Nothing ->
       case Map.lookup q ports of
         Just (home, p) -> Just (LPort home p)
-        Nothing -> LKernel <$> kernelHome q
+        Nothing ->
+          case Map.lookup q externs of
+            Just (home, e) -> Just (LExtern home e)
+            Nothing -> LKernel <$> kernelHome q
 
 -- | The extra edges an @effect module@'s manager puts in the graph: from each
 -- entry binding — @command@, @subscription@ — to the five functions the manager
@@ -384,6 +399,14 @@ modulePorts :: (ModuleName.Canonical, Core.Module) -> [(Core.QualName, (ModuleNa
 modulePorts (home, m) =
   [ (Core.QualName home (Core._binderName (Core._portBinder p)), (home, p))
   | p <- Core._modulePorts m
+  ]
+
+-- | An extern, under the name it defines, with its module beside it, as
+-- 'modulePorts' has.
+moduleExterns :: (ModuleName.Canonical, Core.Module) -> [(Core.QualName, (ModuleName.Canonical, Core.Extern))]
+moduleExterns (home, m) =
+  [ (Core.QualName home (Core._binderName (Core._externBinder e)), (home, e))
+  | e <- Core._moduleExterns m
   ]
 
 moduleCtors :: (ModuleName.Canonical, Core.Module) -> [(Core.QualName, Core.QualName)]
@@ -523,6 +546,18 @@ render p =
         ],
       "kernels " <> int (length (_progKernels p)) <> "\n",
       mconcat ["  " <> B.stringUtf8 (Name.toChars short) <> "\n" | short <- _progKernels p],
+      -- Only when there are any, so that the summaries of the programs that
+      -- declare none, which are all of them before step 4, did not move.
+      if null (_progExterns p)
+        then mempty
+        else
+          "externs "
+            <> int (length (_progExterns p))
+            <> "\n"
+            <> mconcat
+              [ "  " <> B.stringUtf8 (ModuleName.toChars raw) <> "." <> B.stringUtf8 (Name.toChars (Core._binderName (Core._externBinder e))) <> "\n"
+              | (ModuleName.Canonical _ raw, e) <- _progExterns p
+              ],
       "ports " <> int (length (_progPorts p)) <> "\n",
       mconcat
         [ "  " <> B.stringUtf8 (ModuleName.toChars raw) <> "." <> B.stringUtf8 (Name.toChars (Core._binderName (Core._portBinder port))) <> " " <> portFlow port <> "\n"

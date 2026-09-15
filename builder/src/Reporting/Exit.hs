@@ -2367,27 +2367,33 @@ toModuleNameConventionTable srcDir names =
 data Generate
   = GenerateCannotLoadArtifacts
   | GenerateCannotOptimizeDebugValues ModuleName.Raw [ModuleName.Raw]
-  | GenerateExternNotEmittedYet [(ModuleName.Raw, [N.Name])]
+  | GenerateExternUnimplemented [(ModuleName.Raw, N.Name, Maybe FilePath)]
 
 toGenerateReport :: Generate -> Help.Report
 toGenerateReport problem =
   case problem of
     GenerateCannotLoadArtifacts ->
       corruptCacheReport
-    GenerateExternNotEmittedYet found ->
+    GenerateExternUnimplemented problems ->
       Help.report
-        "EXTERN NOT COMPILED YET"
+        "EXTERN HAS NO IMPLEMENTATION"
         Nothing
-        "These modules declare externs, and this compiler cannot emit one yet:"
+        "These externs are used by the program, and there is no JavaScript to call for them:"
         [ D.indent 4 $
             D.vcat
-              [ D.fromChars (ModuleName.toChars m ++ ": " ++ List.intercalate ", " (map N.toChars names))
-              | (m, names) <- found
+              [ D.fromChars $
+                  ModuleName.toChars m
+                    ++ "."
+                    ++ N.toChars name
+                    ++ case file of
+                      Nothing -> ": it has no `js` implementation"
+                      Just path -> ": " ++ path ++ " is not in its package"
+              | (m, name, file) <- List.sort problems
               ],
           D.reflow
-            "Their declarations have been checked and lowered to Core. Emitting an extern\
-            \ for the JavaScript backend is the next step of the work (m1b-extern.md §H8\
-            \ step 4), and until it lands a program that declares one is refused here."
+            "A `js` extern is implemented by a plain script, `src/Ext/<Module>.js` in the\
+            \ package that declares it, which declares the function the attribute names\
+            \ (m1b-extern.md §H15, D198)."
         ]
     GenerateCannotOptimizeDebugValues m ms ->
       Help.report

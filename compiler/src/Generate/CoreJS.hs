@@ -28,6 +28,7 @@ import AST.Canonical qualified as Can
 import Core.AST qualified as Core
 import Core.Prim qualified as Prim
 import Core.Program (Linked (..), Program (..))
+import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as B
 import Data.ByteString.Lazy.Char8 qualified as BLazy
 import Data.List qualified as List
@@ -38,6 +39,7 @@ import Data.Name qualified as Name
 import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
 import Generate.CoreJS.Expression qualified as Expr
+import Generate.CoreJS.Extern qualified as Extern
 import Generate.JavaScript.Builder qualified as JS
 import Generate.JavaScript.Functions qualified as Functions
 import Generate.JavaScript.Name qualified as JsName
@@ -45,6 +47,7 @@ import Generate.Mode qualified as Mode
 import Generate.SourceMap qualified as SourceMap
 import Gren.Kernel qualified as K
 import Gren.ModuleName qualified as ModuleName
+import Gren.Package qualified as Pkg
 import Reporting.Annotation qualified as A
 import Reporting.Doc qualified as D
 import Reporting.Render.Type qualified as RT
@@ -63,14 +66,15 @@ data GeneratedResult = GeneratedResult
 -- @kernels@ is the chunk list per kernel module, which the builder reads off the
 -- graph `Gren.Kernel` already filled in. Only the modules '_progKernels' names
 -- are spliced, and each one lands where the linker put it.
-generate :: Mode.Mode -> Program -> Map Name [K.Chunk] -> GeneratedResult
-generate mode program kernels =
+generate :: Mode.Mode -> Program -> Map Name [K.Chunk] -> Map (Pkg.Name, Name) BS.ByteString -> GeneratedResult
+generate mode program kernels exts =
   let env = envFor mode program
       started =
-        List.foldl'
-          (flip JS.stmtToBuilder)
-          (JS.emptyBuilder firstGeneratedLineNumber)
-          (constructors env program)
+        JS.addByteString (Extern.files exts (_progExterns program)) $
+          List.foldl'
+            (flip JS.stmtToBuilder)
+            (JS.emptyBuilder firstGeneratedLineNumber)
+            (constructors env program)
       linked = List.foldl' (item env kernels) started (_progLinked program)
       builder = List.foldl' (flip JS.stmtToBuilder) linked (managers program)
    in GeneratedResult
@@ -95,15 +99,16 @@ generate mode program kernels =
 -- /edge/ hung off the printed value — §J13\'s rule, which 'Generate.replBackend'
 -- is where it is written down. It used to root @Debug.toString@ instead, and
 -- §G45 deleted that binding.
-generateForRepl :: Bool -> L.Localizer -> Program -> Map Name [K.Chunk] -> ModuleName.Canonical -> Name -> Can.Annotation -> B.Builder
-generateForRepl ansi localizer program kernels home name (Can.Forall _ tipe) =
+generateForRepl :: Bool -> L.Localizer -> Program -> Map Name [K.Chunk] -> Map (Pkg.Name, Name) BS.ByteString -> ModuleName.Canonical -> Name -> Can.Annotation -> B.Builder
+generateForRepl ansi localizer program kernels exts home name (Can.Forall _ tipe) =
   let mode = Mode.Dev
       env = envFor mode program
       started =
-        List.foldl'
-          (flip JS.stmtToBuilder)
-          (JS.emptyBuilder 0)
-          (constructors env program)
+        JS.addByteString (Extern.files exts (_progExterns program)) $
+          List.foldl'
+            (flip JS.stmtToBuilder)
+            (JS.emptyBuilder 0)
+            (constructors env program)
       linked = List.foldl' (item env kernels) started (_progLinked program)
       builder = List.foldl' (flip JS.stmtToBuilder) linked (managers program)
    in "process.on('uncaughtException', function(err) { process.stderr.write(err.toString() + '\\n'); process.exit(1); });"
@@ -182,6 +187,8 @@ item env kernels builder linked =
       case Map.lookup short kernels of
         Nothing -> error ("Generate.CoreJS: no chunks for kernel module " ++ Name.toChars short)
         Just chunks -> JS.addByteString (kernel (Expr._mode env) chunks) builder
+    LExtern home e ->
+      JS.addByteString (Extern.wrapper home e) builder
 
 -- DEFINITIONS
 
@@ -385,11 +392,14 @@ envFor mode program =
     { Expr._mode = mode,
       Expr._ctors = Map.fromList (concatMap ctorEntries (_progData program)),
       Expr._arities =
-        Map.fromList
+        Map.fromList $
           [ (q, length params)
           | (q, Core.Bind _ body) <- _progBindings program,
             Core.ELam params _ <- [Core._exprValue body]
-          ],
+          ]
+            ++ [ (Core.QualName home (Core._binderName (Core._externBinder e)), Extern.arity e)
+               | (home, e) <- _progExterns program
+               ],
       Expr._prims =
         Map.fromList
           [ (q, op)

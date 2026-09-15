@@ -2,6 +2,8 @@ module Generate
   ( dev,
     prod,
     repl,
+    ExtSources,
+    extSources,
   )
 where
 
@@ -14,6 +16,7 @@ import Core.Pretty qualified as Pretty
 import Core.Program qualified as Program
 import Core.Refs qualified as Refs
 import Core.Wire qualified as Wire
+import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as B
 import Data.Map ((!))
 import Data.Map qualified as Map
@@ -21,12 +24,15 @@ import Data.Maybe qualified as Maybe
 import Data.Name qualified as N
 import Data.NonEmptyList qualified as NE
 import Data.Set qualified as Set
+import Data.Utf8 qualified as Utf8
 import Generate.CoreJS qualified as CoreJS
 import Generate.LowC qualified as LowC
 import Generate.Mode qualified as Mode
 import Gren.Details qualified as Details
 import Gren.Kernel qualified as K
 import Gren.ModuleName qualified as ModuleName
+import Gren.Outline qualified as Outline
+import Gren.Package qualified as Pkg
 import Nitpick.Debug qualified as Nitpick
 import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
@@ -47,28 +53,28 @@ type Task a =
 -- each, which is what made the Core path a measured claim rather than a stated
 -- one (@docs\/m1a-js-on-core.md@ §J3 items 6 and 7). It stopped being useful
 -- when the old path stopped being an independent answer.
-dev :: Details.Details -> Build.Artifacts -> Task CoreJS.GeneratedResult
-dev details artifacts =
+dev :: Details.Details -> ExtSources -> Build.Artifacts -> Task CoreJS.GeneratedResult
+dev details sources artifacts =
   do
     kernels <- kernelChunks details
     dumpCore details artifacts kernels
-    checkForExterns details artifacts
     spikeC details artifacts
     program <- linkCore details artifacts kernels
-    return $ CoreJS.generate Mode.Dev program kernels
+    exts <- externFiles sources program
+    return $ CoreJS.generate Mode.Dev program kernels exts
 
 -- | An @--optimize@ build: 'dev', with the field table filled in and @Debug@
 -- refused.
-prod :: Details.Details -> Build.Artifacts -> Task CoreJS.GeneratedResult
-prod details artifacts =
+prod :: Details.Details -> ExtSources -> Build.Artifacts -> Task CoreJS.GeneratedResult
+prod details sources artifacts =
   do
     checkForDebugUses artifacts
     kernels <- kernelChunks details
     dumpCore details artifacts kernels
-    checkForExterns details artifacts
     program <- linkCore details artifacts kernels
+    exts <- externFiles sources program
     let mode = Mode.Prod (CoreJS.shortenFieldNames (Program._progFields program))
-    return $ CoreJS.generate mode program kernels
+    return $ CoreJS.generate mode program kernels exts
 
 -- PROGRAM CORE
 
@@ -208,6 +214,11 @@ runtimeEdges cores =
           ++ [ (Core.QualName home N._main, kernel short)
              | Just m <- [Core._moduleMain modul],
                Just short <- [staticHome m]
+             ]
+          -- A @Task@ extern's wrapper is the scheduler's binding (D193).
+          ++ [ (Core.QualName home (Core._binderName (Core._externBinder e)), kernel (N.fromChars "Scheduler"))
+             | e <- Core._moduleExterns modul,
+               not (Core._externPure e)
              ]
       | (home, modul) <- Map.toList cores
       ]
@@ -396,12 +407,13 @@ spikeBackend =
     }
 
 -- | One REPL entry, generated the way @dev@ is (§J17).
-repl :: Details.Details -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
-repl details ansi artifacts@(Build.ReplArtifacts home _ localizer annotations) name =
+repl :: Details.Details -> ExtSources -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
+repl details sources ansi artifacts@(Build.ReplArtifacts home _ localizer annotations) name =
   do
     kernels <- kernelChunks details
     program <- linkReplCore details artifacts name kernels
-    return $ CoreJS.generateForRepl ansi localizer program kernels home name (annotations ! name)
+    exts <- externFiles sources program
+    return $ CoreJS.generateForRepl ansi localizer program kernels exts home name (annotations ! name)
 
 -- | 'linkCore' for a REPL entry, which differs from a program in its roots.
 --
@@ -471,24 +483,59 @@ replBackend kernels cores home name =
               (Program._backendEdges backend)
         }
 
--- CHECK FOR EXTERNS
+-- EXTERN FILES
 
--- | A program whose Core declares an @\@extern@ is refused until the JS backend
--- can emit one (@m1b-extern.md@ §H8 step 4).
+-- | Every source the build was handed, by package: the project's own and each
+-- dependency's, as "Make" and "Repl" hold them.
 --
--- After 'dumpCore', so the Core an extern lowers to can be dumped and read
--- while nothing can run it yet, which is how §H12 checks step 3.
-checkForExterns :: Details.Details -> Build.Artifacts -> Task ()
-checkForExterns details artifacts =
-  do
-    cores <- Task.io (programCore details artifacts)
-    case [ (ModuleName._module home, map (Core._binderName . Core._externBinder) externs)
-         | (home, modul) <- Map.toAscList cores,
-           let externs = Core._moduleExterns modul,
-           not (null externs)
-         ] of
-      [] -> return ()
-      found -> Task.throw (Exit.GenerateExternNotEmittedYet found)
+-- A @js@ extern's implementation is @src/Ext/<Module>.js@ (F1, D198), and the
+-- front end reads it with the package's other sources under the name
+-- @Ext.<Module>@, as it reads kernel JavaScript under @Gren.Kernel.<Module>@.
+-- So it is already inside every dependency's fingerprint, and a changed
+-- implementation file is a changed package without a second mechanism.
+type ExtSources =
+  Map.Map Pkg.Name (Map.Map ModuleName.Raw BS.ByteString)
+
+-- | 'ExtSources' from what "Make" and "Repl" are handed. The project's own
+-- package is named the way "Build" names it, a dummy name for an application.
+extSources :: Outline.Outline -> Build.Sources -> Map.Map Pkg.Name Details.Dependency -> ExtSources
+extSources outline sources deps =
+  let own =
+        case outline of
+          Outline.App _ -> Pkg.dummyName
+          Outline.Pkg pkgOutline -> Outline._pkg_name pkgOutline
+   in Map.insert own (Map.map Build._source_data sources) (Map.map Details._dep_sources deps)
+
+-- | The implementation file of every reachable @js@ extern, by package and
+-- module (D198).
+--
+-- A reachable extern with no @js@ row, or whose file is not there, is refused
+-- here, at build time, rather than left for the program to find when it loads.
+-- A file that is there but lacks the function, or has it at another arity, is
+-- the load-time check F1's table gives JavaScript.
+externFiles :: ExtSources -> Program.Program -> Task (Map.Map (Pkg.Name, N.Name) BS.ByteString)
+externFiles sources program =
+  let wanted =
+        [ ( home,
+            Core._binderName (Core._externBinder e),
+            [modul | Core.ExternImpl Core.ExternJs (modul : _) <- Core._externImpls e]
+          )
+        | (home, e) <- Program._progExterns program
+        ]
+      found =
+        [ case moduls of
+            [] -> Left (ModuleName._module home, name, Nothing)
+            modul : _ ->
+              let pkg = ModuleName._package home
+                  short = N.fromChars (Utf8.toChars modul)
+               in case Map.lookup (N.fromChars ("Ext." ++ Utf8.toChars modul)) =<< Map.lookup pkg sources of
+                    Nothing -> Left (ModuleName._module home, name, Just ("src/Ext/" ++ Utf8.toChars modul ++ ".js"))
+                    Just bytes -> Right ((pkg, short), bytes)
+        | (home, name, moduls) <- wanted
+        ]
+   in case [problem | Left problem <- found] of
+        [] -> return (Map.fromList [file | Right file <- found])
+        problems -> Task.throw (Exit.GenerateExternUnimplemented problems)
 
 -- CHECK FOR DEBUG
 

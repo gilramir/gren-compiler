@@ -20,6 +20,9 @@ import Canonicalize.Instance qualified as Instance
 import Canonicalize.Pattern qualified as Pattern
 import Canonicalize.Type qualified as Type
 import Control.Monad (foldM)
+import Core.Extern qualified as Extern
+import Core.Lower.Type qualified as LowerType
+import Data.Char qualified as Char
 import Data.Graph qualified as Graph
 import Data.Index qualified as Index
 import Data.List qualified as List
@@ -29,6 +32,7 @@ import Data.Name qualified as Name
 import Gren.Interface qualified as I
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
+import Gren.String qualified as ES
 import Reporting.Annotation qualified as A
 import Reporting.Error.Canonicalize qualified as Error
 import Reporting.Result qualified as Result
@@ -394,6 +398,7 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
           do
             annotation@(Can.Forall freeVars tipe) <- Type.toAnnotation env maybeContext srcType
             checkExtern aname impls tipe
+            checkJsExtern aname impls tipe
             let canImpls = List.sortOn (\(Can.ExternImpl language _) -> language) (map canonicalImpl impls)
             let isPure = any (\(Src.ExternImpl p _ _) -> p) impls
             let cbody = Can.at bodyRegion (Can.VarExtern name canImpls isPure annotation)
@@ -458,6 +463,47 @@ checkExtern (A.At nameRegion name) impls tipe =
       case Map.lookup language seen of
         Just first -> Result.throw (Error.ExternDuplicateLanguage region language first)
         Nothing -> Result.ok (Map.insert language region seen)
+
+-- | What a @js@ row asks of its names and of the declared type, once
+-- 'checkExtern' has held (@m1b-extern.md@ §H13, D192, D198–D203).
+--
+-- The module names the file, @src/Ext/<Module>.js@, so it is a module name's
+-- segment, which is also what the front end reads a file under @src@ as. The
+-- function is looked up among that file's declarations, so it is a JavaScript
+-- identifier. And the type has to be one the boundary can carry, which
+-- "Core.Extern" decides for this check and for the wrapper the backend writes.
+checkJsExtern :: A.Located Name.Name -> [Src.ExternImpl] -> Can.Type -> Result i w ()
+checkJsExtern (A.At nameRegion name) impls tipe =
+  case [names | Src.ExternImpl _ (A.At _ language) names <- impls, Name.toChars language == "js"] of
+    [[A.At moduleRegion modul, A.At functionRegion function]] ->
+      do
+        let moduleChars = ES.toChars modul
+        let functionChars = ES.toChars function
+        if isModuleSegment moduleChars
+          then Result.ok ()
+          else Result.throw (Error.ExternJsModule moduleRegion moduleChars)
+        if isIdentifier functionChars
+          then Result.ok ()
+          else Result.throw (Error.ExternJsFunction functionRegion functionChars)
+        let isPure = any (\(Src.ExternImpl p _ _) -> p) impls
+        case Extern.classify isPure (LowerType.lowerType tipe) of
+          Right _ -> Result.ok ()
+          Left problem -> Result.throw (Error.ExternDoesNotCross nameRegion name problem)
+    _ ->
+      Result.ok ()
+  where
+    isModuleSegment chars =
+      case chars of
+        first : rest -> Char.isAsciiUpper first && all isAsciiAlphaNum rest
+        [] -> False
+
+    isIdentifier chars =
+      case chars of
+        first : rest -> (Char.isAsciiUpper first || Char.isAsciiLower first || first == '_' || first == '$') && all (\c -> isAsciiAlphaNum c || c == '_' || c == '$') rest
+        [] -> False
+
+    isAsciiAlphaNum c =
+      Char.isAsciiUpper c || Char.isAsciiLower c || Char.isDigit c
 
 -- | D77's table: the extern languages, and how many quoted names each takes.
 externLanguages :: [(String, Int)]
