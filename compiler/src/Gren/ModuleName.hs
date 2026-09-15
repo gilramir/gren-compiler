@@ -31,6 +31,7 @@ module Gren.ModuleName
     virtualDom,
     jsonDecode,
     jsonEncode,
+    jsonValue,
   )
 where
 
@@ -202,3 +203,9 @@ jsonDecode = Canonical Pkg.core "Json.Decode"
 
 jsonEncode :: Canonical
 jsonEncode = Canonical Pkg.core "Json.Encode"
+
+-- | Where `Json.Encode.Value` is defined: an alias of `Json.Value.Value`, in a
+-- module `core` does not expose, so that no program reaches its constructors
+-- (`m1b-json.md` D212, D221).
+jsonValue :: Canonical
+jsonValue = Canonical Pkg.core "Json.Value"

@@ -156,8 +156,10 @@ verifyManager tagRegion values name =
 checkTaskError :: Can.Type -> Bool
 checkTaskError tipe =
   case tipe of
+    Can.TAlias _ _ args aliasedType ->
+      checkTaskError (Type.dealias args aliasedType)
     Can.TType home name []
-      | home == ModuleName.jsonEncode && name == Name.value ->
+      | isJson home name ->
           True
     _ -> False
 
@@ -203,7 +205,7 @@ isString home name =
 
 isJson :: ModuleName.Canonical -> Name.Name -> Bool
 isJson home name =
-  home == ModuleName.jsonEncode
+  home == ModuleName.jsonValue
     && name == Name.value
 
 isMaybe :: ModuleName.Canonical -> Name.Name -> Bool

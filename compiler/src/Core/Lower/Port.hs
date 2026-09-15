@@ -311,7 +311,7 @@ text sp chars = Core.Expr (Core.ELit (Core.LString (Utf8.fromChars chars))) stri
 -- TYPES
 
 valueTy :: Core.Type
-valueTy = Core.TCon (Core.QualName ModuleName.jsonEncode Name.value) []
+valueTy = Core.TCon (Core.QualName ModuleName.jsonValue Name.value) []
 
 decoderTy :: Core.Type -> Core.Type
 decoderTy t = Core.TCon (Core.QualName ModuleName.jsonDecode "Decoder") [t]
