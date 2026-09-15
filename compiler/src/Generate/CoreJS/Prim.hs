@@ -11,9 +11,10 @@
 -- own. So @i32_div@ is @(a \/ b) | 0@ with a non-zero divisor as a
 -- precondition, and a backend may treat a violation as unreachable.
 --
--- __Every primitive C13 names has its JavaScript here__, as of
--- @docs\/m1b-ryu.md@ §Y11: the four @*_bits@ conversions were the last hole,
--- and they are two typed arrays over one buffer.
+-- __Every primitive with a type in @Canonicalize.Prim@ has its JavaScript
+-- here__, and so is reachable from @core@: the numeric groups, the
+-- conversions, @str_@ (D206) and @bytes_@ with @bt_@ (D233). @arr_@, @tr_@ and
+-- @task_@ have neither yet.
 --
 -- __The five representations__, which is the whole of what this module knows
 -- that the rest of the compiler does not: an @Int@ is a number brought back
@@ -29,10 +30,12 @@ module Generate.CoreJS.Prim
     helpers,
     bitsHelpers,
     isFloatBits,
+    bytesHelpers,
+    isBytes,
   )
 where
 
-import Core.Prim (ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..))
+import Core.Prim (BytesPrim (..), ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..))
 import Core.Prim qualified as Prim
 import Data.ByteString.Builder qualified as B
 import Data.Name qualified as Name
@@ -69,6 +72,7 @@ prim op args =
     (FloatOp w p, _) -> float w p args
     (ConvOp p, [a]) -> conversion p a
     (StrOp p, _) -> string p args
+    (BytesOp p, _) -> bytes p args
     _ ->
       error $
         "Generate.CoreJS.Prim: no JavaScript for "
@@ -471,6 +475,69 @@ function _Str_utf8Valid(b) {
   } catch (e) {
     return false;
   }
+}
+|]
+
+-- BYTES
+
+-- | D233's eight (@docs/m1b-bytes-prim.md@ §BY4). A @Bytes@ is a @DataView@
+-- over its own slice of a buffer, as it was in the kernel (D202), and a bytes
+-- transient is a @DataView@ too, which 'BtToBytes' hands over as it is. What
+-- names an argument twice is a helper in 'bytesHelpers', so 'inlines' holds
+-- for all of them. The retired four have no type, so no @core@ reaches them.
+bytes :: BytesPrim -> [JS.Expr] -> JS.Expr
+bytes p args =
+  case (p, args) of
+    (BLength, [b]) -> JS.Access b (JsName.fromLocalHumanReadable "byteLength")
+    (BGetU8, [b, i]) -> JS.Call (JS.Access b (JsName.fromLocalHumanReadable "getUint8")) [i]
+    (BSlice, _) -> helper "_BytesPrim_slice" args
+    (BEq, _) -> helper "_BytesPrim_eq" args
+    (BtNew, [n]) -> JS.New (ref "DataView") [JS.New (ref "ArrayBuffer") [n]]
+    (BtSetU8, _) -> helper "_BytesPrim_setU8" args
+    (BtToBytes, [t]) -> t
+    (BtSetBytes, _) -> helper "_BytesPrim_setBytes" args
+    _ -> arityError (BytesOp p) args
+  where
+    ref name = JS.Ref (JsName.fromLocalHumanReadable name)
+    helper name as = JS.Call (ref name) as
+
+-- | Whether a primitive is one of the @bytes_@ or @bt_@ group, whose helpers
+-- 'Generate.CoreJS' emits once in a program that reaches any of them.
+isBytes :: PrimOp -> Bool
+isBytes op =
+  case op of
+    BytesOp _ -> True
+    _ -> False
+
+-- | The @bytes_@ and @bt_@ helpers. A @Bytes@ out of 'BSlice' shares its
+-- parent's buffer at a non-zero @byteOffset@ (core#137), so every copy goes
+-- through the views' own offsets.
+--
+-- Not @_Bytes_@: that is the kernel's @Bytes.js@, whose @var _Bytes_slice@
+-- replaced the helper of the same name in a program holding both
+-- (@docs/m1b-bytes-prim.md@ §BY12).
+bytesHelpers :: B.Builder
+bytesHelpers =
+  [r|
+// A view onto the same buffer, O(1) (docs/m1b-bytes-prim.md §BY4).
+function _BytesPrim_slice(b, i, j) { return new DataView(b.buffer, b.byteOffset + i, j - i); }
+
+// Content, not identity: two views of different buffers, or of one buffer at
+// different offsets, are equal when their bytes are.
+function _BytesPrim_eq(a, b) {
+  var len = a.byteLength;
+  if (len !== b.byteLength) return false;
+  for (var i = 0; i < len; i++) {
+    if (a.getUint8(i) !== b.getUint8(i)) return false;
+  }
+  return true;
+}
+
+function _BytesPrim_setU8(t, i, v) { t.setUint8(i, v); return t; }
+
+function _BytesPrim_setBytes(t, i, b) {
+  new Uint8Array(t.buffer, t.byteOffset + i, b.byteLength).set(new Uint8Array(b.buffer, b.byteOffset, b.byteLength));
+  return t;
 }
 |]
 

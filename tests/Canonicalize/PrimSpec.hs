@@ -64,10 +64,24 @@ spec = do
       typeOf "i64_add" `shouldBe` Just (fn [tInt64, tInt64] tInt64)
 
     it "a group whose Gren-facing type is undecided has no entry" $
-      -- `bytes_cmp` is a real primitive; what it returns is a design question
-      -- its group has not answered yet, and an answer invented here would be
-      -- speculation compiled into the compiler and checked by nothing.
-      answer "bytes_cmp" `shouldBe` NoTypeYet
+      -- `arr_get` is a real primitive; what it answers for an index out of
+      -- range is a design question its group has not answered yet, and an
+      -- answer invented here would be speculation compiled into the compiler
+      -- and checked by nothing.
+      answer "arr_get" `shouldBe` NoTypeYet
+
+    it "a bytes transient is Bytes.Transient's type, answered back (D233)" $
+      typeOf "bt_set_u8" `shouldBe` Just (fn [tTransient, tInt, tInt] tTransient)
+
+    it "`bt_set_bytes` copies a Bytes in at an offset (D233)" $
+      typeOf "bt_set_bytes" `shouldBe` Just (fn [tTransient, tInt, tBytes] tTransient)
+
+    it "`bytes_slice` answers Bytes" $
+      typeOf "bytes_slice" `shouldBe` Just (fn [tBytes, tInt, tInt] tBytes)
+
+    it "a retired bytes primitive has no type, so core cannot name it (D233)" $
+      map answer ["bytes_append", "bytes_cmp", "bytes_to_array", "bytes_from_array"]
+        `shouldBe` [NoTypeYet, NoTypeYet, NoTypeYet, NoTypeYet]
 
     it "`str_cmp` answers an Int, and Geng makes the Order (D207)" $
       typeOf "str_cmp" `shouldBe` Just (fn [tString, tString] tInt)
@@ -150,3 +164,9 @@ tChar = Can.TType ModuleName.char "Char" []
 
 tString :: Can.Type
 tString = Can.TType ModuleName.string "String" []
+
+tBytes :: Can.Type
+tBytes = Can.TType ModuleName.bytes "Bytes" []
+
+tTransient :: Can.Type
+tTransient = Can.TType ModuleName.bytesTransient "Transient" []

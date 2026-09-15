@@ -71,7 +71,7 @@ generate :: Mode.Mode -> Program -> Map Name [K.Chunk] -> Map (Pkg.Name, Name) B
 generate mode program kernels exts =
   let env = envFor mode program
       started =
-        JS.addByteString (stringHelpers env <> floatBitsHelpers env <> Extern.files exts (_progExterns program)) $
+        JS.addByteString (stringHelpers env <> floatBitsHelpers env <> bytesHelpers env <> Extern.files exts (_progExterns program)) $
           List.foldl'
             (flip JS.stmtToBuilder)
             (JS.emptyBuilder firstGeneratedLineNumber)
@@ -105,7 +105,7 @@ generateForRepl ansi localizer program kernels exts home name (Can.Forall _ tipe
   let mode = Mode.Dev
       env = envFor mode program
       started =
-        JS.addByteString (stringHelpers env <> floatBitsHelpers env <> Extern.files exts (_progExterns program)) $
+        JS.addByteString (stringHelpers env <> floatBitsHelpers env <> bytesHelpers env <> Extern.files exts (_progExterns program)) $
           List.foldl'
             (flip JS.stmtToBuilder)
             (JS.emptyBuilder 0)
@@ -430,6 +430,13 @@ stringHelpers env
 floatBitsHelpers :: Expr.Env -> B.Builder
 floatBitsHelpers env
   | any JsPrim.isFloatBits (Map.elems (Expr._prims env)) = JsPrim.bitsHelpers
+  | otherwise = mempty
+
+-- | The @bytes_@ and @bt_@ helpers, when the program reaches one of that group
+-- (@docs/m1b-bytes-prim.md@ §BY4).
+bytesHelpers :: Expr.Env -> B.Builder
+bytesHelpers env
+  | any JsPrim.isBytes (Map.elems (Expr._prims env)) = JsPrim.bytesHelpers
   | otherwise = mempty
 
 -- | The primitive a binding /is/, when its whole body is one applied to its own

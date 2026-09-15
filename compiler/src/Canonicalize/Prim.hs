@@ -17,7 +17,7 @@ module Canonicalize.Prim
 where
 
 import AST.Canonical qualified as Can
-import Core.Prim (ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..))
+import Core.Prim (BytesPrim (..), ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..))
 import Core.Prim qualified as Prim
 import Data.Map qualified as Map
 import Data.Name qualified as Name
@@ -61,13 +61,14 @@ freeVars tipe =
 -- __Why the table has holes.__ Every entry here is mechanical: an integer
 -- primitive's type is read off its width and its shape, a conversion's off the
 -- two widths in its name. Nothing is a judgement call, so nothing here is a
--- guess. The @bytes_@, @arr_@, @tr_@, @bt_@ and @task_@ groups are not
+-- guess. The @arr_@, @tr_@ and @task_@ groups are not
 -- like that — C13's table said what @str_cmp@ /does/ and not what it returns,
 -- and @Transient@ and @Source@ are types @core@ does not have yet. An entry
 -- invented for one of those would be speculation compiled into the compiler
 -- and checked by nothing, so those primitives have no entry and a @\@prim@
 -- naming one is rejected as not available yet. Each entry lands with the Geng
--- type it names, and @str_@'s landed with D206–D211 (@m1b-str-prim.md@ §Z3).
+-- type it names: @str_@'s landed with D206–D211 (@m1b-str-prim.md@ §Z3), and
+-- @bytes_@'s and @bt_@'s with D233 (@m1b-bytes-prim.md@ §BY4).
 --
 -- The four widths\' /types/ were named here before they existed, which cost
 -- nothing while a declaration could not mention them. They exist as of
@@ -81,6 +82,7 @@ primType op =
     FloatOp t p -> Just (floatType (floatWidth t) p)
     ConvOp p -> Just (convType p)
     StrOp p -> strType p
+    BytesOp p -> bytesType p
     _ -> Nothing
 
 -- INTEGERS
@@ -192,6 +194,28 @@ strType p =
   where
     b = Can.TVar "b"
     fold = fn [tString, b, fn [tChar, b] b] b
+
+-- BYTES
+
+-- | D233's eight. The transient is @Bytes.Transient.Transient@, declared in a
+-- module @core@ does not expose; the four retired primitives have no type.
+bytesType :: BytesPrim -> Maybe Can.Type
+bytesType p =
+  case p of
+    BLength -> Just (fn [tBytes] tInt)
+    BGetU8 -> Just (fn [tBytes, tInt] tInt)
+    BSlice -> Just (fn [tBytes, tInt, tInt] tBytes)
+    BAppend -> Nothing
+    BEq -> Just (fn [tBytes, tBytes] tBool)
+    BCmp -> Nothing
+    BToArray -> Nothing
+    BFromArray -> Nothing
+    BtNew -> Just (fn [tInt] tTransient)
+    BtSetU8 -> Just (fn [tTransient, tInt, tInt] tTransient)
+    BtToBytes -> Just (fn [tTransient] tBytes)
+    BtSetBytes -> Just (fn [tTransient, tInt, tBytes] tTransient)
+  where
+    tTransient = Can.TType ModuleName.bytesTransient "Transient" []
 
 fn :: [Can.Type] -> Can.Type -> Can.Type
 fn args result = foldr Can.TLambda result args

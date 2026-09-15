@@ -17,6 +17,7 @@ module Gren.ModuleName
     basics,
     bitwise,
     bytes,
+    bytesTransient,
     char,
     string,
     maybe,
@@ -190,6 +191,12 @@ inspect = Canonical Pkg.core Name.inspectModule
 
 bytes :: Canonical
 bytes = Canonical Pkg.core "Bytes"
+
+-- | Where the bytes transient's type is declared, with the @bt_@ bindings: a
+-- module @core@ does not expose, which @Bytes@ and @Bytes.Encode@ both import
+-- (@m1b-bytes-prim.md@ D233, after D221's @Json.Value@).
+bytesTransient :: Canonical
+bytesTransient = Canonical Pkg.core "Bytes.Transient"
 
 -- HTML
 

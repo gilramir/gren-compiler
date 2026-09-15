@@ -29,7 +29,7 @@
 --     tell the difference. Switched off for the Unicode-table functions of
 --     @unicode.md@ U2, where the host's tables are the divergence.
 --
--- The type is structured rather than a flat enumeration of 158 constructors,
+-- The type is structured rather than a flat enumeration of 167 constructors,
 -- so that a backend can dispatch on the group — which is the shape backends
 -- actually take — while still getting an exhaustiveness warning when a group
 -- grows.
@@ -219,24 +219,45 @@ data StrPrim
     SCharAt
   deriving (Eq, Ord, Show, Enum, Bounded)
 
--- | Multi-byte and float accessors are Geng over 'BGetU8' and the @*_from_bits@
--- conversions, with the intrinsics rule covering @DataView@.
+-- | Every width, both byte orders and both float widths are Geng over 'BGetU8',
+-- 'BtSetU8' and the @*_bits@ conversions, with no width primitive and no
+-- intrinsic (D232, @docs/m1b-bytes-prim.md@ §BY5).
+--
+-- The group is D233's eight. 'BtSetBytes' was added by it and is __appended__
+-- to 'allPrims' after every other primitive, so no earlier wire code moved.
+-- Four of C13's are retired and keep their codes with no type, so no @core@
+-- can name them: @flatten@ is one 'BtNew' and a 'BtSetBytes' a piece, so
+-- there is no 'BAppend'; @Bytes@ has no @Ord@, so nothing calls 'BCmp';
+-- @toArray@ is a Geng loop over 'BGetU8'; and nothing builds @Bytes@ from an
+-- @Array Int@.
 data BytesPrim
   = BLength
   | -- | Precondition: in-range index.
     BGetU8
-  | BSlice
-  | BAppend
-  | BEq
-  | BCmp
-  | BToArray
-  | -- | Precondition: elements in @0..255@.
+  | -- | Precondition: @0 <= i <= j <= length@. Shares its argument's storage
+    -- where the backend can.
+    BSlice
+  | -- | Retired by D233.
+    BAppend
+  | -- | Content, not identity.
+    BEq
+  | -- | Retired by D233.
+    BCmp
+  | -- | Retired by D233.
+    BToArray
+  | -- | Retired by D233.
     BFromArray
-  | -- | A bytes transient for @Bytes.Encode@, with the same linear-use
-    -- semantics as the array transient.
+  | -- | A bytes transient for @Bytes.Encode@ and @Bytes.flatten@, zeroed, of
+    -- the given length. Its linear use is not checked (D233).
     BtNew
-  | BtSetU8
+  | -- | Precondition: in-range index and a value in @0..255@. Answers the
+    -- transient.
+    BtSetU8
   | BtToBytes
+  | -- | Copies a @Bytes@ into the transient at an offset. Precondition: it
+    -- fits. Added by D233: as a Geng loop over 'BtSetU8', flattening a
+    -- megabyte took five times as long (@docs/m1b-bytes-prim.md@ §BY4).
+    BtSetBytes
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | C7's contract: @Array@ is flat and dense, @get@ and @length@ are O(1) and
@@ -329,7 +350,7 @@ allPrims =
     ++ [FloatOp t p | t <- [minBound .. maxBound], p <- [minBound .. maxBound]]
     ++ map ConvOp [minBound .. I32ToChar]
     ++ map StrOp [minBound .. SUtf8Valid]
-    ++ map BytesOp [minBound .. maxBound]
+    ++ map BytesOp [minBound .. BtToBytes]
     ++ map ArrOp [minBound .. maxBound]
     ++ map TransientOp [minBound .. maxBound]
     ++ map TaskOp [minBound .. maxBound]
@@ -338,6 +359,8 @@ allPrims =
     -- its code.
     ++ map StrOp [SEnd .. maxBound]
     ++ [ConvOp F64FromDecimal]
+    -- Appended by D233 (m1b-bytes-prim.md §BY12).
+    ++ [BytesOp BtSetBytes]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -470,6 +493,7 @@ bytesPrimName p =
     BtNew -> "bt_new"
     BtSetU8 -> "bt_set_u8"
     BtToBytes -> "bt_to_bytes"
+    BtSetBytes -> "bt_set_bytes"
 
 arrPrimName :: ArrPrim -> Text
 arrPrimName p =
@@ -599,6 +623,8 @@ primArity op =
         BCmp -> 2
         BSlice -> 3
         BtSetU8 -> 3
+        -- transient, offset, bytes
+        BtSetBytes -> 3
     ArrOp p ->
       case p of
         ALength -> 1

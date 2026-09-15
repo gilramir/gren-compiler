@@ -19,7 +19,7 @@ spec = do
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
       -- someone noticing.
-      length allPrims `shouldBe` 166
+      length allPrims `shouldBe` 167
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -30,6 +30,16 @@ spec = do
         primCode (StrOp SIndexOf)
       )
         `shouldBe` (157, 158, 165, 117)
+
+    it "appends D233's primitive after every code that existed" $
+      -- The four D233 retires keep their codes, so nothing after them moved
+      -- either (m1b-bytes-prim.md §BY12).
+      ( primCode (BytesOp BtSetBytes),
+        primCode (BytesOp BAppend),
+        primCode (BytesOp BtToBytes),
+        primCode (ArrOp ALength)
+      )
+        `shouldBe` (166, 124, 131, 132)
 
     it "gives every primitive a distinct name" $
       duplicates (map primName allPrims) `shouldBe` []
