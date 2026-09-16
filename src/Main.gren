@@ -37,7 +37,6 @@ import Cli.Parser
 import Cli.PrettyPrinter as PP
 import SemanticVersion exposing (SemanticVersion)
 import Json.Encode as Json
-import Process
 
 
 main : Node.Program Model Msg
@@ -181,7 +180,6 @@ type Msg
     | CompilerInitialized { headless : Bool, backendStreams : ChildProcess.StreamIO, encodedCommand : Bytes }
     | CompilerRan Int
     | CompiledForRun { path : Path, exitCode : Int }
-    | RunStarted Process.Id
     | RunExited Int
     | RedirectTerminalIO
         (Result
@@ -322,7 +320,6 @@ update msg model =
                         , fsPermission = model.fsPermission
                         , pathToString = model.pathToString
                         , path = path
-                        , onInit = RunStarted
                         , onExit = RunExited
                         }
                         |> Task.onError
@@ -336,9 +333,6 @@ update msg model =
 
                 else
                     Node.exitWithCode exitCode
-
-            RunStarted _ ->
-                Cmd.none
 
             RunExited exitCode ->
                 Node.exitWithCode exitCode
@@ -410,9 +404,9 @@ parseUserArgs model compilerPath =
         Cli.Parser.Success parsedCommand ->
             let
                 initWithCommand backendCommand =
-                    \cpOpts ->
+                    \streams ->
                         CompilerInitialized
-                            { backendStreams = cpOpts.streams
+                            { backendStreams = streams
                             , headless = False
                             , encodedCommand =
                                 Compiler.Backend.encodeCommand
@@ -475,24 +469,18 @@ parseUserArgs model compilerPath =
                                     projectOutline
                                     |> Task.mapError Terminal.PackageInstall.prettifyError
                             )
-                        |> Task.map
+                        |> Task.andThen
                             (\resolved ->
-                                Compiler.Backend.run
-                                    model.cpPermission
-                                    { useColor = model.useColor
-                                    , compilerPath = compilerPath
-                                    , pathToString = model.pathToString
-                                    , onInit =
-                                        initWithCommand <|
-                                            Compiler.Backend.Repl
-                                                { interpreter = flags.interpreter
-                                                , projectPath = resolved.projectPath
-                                                , outline = resolved.outline
-                                                , rootSources = resolved.rootSources
-                                                , dependencies = resolved.dependencies
-                                                }
-                                    , onComplete = CompilerRan
-                                    }
+                                startBackend model compilerPath
+                                    (initWithCommand <|
+                                        Compiler.Backend.Repl
+                                            { interpreter = flags.interpreter
+                                            , projectPath = resolved.projectPath
+                                            , outline = resolved.outline
+                                            , rootSources = resolved.rootSources
+                                            , dependencies = resolved.dependencies
+                                            }
+                                    )
                             )
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
                         |> Task.perform RunCmd
@@ -521,14 +509,10 @@ parseUserArgs model compilerPath =
                     determineOutputStreamForResolve
                         |> Task.andThen (\output -> resolveProject { model | stdout = output })
                         |> Task.andThen (verifyMakeFlags model.fsPermission flags.entryPoints flags.output)
-                        |> Task.map
+                        |> Task.andThen
                             (\resolved ->
-                                Compiler.Backend.run
-                                    model.cpPermission
-                                    { useColor = model.useColor
-                                    , compilerPath = compilerPath
-                                    , pathToString = model.pathToString
-                                    , onInit = initWithCommand <|
+                                startBackend model compilerPath
+                                    (initWithCommand <|
                                         Compiler.Backend.Make
                                             { optimize = flags.optimize
                                             , sourcemaps = flags.sourcemaps
@@ -540,8 +524,7 @@ parseUserArgs model compilerPath =
                                             , rootSources = resolved.rootSources
                                             , dependencies = resolved.dependencies
                                             }
-                                    , onComplete = CompilerRan
-                                    }
+                                    )
                             )
                         |> Task.onError (endWithErrorReport reportType)
                         |> Task.perform RunCmd
@@ -599,25 +582,19 @@ parseUserArgs model compilerPath =
                     in
                     determineOutputStreamForResolve
                         |> Task.andThen (\output -> resolveProject { model | stdout = output })
-                        |> Task.map
+                        |> Task.andThen
                             (\resolved ->
-                                Compiler.Backend.run
-                                    model.cpPermission
-                                    { useColor = model.useColor
-                                    , compilerPath = compilerPath
-                                    , pathToString = model.pathToString
-                                    , onInit =
-                                        initWithCommand <|
-                                            Compiler.Backend.Docs
-                                                { output = flags.output
-                                                , report = flags.report
-                                                , projectPath = resolved.projectPath
-                                                , outline = resolved.outline
-                                                , rootSources = resolved.rootSources
-                                                , dependencies = resolved.dependencies
-                                                }
-                                    , onComplete = CompilerRan
-                                    }
+                                startBackend model compilerPath
+                                    (initWithCommand <|
+                                        Compiler.Backend.Docs
+                                            { output = flags.output
+                                            , report = flags.report
+                                            , projectPath = resolved.projectPath
+                                            , outline = resolved.outline
+                                            , rootSources = resolved.rootSources
+                                            , dependencies = resolved.dependencies
+                                            }
+                                    )
                             )
                         |> Task.onError (endWithErrorReport reportType)
                         |> Task.perform RunCmd
@@ -720,18 +697,10 @@ parseUserArgs model compilerPath =
                                     projectOutline
                                     |> Task.mapError Terminal.PackageValidate.prettifyError
                             )
-                        |> Task.map
+                        |> Task.andThen
                             (\backendFlags ->
-                                Compiler.Backend.run
-                                    model.cpPermission
-                                    { onInit =
-                                        initWithCommand <|
-                                            Compiler.Backend.PackageValidate backendFlags
-                                    , useColor = model.useColor
-                                    , compilerPath = compilerPath
-                                    , pathToString = model.pathToString
-                                    , onComplete = CompilerRan
-                                    }
+                                startBackend model compilerPath
+                                    (initWithCommand <| Compiler.Backend.PackageValidate backendFlags)
                             )
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
                         |> Task.perform RunCmd
@@ -753,18 +722,10 @@ parseUserArgs model compilerPath =
                                     projectOutline
                                     |> Task.mapError Terminal.PackageBump.prettifyError
                             )
-                        |> Task.map
+                        |> Task.andThen
                             (\backendFlags ->
-                                Compiler.Backend.run
-                                    model.cpPermission
-                                    { onInit =
-                                        initWithCommand <|
-                                            Compiler.Backend.PackageBump backendFlags
-                                    , useColor = model.useColor
-                                    , compilerPath = compilerPath
-                                    , pathToString = model.pathToString
-                                    , onComplete = CompilerRan
-                                    }
+                                startBackend model compilerPath
+                                    (initWithCommand <| Compiler.Backend.PackageBump backendFlags)
                             )
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
                         |> Task.perform RunCmd
@@ -843,18 +804,10 @@ parseUserArgs model compilerPath =
                                         |> Task.mapError Terminal.PackageDiff.prettifyGlobalError
                     in
                     diffTask
-                        |> Task.map
+                        |> Task.andThen
                             (\backendFlags ->
-                                Compiler.Backend.run
-                                    model.cpPermission
-                                    { onInit =
-                                        initWithCommand <|
-                                            Compiler.Backend.PackageDiff backendFlags
-                                    , useColor = model.useColor
-                                    , compilerPath = compilerPath
-                                    , pathToString = model.pathToString
-                                    , onComplete = CompilerRan
-                                    }
+                                startBackend model compilerPath
+                                    (initWithCommand <| Compiler.Backend.PackageDiff backendFlags)
                             )
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
                         |> Task.perform RunCmd
@@ -913,6 +866,40 @@ parseUserArgs model compilerPath =
                         |> Task.map (\_ -> Cmd.none)
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
                         |> Task.perform RunCmd
+
+
+{-| Start the backend with `onStarted` for its streams, and end the program with
+its exit code when it exits.
+-}
+startBackend : Model -> Path -> (ChildProcess.StreamIO -> Msg) -> Task Report (Cmd Msg)
+startBackend model compilerPath onStarted =
+    Compiler.Backend.run
+        model.cpPermission
+        { useColor = model.useColor
+        , compilerPath = compilerPath
+        , pathToString = model.pathToString
+        }
+        |> Task.mapError
+            (\err ->
+                Report.create
+                    "CANNOT START THE COMPILER BACKEND"
+                    Nothing
+                    (PP.words ("I could not start " ++ err.program ++ ": " ++ err.errorCode))
+            )
+        |> Task.map
+            (\child ->
+                Cmd.batch
+                    [ when ChildProcess.streams child is
+                        Just streams ->
+                            Task.succeed (onStarted streams)
+                                |> Task.perform identity
+
+                        Nothing ->
+                            Cmd.none
+                    , ChildProcess.waitForExit child
+                        |> Task.perform CompilerRan
+                    ]
+            )
 
 
 resolveProject : Model -> Task Report Terminal.PackageInstall.PackageResolution
