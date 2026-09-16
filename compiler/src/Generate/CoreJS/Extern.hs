@@ -201,18 +201,18 @@ wrapper home@(ModuleName.Canonical pkg raw) e =
               Extern.Pure result ->
                 "return " <> inbound label result (call []) <> ";"
               Extern.Task x a ->
-                "return _Scheduler_binding(function (callback) {\n\
+                "return _TaskPrim_binding(function (callback) {\n\
                 \  var settled = false;\n\
                 \  var cancel = "
                   <> call
                     [ "function (v) { if (settled) _Extern_twice("
                         <> label
-                        <> "); settled = true; callback(_Scheduler_succeed("
+                        <> "); settled = true; callback(_TaskPrim_succeed("
                         <> inbound label a "v"
                         <> ")); }",
                       "function (v) { if (settled) _Extern_twice("
                         <> label
-                        <> "); settled = true; callback(_Scheduler_fail("
+                        <> "); settled = true; callback(_TaskPrim_fail("
                         <> inbound label x "v"
                         <> ")); }"
                     ]

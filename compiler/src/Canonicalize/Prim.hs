@@ -85,7 +85,7 @@ primType op =
     BytesOp p -> bytesType p
     ArrOp p -> Just (arrType p)
     TransientOp p -> Just (transientType p)
-    TaskOp p -> sourceType p
+    TaskOp p -> taskType p
     _ -> Nothing
 
 -- INTEGERS
@@ -263,9 +263,41 @@ transientType p =
     tArray = Can.TType ModuleName.array "Array" [a]
     tTransient = Can.TType ModuleName.arrayTransient "Transient" [a]
 
--- | D71's mailbox (@ffi.md@ F4). Only the three @source_@ primitives have a
--- type; the eight @task_@ ones beside them in 'Core.Prim.TaskPrim' wait for
--- D246, which makes @Task@ Geng over them.
+-- | The @Task@ tree (D246, D282, D283; @m1b-source.md@ §SO22). Each type is the
+-- signature @Task@ or @Process@ exposes the function under, so @core@ declares
+-- the exposed function as the primitive rather than wrapping it.
+--
+-- @task_race@ takes the first task apart from the rest, as @Task.race@ does
+-- (D110), so a race between no tasks cannot be written rather than being a
+-- precondition. @task_finally@ has no type: @finally@ is Geng over @bracket@
+-- (D103), and D282 retired the code, as D232 retired four of @bytes_@'s.
+taskType :: TaskPrim -> Maybe Can.Type
+taskType p =
+  case p of
+    TaskSucceed -> Just (fn [a] (tTask x a))
+    TaskFail -> Just (fn [x] (tTask x a))
+    TaskAndThen -> Just (fn [fn [a] (tTask x b), tTask x a] (tTask x b))
+    TaskOnError -> Just (fn [fn [x] (tTask y a), tTask x a] (tTask y a))
+    TaskConcurrent -> Just (fn [tArray (tTask x a)] (tTask x (tArray a)))
+    TaskRace -> Just (fn [tTask x a, tArray (tTask x a)] (tTask x a))
+    TaskBracket -> Just (fn [tTask x r, fn [r] (tTask tNever tUnit), fn [r] (tTask x a)] (tTask x a))
+    TaskFinally -> Nothing
+    TaskMap2 -> Just (fn [fn [a, b] c, tTask x a, tTask x b] (tTask x c))
+    TaskSpawn -> Just (fn [tTask x a] (tTask y tProcessId))
+    TaskKill -> Just (fn [tProcessId] (tTask x tUnit))
+    _ -> sourceType p
+  where
+    a = Can.TVar "a"
+    b = Can.TVar "b"
+    c = Can.TVar "c"
+    r = Can.TVar "r"
+    x = Can.TVar "x"
+    y = Can.TVar "y"
+    tArray t = Can.TType ModuleName.array "Array" [t]
+    tNever = Can.TType ModuleName.basics "Never" []
+    tProcessId = Can.TType ModuleName.process "Id" []
+
+-- | D71's mailbox (@ffi.md@ F4).
 --
 -- @source_new@ takes no argument at all (D252), which makes it the table's only
 -- zero-arity entry: @Source.new@ is a @Task@, and a @Task@ is a description

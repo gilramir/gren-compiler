@@ -195,10 +195,13 @@ generate env (Core.Expr value _ sp) =
           JsExpr (ctor env pos name tag args)
         Core.ERecord fields ->
           JsExpr (record env sp fields)
+        -- A helper the backend emits in every program (D288): it was kernel
+        -- `Utils`'s, which no link edge reached, so a program got it only
+        -- through whatever else happened to import that file.
         Core.EUpdate base fields ->
           JsExpr $
             JS.Call
-              (JS.Ref (JsName.fromKernel Name.utils "update"))
+              (JS.Ref (JsName.fromLocalHumanReadable "_Record_update"))
               [jsExpr env base, record env sp fields]
         Core.EAccess base name ->
           JsExpr (JS.TrackedAccess (jsExpr env base) (_home env) pos (generateField (_mode env) name))

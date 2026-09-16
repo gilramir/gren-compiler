@@ -19,7 +19,7 @@ spec = do
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
       -- someone noticing.
-      length allPrims `shouldBe` 167
+      length allPrims `shouldBe` 170
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -40,6 +40,17 @@ spec = do
         primCode (ArrOp ALength)
       )
         `shouldBe` (166, 124, 131, 132)
+
+    it "appends D282's and D283's primitives after every code that existed" $
+      -- `task_race`'s arity changed and `task_finally` retired, and both kept
+      -- their codes (m1b-source.md §SO22.9).
+      ( primCode (TaskOp TaskMap2),
+        primCode (TaskOp TaskSpawn),
+        primCode (TaskOp TaskKill),
+        primCode (TaskOp SourceClose),
+        primCode (BytesOp BtSetBytes)
+      )
+        `shouldBe` (167, 168, 169, 156, 166)
 
     it "gives every primitive a distinct name" $
       duplicates (map primName allPrims) `shouldBe` []

@@ -14,8 +14,8 @@
 -- __Every primitive with a type in @Canonicalize.Prim@ has its JavaScript
 -- here__, and so is reachable from @core@: the numeric groups, the
 -- conversions, @str_@ (D206), @bytes_@ with @bt_@ (D233), @arr_@ and @tr_@
--- (D236) and the three @source_@ ones (D252). The eight @task_@ primitives
--- beside those have neither yet, and wait for D246.
+-- (D236), and the @task_@ group with its three @source_@ ones (D252, D282,
+-- D283). @task_finally@ is retired and has neither.
 --
 -- __The five representations__, which is the whole of what this module knows
 -- that the rest of the compiler does not: an @Int@ is a number brought back
@@ -37,6 +37,10 @@ module Generate.CoreJS.Prim
     isArray,
     sourceHelpers,
     isSource,
+    taskHelpers,
+    isTask,
+    exportHelpers,
+    recordHelpers,
   )
 where
 
@@ -80,7 +84,7 @@ prim op args =
     (BytesOp p, _) -> bytes p args
     (ArrOp p, _) -> array p args
     (TransientOp p, _) -> transient p args
-    (TaskOp p, _) -> source p args
+    (TaskOp p, _) -> task p args
     _ ->
       error $
         "Generate.CoreJS.Prim: no JavaScript for "
@@ -587,13 +591,610 @@ transient p args =
   where
     helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
 
--- | D71's mailbox. Only the three @source_@ primitives are emitted; the eight
--- @task_@ ones beside them in 'Core.Prim.TaskPrim' have no type yet (D246) and
--- so cannot be reached from @core@.
+-- | The @Task@ tree (D246, @m1b-source.md@ §SO24): each primitive is a call to
+-- the helper that builds its node, or starts or stops a process.
+task :: TaskPrim -> [JS.Expr] -> JS.Expr
+task p args =
+  case (p, args) of
+    (TaskSucceed, [_]) -> helper "_TaskPrim_succeed" args
+    (TaskFail, [_]) -> helper "_TaskPrim_fail" args
+    (TaskAndThen, [_, _]) -> helper "_TaskPrim_andThen" args
+    (TaskOnError, [_, _]) -> helper "_TaskPrim_onError" args
+    (TaskConcurrent, [_]) -> helper "_TaskPrim_concurrent" args
+    (TaskRace, [_, _]) -> helper "_TaskPrim_race" args
+    (TaskBracket, [_, _, _]) -> helper "_TaskPrim_bracket" args
+    (TaskMap2, [_, _, _]) -> helper "_TaskPrim_map2" args
+    (TaskSpawn, [_]) -> helper "_TaskPrim_spawn" args
+    (TaskKill, [_]) -> helper "_TaskPrim_kill" args
+    (TaskFinally, _) -> arityError (TaskOp p) args
+    _ -> source p args
+  where
+    helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
+
+-- | Whether a primitive is one of the @task_@ group, the @source_@ ones
+-- included, all of which are emitted over 'taskHelpers'.
+isTask :: PrimOp -> Bool
+isTask op =
+  case op of
+    TaskOp _ -> True
+    _ -> False
+
+-- | The scheduler: the node builders, the processes, cancellation, @main@ and
+-- the step. It was @core@'s kernel @Scheduler.js@ until step 8b, and is that
+-- file as step 8a left it (D286), with its names and tags spelled out
+-- (@m1b-source.md@ §SO24). 'Generate.CoreJS' emits it before every other
+-- helper, because the @source_@ helpers and an extern with no arguments build a
+-- binding node when the program loads.
+--
+-- A binding node holds only what to run, and a wait and its cancel function are
+-- the process's, so one node may be shared by any number of processes. That is
+-- what makes @_SourcePrim_new@ and a zero-argument extern's single node safe.
+taskHelpers :: B.Builder
+taskHelpers =
+  [r|
+// TASKS
+//
+// A task is a tree of nodes, and `$` is the kind of node:
+//
+//   0 SUCCEED   { value }
+//   1 FAIL      { value }
+//   2 BINDING   { callback }               a wait, begun by calling callback
+//   3 AND_THEN  { callback, task }
+//   4 ON_ERROR  { callback, task }
+//   5 BRACKET   { release, task }
+//
+// A process's stack holds frames of kind 0 and 1, which continue a success or a
+// failure, and 6 RELEASE { release }. The tags are numbers because the REPL's
+// printer shows any object whose `$` is a number as `<internals>`, which is
+// what a task is to a reader.
+
+function _TaskPrim_succeed(value) {
+  return {
+    $: 0,
+    value: value,
+  };
+}
+
+function _TaskPrim_fail(error) {
+  return {
+    $: 1,
+    value: error,
+  };
+}
+
+// A binding node holds only what to run. The wait it starts, and the function
+// that cancels that wait, belong to the process that runs it (D286), because a
+// node is a value: an extern with no arguments is one node for the whole
+// program, and two processes may be waiting on it at once.
+function _TaskPrim_binding(callback) {
+  return {
+    $: 2,
+    callback: callback,
+  };
+}
+
+function _TaskPrim_andThen(callback, task) {
+  return {
+    $: 3,
+    callback: callback,
+    task: task,
+  };
+}
+
+function _TaskPrim_onError(callback, task) {
+  return {
+    $: 4,
+    callback: callback,
+    task: task,
+  };
+}
+
+// `bracket` cannot be written on `andThen` and `onError`, because those two
+// only see a task that finished. A cancelled task does not finish: `rawKill`
+// below drops the process's stack, and with it every release handler a library
+// implementation would have parked there. So the release handler is a third
+// kind of stack frame, which the interpreter answers to on success, on failure
+// and on cancellation alike.
+function _TaskPrim_bracket(acquire, release, use) {
+  return _TaskPrim_andThen(function (resource) {
+    return {
+      $: 5,
+      release: function () {
+        return release(resource);
+      },
+      task: use(resource),
+    };
+  }, acquire);
+}
+
+// Run one release handler, then carry the outcome that reached it on unchanged.
+// The handler is a `Task Never {}`, so the outcome cannot be lost to a second
+// failure on the way out.
+function _TaskPrim_releasing(frame, outcome) {
+  return _TaskPrim_andThen(function (_) {
+    return outcome;
+  }, frame.release());
+}
+
+// CANCELLATION IS SOMETHING TO WAIT FOR
+//
+// Cancelling a task is not instantaneous: what it leaves to do is the release
+// handlers of every `bracket` it interrupted. So `rawKill` hands back a task —
+// null if there is nothing left — and each of its callers waits for it rather
+// than merely starting it. That is what lets `concurrent` keep the promise
+// `portable-core.md` P2 makes for it, and what orders an outer release handler
+// after the inner ones when both are cancelled at once.
+//
+// The steps are thunks, because a release handler builds its task when it runs.
+
+function _TaskPrim_inOrder(steps) {
+  if (steps.length === 0) {
+    return null;
+  }
+
+  var chain = steps[0]();
+  for (var i = 1; i < steps.length; i++) {
+    chain = _TaskPrim_andThen(_TaskPrim_thenRun(steps[i]), chain);
+  }
+
+  return chain;
+}
+
+function _TaskPrim_thenRun(step) {
+  return function (_) {
+    return step();
+  };
+}
+
+function _TaskPrim_always(task) {
+  return function () {
+    return task;
+  };
+}
+
+// A scope with a fixed child set. `concurrent` and `race` are both one, and
+// they differ in a single question: what a child *succeeding* means. Failure is
+// the same for both — §N9.3's first failure cancels the siblings and fails the
+// scope — and so is everything below it, which is why this is one function.
+//
+// `makeAnswer` is called once per run, not once per task value: a `Task` is a
+// value and may be run twice, so the counting a `concurrent` does cannot live
+// out here.
+function _TaskPrim_scope(tasks, makeAnswer) {
+  return _TaskPrim_binding(function (callback) {
+    const answer = makeAnswer();
+    let procs;
+    // An outcome has been chosen; and, separately, nobody is listening for one
+    // any more because this task was itself cancelled.
+    let settled = false;
+    let abandoned = false;
+
+    // Cancel every task and hand back what those cancellations have left to
+    // do. Killing a process that already finished takes nothing and returns
+    // nothing, so this is also how the successful siblings are disposed of.
+    function cancelAll() {
+      const steps = [];
+      for (let i = 0; i < procs.length; i++) {
+        const pending = _TaskPrim_rawKill(procs[i]);
+        if (pending) {
+          steps.push(_TaskPrim_always(pending));
+        }
+      }
+      return _TaskPrim_inOrder(steps);
+    }
+
+    // The first failure cancels the siblings — and this task does not answer
+    // until they are finished, release handlers included. `concurrent` is
+    // specified as a scope with a fixed child set (`portable-core.md` P2), and
+    // a scope does not complete before its children do
+    // (`concurrency-native.md` §N9.3).
+    function settle(outcome) {
+      if (settled || abandoned) {
+        return;
+      }
+      settled = true;
+
+      const pending = cancelAll();
+      if (!pending) {
+        callback(outcome);
+        return;
+      }
+
+      _TaskPrim_rawSpawn(
+        _TaskPrim_andThen(function (_) {
+            if (!abandoned) {
+              callback(outcome);
+            }
+            return _TaskPrim_succeed({});
+          },
+          pending
+        )
+      );
+    }
+
+    procs = tasks.map((task, i) => {
+      function onSuccess(res) {
+        // Null means "not yet": a `concurrent` still waiting on a sibling.
+        const outcome = answer(i, res);
+        if (outcome) {
+          settle(outcome);
+        }
+      }
+      function onError(e) {
+        settle(_TaskPrim_fail(e));
+      }
+      const success = _TaskPrim_andThen(onSuccess, task);
+      const handled = _TaskPrim_onError(onError, success);
+      return _TaskPrim_rawSpawn(handled);
+    });
+
+    // Cancelled from outside: no answer is owed any more, but the children
+    // still have to be finished with, and whoever did the killing waits.
+    return function () {
+      abandoned = true;
+      return cancelAll();
+    };
+  });
+}
+
+function _TaskPrim_concurrent(tasks) {
+  if (tasks.length === 0) return _TaskPrim_succeed([]);
+
+  return _TaskPrim_scope(tasks, function () {
+    const results = new Array(tasks.length);
+    let count = 0;
+
+    return function (i, res) {
+      results[i] = res;
+      count++;
+      return count === tasks.length ? _TaskPrim_succeed(results) : null;
+    };
+  });
+}
+
+// The first child to *settle* is the answer, and settling means succeeding or
+// failing: the branch that wins a `race [ work, timeout ]` is the one that
+// fails, so a `race` that waited for a success could never time out. The first
+// task is apart from the rest, as in `Task.race` (D110), so there is always at
+// least one and this always has an answer to give.
+function _TaskPrim_race(first, rest) {
+  return _TaskPrim_scope([first].concat(rest), function () {
+    return function (i, res) {
+      return _TaskPrim_succeed(res);
+    };
+  });
+}
+
+function _TaskPrim_map2(callback, taskA, taskB) {
+  function combine([resA, resB]) {
+    return _TaskPrim_succeed(A2(callback, resA, resB));
+  }
+  return _TaskPrim_andThen(combine, _TaskPrim_concurrent([taskA, taskB]));
+}
+
+// PROCESSES
+
+var _TaskPrim_guid = 0;
+
+function _TaskPrim_rawSpawn(task) {
+  var proc = {
+    $: 0,
+    id: _TaskPrim_guid++,
+    root: task,
+    stack: null,
+    wait: null,
+    cancel: null,
+  };
+
+  _TaskPrim_enqueue(proc);
+
+  return proc;
+}
+
+function _TaskPrim_spawn(task) {
+  return _TaskPrim_binding(function (callback) {
+    callback(_TaskPrim_succeed(_TaskPrim_rawSpawn(task)));
+  });
+}
+
+// MAIN
+
+// A `main : Task Never {}` (D72; geng-lang m1b-source.md §SO12). What the
+// export's `init` is: a function, as a `Program`'s is, which runs the task in a
+// process of its own. The type says the task cannot fail, so the program ends in
+// one of two ways, and each ends the process (D257):
+//
+// - `main` completes, and the status is `process.exitCode`, which is 0 unless
+//   the program chose one with `Node.setExitCode`.
+// - something throws, in the first slice of the task, which runs inside this
+//   call, or in any later one, which runs from a host callback. Both are
+//   reported the same way, the error on standard error and status 1, where
+//   left to node the first would be caught by the output's `try` and exit 0
+//   (compiler#385) and the second would print a source line before the error.
+function _TaskPrim_runMain(task) {
+  return function (args) {
+    var host = typeof process !== "undefined" && process.stdout && process.stderr;
+    if (host) {
+      process.on("uncaughtException", _TaskPrim_mainCrashed);
+      process.once("beforeExit", _TaskPrim_mainStalled);
+    }
+    try {
+      _TaskPrim_rawSpawn(
+        _TaskPrim_andThen(function (value) {
+          if (host) {
+            _TaskPrim_mainEnd();
+          }
+          return _TaskPrim_succeed(value);
+        }, task),
+      );
+    } catch (e) {
+      if (!host) {
+        throw e;
+      }
+      _TaskPrim_mainCrashed(e);
+    }
+  };
+}
+
+function _TaskPrim_mainCrashed(e) {
+  console.error(e);
+  process.exitCode = 1;
+  _TaskPrim_mainEnd();
+}
+
+// Node's event loop has emptied while `main` is still waiting, so nothing is
+// left that could wake it and it can never complete. Ending with status 0 would
+// say it did; this is `ffi.md` F4's rule for a source nothing can deliver to,
+// on JavaScript (D263). A completed `main` never gets here, since
+// `process.exit` does not emit `beforeExit`.
+function _TaskPrim_mainStalled() {
+  console.error(
+    "main cannot complete: it is waiting for an event that nothing still running can deliver",
+  );
+  process.exitCode = 1;
+  _TaskPrim_mainEnd();
+}
+
+// The program ends when `main` does (D72), even if a host resource it opened
+// and did not close would keep node's event loop alive: nothing can be
+// listening to it, since only `main` could have been. Standard output and error
+// are written through first, because a write to a pipe is asynchronous on POSIX
+// and `process.exit` drops what is still queued (§SO12 measured 64 KiB of 8 MiB
+// arriving). `process.exit()` takes `process.exitCode`.
+function _TaskPrim_mainEnd() {
+  process.stdout.write("", function () {
+    process.stderr.write("", function () {
+      process.exit();
+    });
+  });
+}
+
+function _TaskPrim_kill(proc) {
+  return _TaskPrim_binding(function (callback) {
+    var pending = _TaskPrim_rawKill(proc);
+
+    if (!pending) {
+      callback(_TaskPrim_succeed({}));
+      return;
+    }
+
+    // `kill` answers when the cancellation is finished rather than when it is
+    // started, which is the difference between a release handler being a
+    // guarantee and being a hope.
+    _TaskPrim_rawSpawn(
+      _TaskPrim_andThen(function (_) {
+        callback(_TaskPrim_succeed({}));
+        return _TaskPrim_succeed({});
+      }, pending),
+    );
+  });
+}
+
+// Returns what this cancellation has left to do, or null if it is finished.
+// The caller waits for it: `_TaskPrim_kill` and `concurrent`'s `cancelAll`
+// are the two, and neither may merely start it.
+function _TaskPrim_rawKill(proc) {
+  var steps = [];
+
+  // A process that is waiting stops waiting here, whether or not the wait can
+  // be cancelled: clearing `wait` is what makes the operation's callback do
+  // nothing when it comes, and most operations have no cancel function.
+  if (proc.wait) {
+    var cancel = proc.cancel;
+    proc.wait = null;
+    proc.cancel = null;
+    // A cancel function returns nothing, or the task its *own* cancellation
+    // has left to do. `concurrent`'s scope is the only one that returns
+    // anything. It is sequenced first, so an inner scope is finished with
+    // before this process's own handlers run: innermost-first holds across a
+    // `concurrent` as well as within one.
+    var pending = typeof cancel === "function" ? cancel() : null;
+    if (pending) {
+      steps.push(_TaskPrim_always(pending));
+    }
+  }
+
+  // Everything the process was going to do next is abandoned — except its
+  // release handlers, which are exactly what cancellation must still run. They
+  // live in the process's own state rather than in the interpreter's call
+  // stack, which is what makes reaching them here possible at all, and the
+  // frames are already in innermost-first order. Each is taken as it is found,
+  // so that killing an already-killed process releases nothing twice.
+  for (var frame = proc.stack; frame; frame = frame.rest) {
+    if (frame.$ === 6 && frame.release) {
+      steps.push(frame.release);
+      frame.release = null;
+    }
+  }
+
+  // `root` is the only field a kill may clear. `rawKill` is reachable from
+  // inside a callback that `_TaskPrim_step` is part-way through running — a
+  // task of a `concurrent` fails, and the failure handler kills its siblings
+  // and itself — and that callback's caller still reads `stack` afterwards.
+  proc.root = null;
+
+  return _TaskPrim_inOrder(steps);
+}
+
+/* STEP PROCESSES
+
+type alias Process =
+  { $ : tag
+  , id : unique_id
+  , root : Task
+  , stack : null | { $: SUCCEED | FAIL, callback, rest: stack }
+                 | { $: RELEASE, release: () -> Task Never {}, rest: stack }
+  , wait : null | {}               the token of the wait in progress
+  , cancel : null | () -> ?Task    that wait's cancel function
+  }
+
+*/
+
+var _TaskPrim_working = false;
+var _TaskPrim_queue = [];
+
+function _TaskPrim_enqueue(proc) {
+  _TaskPrim_queue.push(proc);
+  if (_TaskPrim_working) {
+    return;
+  }
+  _TaskPrim_working = true;
+  // Make sure tasks created during _step are run
+  while (_TaskPrim_queue.length > 0) {
+    const activeProcs = _TaskPrim_queue;
+    _TaskPrim_queue = [];
+
+    for (const proc of activeProcs) {
+      _TaskPrim_step(proc);
+    }
+  }
+  _TaskPrim_working = false;
+}
+
+function _TaskPrim_step(proc) {
+  stepping: while (proc.root) {
+    var rootTag = proc.root.$;
+    if (rootTag === 0 || rootTag === 1) {
+      while (proc.stack && proc.stack.$ !== rootTag) {
+        // A release frame matches neither tag, so it is reached on both, which
+        // is the whole of what `bracket` promises about success and failure.
+        if (proc.stack.$ === 6) {
+          proc.root = _TaskPrim_releasing(proc.stack, proc.root);
+          proc.stack = proc.stack.rest;
+          continue stepping;
+        }
+        proc.stack = proc.stack.rest;
+      }
+      if (!proc.stack) {
+        return;
+      }
+      proc.root = proc.stack.callback(proc.root.value);
+      proc.stack = proc.stack.rest;
+    } else if (rootTag === 2) {
+      // Each wait is a fresh token (D286). The callback answers only the wait
+      // that is still current: one that comes after a kill, or a second one
+      // for the same wait, finds a different token or none and does nothing.
+      // Without that, a killed process ran on once an operation with no
+      // cancel function finished, and unwound into release frames its kill
+      // had already emptied (m1b-source.md §SO22.3).
+      var wait = {};
+      proc.wait = wait;
+      proc.cancel = null;
+      var cancel = proc.root.callback(function (newRoot) {
+        if (proc.wait !== wait) {
+          return;
+        }
+        proc.wait = null;
+        proc.cancel = null;
+        proc.root = newRoot;
+        _TaskPrim_enqueue(proc);
+      });
+      // A callback that answered before returning has already ended the
+      // wait, and its cancel function has nothing left to cancel.
+      if (proc.wait === wait) {
+        proc.cancel = cancel;
+      }
+      return;
+    } else if (rootTag === 5) {
+      proc.stack = {
+        $: 6,
+        release: proc.root.release,
+        rest: proc.stack,
+      };
+      proc.root = proc.root.task;
+    } // if (rootTag === 3 || rootTag === 4)
+    else {
+      proc.stack = {
+        $: rootTag === 3 ? 0 : 1,
+        callback: proc.root.callback,
+        rest: proc.stack,
+      };
+      proc.root = proc.root.task;
+    }
+  }
+}
+|]
+
+-- | The export every program ends with: merge the program's @main@s into
+-- @scope.Gren@, refusing a second @init@ under one module name. It was
+-- @_Platform_export@ in @core@'s kernel @Platform.js@, whose other half, JSON at
+-- the host boundary, left with @Sqlite@ (D284, D285).
+exportHelpers :: B.Builder
+exportHelpers =
+  [r|
+function _Program_export(exports) {
+  scope["Gren"]
+    ? _Program_mergeExports("Gren", scope["Gren"], exports)
+    : (scope["Gren"] = exports);
+}
+
+function _Program_mergeExports(moduleName, obj, exports) {
+  for (var name in exports) {
+    name in obj
+      ? name == "init"
+        ? _Program_duplicate(moduleName)
+        : _Program_mergeExports(moduleName + "." + name, obj[name], exports[name])
+      : (obj[name] = exports[name]);
+  }
+}
+
+function _Program_duplicate(moduleName) {
+  throw new Error(
+    "Your page is loading multiple Gren scripts with a module named " +
+      moduleName +
+      ". Maybe a duplicate script is getting loaded accidentally? If not, rename one of them so I know which is which!",
+  );
+}
+|]
+
+-- | Record update, which @Generate.CoreJS.Expression@ writes for every
+-- @{ r | f = v }@ (D288, @m1b-source.md@ §SO24). It was @_Utils_update@ in
+-- @core@'s kernel, and nothing linked @Utils.js@ because of it: a program
+-- reached the file through the import chain that began at @Scheduler.js@, and
+-- step 8b's first build is what found that out.
+recordHelpers :: B.Builder
+recordHelpers =
+  [r|
+function _Record_update(oldRecord, updatedFields) {
+  var newRecord = {};
+
+  for (var key in oldRecord) {
+    newRecord[key] = oldRecord[key];
+  }
+
+  for (var key in updatedFields) {
+    newRecord[key] = updatedFields[key];
+  }
+
+  return newRecord;
+}
+|]
+
+-- | D71's mailbox.
 --
 -- @source_new@ carries no arguments (D252), so it is the one primitive whose
 -- JavaScript is a bare reference rather than a call: it names a single
--- @_Scheduler_binding@ node, shared by every run. Each run allocates its own
+-- @_TaskPrim_binding@ node, shared by every run. Each run allocates its own
 -- mailbox, because allocating is what running the node does. Sharing the node
 -- was safe here only because its callback answers before it returns, until
 -- D286 moved a wait and its cancel function from the node onto the process
@@ -643,18 +1244,18 @@ function _SourcePrim_Source() {
   this.closed = false;
 }
 
-var _SourcePrim_new = _Scheduler_binding(function (callback) {
-  callback(_Scheduler_succeed(new _SourcePrim_Source()));
+var _SourcePrim_new = _TaskPrim_binding(function (callback) {
+  callback(_TaskPrim_succeed(new _SourcePrim_Source()));
 });
 
 function _SourcePrim_next(source) {
-  return _Scheduler_binding(function (callback) {
+  return _TaskPrim_binding(function (callback) {
     if (source.queue.length > 0) {
-      callback(_Scheduler_succeed([source.queue.shift()]));
+      callback(_TaskPrim_succeed([source.queue.shift()]));
       return;
     }
     if (source.closed) {
-      callback(_Scheduler_succeed([]));
+      callback(_TaskPrim_succeed([]));
       return;
     }
     source.waiting = callback;
@@ -663,9 +1264,9 @@ function _SourcePrim_next(source) {
 }
 
 function _SourcePrim_close(source) {
-  return _Scheduler_binding(function (callback) {
+  return _TaskPrim_binding(function (callback) {
     _SourcePrim_shut(source);
-    callback(_Scheduler_succeed({}));
+    callback(_TaskPrim_succeed({}));
   });
 }
 
@@ -677,7 +1278,7 @@ function _SourcePrim_shut(source) {
   var waiting = source.waiting;
   if (waiting) {
     source.waiting = null;
-    waiting(_Scheduler_succeed([]));
+    waiting(_TaskPrim_succeed([]));
   }
 }
 
@@ -686,7 +1287,7 @@ function _SourcePrim_emit(source, value) {
   var waiting = source.waiting;
   if (waiting) {
     source.waiting = null;
-    waiting(_Scheduler_succeed([value]));
+    waiting(_TaskPrim_succeed([value]));
   } else {
     source.queue.push(value);
   }

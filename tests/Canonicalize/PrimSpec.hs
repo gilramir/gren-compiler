@@ -141,10 +141,28 @@ spec = do
       -- constructor the linker had no reason to keep.
       typeOf "source_next" `shouldBe` Just (fn [tSourceA] (tTask tArray))
 
-    it "the eight task primitives still have no type" $
-      -- They wait for D246, which makes `Task` Geng over them.
-      map answer ["task_succeed", "task_fail", "task_and_then", "task_on_error", "task_concurrent", "task_race", "task_bracket", "task_finally"]
-        `shouldBe` replicate 8 NoTypeYet
+    it "the task primitives are `Task`'s and `Process`'s own signatures (D246, D282, D283)" $
+      let t x ok = Can.TType ModuleName.taskInternal "Task" [x, ok]
+          v = Can.TVar
+          arr e = Can.TType ModuleName.array "Array" [e]
+          never = Can.TType ModuleName.basics "Never" []
+          pid = Can.TType ModuleName.process "Id" []
+       in map typeOf ["task_succeed", "task_fail", "task_and_then", "task_on_error", "task_concurrent", "task_race", "task_bracket", "task_map2", "task_spawn", "task_kill"]
+            `shouldBe` [ Just (fn [v "a"] (t (v "x") (v "a"))),
+                         Just (fn [v "x"] (t (v "x") (v "a"))),
+                         Just (fn [fn [v "a"] (t (v "x") (v "b")), t (v "x") (v "a")] (t (v "x") (v "b"))),
+                         Just (fn [fn [v "x"] (t (v "y") (v "a")), t (v "x") (v "a")] (t (v "y") (v "a"))),
+                         Just (fn [arr (t (v "x") (v "a"))] (t (v "x") (arr (v "a")))),
+                         Just (fn [t (v "x") (v "a"), arr (t (v "x") (v "a"))] (t (v "x") (v "a"))),
+                         Just (fn [t (v "x") (v "r"), fn [v "r"] (t never tUnit), fn [v "r"] (t (v "x") (v "a"))] (t (v "x") (v "a"))),
+                         Just (fn [fn [v "a", v "b"] (v "c"), t (v "x") (v "a"), t (v "x") (v "b")] (t (v "x") (v "c"))),
+                         Just (fn [t (v "x") (v "a")] (t (v "y") pid)),
+                         Just (fn [pid] (t (v "x") tUnit))
+                       ]
+
+    it "`task_finally` is retired and has no type (D282)" $
+      -- `finally` is Geng over `bracket` (D103).
+      answer "task_finally" `shouldBe` NoTypeYet
 
     it "a transient's type is not the bytes one" $
       (typeOf "tr_new" == typeOf "bt_new") `shouldBe` False

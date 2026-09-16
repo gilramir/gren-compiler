@@ -295,6 +295,13 @@ data TransientPrim
 
 -- | The reified @Task@ tree the runtime steps. @map@, @sequence@ and friends
 -- are Geng over these.
+--
+-- 'TaskMap2', 'TaskSpawn' and 'TaskKill' were added by D282 and D283
+-- (@m1b-source.md@ §SO22.9) and are __appended__ in 'allPrims': @map2@'s two
+-- tasks have different result types, so it cannot be Geng over 'TaskConcurrent'
+-- and its one array, and @Process.spawn@ and @kill@ are the scheduler's until
+-- D56's package replaces them. 'TaskFinally' is retired by D282, since @finally@
+-- is Geng over @bracket@ (D103), and keeps its code with no type.
 data TaskPrim
   = TaskSucceed
   | TaskFail
@@ -310,6 +317,9 @@ data TaskPrim
     SourceNew
   | SourceNext
   | SourceClose
+  | TaskMap2
+  | TaskSpawn
+  | TaskKill
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 data PrimOp
@@ -353,7 +363,7 @@ allPrims =
     ++ map BytesOp [minBound .. BtToBytes]
     ++ map ArrOp [minBound .. maxBound]
     ++ map TransientOp [minBound .. maxBound]
-    ++ map TaskOp [minBound .. maxBound]
+    ++ map TaskOp [minBound .. SourceClose]
     ++ [DebugLog]
     -- Appended by D206 and D210 (m1b-str-prim.md §Z9). Everything above keeps
     -- its code.
@@ -361,6 +371,8 @@ allPrims =
     ++ [ConvOp F64FromDecimal]
     -- Appended by D233 (m1b-bytes-prim.md §BY12).
     ++ [BytesOp BtSetBytes]
+    -- Appended by D282 and D283 (m1b-source.md §SO22.9).
+    ++ map TaskOp [TaskMap2 .. maxBound]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -531,6 +543,9 @@ taskPrimName p =
     SourceNew -> "source_new"
     SourceNext -> "source_next"
     SourceClose -> "source_close"
+    TaskMap2 -> "task_map2"
+    TaskSpawn -> "task_spawn"
+    TaskKill -> "task_kill"
 
 nameTable :: Map.Map Text PrimOp
 nameTable = Map.fromList [(primName p, p) | p <- allPrims]
@@ -657,7 +672,12 @@ primArity op =
         TaskAndThen -> 2
         TaskOnError -> 2
         TaskConcurrent -> 1
-        TaskRace -> 1
+        -- the first task, and the rest: `Task.race`'s own shape (D110, D282)
+        TaskRace -> 2
         TaskBracket -> 3
         TaskFinally -> 2
+        -- the function, and the two tasks
+        TaskMap2 -> 3
+        TaskSpawn -> 1
+        TaskKill -> 1
     DebugLog -> 2

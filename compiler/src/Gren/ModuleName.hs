@@ -20,6 +20,7 @@ module Gren.ModuleName
     bytesTransient,
     arrayTransient,
     source,
+    process,
     taskInternal,
     taskModule,
     char,
@@ -214,6 +215,11 @@ arrayTransient = Canonical Pkg.core "Array.Transient"
 -- signature of every extern that emits events.
 source :: Canonical
 source = Canonical Pkg.core "Source"
+
+-- | Where @Process.Id@ is declared, the type @task_spawn@ answers and @task_kill@
+-- takes (D283).
+process :: Canonical
+process = Canonical Pkg.core "Process"
 
 -- | Where a @Task@'s type is declared: a module @core@ does not expose, because
 -- @Platform@ — which declared it until close-out item 4 — and @Task@ import each

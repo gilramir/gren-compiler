@@ -71,7 +71,7 @@ generate :: Mode.Mode -> Program -> Map Name [K.Chunk] -> Map (Pkg.Name, Name) B
 generate mode program kernels exts =
   let env = envFor mode program
       started =
-        JS.addByteString (stringHelpers env <> floatBitsHelpers env <> bytesHelpers env <> arrayHelpers env <> sourceHelpers env <> Extern.files exts (_progExterns program)) $
+        JS.addByteString (taskHelpers env program <> JsPrim.recordHelpers <> JsPrim.exportHelpers <> stringHelpers env <> floatBitsHelpers env <> bytesHelpers env <> arrayHelpers env <> sourceHelpers env <> Extern.files exts (_progExterns program)) $
           List.foldl'
             (flip JS.stmtToBuilder)
             (JS.emptyBuilder firstGeneratedLineNumber)
@@ -90,7 +90,7 @@ generate mode program kernels exts =
 --
 -- The same fold over the link order that 'generate' performs, with the two ends
 -- swapped for the REPL's: no module wrapper, because the script is piped
--- straight into @node@ and nothing imports it; and no @_Platform_export@,
+-- straight into @node@ and nothing imports it; and no @_Program_export@,
 -- because a REPL entry has no @main@. What replaces the export is
 -- 'printForRepl'.
 --
@@ -104,7 +104,7 @@ generateForRepl ansi localizer program kernels exts home name (Can.Forall _ tipe
   let mode = Mode.Dev
       env = envFor mode program
       started =
-        JS.addByteString (stringHelpers env <> floatBitsHelpers env <> bytesHelpers env <> arrayHelpers env <> sourceHelpers env <> Extern.files exts (_progExterns program)) $
+        JS.addByteString (taskHelpers env program <> JsPrim.recordHelpers <> stringHelpers env <> floatBitsHelpers env <> bytesHelpers env <> arrayHelpers env <> sourceHelpers env <> Extern.files exts (_progExterns program)) $
           List.foldl'
             (flip JS.stmtToBuilder)
             (JS.emptyBuilder 0)
@@ -250,15 +250,14 @@ addChunk mode chunk builder =
 
 exports :: Expr.Env -> [(ModuleName.Canonical, Core.Main)] -> B.Builder
 exports env mains =
-  let export = JsName.fromKernel Name.platform "export"
-   in JsName.toBuilder export <> "(" <> trieToBuilder env (foldr addToTrie emptyTrie mains) <> ");"
+  "_Program_export(" <> trieToBuilder env (foldr addToTrie emptyTrie mains) <> ");"
 
 -- | What a runtime is handed for one @main@ (C19).
 entry :: ModuleName.Canonical -> Core.Main -> JS.Expr
 entry home main =
   let value = JS.Ref (JsName.fromGlobal home Name._main)
    in case main of
-        Core.MainTask -> JS.Call (JS.Ref (JsName.fromKernel (Name.fromChars "Scheduler") "runMain")) [value]
+        Core.MainTask -> JS.Call (JS.Ref (JsName.fromLocalHumanReadable "_TaskPrim_runMain")) [value]
 
 data Trie = Trie
   { _main :: Maybe (ModuleName.Canonical, Core.Main),
@@ -329,6 +328,19 @@ envFor mode program =
       Expr._home = ModuleName.basics,
       Expr._depth = 0
     }
+
+-- | The scheduler (D246, @m1b-source.md@ §SO24), when the program can run a
+-- task at all: it has a @main@, reaches a @task_@ or @source_@ primitive, or
+-- links an extern whose result is a @Task@, whose wrapper is a binding node.
+-- It is emitted before every other helper, since the @source_@ helpers and a
+-- zero-argument extern build a node when the program loads.
+taskHelpers :: Expr.Env -> Program -> B.Builder
+taskHelpers env program
+  | not (null (_progMains program))
+      || any JsPrim.isTask (Map.elems (Expr._prims env))
+      || any (not . Core._externPure . snd) (_progExterns program) =
+      JsPrim.taskHelpers
+  | otherwise = mempty
 
 -- | D206's string helpers, when the program reaches a @str_@ primitive at all
 -- (@docs/m1b-str-prim.md@ §Z3). Every primitive is a binding's whole body in

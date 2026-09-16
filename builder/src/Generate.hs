@@ -176,10 +176,10 @@ ownCore (Build.Artifacts _ _ roots modules) =
 -- whole program's, kernel and Gren at once, where the linker wants each kernel
 -- module's share attributed to it so that an unreached one contributes nothing.
 backendFor :: Map.Map N.Name [K.Chunk] -> Map.Map ModuleName.Canonical Core.Module -> Program.Backend
-backendFor kernels cores =
+backendFor kernels _ =
   Program.Backend
     { Program._backendKernels = Map.map kernelInfo kernels,
-      Program._backendEdges = runtimeEdges cores
+      Program._backendEdges = Map.empty
     }
 
 kernelInfo :: [K.Chunk] -> Program.Kernel
@@ -190,36 +190,12 @@ kernelInfo chunks =
       Program._kernelFields = Map.keysSet (K.countFields chunks)
     }
 
--- | The kernel module each declaration's runtime call lands in.
---
--- A @main@ is handed to @_Scheduler_runMain@ (D72, @m1b-source.md@ §SO12),
--- which is `core`'s and not `node`'s, because a program whose `main` is a
--- `Task` need not depend on `node` at all, and the whole program to
--- @_Platform_export@. A @Task@ extern's wrapper is the scheduler's binding
--- (D193). None of those names is in Core and none should be — C16 keeps
--- kernel JavaScript in the build system, and C19 keeps the runtime call out of
--- the declaration — so the JS backend supplies them here, where the backend is
--- already chosen.
---
--- @compiler#387@ is why these are edges rather than roots: stock 0.6.6 emitted
--- a port's @var@ above the kernel @var@ it registered itself in. Ports are gone
--- (§SO19), and an argument-less extern is the same shape of problem.
-runtimeEdges :: Map.Map ModuleName.Canonical Core.Module -> Map.Map Core.QualName Refs.Refs
-runtimeEdges cores =
-  Map.fromList $
-    concat
-      [ [ (Core.QualName home N._main, kernel short)
-        | Just Core.MainTask <- [Core._moduleMain modul],
-          short <- [N.fromChars "Scheduler", N.platform]
-        ]
-          ++ [ (Core.QualName home (Core._binderName (Core._externBinder e)), kernel (N.fromChars "Scheduler"))
-             | e <- Core._moduleExterns modul,
-               not (Core._externPure e)
-             ]
-      | (home, modul) <- Map.toList cores
-      ]
-  where
-    kernel = Refs.global . Program.kernelName
+-- A runtime's entry points used to be edges from here into kernel modules: a
+-- @main@ to @Scheduler@ and @Platform@, and a @Task@ extern to @Scheduler@.
+-- Since step 8b the scheduler and the export are helpers the backend emits
+-- itself, ahead of every binding (D285, @m1b-source.md@ §SO24), so no
+-- declaration needs an edge, and the REPL's to @Debug@ is the only one left
+-- ('replBackend').
 
 -- | The linked Core program (§J15).
 --
@@ -283,7 +259,8 @@ kernelChunks details =
 -- The kernel modules a runtime enters through are /not/ here. They were, and it
 -- was wrong: a root makes a kernel module reachable and says nothing about when
 -- it is emitted, so a port's @var@ could still land above the chunk it
--- registers itself in. They are edges instead — 'runtimeEdges'.
+-- registers itself in. They were edges instead, and are now helpers the backend
+-- emits ahead of everything (§SO24).
 coreRoots :: Build.Artifacts -> Map.Map ModuleName.Canonical Core.Module -> [Core.QualName]
 coreRoots (Build.Artifacts pkg _ roots _) cores =
   [ Core.QualName home N._main
