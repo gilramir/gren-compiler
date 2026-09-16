@@ -593,12 +593,11 @@ transient p args =
 --
 -- @source_new@ carries no arguments (D252), so it is the one primitive whose
 -- JavaScript is a bare reference rather than a call: it names a single
--- @_Scheduler_binding@ node, shared by every run. That is safe __because its
--- callback completes synchronously__ — a binding node carries @__kill@, the
--- cancel function of the process running it, and two processes parked on one
--- node would share one. Nothing parks here: the node allocates a mailbox and
--- calls back before it returns, so each /run/ gets its own mailbox and
--- @__kill@ is @undefined@ every time it is written.
+-- @_Scheduler_binding@ node, shared by every run. Each run allocates its own
+-- mailbox, because allocating is what running the node does. Sharing the node
+-- was safe here only because its callback answers before it returns, until
+-- D286 moved a wait and its cancel function from the node onto the process
+-- (@m1b-source.md@ §SO22.3), which makes any binding node safe to share.
 source :: TaskPrim -> [JS.Expr] -> JS.Expr
 source p args =
   case (p, args) of
