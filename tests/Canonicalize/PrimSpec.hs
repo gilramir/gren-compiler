@@ -63,12 +63,22 @@ spec = do
       -- type `core` has not declared.
       typeOf "i64_add" `shouldBe` Just (fn [tInt64, tInt64] tInt64)
 
-    it "a group whose Gren-facing type is undecided has no entry" $
-      -- `arr_get` is a real primitive; what it answers for an index out of
-      -- range is a design question its group has not answered yet, and an
-      -- answer invented here would be speculation compiled into the compiler
-      -- and checked by nothing.
-      answer "arr_get" `shouldBe` NoTypeYet
+    it "`arr_get` answers the element, with an in-range index as its precondition (D236)" $
+      -- What the public `Array.get` does with an index out of range is Geng's
+      -- (D239): a negative index from the end, a `Maybe` at either edge, and
+      -- the clamping rules `accept/array-edges` pins. The primitive under it
+      -- is total only in range, and its type says so by answering `a`.
+      typeOf "arr_get" `shouldBe` Just (fn [tArray, tInt] a)
+
+    it "every arr_ primitive is polymorphic in the element (D236)" $
+      map typeOf ["arr_length", "arr_set", "arr_slice", "arr_append", "arr_insert", "arr_remove"]
+        `shouldBe` [ Just (fn [tArray] tInt),
+                     Just (fn [tArray, tInt, a] tArray),
+                     Just (fn [tArray, tInt, tInt] tArray),
+                     Just (fn [tArray, tArray] tArray),
+                     Just (fn [tArray, tInt, a] tArray),
+                     Just (fn [tArray, tInt] tArray)
+                   ]
 
     it "a bytes transient is Bytes.Transient's type, answered back (D233)" $
       typeOf "bt_set_u8" `shouldBe` Just (fn [tTransient, tInt, tInt] tTransient)
@@ -98,8 +108,21 @@ spec = do
     it "`f64_from_decimal` reads a String" $
       typeOf "f64_from_decimal" `shouldBe` Just (fn [tString] tFloat)
 
-    it "so does the transient group, whose type does not exist at all" $
-      answer "tr_new" `shouldBe` NoTypeYet
+    it "the array transient is Array.Transient's type, parameterized (D240)" $
+      -- Unlike the bytes transient, which holds bytes and so needs no
+      -- parameter, this one carries its element type through every operation.
+      map typeOf ["tr_new", "tr_from_array", "tr_push", "tr_set", "tr_get", "tr_length", "tr_to_array"]
+        `shouldBe` [ Just (fn [tInt] tTransientA),
+                     Just (fn [tArray] tTransientA),
+                     Just (fn [tTransientA, a] tTransientA),
+                     Just (fn [tTransientA, tInt, a] tTransientA),
+                     Just (fn [tTransientA, tInt] a),
+                     Just (fn [tTransientA] tInt),
+                     Just (fn [tTransientA] tArray)
+                   ]
+
+    it "a transient's type is not the bytes one" $
+      (typeOf "tr_new" == typeOf "bt_new") `shouldBe` False
 
     it "a name the compiler does not know is not a primitive" $
       answer "i32_addd" `shouldBe` Unknown
@@ -146,6 +169,16 @@ fn args result = foldr Can.TLambda result args
 
 tInt :: Can.Type
 tInt = Can.TType ModuleName.basics "Int" []
+
+-- | The element every `arr_` and `tr_` entry is polymorphic in.
+a :: Can.Type
+a = Can.TVar "a"
+
+tArray :: Can.Type
+tArray = Can.TType ModuleName.array "Array" [a]
+
+tTransientA :: Can.Type
+tTransientA = Can.TType ModuleName.arrayTransient "Transient" [a]
 
 tInt64 :: Can.Type
 tInt64 = Can.TType ModuleName.basics "Int64" []

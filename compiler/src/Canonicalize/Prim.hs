@@ -17,7 +17,7 @@ module Canonicalize.Prim
 where
 
 import AST.Canonical qualified as Can
-import Core.Prim (BytesPrim (..), ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..))
+import Core.Prim (ArrPrim (..), BytesPrim (..), ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..), TransientPrim (..))
 import Core.Prim qualified as Prim
 import Data.Map qualified as Map
 import Data.Name qualified as Name
@@ -83,6 +83,8 @@ primType op =
     ConvOp p -> Just (convType p)
     StrOp p -> strType p
     BytesOp p -> bytesType p
+    ArrOp p -> Just (arrType p)
+    TransientOp p -> Just (transientType p)
     _ -> Nothing
 
 -- INTEGERS
@@ -216,6 +218,49 @@ bytesType p =
     BtSetBytes -> Just (fn [tTransient, tInt, tBytes] tTransient)
   where
     tTransient = Can.TType ModuleName.bytesTransient "Transient" []
+
+-- ARRAYS
+
+-- | D236's fourteen (@docs/m1b-arr-prim.md@ §AR2), which is C13's list with
+-- nothing added and nothing retired.
+--
+-- Every one is polymorphic in the element, and none of them is constrained: an
+-- @Array@ is flat and dense whatever it holds (C7), and a primitive never
+-- carries a class (C13). The index rules are @core@\'s, not these: each of
+-- these has C13\'s in-range precondition and D239 puts the negative index, the
+-- clamping and the crossed bounds in Geng around them.
+arrType :: ArrPrim -> Can.Type
+arrType p =
+  case p of
+    ALength -> fn [tArray] tInt
+    AGet -> fn [tArray, tInt] a
+    ASet -> fn [tArray, tInt, a] tArray
+    ASlice -> fn [tArray, tInt, tInt] tArray
+    AAppend -> fn [tArray, tArray] tArray
+    AInsert -> fn [tArray, tInt, a] tArray
+    ARemove -> fn [tArray, tInt] tArray
+  where
+    a = Can.TVar "a"
+    tArray = Can.TType ModuleName.array "Array" [a]
+
+-- | C7\'s transient, whose type is @Array.Transient.Transient@ — a module
+-- @core@ does not expose (D240), as the bytes transient\'s is. Each operation
+-- answers the transient it was given, and a non-linear use copies rather than
+-- corrupting what it was taken from; nothing here checks linear use.
+transientType :: TransientPrim -> Can.Type
+transientType p =
+  case p of
+    TrNew -> fn [tInt] tTransient
+    TrFromArray -> fn [tArray] tTransient
+    TrPush -> fn [tTransient, a] tTransient
+    TrSet -> fn [tTransient, tInt, a] tTransient
+    TrGet -> fn [tTransient, tInt] a
+    TrLength -> fn [tTransient] tInt
+    TrToArray -> fn [tTransient] tArray
+  where
+    a = Can.TVar "a"
+    tArray = Can.TType ModuleName.array "Array" [a]
+    tTransient = Can.TType ModuleName.arrayTransient "Transient" [a]
 
 fn :: [Can.Type] -> Can.Type -> Can.Type
 fn args result = foldr Can.TLambda result args

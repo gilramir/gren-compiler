@@ -18,6 +18,7 @@ module Gren.ModuleName
     bitwise,
     bytes,
     bytesTransient,
+    arrayTransient,
     char,
     string,
     maybe,
@@ -197,6 +198,12 @@ bytes = Canonical Pkg.core "Bytes"
 -- (@m1b-bytes-prim.md@ D233, after D221's @Json.Value@).
 bytesTransient :: Canonical
 bytesTransient = Canonical Pkg.core "Bytes.Transient"
+
+-- | Where the array transient's type is declared, with the @tr_@ bindings that
+-- do not mention @Array@: a module @core@ does not expose, which @Array@ and
+-- @Array.Builder@ both import (@m1b-arr-prim.md@ D240).
+arrayTransient :: Canonical
+arrayTransient = Canonical Pkg.core "Array.Transient"
 
 -- HTML
 

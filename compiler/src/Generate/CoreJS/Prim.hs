@@ -32,10 +32,12 @@ module Generate.CoreJS.Prim
     isFloatBits,
     bytesHelpers,
     isBytes,
+    arrayHelpers,
+    isArray,
   )
 where
 
-import Core.Prim (BytesPrim (..), ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..))
+import Core.Prim (ArrPrim (..), BytesPrim (..), ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..), TransientPrim (..))
 import Core.Prim qualified as Prim
 import Data.ByteString.Builder qualified as B
 import Data.Name qualified as Name
@@ -73,6 +75,8 @@ prim op args =
     (ConvOp p, [a]) -> conversion p a
     (StrOp p, _) -> string p args
     (BytesOp p, _) -> bytes p args
+    (ArrOp p, _) -> array p args
+    (TransientOp p, _) -> transient p args
     _ ->
       error $
         "Generate.CoreJS.Prim: no JavaScript for "
@@ -538,6 +542,113 @@ function _BytesPrim_setU8(t, i, v) { t.setUint8(i, v); return t; }
 function _BytesPrim_setBytes(t, i, b) {
   new Uint8Array(t.buffer, t.byteOffset + i, b.byteLength).set(new Uint8Array(b.buffer, b.byteOffset, b.byteLength));
   return t;
+}
+|]
+
+-- ARRAYS
+
+-- | D236's fourteen (@docs/m1b-arr-prim.md@ §AR2). An @Array@ is a dense JS
+-- array, which is what C7's contract says on this backend and what an extern
+-- sees (D192), so the seven @arr_@ primitives are the JS method of the same
+-- shape and each names its argument once. Every index here is in range, and
+-- every splice bound is already clamped: D239 puts those rules in Geng.
+array :: ArrPrim -> [JS.Expr] -> JS.Expr
+array p args =
+  case (p, args) of
+    (ALength, [a]) -> JS.Access a (JsName.fromLocalHumanReadable "length")
+    (AGet, [a, i]) -> JS.Index a i
+    (ASet, [a, i, v]) -> method a "with" [i, v]
+    (ASlice, [a, i, j]) -> method a "slice" [i, j]
+    (AAppend, [a, b]) -> method a "concat" [b]
+    (AInsert, [a, i, v]) -> method a "toSpliced" [i, JS.Int 0, v]
+    (ARemove, [a, i]) -> method a "toSpliced" [i, JS.Int 1]
+    _ -> arityError (ArrOp p) args
+  where
+    method target name as = JS.Call (JS.Access target (JsName.fromLocalHumanReadable name)) as
+
+-- | C7's transient. Every one is a helper: the type is the helpers' own class,
+-- and @push@, @set@ and @to_array@ each read their transient more than once on
+-- the path that copies.
+transient :: TransientPrim -> [JS.Expr] -> JS.Expr
+transient p args =
+  case (p, args) of
+    (TrNew, [_]) -> helper "_ArrayPrim_trNew" args
+    (TrFromArray, [_]) -> helper "_ArrayPrim_trFromArray" args
+    (TrPush, [_, _]) -> helper "_ArrayPrim_trPush" args
+    (TrSet, [_, _, _]) -> helper "_ArrayPrim_trSet" args
+    (TrGet, [_, _]) -> helper "_ArrayPrim_trGet" args
+    (TrLength, [_]) -> helper "_ArrayPrim_trLength" args
+    (TrToArray, [_]) -> helper "_ArrayPrim_trToArray" args
+    _ -> arityError (TransientOp p) args
+  where
+    helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
+
+-- | Whether a primitive is one of the @arr_@ or @tr_@ group, whose helpers
+-- 'Generate.CoreJS' emits once in a program that reaches any of them.
+isArray :: PrimOp -> Bool
+isArray op =
+  case op of
+    ArrOp _ -> True
+    TransientOp _ -> True
+    _ -> False
+
+-- | The @tr_@ helpers: C7's transient, which is a real JS array plus the number
+-- of elements that are live and a flag saying whether the array has been handed
+-- out. A first write mutates in place; a write to a transient whose array has
+-- escaped copies first, so a non-linear use stays correct without anything
+-- checking linearity.
+--
+-- Not @_Array_@: that is the kernel's @Array.js@, whose @var _Array_slice@
+-- would replace a helper of the same name in a program holding both
+-- (@docs/m1b-bytes-prim.md@ §BY12.2, where it happened).
+arrayHelpers :: B.Builder
+arrayHelpers =
+  [r|
+function _ArrayPrim_Transient(live, escaped, array) {
+  this.live = live;
+  this.escaped = escaped;
+  this.array = array;
+}
+
+function _ArrayPrim_trNew(capacity) {
+  return new _ArrayPrim_Transient(0, false, new Array(capacity));
+}
+
+function _ArrayPrim_trFromArray(array) {
+  return new _ArrayPrim_Transient(array.length, true, array);
+}
+
+// The array to write into: its own when nothing else holds it, a copy of the
+// live elements when it has escaped.
+function _ArrayPrim_trOwn(t) {
+  if (t.escaped) return t.array.slice(0, t.live);
+  t.escaped = true;
+  return t.array;
+}
+
+function _ArrayPrim_trPush(t, value) {
+  var array = _ArrayPrim_trOwn(t);
+  var live = t.live;
+  if (live < array.length) { array[live] = value; } else { array.push(value); }
+  return new _ArrayPrim_Transient(live + 1, false, array);
+}
+
+function _ArrayPrim_trSet(t, index, value) {
+  var array = _ArrayPrim_trOwn(t);
+  array[index] = value;
+  return new _ArrayPrim_Transient(t.live, false, array);
+}
+
+function _ArrayPrim_trGet(t, index) { return t.array[index]; }
+
+function _ArrayPrim_trLength(t) { return t.live; }
+
+function _ArrayPrim_trToArray(t) {
+  var array = t.array;
+  if (t.escaped) return array.slice(0, t.live);
+  t.escaped = true;
+  array.length = t.live;
+  return array;
 }
 |]
 
