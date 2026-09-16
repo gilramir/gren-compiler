@@ -80,8 +80,7 @@ reservedWords =
       "where",
       "import",
       "exposing",
-      "as",
-      "port"
+      "as"
     ]
 
 -- MODULE NAME

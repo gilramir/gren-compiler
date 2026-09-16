@@ -16,8 +16,11 @@ import AST.Source qualified as Src
 import AST.SourceComments qualified as SC
 import Data.Bifunctor (first)
 import Data.ByteString qualified as BS
+import Data.Char qualified as Char
 import Data.List.NonEmpty (NonEmpty, nonEmpty)
 import Data.Name qualified as Name
+import Data.Word (Word8)
+import Foreign.Ptr (Ptr, plusPtr)
 import Gren.Compiler.Imports qualified as Imports
 import Gren.Package qualified as Pkg
 import Parse.Declaration qualified as Decl
@@ -35,7 +38,7 @@ import Reporting.Error.Syntax qualified as E
 fromByteString :: ProjectType -> BS.ByteString -> Either E.Error Src.Module
 fromByteString projectType source =
   case P.fromByteString (chompModule projectType) E.ModuleBadEnd source of
-    Right modul -> checkModule projectType modul
+    Right modul -> Right (checkModule modul)
     Left err -> Left (E.ParseError err)
 
 -- PROJECT TYPE
@@ -84,48 +87,15 @@ chompModule projectType =
 
 -- CHECK MODULE
 
-checkModule :: ProjectType -> Module -> Either E.Error Src.Module
-checkModule projectType (Module maybeHeader imports infixes decls) =
-  let (values, classes, instances, unions, aliases, ports, topLevelComments) = categorizeDecls [] [] [] [] [] [] [] 0 decls
+checkModule :: Module -> Src.Module
+checkModule (Module maybeHeader imports infixes decls) =
+  let (values, classes, instances, unions, aliases, topLevelComments) = categorizeDecls [] [] [] [] [] [] 0 decls
    in case maybeHeader of
-        Just (Header name effects exports docs comments) ->
-          (\fx -> Src.Module (Just name) exports (toDocs docs decls) imports values classes instances unions aliases infixes topLevelComments comments fx (capabilities decls))
-            <$> checkEffects projectType ports effects
+        Just (Header name exports docs comments) ->
+          Src.Module (Just name) exports (toDocs docs decls) imports values classes instances unions aliases infixes topLevelComments comments (capabilities decls)
         Nothing ->
           let comments = SC.HeaderComments [] [] [] [] [] []
-           in Right $
-                Src.Module Nothing (A.At A.one Src.Open) (Src.NoDocs A.one) imports values classes instances unions aliases infixes topLevelComments comments
-                  ( case ports of
-                      [] -> Src.NoEffects
-                      _ : _ -> Src.Ports ports (SC.PortsComments [])
-                  )
-                  (capabilities decls)
-
-checkEffects :: ProjectType -> [(Src.SourceOrder, Src.Port)] -> Effects -> Either E.Error Src.Effects
-checkEffects projectType ports effects =
-  case effects of
-    NoEffects region ->
-      case ports of
-        [] ->
-          Right Src.NoEffects
-        (_, Src.Port name _) : _ ->
-          case projectType of
-            Package _ -> Left (E.NoPortsInPackage name)
-            Application -> Left (E.UnexpectedPort region)
-    Ports region comments ->
-      case projectType of
-        Package _ ->
-          Left (E.NoPortModulesInPackage region)
-        Application ->
-          case ports of
-            [] -> Left (E.NoPorts region)
-            _ : _ -> Right (Src.Ports ports comments)
-    Manager region manager comments ->
-      if isKernel projectType
-        then case ports of
-          [] -> Right (Src.Manager region manager comments)
-          _ : _ -> Left (E.UnexpectedPort region)
-        else Left (E.NoEffectsOutsideKernel region)
+           in Src.Module Nothing (A.At A.one Src.Open) (Src.NoDocs A.one) imports values classes instances unions aliases infixes topLevelComments comments (capabilities decls)
 
 categorizeDecls ::
   [(Src.SourceOrder, A.Located Src.Value)] ->
@@ -133,7 +103,6 @@ categorizeDecls ::
   [(Src.SourceOrder, A.Located Src.Instance)] ->
   [(Src.SourceOrder, A.Located Src.Union)] ->
   [(Src.SourceOrder, A.Located Src.Alias)] ->
-  [(Src.SourceOrder, Src.Port)] ->
   [(Src.SourceOrder, NonEmpty Src.Comment)] ->
   Src.SourceOrder ->
   [Decl.Decl] ->
@@ -142,23 +111,21 @@ categorizeDecls ::
     [(Src.SourceOrder, A.Located Src.Instance)],
     [(Src.SourceOrder, A.Located Src.Union)],
     [(Src.SourceOrder, A.Located Src.Alias)],
-    [(Src.SourceOrder, Src.Port)],
     [(Src.SourceOrder, NonEmpty Src.Comment)]
   )
-categorizeDecls values classes instances unions aliases ports topLevelComments index decls =
+categorizeDecls values classes instances unions aliases topLevelComments index decls =
   case decls of
     [] ->
-      (values, classes, instances, unions, aliases, ports, topLevelComments)
+      (values, classes, instances, unions, aliases, topLevelComments)
     decl : otherDecls ->
       case decl of
-        Decl.Value _ value -> categorizeDecls ((index, value) : values) classes instances unions aliases ports topLevelComments (index + 1) otherDecls
-        Decl.Capability _ value -> categorizeDecls ((index, value) : values) classes instances unions aliases ports topLevelComments (index + 1) otherDecls
-        Decl.Class _ class_ -> categorizeDecls values ((index, class_) : classes) instances unions aliases ports topLevelComments (index + 1) otherDecls
-        Decl.Instance _ instance_ -> categorizeDecls values classes ((index, instance_) : instances) unions aliases ports topLevelComments (index + 1) otherDecls
-        Decl.Union _ union -> categorizeDecls values classes instances ((index, union) : unions) aliases ports topLevelComments (index + 1) otherDecls
-        Decl.Alias _ alias -> categorizeDecls values classes instances unions ((index, alias) : aliases) ports topLevelComments (index + 1) otherDecls
-        Decl.Port _ port_ -> categorizeDecls values classes instances unions aliases ((index, port_) : ports) topLevelComments (index + 1) otherDecls
-        Decl.TopLevelComments comments -> categorizeDecls values classes instances unions aliases ports ((index, comments) : topLevelComments) (index + 1) otherDecls
+        Decl.Value _ value -> categorizeDecls ((index, value) : values) classes instances unions aliases topLevelComments (index + 1) otherDecls
+        Decl.Capability _ value -> categorizeDecls ((index, value) : values) classes instances unions aliases topLevelComments (index + 1) otherDecls
+        Decl.Class _ class_ -> categorizeDecls values ((index, class_) : classes) instances unions aliases topLevelComments (index + 1) otherDecls
+        Decl.Instance _ instance_ -> categorizeDecls values classes ((index, instance_) : instances) unions aliases topLevelComments (index + 1) otherDecls
+        Decl.Union _ union -> categorizeDecls values classes instances ((index, union) : unions) aliases topLevelComments (index + 1) otherDecls
+        Decl.Alias _ alias -> categorizeDecls values classes instances unions ((index, alias) : aliases) topLevelComments (index + 1) otherDecls
+        Decl.TopLevelComments comments -> categorizeDecls values classes instances unions aliases ((index, comments) : topLevelComments) (index + 1) otherDecls
 
 -- | The values declared under @\@capability@ (D258).
 capabilities :: [Decl.Decl] -> [A.Located Name.Name]
@@ -188,7 +155,6 @@ getDocComments decls comments =
         Decl.Instance _ _ -> getDocComments otherDecls comments
         Decl.Union c (A.At _ (Src.Union n _ _ _ _)) -> getDocComments otherDecls (addComment c n comments)
         Decl.Alias c (A.At _ (Src.Alias n _ _)) -> getDocComments otherDecls (addComment c n comments)
-        Decl.Port c (Src.Port n _) -> getDocComments otherDecls (addComment c n comments)
         Decl.TopLevelComments _ -> getDocComments otherDecls comments
 
 addComment :: Maybe Src.DocComment -> A.Located Name.Name -> [(Name.Name, Src.DocComment)] -> [(Name.Name, Src.DocComment)]
@@ -253,26 +219,19 @@ chompModuleDocCommentSpace =
 data Header
   = Header
       (A.Located Name.Name)
-      Effects
       (A.Located Src.Exposing)
       (Either A.Region Src.DocComment)
       SC.HeaderComments
-
-data Effects
-  = NoEffects A.Region
-  | Ports A.Region SC.PortsComments
-  | Manager A.Region Src.Manager SC.ManagerComments
 
 chompHeader :: Parser E.Module (Maybe Header)
 chompHeader =
   do
     commentsBeforeModuleLine <- freshLine E.FreshLine
-    start <- getPosition
+    refuseRemovedHeader
     oneOfWithFallback
       [ -- module MyThing exposing (..)
         do
           Keyword.module_ E.ModuleProblem
-          effectEnd <- getPosition
           commentsAfterModuleKeyword <- Space.chompAndCheckIndent E.ModuleSpace E.ModuleProblem
           name <- addLocation (Var.moduleName E.ModuleName)
           commentsAfterModuleName <- Space.chompAndCheckIndent E.ModuleSpace E.ModuleProblem
@@ -283,125 +242,48 @@ chompHeader =
           let comments = SC.HeaderComments commentsBeforeModuleLine commentsAfterModuleKeyword commentsAfterModuleName commentsAfterExposingKeyword commentsBeforeDocComment commentsAfterDocComment
           return $
             Just $
-              Header name (NoEffects (A.Region start effectEnd)) exports docComment comments,
-        -- port module MyThing exposing (..)
-        do
-          Keyword.port_ E.PortModuleProblem
-          commentsAfterPortKeyword <- Space.chompAndCheckIndent E.ModuleSpace E.PortModuleProblem
-          Keyword.module_ E.PortModuleProblem
-          effectEnd <- getPosition
-          commentsAfterModuleKeyword <- Space.chompAndCheckIndent E.ModuleSpace E.PortModuleProblem
-          name <- addLocation (Var.moduleName E.PortModuleName)
-          commentsAfterModuleName <- Space.chompAndCheckIndent E.ModuleSpace E.PortModuleProblem
-          Keyword.exposing_ E.PortModuleProblem
-          commentsAfterExposingKeyword <- Space.chompAndCheckIndent E.ModuleSpace E.PortModuleProblem
-          exports <- addLocation (specialize E.PortModuleExposing exposing)
-          (commentsBeforeDocComment, docComment, commentsAfterDocComment) <- chompModuleDocCommentSpace
-          let comments = SC.HeaderComments commentsBeforeModuleLine commentsAfterModuleKeyword commentsAfterModuleName commentsAfterExposingKeyword commentsBeforeDocComment commentsAfterDocComment
-          let portsComments = SC.PortsComments commentsAfterPortKeyword
-          return $
-            Just $
-              Header name (Ports (A.Region start effectEnd) portsComments) exports docComment comments,
-        -- effect module MyThing where { command = MyCmd } exposing (..)
-        do
-          Keyword.effect_ E.Effect
-          commentsAfterEffectKeyword <- Space.chompAndCheckIndent E.ModuleSpace E.Effect
-          Keyword.module_ E.Effect
-          effectEnd <- getPosition
-          commentsAfterModuleKeyword <- Space.chompAndCheckIndent E.ModuleSpace E.Effect
-          name <- addLocation (Var.moduleName E.ModuleName)
-          commentsAfterModuleName <- Space.chompAndCheckIndent E.ModuleSpace E.Effect
-          Keyword.where_ E.Effect
-          commentsAfterWhereKeyword <- Space.chompAndCheckIndent E.ModuleSpace E.Effect
-          (manager, commentsAfterManager1) <- chompManager
-          commentsAfterManager2 <- Space.chompAndCheckIndent E.ModuleSpace E.Effect
-          Keyword.exposing_ E.Effect
-          commentsAfterExposingKeyword <- Space.chompAndCheckIndent E.ModuleSpace E.Effect
-          exports <- addLocation (specialize (const E.Effect) exposing)
-          (commentsBeforeDocComment, docComment, commentsAfterDocComment) <- chompModuleDocCommentSpace
-          let comments = SC.HeaderComments commentsBeforeModuleLine commentsAfterModuleKeyword commentsAfterModuleName commentsAfterExposingKeyword commentsBeforeDocComment commentsAfterDocComment
-          let managerComments = SC.ManagerComments commentsAfterEffectKeyword commentsAfterWhereKeyword (commentsAfterManager1 <> commentsAfterManager2)
-          return $
-            Just $
-              Header name (Manager (A.Region start effectEnd) manager managerComments) exports docComment comments
+              Header name exports docComment comments
       ]
       -- default header
       Nothing
 
-chompManager :: Parser E.Module (Src.Manager, [Src.Comment])
-chompManager =
-  do
-    word1 0x7B {- { -} E.Effect
-    commentsAfterOpenBrace <- spaces_em
-    oneOf
-      E.Effect
-      [ do
-          cmd <- chompCommand
-          commentsAfterCmd <- spaces_em
-          oneOf
-            E.Effect
-            [ do
-                word1 0x7D {-}-} E.Effect
-                commentsAfterCloseBrace <- spaces_em
-                let comments = SC.CmdComments commentsAfterOpenBrace commentsAfterCmd
-                return (Src.Cmd cmd comments, commentsAfterCloseBrace),
-              do
-                word1 0x2C {-,-} E.Effect
-                commentsAfterComma <- spaces_em
-                sub <- chompSubscription
-                commentsAfterSub <- spaces_em
-                word1 0x7D {-}-} E.Effect
-                commentsAfterCloseBrace <- spaces_em
-                let cmdComments = SC.CmdComments commentsAfterOpenBrace commentsAfterCmd
-                let subComments = SC.SubComments commentsAfterComma commentsAfterSub
-                let comments = SC.FxComments cmdComments subComments
-                return (Src.Fx cmd sub comments, commentsAfterCloseBrace)
-            ],
-        do
-          sub <- chompSubscription
-          commentsAfterSub <- spaces_em
-          oneOf
-            E.Effect
-            [ do
-                word1 0x7D {-}-} E.Effect
-                commentsAfterCloseBrace <- spaces_em
-                let comments = SC.SubComments commentsAfterOpenBrace commentsAfterSub
-                return (Src.Sub sub comments, commentsAfterCloseBrace),
-              do
-                word1 0x2C {-,-} E.Effect
-                commentsAfterComma <- spaces_em
-                cmd <- chompCommand
-                commentsAfterCmd <- spaces_em
-                word1 0x7D {-}-} E.Effect
-                commentsAfterCloseBrace <- spaces_em
-                let subComments = SC.SubComments commentsAfterOpenBrace commentsAfterSub
-                let cmdComments = SC.CmdComments commentsAfterComma commentsAfterCmd
-                let comments = SC.FxComments cmdComments subComments
-                return (Src.Fx cmd sub comments, commentsAfterCloseBrace)
-            ]
-      ]
+-- | @port module@ and @effect module@, which Geng has no more (D280,
+-- @m1b-source.md@ §SO20). A program written for Gren meets this first, so the
+-- parser says what replaces them rather than getting stuck on the word.
+--
+-- Neither word is reserved: @port@ is an ordinary name since D279 and @effect@
+-- always was. So this looks ahead without consuming anything, and refuses only
+-- a first word followed by @module@. A file with no header whose first
+-- declaration is a value named @port@ still parses.
+refuseRemovedHeader :: Parser E.Module ()
+refuseRemovedHeader =
+  P.Parser $ \state@(P.State _ pos end _ row col) _ eok cerr _ ->
+    if wordThenModule pos end "port"
+      then cerr row col E.PortModuleHeader
+      else
+        if wordThenModule pos end "effect"
+          then cerr row col E.EffectModuleHeader
+          else eok () state
 
-chompCommand :: Parser E.Module (A.Located Name.Name)
-chompCommand =
-  do
-    Keyword.command_ E.Effect
-    spaces_em
-    word1 0x3D {-=-} E.Effect
-    spaces_em
-    addLocation (Var.upper E.Effect)
-
-chompSubscription :: Parser E.Module (A.Located Name.Name)
-chompSubscription =
-  do
-    Keyword.subscription_ E.Effect
-    spaces_em
-    word1 0x3D {-=-} E.Effect
-    spaces_em
-    addLocation (Var.upper E.Effect)
-
-spaces_em :: Parser E.Module [Src.Comment]
-spaces_em =
-  Space.chompAndCheckIndent E.ModuleSpace E.Effect
+-- | Whether the bytes at @pos@ are this word, whitespace, and then the word
+-- @module@, each word ending where an identifier would.
+wordThenModule :: Ptr Word8 -> Ptr Word8 -> String -> Bool
+wordThenModule pos end word =
+  let afterWord = plusPtr pos (length word)
+      afterSpace = skipSpace afterWord
+   in bytesAt pos (ascii word)
+        && afterSpace > afterWord
+        && bytesAt afterSpace (ascii "module")
+        && Var.getInnerWidth (plusPtr afterSpace 6) end == 0
+  where
+    bytesAt p bytes =
+      plusPtr p (length bytes) <= end
+        && and [P.unsafeIndex (plusPtr p i) == b | (i, b) <- zip [0 ..] bytes]
+    ascii = map (fromIntegral . Char.ord)
+    skipSpace p =
+      if p < end && P.unsafeIndex p `elem` [0x20, 0x0A, 0x0D]
+        then skipSpace (plusPtr p 1)
+        else p
 
 -- IMPORTS
 

@@ -338,7 +338,7 @@ crawlFile env@(Env _ _ projectType _ _ buildID locals _) mvar sources docsNeed e
   case Parse.fromByteString projectType source of
     Left err ->
       return $ SBadSyntax path source err
-    Right modul@(Src.Module maybeActualName _ _ imports _ _ _ _ _ _ _ _ _ _) ->
+    Right modul@(Src.Module maybeActualName _ _ imports _ _ _ _ _ _ _ _ _) ->
       case maybeActualName of
         Nothing ->
           return $ SBadSyntax path source (Syntax.ModuleNameUnspecified expectedName)
@@ -440,11 +440,11 @@ checkModule env@(Env _ root projectType _ _ _ _ _) foreigns resultsMVar name sta
                 RProblem $
                   Error.Module name path source $
                     case Parse.fromByteString projectType source of
-                      Right (Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _ _) ->
+                      Right (Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _) ->
                         Error.BadImports (toImportErrors env results imports problems)
                       Left err ->
                         Error.BadSyntax err
-    SChanged local@(Details.Local path _ deps _ lastCompile) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _ _) docsNeed ->
+    SChanged local@(Details.Local path _ deps _ lastCompile) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _) docsNeed ->
       do
         results <- readMVar resultsMVar
         depsStatus <- checkDeps root results deps lastCompile
@@ -910,7 +910,7 @@ fromRepl root details rootSources source =
     case Parse.fromByteString projectType source of
       Left syntaxError ->
         return $ Left $ Exit.ReplBadInput source $ Error.BadSyntax syntaxError
-      Right modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _ _) ->
+      Right modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _) ->
         do
           let deps = map (Src.getImportName . snd) imports
           mvar <- newMVar Map.empty
@@ -934,7 +934,7 @@ fromRepl root details rootSources source =
                 finalizeReplArtifacts env source modul depsStatus resultMVars results
 
 finalizeReplArtifacts :: Env -> B.ByteString -> Src.Module -> DepsStatus -> ResultDict -> Map.Map ModuleName.Raw Result -> IO (Either Exit.Repl ReplArtifacts)
-finalizeReplArtifacts env@(Env _ root projectType platform _ _ _ _) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _ _) depsStatus resultMVars results =
+finalizeReplArtifacts env@(Env _ root projectType platform _ _ _ _) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _) depsStatus resultMVars results =
   let pkg =
         projectTypeToPkg projectType
 

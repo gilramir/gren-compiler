@@ -43,7 +43,6 @@ data Decl
   | Instance (Maybe Src.DocComment) (A.Located Src.Instance)
   | Union (Maybe Src.DocComment) (A.Located Src.Union)
   | Alias (Maybe Src.DocComment) (A.Located Src.Alias)
-  | Port (Maybe Src.DocComment) Src.Port
   | TopLevelComments (NonEmpty Src.Comment)
   deriving (Show)
 
@@ -89,7 +88,6 @@ declaration =
         oneOf
           E.DeclStart
           [ typeDecl maybeDocs start [],
-            portDecl maybeDocs,
             classDecl maybeDocs start,
             instanceDecl maybeDocs start,
             valueDecl maybeDocs start
@@ -735,23 +733,6 @@ chompVariants variants@((lastCommentsBefore, lastName, lastArgs, lastCommentsAft
     ( let (commentsAfterLastVariant, commentsAfter) = List.span (A.isIndentedMoreThan 1) lastCommentsAfter
        in ((reverse ((lastCommentsBefore, lastName, lastArgs, commentsAfterLastVariant) : rest), commentsAfter), end)
     )
-
--- PORT
-
-portDecl :: Maybe Src.DocComment -> Space.Parser E.Decl (Decl, [Src.Comment])
-portDecl maybeDocs =
-  inContext E.Port (Keyword.port_ E.DeclStart) $
-    do
-      Space.chompAndCheckIndent E.PortSpace E.PortIndentName
-      name <- addLocation (Var.lower E.PortName)
-      Space.chompAndCheckIndent E.PortSpace E.PortIndentColon
-      word1 0x3A {-:-} E.PortColon
-      Space.chompAndCheckIndent E.PortSpace E.PortIndentType
-      ((tipe, commentsAfterTipe), end) <- specialize E.PortType Type.expression
-      return
-        ( (Port maybeDocs (Src.Port name tipe), commentsAfterTipe),
-          end
-        )
 
 -- INFIX
 

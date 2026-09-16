@@ -104,7 +104,6 @@ Library common
         AST.SourceComments
         AST.Utils.Binop
         AST.Utils.Type
-        Canonicalize.Effects
         Canonicalize.Environment
         Canonicalize.Environment.Dups
         Canonicalize.Environment.Foreign
@@ -308,6 +307,7 @@ Test-Suite gren-tests
         Parse.UnderscorePatternSpec
         Parse.MultilineStringSpec
         Parse.DeclSpec
+        Parse.ModuleHeaderSpec
         Reporting.Error.ImportSpec
         Type.ClassSpec
         Type.ResolveSpec

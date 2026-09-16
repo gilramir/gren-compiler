@@ -74,9 +74,6 @@ data Error
   | DuplicateAliasArg Name.Name Name.Name A.Region A.Region
   | DuplicateUnionArg Name.Name Name.Name A.Region A.Region
   | DuplicatePattern DuplicatePatternContext Name.Name A.Region A.Region
-  | -- | An @effect module@ (@m1b-source.md@ §SO19). Effect managers are gone,
-    -- and the parser still takes the header until 6c.
-    EffectModule A.Region
   | ExportDuplicate Name.Name A.Region A.Region
   | ExportNotFound A.Region VarKind Name.Name [Name.Name]
   | ExportOpenAlias A.Region Name.Name
@@ -93,8 +90,6 @@ data Error
   | NotFoundType A.Region (Maybe Name.Name) Name.Name PossibleNames
   | NotFoundVariant A.Region (Maybe Name.Name) Name.Name PossibleNames
   | NotFoundBinop A.Region Name.Name (Set.Set Name.Name)
-  | -- | A @port@, which left with effect managers (§SO19).
-    PortDeclaration A.Region Name.Name
   | PrimOutsideCore A.Region Name.Name
   | PrimUnknown A.Region Name.Name
   | PrimHasNoTypeYet A.Region Name.Name
@@ -293,23 +288,6 @@ toReport source err =
             "This `let` expression defines `" <> Name.toChars name <> "` more than once!"
           DPDestruct ->
             "This pattern contains multiple `" <> Name.toChars name <> "` variables."
-    EffectModule region ->
-      Report.Report "EFFECT MODULE" region [] $
-        Code.toSnippet
-          source
-          region
-          Nothing
-          ( D.reflow "This module is an `effect module`, and Geng has no effect managers:",
-            D.stack
-              [ D.reflow
-                  "A module that talks to the host declares an `@extern` for each thing it does,\
-                  \ and answers a `Task`. Events the host produces arrive through a `Source`,\
-                  \ which a task reads.",
-                D.reflow
-                  "Remove `effect` and the `where` clause from the header, and write the manager's\
-                  \ commands and subscriptions as tasks."
-              ]
-          )
     ExportDuplicate name r1 r2 ->
       let messageThatEndsWithPunctuation =
             "You are trying to expose `" <> Name.toChars name <> "` multiple times!"
@@ -988,18 +966,6 @@ toReport source err =
                                       alts ->
                                         ["Maybe", "you", "want"] ++ D.commaSep "or" format alts ++ ["instead?"]
                               )
-    PortDeclaration region name ->
-      Report.Report "PORT" region [] $
-        Code.toSnippet
-          source
-          region
-          Nothing
-          ( D.reflow $
-              "The `" ++ Name.toChars name ++ "` port cannot be declared, because Geng has no ports:",
-            D.reflow
-              "A call into JavaScript is an `@extern` that answers a `Task`, and values JavaScript\
-              \ sends in arrive through a `Source`, which a task reads."
-          )
     PrimOutsideCore region name ->
       Report.Report "PRIMITIVE OUTSIDE CORE" region [] $
         Code.toSnippet

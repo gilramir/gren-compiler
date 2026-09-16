@@ -24,40 +24,6 @@ data HeaderComments = HeaderComments
   }
   deriving (Show)
 
--- Effects
-
-data PortsComments = PortsComments
-  { _afterPortKeyword :: [Comment]
-  }
-  deriving (Show)
-
-data ManagerComments = ManagerComments
-  { _afterEffectKeyword :: [Comment],
-    _afterWhereKeyword :: [Comment],
-    _afterManager :: [Comment]
-  }
-  deriving (Show)
-
--- Manager
-
-data CmdComments = CmdComments
-  { _beforeCommandKeyword :: [Comment],
-    _afterCommand :: [Comment]
-  }
-  deriving (Show)
-
-data SubComments = SubComments
-  { _beforeSubscriptionsKeyword :: [Comment],
-    _afterSubscriptions :: [Comment]
-  }
-  deriving (Show)
-
-data FxComments = FxComments
-  { _cmdComments :: CmdComments,
-    _subComments :: SubComments
-  }
-  deriving (Show)
-
 -- Import
 
 data ImportComments = ImportComments

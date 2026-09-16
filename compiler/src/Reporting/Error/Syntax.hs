@@ -15,7 +15,6 @@ module Reporting.Error.Syntax
     TypeAlias (..),
     CustomType (..),
     DeclDef (..),
-    Port (..),
     --
     Expr (..),
     Parenthesized (..),
@@ -66,11 +65,6 @@ import Prelude hiding (Char, String)
 data Error
   = ModuleNameUnspecified ModuleName.Raw
   | ModuleNameMismatch ModuleName.Raw (A.Located ModuleName.Raw)
-  | UnexpectedPort A.Region
-  | NoPorts A.Region
-  | NoPortsInPackage (A.Located Name.Name)
-  | NoPortModulesInPackage A.Region
-  | NoEffectsOutsideKernel A.Region
   | ParseError Module
   deriving (Show)
 
@@ -83,12 +77,10 @@ data Module
     ModuleProblem Row Col
   | ModuleName Row Col
   | ModuleExposing Exposing Row Col
-  | --
-    PortModuleProblem Row Col
-  | PortModuleName Row Col
-  | PortModuleExposing Exposing Row Col
-  | --
-    Effect Row Col
+  | -- | @port module@ and @effect module@, refused where the header begins
+    -- (D280, @m1b-source.md@ §SO20).
+    PortModuleHeader Row Col
+  | EffectModuleHeader Row Col
   | --
     FreshLine Row Col
   | --
@@ -128,8 +120,6 @@ data Exposing
 data Decl
   = DeclStart Row Col
   | DeclSpace Space Row Col
-  | --
-    Port Port Row Col
   | DeclClass DeclClass Row Col
   | DeclInstance DeclInstance Row Col
   | DeclAttribute Attribute Row Col
@@ -151,16 +141,6 @@ data DeclDef
     DeclDefIndentType Row Col
   | DeclDefIndentEquals Row Col
   | DeclDefIndentBody Row Col
-  deriving (Show)
-
-data Port
-  = PortSpace Space Row Col
-  | PortName Row Col
-  | PortColon Row Col
-  | PortType Type Row Col
-  | PortIndentName Row Col
-  | PortIndentColon Row Col
-  | PortIndentType Row Col
   deriving (Show)
 
 -- CLASS DECLARATIONS
@@ -586,142 +566,26 @@ toReport source err =
                   \ module name, try renaming the file instead."
               ]
           )
-    UnexpectedPort region ->
-      Report.Report "UNEXPECTED PORTS" region [] $
-        Code.toSnippet
-          source
-          region
-          Nothing
-          ( D.reflow $
-              "You are declaring ports in a normal module.",
-            D.stack
-              [ D.fillSep
-                  [ "Switch",
-                    "this",
-                    "to",
-                    "say",
-                    D.cyan "port module",
-                    "instead,",
-                    "marking",
-                    "that",
-                    "this",
-                    "module",
-                    "contains",
-                    "port",
-                    "declarations."
-                  ],
-                D.link
-                  "Note"
-                  "Ports are not a traditional FFI for calling JS functions directly. They need a different mindset! Read"
-                  "ports"
-                  "to learn the syntax and how to use it effectively."
-              ]
-          )
-    NoPorts region ->
-      Report.Report "NO PORTS" region [] $
-        Code.toSnippet
-          source
-          region
-          Nothing
-          ( D.reflow $
-              "This module does not declare any ports, but it says it will:",
-            D.fillSep
-              [ "Switch",
-                "this",
-                "to",
-                D.cyan "module",
-                "and",
-                "you",
-                "should",
-                "be",
-                "all",
-                "set!"
-              ]
-          )
-    NoPortsInPackage (A.At region _) ->
-      Report.Report "PACKAGES CANNOT HAVE PORTS" region [] $
-        Code.toSnippet
-          source
-          region
-          Nothing
-          ( D.reflow $
-              "Packages cannot declare any ports, so I am getting stuck here:",
-            D.stack
-              [ D.reflow $
-                  "Remove this port declaration.",
-                noteForPortsInPackage
-              ]
-          )
-    NoPortModulesInPackage region ->
-      Report.Report "PACKAGES CANNOT HAVE PORTS" region [] $
-        Code.toSnippet
-          source
-          region
-          Nothing
-          ( D.reflow $
-              "Packages cannot declare any ports, so I am getting stuck here:",
-            D.stack
-              [ D.fillSep $
-                  [ "Remove",
-                    "the",
-                    D.cyan "port",
-                    "keyword",
-                    "and",
-                    "I",
-                    "should",
-                    "be",
-                    "able",
-                    "to",
-                    "continue."
-                  ],
-                noteForPortsInPackage
-              ]
-          )
-    NoEffectsOutsideKernel region ->
-      Report.Report "INVALID EFFECT MODULE" region [] $
-        Code.toSnippet
-          source
-          region
-          Nothing
-          ( D.reflow $
-              "It is not possible to declare an `effect module` outside the gren-lang organization,\
-              \ so I am getting stuck here:",
-            D.stack
-              [ D.reflow $
-                  "Switch to a normal module declaration.",
-                D.toSimpleNote $
-                  "Effect modules are designed to allow certain core functionality to be\
-                  \ defined separately from the compiler. So the gren-lang organization has access to\
-                  \ this so that certain changes, extensions, and fixes can be introduced without\
-                  \ needing to release new Gren binaries. For example, we want to make it possible\
-                  \ to test effects, but this may require changes to the design of effect modules.\
-                  \ By only having them defined in the gren-lang organization, that kind of design work\
-                  \ can proceed much more smoothly."
-              ]
-          )
     ParseError modul ->
       toParseErrorReport source modul
 
-noteForPortsInPackage :: D.Doc
-noteForPortsInPackage =
-  D.stack
-    [ D.toSimpleNote $
-        "One of the major goals of the package ecosystem is to be completely written\
-        \ in Gren. This means when you install a Gren package, you can be sure you are safe\
-        \ from security issues on install and that you are not going to get any runtime\
-        \ exceptions coming from your new dependency. This design also sets the ecosystem\
-        \ up to target other platforms more easily (like mobile phones, WebAssembly, etc.)\
-        \ since no community code explicitly depends on JavaScript even existing.",
-      D.reflow $
-        "Given that overall goal, allowing ports in packages would lead to some pretty\
-        \ surprising behavior. If ports were allowed in packages, you could install a\
-        \ package but not realize that it brings in an indirect dependency that defines a\
-        \ port. Now you have a program that does not work and the fix is to realize that\
-        \ some JavaScript needs to be added for a dependency you did not even know about.\
-        \ That would be extremely frustrating! \"So why not allow the package author to\
-        \ include the necessary JS code as well?\" Now we are back in conflict with our\
-        \ overall goal to keep all community packages free from runtime exceptions."
-    ]
+-- | What the parser says to a @port module@ or an @effect module@ header (D280).
+-- The region is the two words, which the refusal has just read.
+toRemovedHeaderReport :: Code.Source -> [Char.Char] -> [Char.Char] -> Col -> Row -> Col -> D.Doc -> Report.Report
+toRemovedHeaderReport source title header width row col replacement =
+  let region = A.Region (A.Position row col) (A.Position row (col + width))
+   in Report.Report title region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This module's header is `" ++ header ++ "`, and Geng has no such modules:",
+            D.stack
+              [ replacement,
+                D.reflow "Make it a plain `module`, and write what its ports or effects did as tasks."
+              ]
+          )
 
 toParseErrorReport :: Code.Source -> Module -> Report.Report
 toParseErrorReport source modul =
@@ -780,62 +644,17 @@ toParseErrorReport source modul =
               )
     ModuleExposing exposing row col ->
       toExposingReport source exposing row col
-    PortModuleProblem row col ->
-      let region = toRegion row col
-       in Report.Report "UNFINISHED PORT MODULE DECLARATION" region [] $
-            Code.toSnippet
-              source
-              region
-              Nothing
-              ( D.reflow $
-                  "I am parsing an `port module` declaration, but I got stuck here:",
-                D.stack
-                  [ D.reflow $
-                      "Here are some examples of valid `port module` declarations:",
-                    D.indent 4 $
-                      D.vcat $
-                        [ D.fillSep [D.cyan "port", D.cyan "module", "WebSockets", D.cyan "exposing", "(send, listen, keepAlive)"],
-                          D.fillSep [D.cyan "port", D.cyan "module", "Maps", D.cyan "exposing", "(Location, goto)"]
-                        ],
-                    D.link "Note" "Read" "ports" "for more help."
-                  ]
-              )
-    PortModuleName row col ->
-      let region = toRegion row col
-       in Report.Report "EXPECTING MODULE NAME" region [] $
-            Code.toSnippet
-              source
-              region
-              Nothing
-              ( D.reflow $
-                  "I was parsing an `module` declaration until I got stuck here:",
-                D.stack
-                  [ D.reflow $
-                      "I was expecting to see the module name next, like in these examples:",
-                    D.indent 4 $
-                      D.vcat $
-                        [ D.fillSep [D.cyan "port", D.cyan "module", "WebSockets", D.cyan "exposing", "(send, listen, keepAlive)"],
-                          D.fillSep [D.cyan "port", D.cyan "module", "Maps", D.cyan "exposing", "(Location, goto)"]
-                        ],
-                    D.reflow $
-                      "Notice that the module names all start with a capital letter and use only ASCII letters and digits after it. That is required: a module name is also a file name, and file systems disagree about everything else."
-                  ]
-              )
-    PortModuleExposing exposing row col ->
-      toExposingReport source exposing row col
-    Effect row col ->
-      let region = toRegion row col
-       in Report.Report "BAD MODULE DECLARATION" region [] $
-            Code.toSnippet
-              source
-              region
-              Nothing
-              ( D.reflow $
-                  "I cannot parse this module declaration:",
-                D.reflow $
-                  "This type of module is reserved for the gren-lang organization. It is used to\
-                  \ define certain effects, avoiding building them into the compiler."
-              )
+    PortModuleHeader row col ->
+      toRemovedHeaderReport source "PORT MODULE" "port module" 11 row col $
+        D.reflow
+          "A call into JavaScript is an `@extern` that answers a `Task`, and values\
+          \ JavaScript sends in arrive through a `Source`, which a task reads."
+    EffectModuleHeader row col ->
+      toRemovedHeaderReport source "EFFECT MODULE" "effect module" 13 row col $
+        D.reflow
+          "A module that talks to the host declares an `@extern` for each thing it does,\
+          \ and answers a `Task`. Events the host produces arrive through a `Source`,\
+          \ which a task reads."
     FreshLine row col ->
       let region = toRegion row col
 
@@ -1533,8 +1352,6 @@ toDeclarationsReport source decl =
       toDeclStartReport source row col
     DeclSpace space row col ->
       toSpaceReport source space row col
-    Port port_ row col ->
-      toPortReport source port_ row col
     DeclClass declClass row col ->
       toDeclClassReport source declClass row col
     DeclInstance declInstance row col ->
@@ -2011,182 +1828,6 @@ toDeclInstanceReport source declInstance startRow startCol =
             D.reflow
               "I was expecting the next definition to start in the same column as the one\
               \ before it. Everything in the instance lines up."
-
--- PORT
-
-toPortReport :: Code.Source -> Port -> Row -> Col -> Report.Report
-toPortReport source port_ startRow startCol =
-  case port_ of
-    PortSpace space row col ->
-      toSpaceReport source space row col
-    PortName row col ->
-      case Code.whatIsNext source row col of
-        Code.Keyword keyword ->
-          let surroundings = A.Region (A.Position startRow startCol) (A.Position row col)
-              region = toKeywordRegion row col keyword
-           in Report.Report "RESERVED WORD" region [] $
-                Code.toSnippet
-                  source
-                  surroundings
-                  (Just region)
-                  ( D.reflow $
-                      "I cannot handle ports with names like this:",
-                    D.reflow $
-                      "You are trying to make a port named `"
-                        ++ keyword
-                        ++ "` but that is a reserved word. Try using some other name?"
-                  )
-        _ ->
-          let surroundings = A.Region (A.Position startRow startCol) (A.Position row col)
-              region = toRegion row col
-           in Report.Report "PORT PROBLEM" region [] $
-                Code.toSnippet
-                  source
-                  surroundings
-                  (Just region)
-                  ( D.reflow $
-                      "I just saw the start of a `port` declaration, but then I got stuck here:",
-                    D.stack
-                      [ D.fillSep
-                          [ "I",
-                            "was",
-                            "expecting",
-                            "to",
-                            "see",
-                            "a",
-                            "name",
-                            "like",
-                            D.dullyellow "send",
-                            "or",
-                            D.dullyellow "receive",
-                            "next.",
-                            "Something",
-                            "that",
-                            "starts",
-                            "with",
-                            "a",
-                            "lower-case",
-                            "letter."
-                          ],
-                        portNote
-                      ]
-                  )
-    PortColon row col ->
-      let surroundings = A.Region (A.Position startRow startCol) (A.Position row col)
-          region = toRegion row col
-       in Report.Report "PORT PROBLEM" region [] $
-            Code.toSnippet
-              source
-              surroundings
-              (Just region)
-              ( D.reflow $
-                  "I just saw the start of a `port` declaration, but then I got stuck here:",
-                D.stack
-                  [ D.reflow $
-                      "I was expecting to see a colon next. And then a type that tells me\
-                      \ what type of values are going to flow through.",
-                    portNote
-                  ]
-              )
-    PortType tipe row col ->
-      toTypeReport source TC_Port tipe row col
-    PortIndentName row col ->
-      let surroundings = A.Region (A.Position startRow startCol) (A.Position row col)
-          region = toRegion row col
-       in Report.Report "UNFINISHED PORT" region [] $
-            Code.toSnippet
-              source
-              surroundings
-              (Just region)
-              ( D.reflow $
-                  "I just saw the start of a `port` declaration, but then I got stuck here:",
-                D.stack
-                  [ D.fillSep
-                      [ "I",
-                        "was",
-                        "expecting",
-                        "to",
-                        "see",
-                        "a",
-                        "name",
-                        "like",
-                        D.dullyellow "send",
-                        "or",
-                        D.dullyellow "receive",
-                        "next.",
-                        "Something",
-                        "that",
-                        "starts",
-                        "with",
-                        "a",
-                        "lower-case",
-                        "letter."
-                      ],
-                    portNote
-                  ]
-              )
-    PortIndentColon row col ->
-      let surroundings = A.Region (A.Position startRow startCol) (A.Position row col)
-          region = toRegion row col
-       in Report.Report "UNFINISHED PORT" region [] $
-            Code.toSnippet
-              source
-              surroundings
-              (Just region)
-              ( D.reflow $
-                  "I just saw the start of a `port` declaration, but then I got stuck here:",
-                D.stack
-                  [ D.reflow $
-                      "I was expecting to see a colon next. And then a type that tells me\
-                      \ what type of values are going to flow through.",
-                    portNote
-                  ]
-              )
-    PortIndentType row col ->
-      let surroundings = A.Region (A.Position startRow startCol) (A.Position row col)
-          region = toRegion row col
-       in Report.Report "UNFINISHED PORT" region [] $
-            Code.toSnippet
-              source
-              surroundings
-              (Just region)
-              ( D.reflow $
-                  "I just saw the start of a `port` declaration, but then I got stuck here:",
-                D.stack
-                  [ D.reflow $
-                      "I was expecting to see a type next. Here are examples of outgoing and\
-                      \ incoming ports for reference:",
-                    D.indent 4 $
-                      D.vcat $
-                        [ D.fillSep [D.cyan "port", "send", ":", "String -> Cmd msg"],
-                          D.fillSep [D.cyan "port", "receive", ":", "(String -> msg) -> Sub msg"]
-                        ],
-                    D.reflow $
-                      "The first line defines a `send` port so you can send strings out to JavaScript.\
-                      \ Maybe you send them on a WebSocket or put them into IndexedDB. The second line\
-                      \ defines a `receive` port so you can receive strings from JavaScript. Maybe you\
-                      \ get receive messages when new WebSocket messages come in or when an entry in\
-                      \ IndexedDB changes for some external reason."
-                  ]
-              )
-
-portNote :: D.Doc
-portNote =
-  D.stack
-    [ D.toSimpleNote $
-        "Here are some example `port` declarations for reference:",
-      D.indent 4 $
-        D.vcat $
-          [ D.fillSep [D.cyan "port", "send", ":", "String -> Cmd msg"],
-            D.fillSep [D.cyan "port", "receive", ":", "(String -> msg) -> Sub msg"]
-          ],
-      D.reflow $
-        "The first line defines a `send` port so you can send strings out to JavaScript.\
-        \ Maybe you send them on a WebSocket or put them into IndexedDB. The second line\
-        \ defines a `receive` port so you can receive strings from JavaScript. Maybe you\
-        \ get receive messages when new WebSocket messages come in or when the IndexedDB\
-        \ is changed for some external reason."
-    ]
 
 -- DECL TYPE
 
@@ -6263,7 +5904,6 @@ data TContext
   = TC_Annotation Name.Name
   | TC_CustomType
   | TC_TypeAlias
-  | TC_Port
   | TC_InstanceHead
 
 toTypeReport :: Code.Source -> TContext -> Type -> Row -> Col -> Report.Report
@@ -6300,7 +5940,6 @@ toTypeReport source context tipe startRow startCol =
                   TC_Annotation _ -> "type annotation"
                   TC_CustomType -> "custom type"
                   TC_TypeAlias -> "type alias"
-                  TC_Port -> "port"
                   TC_InstanceHead -> "instance"
 
               something =
@@ -6308,7 +5947,6 @@ toTypeReport source context tipe startRow startCol =
                   TC_Annotation name -> "the `" ++ Name.toChars name ++ "` type annotation"
                   TC_CustomType -> "a custom type"
                   TC_TypeAlias -> "a type alias"
-                  TC_Port -> "a port"
                   TC_InstanceHead -> "an instance declaration"
            in Report.Report ("PROBLEM IN " ++ map Char.toUpper thing) region [] $
                 Code.toSnippet
@@ -6346,7 +5984,6 @@ toTypeReport source context tipe startRow startCol =
               TC_Annotation _ -> "type annotation"
               TC_CustomType -> "custom type"
               TC_TypeAlias -> "type alias"
-              TC_Port -> "port"
               TC_InstanceHead -> "instance"
        in Report.Report ("UNFINISHED " ++ map Char.toUpper thing) region [] $
             Code.toSnippet

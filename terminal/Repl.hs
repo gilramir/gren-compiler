@@ -142,7 +142,6 @@ loop flags env state =
 data Input
   = Import ModuleName.Raw BS.ByteString
   | Type N.Name BS.ByteString
-  | Port
   | -- | A `class` or `instance` declaration, which the REPL declines rather
     -- than crashes on. Both parse (`docs/m1b-classes.md` §G17) and neither can
     -- work here: a REPL session is a third-party package, and §8.3 gates class
@@ -276,13 +275,10 @@ attemptDeclOrExpr lines =
             PD.Alias _ (A.At _ (Src.Alias (A.At _ name) _ _)) -> ifDone lines (Type name src)
             PD.Class _ _ -> Done ClassOrInstance
             PD.Instance _ _ -> Done ClassOrInstance
-            PD.Port _ _ -> Done Port
             PD.TopLevelComments _ -> Done Skip
         Left declPosition
           | startsWithKeyword "type" lines ->
               ifFail lines (Type "ERR" src)
-          | startsWithKeyword "port" lines ->
-              Done Port
           | otherwise ->
               case P.fromByteString exprParser (,) src of
                 Right _ ->
@@ -381,10 +377,6 @@ eval flags env state@(State imports types decls) input =
         do
           let newState = state {_types = Map.insert name (B.byteString src) types}
           Loop <$> attemptEval flags env state newState OutputNothing
-      Port ->
-        do
-          putStrLn "I cannot handle port declarations."
-          return (Loop state)
       ClassOrInstance ->
         do
           putStrLn "I cannot handle class or instance declarations."

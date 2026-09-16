@@ -9,7 +9,6 @@ where
 import AST.Canonical qualified as Can
 import AST.Source qualified as Src
 import Canonicalize.Derive qualified as Derive
-import Canonicalize.Effects qualified as Effects
 import Canonicalize.Environment qualified as Env
 import Canonicalize.Environment.Dups qualified as Dups
 import Canonicalize.Environment.Foreign qualified as Foreign
@@ -48,10 +47,9 @@ type Result i w a =
 -- MODULES
 
 canonicalize :: Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Result i [W.Warning] Can.Module
-canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ effects capabilities) =
+canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ capabilities) =
   do
     checkClassesAreFirstParty pkg (fmap snd classes)
-    Effects.refuse effects
 
     let values = fmap snd valuesWithSourceOrder
     let home = ModuleName.Canonical pkg (Src.getName modul)

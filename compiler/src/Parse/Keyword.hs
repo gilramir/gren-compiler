@@ -4,7 +4,6 @@
 module Parse.Keyword
   ( type_,
     alias_,
-    port_,
     class_,
     instance_,
     if_,
@@ -22,10 +21,7 @@ module Parse.Keyword
     import_,
     exposing_,
     as_,
-    effect_,
     where_,
-    command_,
-    subscription_,
     k4,
     k5,
   )
@@ -44,9 +40,6 @@ type_ tx = k4 0x74 0x79 0x70 0x65 tx
 
 alias_ :: (Row -> Col -> x) -> Parser x ()
 alias_ tx = k5 0x61 0x6C 0x69 0x61 0x73 tx
-
-port_ :: (Row -> Col -> x) -> Parser x ()
-port_ tx = k4 0x70 0x6F 0x72 0x74 tx
 
 -- | `class` and `instance` are contextual keywords, not reserved words
 -- (D117): they begin a declaration only at the start of one and only when an
@@ -117,35 +110,8 @@ as_ tx = k2 0x61 0x73 tx
 
 -- EFFECTS
 
-effect_ :: (Row -> Col -> x) -> Parser x ()
-effect_ tx = k6 0x65 0x66 0x66 0x65 0x63 0x74 tx
-
 where_ :: (Row -> Col -> x) -> Parser x ()
 where_ tx = k5 0x77 0x68 0x65 0x72 0x65 tx
-
-command_ :: (Row -> Col -> x) -> Parser x ()
-command_ tx = k7 0x63 0x6F 0x6D 0x6D 0x61 0x6E 0x64 tx
-
-subscription_ :: (Row -> Col -> x) -> Parser x ()
-subscription_ toError =
-  P.Parser $ \(P.State src pos end indent row col) cok _ _ eerr ->
-    let !pos12 = plusPtr pos 12
-     in if pos12 <= end
-          && P.unsafeIndex (pos) == 0x73
-          && P.unsafeIndex (plusPtr pos 1) == 0x75
-          && P.unsafeIndex (plusPtr pos 2) == 0x62
-          && P.unsafeIndex (plusPtr pos 3) == 0x73
-          && P.unsafeIndex (plusPtr pos 4) == 0x63
-          && P.unsafeIndex (plusPtr pos 5) == 0x72
-          && P.unsafeIndex (plusPtr pos 6) == 0x69
-          && P.unsafeIndex (plusPtr pos 7) == 0x70
-          && P.unsafeIndex (plusPtr pos 8) == 0x74
-          && P.unsafeIndex (plusPtr pos 9) == 0x69
-          && P.unsafeIndex (plusPtr pos 10) == 0x6F
-          && P.unsafeIndex (plusPtr pos 11) == 0x6E
-          && Var.getInnerWidth pos12 end == 0
-          then let !s = P.State src pos12 end indent row (col + 12) in cok () s
-          else eerr row col toError
 
 -- KEYWORDS
 
@@ -212,22 +178,6 @@ k6 w1 w2 w3 w4 w5 w6 toError =
           && P.unsafeIndex (plusPtr pos 5) == w6
           && Var.getInnerWidth pos6 end == 0
           then let !s = P.State src pos6 end indent row (col + 6) in cok () s
-          else eerr row col toError
-
-k7 :: Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> (Row -> Col -> x) -> Parser x ()
-k7 w1 w2 w3 w4 w5 w6 w7 toError =
-  P.Parser $ \(P.State src pos end indent row col) cok _ _ eerr ->
-    let !pos7 = plusPtr pos 7
-     in if pos7 <= end
-          && P.unsafeIndex (pos) == w1
-          && P.unsafeIndex (plusPtr pos 1) == w2
-          && P.unsafeIndex (plusPtr pos 2) == w3
-          && P.unsafeIndex (plusPtr pos 3) == w4
-          && P.unsafeIndex (plusPtr pos 4) == w5
-          && P.unsafeIndex (plusPtr pos 5) == w6
-          && P.unsafeIndex (plusPtr pos 6) == w7
-          && Var.getInnerWidth pos7 end == 0
-          then let !s = P.State src pos7 end indent row (col + 7) in cok () s
           else eerr row col toError
 
 k8 :: Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> (Row -> Col -> x) -> Parser x ()

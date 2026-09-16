@@ -42,9 +42,6 @@ module AST.Source
     UnionVariant,
     Alias (..),
     Infix (..),
-    Port (..),
-    Effects (..),
-    Manager (..),
     Docs (..),
     DocComment (..),
     Exposing (..),
@@ -240,7 +237,6 @@ data Module = Module
     _binops :: ([Comment], [A.Located Infix]),
     _topLevelComments :: [(SourceOrder, NonEmpty Comment)],
     _headerComments :: SC.HeaderComments,
-    _effects :: Effects,
     -- | The values declared under @\@capability@ (D258, @m1b-source.md@
     -- §SO12.4), which only the application and this module's own package may
     -- refer to.
@@ -249,7 +245,7 @@ data Module = Module
   deriving (Show)
 
 getName :: Module -> Name
-getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _ _ _) =
+getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _ _) =
   case maybeName of
     Just (A.At _ name) ->
       name
@@ -318,21 +314,6 @@ data Alias = Alias (A.Located Name) [A.Located Name] Type
   deriving (Show)
 
 data Infix = Infix Name Binop.Associativity Binop.Precedence Name
-  deriving (Show)
-
-data Port = Port (A.Located Name) Type
-  deriving (Show)
-
-data Effects
-  = NoEffects
-  | Ports [(SourceOrder, Port)] SC.PortsComments
-  | Manager A.Region Manager SC.ManagerComments
-  deriving (Show)
-
-data Manager
-  = Cmd (A.Located Name) SC.CmdComments
-  | Sub (A.Located Name) SC.SubComments
-  | Fx (A.Located Name) (A.Located Name) SC.FxComments
   deriving (Show)
 
 data Docs
