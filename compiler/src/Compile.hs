@@ -24,6 +24,7 @@ import Gren.Interface qualified as I
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Gren.Platform qualified as P
+import Nitpick.Capability qualified as Capability
 import Nitpick.Main qualified as NitpickMain
 import Nitpick.PatternMatches qualified as PatternMatches
 import Reporting.Annotation qualified as A
@@ -53,13 +54,16 @@ data Artifacts = Artifacts
     _core :: Core.Module
   }
 
-compile :: P.Platform -> Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Either E.Error Artifacts
-compile platform pkg ifaces modul =
+-- | The 'Bool' is whether the module is the application's rather than a
+-- package's, which is what decides whether it may mint a capability (D258).
+compile :: P.Platform -> Bool -> Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Either E.Error Artifacts
+compile platform application pkg ifaces modul =
   do
     -- Numbering happens between canonicalization and type checking, because
     -- the checker records a type per node id (`docs/m1a-node-types.md`) and
     -- everything downstream of it must see the same ids.
     canonical <- NodeId.number <$> canonicalize pkg ifaces modul
+    () <- checkCapabilities application pkg ifaces canonical
     Type.Solved solved nodeTypes defaults literalWidths <- typeCheck modul canonical
     () <- checkNodeTypes canonical nodeTypes
     -- Before the annotations, because half of one may come from it: an
@@ -129,6 +133,13 @@ contextOf inferred d =
       | otherwise -> Map.singleton name freeVars
 
 -- PHASES
+
+-- | D258: a package may not refer to a capability another package declares.
+checkCapabilities :: Bool -> Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Can.Module -> Either E.Error ()
+checkCapabilities application pkg ifaces canonical =
+  case Capability.check application pkg ifaces canonical of
+    [] -> Right ()
+    e : es -> Left (E.BadCapabilities (NE.List e es))
 
 canonicalize :: Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Either E.Error Can.Module
 canonicalize pkg ifaces modul =

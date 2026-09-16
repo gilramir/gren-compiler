@@ -1024,6 +1024,7 @@ mainP =
         (0, Nothing) -> pure MainString
         (1, Nothing) -> pure MainHtml
         (2, Just converter) -> pure (MainProgram converter)
+        (3, Nothing) -> pure MainTask
         (2, Nothing) -> failAt here "a Program main has no flags converter"
         (_, Just _) -> failAt here "only a Program main may carry a flags converter"
         _ -> failAt here ("no such main kind: " ++ show code)

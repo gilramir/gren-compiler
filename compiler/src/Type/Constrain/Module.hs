@@ -19,7 +19,7 @@ import Type.Type (Constraint (..), Type (..), mkFlexVar, nameToRigid, never, (==
 -- CONSTRAIN
 
 constrain :: Can.Module -> IO Constraint
-constrain (Can.Module home _ _ decls _ _ _ instances _ effects _) =
+constrain (Can.Module home _ _ decls _ _ _ instances _ effects _ _) =
   do
     final <- constrainInstances instances
     case effects of

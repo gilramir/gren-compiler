@@ -294,6 +294,10 @@ data MainOf
   | -- | A @Platform.Program@ whose flags cannot come from JavaScript, for
     -- @Reporting.Error.Main.BadFlags@.
     BadFlags Can.Type CE.InvalidPayload
+  | -- | A @Task@ that is not a @Task Never {}@, for
+    -- @Reporting.Error.Main.BadTask@: whether its error type is the wrong one,
+    -- and whether its answer is.
+    BadTask Can.Type Bool Bool
 
 -- | The classification, from the module's annotations and the platform.
 --
@@ -309,7 +313,7 @@ mainOf :: P.Platform -> Map.Map Name Can.Annotation -> MainOf
 mainOf platform annotations =
   case Map.lookup Name._main annotations of
     Nothing -> NoMain
-    Just (Can.Forall _ tipe) ->
+    Just (Can.Forall freeVars tipe) ->
       case Type.deepDealias tipe of
         Can.TType hm nm []
           | platform == P.Node && hm == ModuleName.string && nm == Name.string ->
@@ -317,6 +321,11 @@ mainOf platform annotations =
         Can.TType hm nm [_]
           | platform == P.Browser && hm == ModuleName.virtualDom && nm == Name.node ->
               IsMain Core.MainHtml
+        Can.TType hm nm [err, answer]
+          | platform == P.Node && hm == ModuleName.taskInternal && nm == Name.task ->
+              let badErr = not (isNever err || unconstrained freeVars err)
+                  badAnswer = not (isUnit answer || unconstrained freeVars answer)
+               in if badErr || badAnswer then BadTask tipe badErr badAnswer else IsMain Core.MainTask
         Can.TType hm nm [flags, _, _]
           | hm == ModuleName.platform && nm == Name.program ->
               case Effects.checkPayload flags of
@@ -324,12 +333,37 @@ mainOf platform annotations =
                 Left (subType, invalidPayload) -> BadFlags subType invalidPayload
         _ -> NotRunnable tipe (runnableOn platform)
 
+-- | A @main : Task e a@ is runnable when nothing can reach the end of the
+-- program but completion (D72, @m1b-source.md@ §SO12, D256): @e@ is @Never@ and
+-- @a@ is @{}@, or either is a variable nothing constrains. @Task x {}@ is what
+-- an unannotated @main = Console.write "hi"@ infers, and a task that can fail
+-- with /any/ error is one that cannot fail with a particular one — so the
+-- variable is as safe as @Never@ and refusing it would only make an annotation
+-- compulsory. A constrained variable is not: @Task.fail 3@ is a @Task number a@.
+isNever :: Can.Type -> Bool
+isNever t =
+  case t of
+    Can.TType hm nm [] -> hm == ModuleName.basics && nm == Name.fromChars "Never"
+    _ -> False
+
+isUnit :: Can.Type -> Bool
+isUnit t =
+  case t of
+    Can.TRecord fields Nothing -> Map.null fields
+    _ -> False
+
+unconstrained :: Can.FreeVars -> Can.Type -> Bool
+unconstrained freeVars t =
+  case t of
+    Can.TVar name -> null (Map.findWithDefault [] name freeVars)
+    _ -> False
+
 -- | The type names a platform's @main@ may have, as the error prints them.
 runnableOn :: P.Platform -> [String]
 runnableOn platform =
   case platform of
     P.Browser -> ["Html", "Svg", "Program"]
-    P.Node -> ["String", "Program"]
+    P.Node -> ["String", "Program", "Task Never {}"]
     P.Common -> []
 
 -- | What 'lower' keeps. A module that is not rejected has no other answer.
@@ -340,6 +374,7 @@ mainFrom m =
     NoMain -> Nothing
     NotRunnable _ _ -> Nothing
     BadFlags _ _ -> Nothing
+    BadTask {} -> Nothing
 
 -- | The module's definitions, grouped and ordered by C14.
 --

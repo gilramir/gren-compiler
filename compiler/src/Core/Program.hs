@@ -623,7 +623,7 @@ portFlow (Core.Port _ flow) =
   where
     bytes c = if Core._convBytes c then "bytes" else "json"
 
--- | Which of the three things a runtime does with @main@, and for a program
+-- | Which of the four things a runtime does with @main@, and for a program
 -- whether its flags cross as bytes: what a reader would otherwise open the Core
 -- to find, as with 'portFlow'.
 mainKind :: Core.Main -> B.Builder
@@ -632,6 +632,7 @@ mainKind m =
     Core.MainString -> "string"
     Core.MainHtml -> "html"
     Core.MainProgram c -> "program " <> if Core._convBytes c then "bytes" else "json"
+    Core.MainTask -> "task"
 
 managerKind :: Core.Manager -> B.Builder
 managerKind m =

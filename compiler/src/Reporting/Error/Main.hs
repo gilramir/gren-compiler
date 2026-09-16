@@ -23,6 +23,9 @@ data Error
   = BadType A.Region Can.Type [String]
   | BadCycle A.Region Name.Name [Name.Name]
   | BadFlags A.Region Can.Type E.InvalidPayload
+  | -- | A @main : Task e a@ that is not a @Task Never {}@ (D72): whether @e@ is
+    -- the wrong type, and whether @a@ is.
+    BadTask A.Region Can.Type Bool Bool
 
 -- TO REPORT
 
@@ -55,6 +58,36 @@ toReport localizer source err =
                   \ instead it is involved in this cycle of definitions:",
                 D.cycle 4 name names
               ]
+          )
+    BadTask region tipe badErr badAnswer ->
+      Report.Report "BAD MAIN TYPE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( "A `main` task must be a `Task Never {}`, and this one is not:",
+            D.stack $
+              [ D.indent 4 $ D.dullyellow $ RT.canToDoc localizer RT.None tipe
+              ]
+                ++ [ D.reflow $
+                       "Its error type is not `Never`, so it can fail, and a failure\
+                       \ would have nowhere to go: `main` is the end of the program.\
+                       \ Handle the error before it gets there, with `Task.onError`:"
+                   | badErr
+                   ]
+                ++ [ D.indent 4 $
+                       D.vcat
+                         [ "main =",
+                           "    run",
+                           "        |> Task.onError (\\error -> Console.writeErr (inspect error ++ \"\\n\"))"
+                         ]
+                   | badErr
+                   ]
+                ++ [ D.reflow $
+                       "Its answer is not `{}`. Nothing receives what `main` completes\
+                       \ with, so say that it is thrown away, with `Task.map (\\_ -> {})`."
+                   | badAnswer
+                   ]
           )
     BadFlags region _badType invalidPayload ->
       let formatDetails (aBadKindOfThing, butThatIsNoGood) =

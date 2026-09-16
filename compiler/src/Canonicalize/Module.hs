@@ -27,6 +27,7 @@ import Data.Graph qualified as Graph
 import Data.Index qualified as Index
 import Data.List qualified as List
 import Data.Map qualified as Map
+import Data.Set qualified as Set
 import Data.Maybe qualified as Maybe
 import Data.Name qualified as Name
 import Gren.Interface qualified as I
@@ -47,7 +48,7 @@ type Result i w a =
 -- MODULES
 
 canonicalize :: Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Result i [W.Warning] Can.Module
-canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ effects) =
+canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ effects capabilities) =
   do
     checkClassesAreFirstParty pkg (fmap snd classes)
 
@@ -85,7 +86,7 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
 
     checkClosedClassesCovered home (fmap snd classes) cclasses cinstances
 
-    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops ceffects (externBodies values)
+    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops ceffects (externBodies values) (Set.fromList (map A.toValue capabilities))
 
 -- | Every member of a closed class this module declares has an instance here.
 --

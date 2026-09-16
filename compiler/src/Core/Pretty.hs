@@ -115,6 +115,7 @@ mainDecl opts m =
     MainString -> "main string\n"
     MainHtml -> "main html\n"
     MainProgram c -> "main program\n" <> converter opts "flags" c
+    MainTask -> "main task\n"
 
 -- | A @port@ declaration (C18): which way the payload crosses, whether it
 -- crosses as bytes, and the converters as ordinary Core.

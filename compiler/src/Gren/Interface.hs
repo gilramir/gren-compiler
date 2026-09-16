@@ -26,6 +26,7 @@ import Data.Map.Merge.Strict qualified as Map
 import Data.Map.Strict ((!))
 import Data.Map.Strict qualified as Map
 import Data.Name qualified as Name
+import Data.Set qualified as Set
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Reporting.Annotation qualified as A
@@ -55,7 +56,11 @@ data Interface = Interface
     -- __closure__ rather than the module's own is what makes that transitive
     -- reach an ordinary union over direct imports, so nothing in the build
     -- graph has to know that instances exist.
-    _instances :: Map.Map Can.InstanceKey Can.InstanceHead
+    _instances :: Map.Map Can.InstanceKey Can.InstanceHead,
+    -- | The exposed values declared under @\@capability@ (D258,
+    -- @m1b-source.md@ §SO12.4), which an importer outside '_home' may refer to
+    -- only if it is the application's.
+    _capabilities :: Set.Set Name.Name
   }
   deriving (Eq, Show)
 
@@ -94,7 +99,7 @@ data Binop = Binop
 -- FROM MODULE
 
 fromModule :: Pkg.Name -> Map.Map ModuleName.Raw Interface -> Can.Module -> Map.Map Name.Name Can.Annotation -> Interface
-fromModule home imports (Can.Module _ exports _ _ unions aliases classes instances binops _ _) annotations =
+fromModule home imports (Can.Module _ exports _ _ unions aliases classes instances binops _ _ capabilities) annotations =
   Interface
     { _home = home,
       _values = restrict exports annotations,
@@ -105,7 +110,8 @@ fromModule home imports (Can.Module _ exports _ _ unions aliases classes instanc
       _instances =
         Map.union
           (Map.map Can._in_head instances)
-          (Map.unions (map _instances (Map.elems imports)))
+          (Map.unions (map _instances (Map.elems imports))),
+      _capabilities = Map.keysSet (restrict exports (Map.fromSet id capabilities))
     }
 
 restrict :: Can.Exports -> Map.Map Name.Name a -> Map.Map Name.Name a
@@ -234,7 +240,7 @@ public =
   Public
 
 private :: Interface -> DependencyInterface
-private (Interface pkg _ unions aliases _ _ _) =
+private (Interface pkg _ unions aliases _ _ _ _) =
   Private pkg (Map.map extractUnion unions) (Map.map extractAlias aliases)
 
 extractUnion :: Union -> Can.Union
@@ -259,8 +265,8 @@ privatize di =
 -- BINARY
 
 instance Binary Interface where
-  get = Interface <$> get <*> get <*> get <*> get <*> get <*> get <*> get
-  put (Interface a b c d e f g) = put a >> put b >> put c >> put d >> put e >> put f >> put g
+  get = Interface <$> get <*> get <*> get <*> get <*> get <*> get <*> get <*> get
+  put (Interface a b c d e f g h) = put a >> put b >> put c >> put d >> put e >> put f >> put g >> put h
 
 instance Binary Union where
   put union =

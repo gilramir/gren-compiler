@@ -162,6 +162,7 @@ mainRefs m =
     Core.MainString -> mempty
     Core.MainHtml -> mempty
     Core.MainProgram c -> converterRefs c
+    Core.MainTask -> mempty
 
 converterRefs :: Core.Converter -> Refs
 converterRefs = refsIn . Core._convCode

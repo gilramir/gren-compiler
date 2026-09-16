@@ -89,15 +89,17 @@ checkModule projectType (Module maybeHeader imports infixes decls) =
   let (values, classes, instances, unions, aliases, ports, topLevelComments) = categorizeDecls [] [] [] [] [] [] [] 0 decls
    in case maybeHeader of
         Just (Header name effects exports docs comments) ->
-          Src.Module (Just name) exports (toDocs docs decls) imports values classes instances unions aliases infixes topLevelComments comments
+          (\fx -> Src.Module (Just name) exports (toDocs docs decls) imports values classes instances unions aliases infixes topLevelComments comments fx (capabilities decls))
             <$> checkEffects projectType ports effects
         Nothing ->
           let comments = SC.HeaderComments [] [] [] [] [] []
            in Right $
-                Src.Module Nothing (A.At A.one Src.Open) (Src.NoDocs A.one) imports values classes instances unions aliases infixes topLevelComments comments $
-                  case ports of
-                    [] -> Src.NoEffects
-                    _ : _ -> Src.Ports ports (SC.PortsComments [])
+                Src.Module Nothing (A.At A.one Src.Open) (Src.NoDocs A.one) imports values classes instances unions aliases infixes topLevelComments comments
+                  ( case ports of
+                      [] -> Src.NoEffects
+                      _ : _ -> Src.Ports ports (SC.PortsComments [])
+                  )
+                  (capabilities decls)
 
 checkEffects :: ProjectType -> [(Src.SourceOrder, Src.Port)] -> Effects -> Either E.Error Src.Effects
 checkEffects projectType ports effects =
@@ -150,12 +152,18 @@ categorizeDecls values classes instances unions aliases ports topLevelComments i
     decl : otherDecls ->
       case decl of
         Decl.Value _ value -> categorizeDecls ((index, value) : values) classes instances unions aliases ports topLevelComments (index + 1) otherDecls
+        Decl.Capability _ value -> categorizeDecls ((index, value) : values) classes instances unions aliases ports topLevelComments (index + 1) otherDecls
         Decl.Class _ class_ -> categorizeDecls values ((index, class_) : classes) instances unions aliases ports topLevelComments (index + 1) otherDecls
         Decl.Instance _ instance_ -> categorizeDecls values classes ((index, instance_) : instances) unions aliases ports topLevelComments (index + 1) otherDecls
         Decl.Union _ union -> categorizeDecls values classes instances ((index, union) : unions) aliases ports topLevelComments (index + 1) otherDecls
         Decl.Alias _ alias -> categorizeDecls values classes instances unions ((index, alias) : aliases) ports topLevelComments (index + 1) otherDecls
         Decl.Port _ port_ -> categorizeDecls values classes instances unions aliases ((index, port_) : ports) topLevelComments (index + 1) otherDecls
         Decl.TopLevelComments comments -> categorizeDecls values classes instances unions aliases ports ((index, comments) : topLevelComments) (index + 1) otherDecls
+
+-- | The values declared under @\@capability@ (D258).
+capabilities :: [Decl.Decl] -> [A.Located Name.Name]
+capabilities decls =
+  [name | Decl.Capability _ (A.At _ (Src.Value name _ _ _ _)) <- decls]
 
 -- TO DOCS
 
@@ -175,6 +183,7 @@ getDocComments decls comments =
     decl : otherDecls ->
       case decl of
         Decl.Value c (A.At _ (Src.Value n _ _ _ _)) -> getDocComments otherDecls (addComment c n comments)
+        Decl.Capability c (A.At _ (Src.Value n _ _ _ _)) -> getDocComments otherDecls (addComment c n comments)
         Decl.Class c (A.At _ (Src.Class n _ _ _)) -> getDocComments otherDecls (addComment c n comments)
         Decl.Instance _ _ -> getDocComments otherDecls comments
         Decl.Union c (A.At _ (Src.Union n _ _ _ _)) -> getDocComments otherDecls (addComment c n comments)

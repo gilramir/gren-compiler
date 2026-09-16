@@ -416,7 +416,7 @@ refused m =
         Right _ -> expectationFailure "the reader accepted an extern it should refuse"
 
 everyMain :: [Main]
-everyMain = [MainString, MainHtml, MainProgram converter]
+everyMain = [MainString, MainHtml, MainProgram converter, MainTask]
 
 converter :: Converter
 converter = Converter False var

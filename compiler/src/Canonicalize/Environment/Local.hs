@@ -70,7 +70,7 @@ addVars module_ classes (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
 -- would then have two answers. So the duplicate check runs over both and only
 -- the values are kept.
 collectVars :: Src.Module -> Classes -> Result i w (Map.Map Name.Name Env.Var)
-collectVars (Src.Module _ _ _ _ values classes _ _ _ _ _ _ effects) canClasses =
+collectVars (Src.Module _ _ _ _ values classes _ _ _ _ _ _ effects _) canClasses =
   let addDecl dict (A.At _ (Src.Value (A.At region name) _ _ _ _)) =
         Dups.insert name region (Env.TopLevel region) dict
       addMethod dict (A.At _ (Src.Class _ _ methods _)) =
@@ -122,7 +122,7 @@ toEffectDups effects =
 -- over this module's declarations settle it and the declarations stay
 -- unordered with respect to each other (§G21).
 addClasses :: Src.Module -> Env.Env -> Result i w (Env.Env, Classes)
-addClasses (Src.Module _ _ _ _ _ classes _ _ _ _ _ _ _) env =
+addClasses (Src.Module _ _ _ _ _ classes _ _ _ _ _ _ _ _) env =
   do
     canClasses <- traverse (canonicalizeClass (withClassNames env (fmap snd classes))) (fmap snd classes)
     Result.ok (withClasses env (Map.fromList canClasses))
@@ -215,7 +215,7 @@ canonicalizeMethod env home className param (_, A.At region methodName, Src.Anno
 -- one position. They are checked together and stored apart — a class is not a
 -- type and cannot appear where one does.
 addTypes :: Src.Module -> Env.Env -> Result i w Env.Env
-addTypes (Src.Module _ _ _ _ _ classes _ unions aliases _ _ _ _) (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
+addTypes (Src.Module _ _ _ _ _ classes _ unions aliases _ _ _ _ _) (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
   let addAliasDups dups (A.At _ (Src.Alias (A.At region name) _ _)) = Dups.insert name region () dups
       addUnionDups dups (A.At _ (Src.Union (A.At region name) _ _ _ _)) = Dups.insert name region () dups
       addClassDups dups (A.At _ (Src.Class (A.At region name) _ _ _)) = Dups.insert name region () dups
@@ -347,7 +347,7 @@ addFreeVars freeVars (A.At region tipe) =
 -- ADD CTORS
 
 addCtors :: Src.Module -> Env.Env -> Result i w (Env.Env, Unions, Aliases)
-addCtors (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _) env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
+addCtors (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _ _) env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
   do
     unionInfo <- traverse (canonicalizeUnion env) (fmap snd unions)
     aliasInfo <- traverse (canonicalizeAlias env) (fmap snd aliases)

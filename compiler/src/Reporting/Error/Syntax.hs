@@ -198,6 +198,7 @@ data Attribute
   | AttributeLanguage Row Col
   | AttributeExternName Row Col
   | AttributeAfterExtern Name.Name Row Col
+  | AttributeCapabilityAnnotation Row Col
   | --
     AttributeIndentName Row Col
   | AttributeIndentOpen Row Col
@@ -1879,6 +1880,12 @@ toAttributeReport source attribute startRow startCol =
               "I was expecting a custom type after this attribute. `@derive` says which\
               \ classes an abstract type derives, so a type alias or a value has nothing to\
               \ do with it."
+        AttributeCapabilityAnnotation row col ->
+          stuck row col "CAPABILITY WITHOUT A TYPE" $
+            D.reflow
+              "I was expecting a type annotation on this value. A `@capability` is how a\
+              \ package lets an application obtain a capability, so its type is written\
+              \ down where a reader can see what is being obtained."
         AttributeIndentName row col ->
           stuck row col "UNFINISHED ATTRIBUTE" $
             D.reflow "I was expecting the name of an attribute next."

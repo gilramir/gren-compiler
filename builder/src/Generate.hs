@@ -213,7 +213,7 @@ runtimeEdges cores =
         ]
           ++ [ (Core.QualName home N._main, kernel short)
              | Just m <- [Core._moduleMain modul],
-               Just short <- [staticHome m]
+               short <- staticHomes m
              ]
           -- A @Task@ extern's wrapper is the scheduler's binding (D193).
           ++ [ (Core.QualName home (Core._binderName (Core._externBinder e)), kernel (N.fromChars "Scheduler"))
@@ -224,11 +224,18 @@ runtimeEdges cores =
       ]
   where
     kernel = Refs.global . Program.kernelName
-    staticHome m =
+    staticHomes m =
       case m of
-        Core.MainString -> Just N.node
-        Core.MainHtml -> Just N.virtualDom
-        Core.MainProgram _ -> Nothing
+        Core.MainString -> [N.node]
+        Core.MainHtml -> [N.virtualDom]
+        Core.MainProgram _ -> []
+        -- `_Scheduler_runMain` (D72, @m1b-source.md@ §SO12). It is `core`'s
+        -- and not `node`'s, because a program whose `main` is a `Task` need not
+        -- depend on `node` at all. The other three reach `_Platform_export`,
+        -- which every entry point is handed to, through the kernel they land
+        -- in or through `Platform.worker`; a task reaches nothing else, so it
+        -- names `Platform` itself.
+        Core.MainTask -> [N.fromChars "Scheduler", N.platform]
 
 -- | The linked Core program (§J15).
 --

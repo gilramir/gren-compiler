@@ -300,14 +300,15 @@ data ExternLanguage
 -- @main@ is an ordinary binding and stays one; what is /not/ a value is the
 -- thing a runtime does with it, which depends on the binding's __type__ and not
 -- on its body. A @main : String@ is printed, a @main : Html msg@ is handed to
--- the virtual DOM, and a @Program flags model msg@ is applied to a decoder
--- derived from @flags@ — three different pieces of a runtime, chosen by a type
--- the emitted code no longer has.
+-- the virtual DOM, a @Program flags model msg@ is applied to a decoder derived
+-- from @flags@, and a @Task Never {}@ is run until it completes — four
+-- different pieces of a runtime, chosen by a type the emitted code no longer
+-- has.
 --
 -- So the choice is recorded here, beside the binding, exactly as C17 records a
 -- manager's and C18 a port's. The frontend has already rejected every other
 -- shape by the time this is built (@Reporting.Error.Main@), so there is no
--- fourth case and no error to report.
+-- fifth case and no error to report.
 data Main
   = -- | @main : String@, on the @node@ platform.
     MainString
@@ -317,6 +318,10 @@ data Main
     -- is the same one a @port@'s payload gets — @Optimize.Port.toFlagsDecoder@
     -- is literally @toDecoder@, and this is "Core.Lower.Port"'s.
     MainProgram !Converter
+  | -- | @main : Task Never {}@, on the @node@ platform (D72,
+    -- @m1b-source.md@ §SO12). The program ends when the task completes, and
+    -- the task is all there is: no flags, no converter.
+    MainTask
   deriving (Eq, Show)
 
 -- | What an @effect module@ declares, as a declaration rather than as an

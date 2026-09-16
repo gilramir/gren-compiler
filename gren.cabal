@@ -155,6 +155,7 @@ Library common
         Generate.Mode
         Generate.SourceMap
         Generate.VLQ
+        Nitpick.Capability
         Nitpick.Debug
         Nitpick.Main
         Nitpick.PatternMatches
@@ -175,6 +176,7 @@ Library common
         Reporting.Annotation
         Reporting.Doc
         Reporting.Error
+        Reporting.Error.Capability
         Reporting.Error.Canonicalize
         Reporting.Error.Docs
         Reporting.Error.Import

@@ -116,6 +116,7 @@ mainOf tbl m =
     Core.MainString -> m
     Core.MainHtml -> m
     Core.MainProgram c -> Core.MainProgram (converter tbl c)
+    Core.MainTask -> m
 
 converter :: Table -> Core.Converter -> Core.Converter
 converter tbl (Core.Converter bytes code) =

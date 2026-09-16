@@ -682,7 +682,7 @@ crawlModule foreignDeps sources mvar pkg docsStatus authorizedForKernelCode name
 crawlFile :: Map.Map ModuleName.Raw ForeignInterface -> Map.Map ModuleName.Raw ByteString -> MVar StatusDict -> Pkg.Name -> DocsStatus -> Bool -> ModuleName.Raw -> ByteString -> IO (Either CrawlError Status)
 crawlFile foreignDeps sources mvar pkg docsStatus authorizedForKernelCode expectedName bytes =
   case Parse.fromByteString (Parse.Package pkg) bytes of
-    Right modul@(Src.Module (Just (A.At _ actualName)) _ _ imports _ _ _ _ _ _ _ _ _) | expectedName == actualName ->
+    Right modul@(Src.Module (Just (A.At _ actualName)) _ _ imports _ _ _ _ _ _ _ _ _ _) | expectedName == actualName ->
       do
         deps <- crawlImports foreignDeps sources mvar pkg authorizedForKernelCode (fmap snd imports)
         return (Right (SLocal docsStatus deps modul bytes))
@@ -720,7 +720,7 @@ crawlKernel foreignDeps sources mvar pkg bytes =
 getDepHome :: ForeignInterface -> Maybe Pkg.Name
 getDepHome fi =
   case fi of
-    ForeignSpecific (I.Interface pkg _ _ _ _ _ _) -> Just pkg
+    ForeignSpecific (I.Interface pkg _ _ _ _ _ _ _) -> Just pkg
     ForeignAmbiguous -> Nothing
 
 -- COMPILE
@@ -746,7 +746,7 @@ compile platform pkg mvar status =
             return Nothing
           Just results ->
             let importedIfaces = Map.mapMaybe getInterface results
-             in case Compile.compile platform pkg importedIfaces modul of
+             in case Compile.compile platform False pkg importedIfaces modul of
                   Left err ->
                     do
                       reportDepError pkg (maybe (Name.fromChars "?") A.toValue (Src._name modul)) bytes err

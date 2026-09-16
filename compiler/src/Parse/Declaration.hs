@@ -36,6 +36,9 @@ import Reporting.Error.Syntax qualified as E
 
 data Decl
   = Value (Maybe Src.DocComment) (A.Located Src.Value)
+  | -- | A value declaration under @\@capability@ (D258, @m1b-source.md@
+    -- §SO12.4): an ordinary value, and a name "Parse.Module" collects.
+    Capability (Maybe Src.DocComment) (A.Located Src.Value)
   | Class (Maybe Src.DocComment) (A.Located Src.Class)
   | Instance (Maybe Src.DocComment) (A.Located Src.Instance)
   | Union (Maybe Src.DocComment) (A.Located Src.Union)
@@ -70,6 +73,18 @@ declaration =
         primDecl maybeDocs start primName
       Just (Extern first) ->
         externDecl maybeDocs first
+      Just CapabilityAttribute ->
+        -- A capability is minted by an ordinary value (D258), so what follows
+        -- is a value declaration and nothing else, and it is annotated: it is
+        -- a package's published way to obtain a capability, and its type is
+        -- what a reader learns that from.
+        do
+          ((decl, comments), end) <- valueDecl maybeDocs start
+          case decl of
+            Value docs value@(A.At _ (Src.Value _ _ _ (Just _) _)) ->
+              return ((Capability docs value, comments), end)
+            _ ->
+              capabilityNeedsAnnotation start
       Nothing ->
         oneOf
           E.DeclStart
@@ -92,6 +107,9 @@ data Attribute
   = Derive [A.Located Name.Name]
   | Prim (A.Located Name.Name)
   | Extern Src.ExternImpl
+  | -- | @\@capability@, bare, on a value that mints a capability (D258): only
+    -- the application and the declaring package may refer to it.
+    CapabilityAttribute
 
 chompAttribute :: Parser E.Decl (Maybe Attribute)
 chompAttribute =
@@ -102,6 +120,8 @@ chompAttribute =
           nameEnd <- getPosition
           if name == Name.fromChars "derive"
             then Just . Derive <$> chompDeriveArgs
+            else if name == Name.fromChars "capability"
+            then Just CapabilityAttribute <$ chompBareAttributeEnd
             else
               if name == Name.fromChars "prim"
                 then Just . Prim <$> chompPrimArg
@@ -110,6 +130,14 @@ chompAttribute =
                   Nothing -> attributeUnknown name nameEnd
     ]
     Nothing
+
+-- | The end of an attribute with no arguments: the declaration starts on the
+-- next fresh line, as it does after every other attribute.
+chompBareAttributeEnd :: Parser E.Attribute ()
+chompBareAttributeEnd =
+  do
+    Space.chomp E.AttributeSpace
+    Space.checkFreshLine E.AttributeIndentDecl
 
 chompDeriveArgs :: Parser E.Attribute [A.Located Name.Name]
 chompDeriveArgs =
@@ -272,6 +300,11 @@ attributeNotOnCustomType :: Space.Parser E.Decl (Decl, [Src.Comment])
 attributeNotOnCustomType =
   P.Parser $ \(P.State _ _ _ _ row col) _ _ cerr _ ->
     cerr row col (E.DeclAttribute (E.AttributeNotOnCustomType row col))
+
+capabilityNeedsAnnotation :: A.Position -> Space.Parser E.Decl (Decl, [Src.Comment])
+capabilityNeedsAnnotation (A.Position row col) =
+  P.Parser $ \_ _ _ cerr _ ->
+    cerr row col (E.DeclAttribute (E.AttributeCapabilityAnnotation row col))
 
 attributeUnknown :: Name.Name -> A.Position -> Parser E.Attribute a
 attributeUnknown name (A.Position row col) =

@@ -240,12 +240,16 @@ data Module = Module
     _binops :: ([Comment], [A.Located Infix]),
     _topLevelComments :: [(SourceOrder, NonEmpty Comment)],
     _headerComments :: SC.HeaderComments,
-    _effects :: Effects
+    _effects :: Effects,
+    -- | The values declared under @\@capability@ (D258, @m1b-source.md@
+    -- §SO12.4), which only the application and this module's own package may
+    -- refer to.
+    _capabilities :: [A.Located Name]
   }
   deriving (Show)
 
 getName :: Module -> Name
-getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _ _) =
+getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _ _ _) =
   case maybeName of
     Just (A.At _ name) ->
       name

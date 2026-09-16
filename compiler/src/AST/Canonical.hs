@@ -85,6 +85,7 @@ import Data.Binary
 import Data.Index qualified as Index
 import Data.List qualified as List
 import Data.Map qualified as Map
+import Data.Set qualified as Set
 import Data.Name (Name)
 import Data.Name qualified as Name
 import Gren.Float qualified as EF
@@ -345,7 +346,11 @@ data Module = Module
     -- | The extern declarations with a Geng body (D222, @m1b-json.md@ §O17),
     -- by name. Each one's definition is an ordinary 'TypedDef' in '_decls',
     -- and "Core.Lower.Module" makes it an extern entry beside its binding.
-    _externBodies :: Map.Map Name ExternBody
+    _externBodies :: Map.Map Name ExternBody,
+    -- | The values declared under @\@capability@ (D258, @m1b-source.md@
+    -- §SO12.4). "Nitpick.Capability" refuses a reference to one from a module
+    -- of another package, unless that module is the application's.
+    _capabilities :: Set.Set Name
   }
   deriving (Show)
 

@@ -24,7 +24,6 @@ import Compiler.Paths
 import Compiler.Outline as Outline exposing (Outline)
 import Compiler.ModuleName as ModuleName exposing (ModuleName)
 import Git
-import Init
 import Stream
 import Stream.Log
 import Task exposing (Task)
@@ -66,14 +65,21 @@ type alias Model =
     }
 
 
-init : Node.Environment -> Init.Task { model : Model, command : Cmd Msg }
+-- `Init.await`'s shape, for an ordinary task: `init` was an `Init.Task` chain
+-- until D258 made minting a capability the application's rather than a type's.
+await : Task x a -> (a -> Task x b) -> Task x b
+await task fn =
+    Task.andThen fn task
+
+
+init : Node.Environment -> Task Never { model : Model, command : Cmd Msg }
 init env =
-    Init.await FileSystem.initialize <| \fsPermission ->
-    Init.await ChildProcess.initialize <| \cpPermission ->
-    Init.await HttpClient.initialize <| \httpPermission ->
-    Init.await Terminal.initialize <| \terminalConfig ->
-    Init.awaitTask Node.getEnvironmentVariables <| \envVars ->
-    Init.awaitTask (FileSystem.homeDirectory fsPermission) <| \homeDir ->
+    await FileSystem.initialize <| \fsPermission ->
+    await ChildProcess.initialize <| \cpPermission ->
+    await HttpClient.initialize <| \httpPermission ->
+    await Terminal.initialize <| \terminalConfig ->
+    await Node.getEnvironmentVariables <| \envVars ->
+    await (FileSystem.homeDirectory fsPermission) <| \homeDir ->
         let
             userArgs =
                 Array.dropFirst 2 env.args

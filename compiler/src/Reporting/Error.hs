@@ -21,6 +21,7 @@ import Reporting.Error.Docs qualified as Docs
 import Reporting.Error.Import qualified as Import
 import Reporting.Error.Instance qualified as Instance
 import Reporting.Error.Literal qualified as Literal
+import Reporting.Error.Capability qualified as Capability
 import Reporting.Error.Main qualified as Main
 import Reporting.Error.Pattern qualified as Pattern
 import Reporting.Error.Syntax qualified as Syntax
@@ -48,6 +49,7 @@ data Error
   | BadTypes L.Localizer (NE.List Type.Error)
   | BadInstances L.Localizer (NE.List Instance.Error)
   | BadMains L.Localizer (OneOrMore.OneOrMore Main.Error)
+  | BadCapabilities (NE.List Capability.Error)
   | BadPatterns (NE.List Pattern.Error)
   | BadLiterals (NE.List Literal.Error)
   | BadDocs Docs.Error
@@ -69,6 +71,8 @@ toReports source err =
       fmap (Instance.toReport localizer source) errs
     BadMains localizer errs ->
       fmap (Main.toReport localizer source) (OneOrMore.destruct NE.List errs)
+    BadCapabilities errs ->
+      fmap (Capability.toReport source) errs
     BadPatterns errs ->
       fmap (Pattern.toReport source) errs
     BadLiterals errs ->

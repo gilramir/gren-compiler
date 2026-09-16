@@ -338,7 +338,7 @@ crawlFile env@(Env _ _ projectType _ _ buildID locals _) mvar sources docsNeed e
   case Parse.fromByteString projectType source of
     Left err ->
       return $ SBadSyntax path source err
-    Right modul@(Src.Module maybeActualName _ _ imports _ _ _ _ _ _ _ _ _) ->
+    Right modul@(Src.Module maybeActualName _ _ imports _ _ _ _ _ _ _ _ _ _) ->
       case maybeActualName of
         Nothing ->
           return $ SBadSyntax path source (Syntax.ModuleNameUnspecified expectedName)
@@ -440,11 +440,11 @@ checkModule env@(Env _ root projectType _ _ _ _ _) foreigns resultsMVar name sta
                 RProblem $
                   Error.Module name path source $
                     case Parse.fromByteString projectType source of
-                      Right (Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _) ->
+                      Right (Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _ _) ->
                         Error.BadImports (toImportErrors env results imports problems)
                       Left err ->
                         Error.BadSyntax err
-    SChanged local@(Details.Local path _ deps _ lastCompile) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _) docsNeed ->
+    SChanged local@(Details.Local path _ deps _ lastCompile) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _ _) docsNeed ->
       do
         results <- readMVar resultsMVar
         depsStatus <- checkDeps root results deps lastCompile
@@ -696,7 +696,7 @@ checkInside name p1 status =
 compile :: Env -> DocsNeed -> Details.Local -> B.ByteString -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> IO Result
 compile (Env key root projectType platform _ buildID _ _) docsNeed (Details.Local path fingerprint deps lastChange _) source ifaces modul =
   let pkg = projectTypeToPkg projectType
-   in case Compile.compile platform pkg ifaces modul of
+   in case Compile.compile platform (isApplication projectType) pkg ifaces modul of
         Right (Compile.Artifacts canonical annotations _nodeTypes core) ->
           case makeDocs docsNeed canonical of
             Left err ->
@@ -765,6 +765,14 @@ readCore root name =
         case Wire.decode encoded of
           Right core -> return (Just core)
           Left _ -> return Nothing
+
+-- | Whether a project's own modules are an application's, which may mint a
+-- capability that any package declares (D258).
+isApplication :: Parse.ProjectType -> Bool
+isApplication projectType =
+  case projectType of
+    Parse.Package _ -> False
+    Parse.Application -> True
 
 projectTypeToPkg :: Parse.ProjectType -> Pkg.Name
 projectTypeToPkg projectType =
@@ -902,7 +910,7 @@ fromRepl root details rootSources source =
     case Parse.fromByteString projectType source of
       Left syntaxError ->
         return $ Left $ Exit.ReplBadInput source $ Error.BadSyntax syntaxError
-      Right modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _) ->
+      Right modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _ _) ->
         do
           let deps = map (Src.getImportName . snd) imports
           mvar <- newMVar Map.empty
@@ -926,12 +934,12 @@ fromRepl root details rootSources source =
                 finalizeReplArtifacts env source modul depsStatus resultMVars results
 
 finalizeReplArtifacts :: Env -> B.ByteString -> Src.Module -> DepsStatus -> ResultDict -> Map.Map ModuleName.Raw Result -> IO (Either Exit.Repl ReplArtifacts)
-finalizeReplArtifacts env@(Env _ root projectType platform _ _ _ _) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _) depsStatus resultMVars results =
+finalizeReplArtifacts env@(Env _ root projectType platform _ _ _ _) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _ _) depsStatus resultMVars results =
   let pkg =
         projectTypeToPkg projectType
 
       compileInput ifaces =
-        case Compile.compile platform pkg ifaces modul of
+        case Compile.compile platform (isApplication projectType) pkg ifaces modul of
           Right (Compile.Artifacts canonical annotations _nodeTypes core) ->
             let h = Can._name canonical
                 m = Fresh (Src.getName modul) (I.fromModule pkg ifaces canonical annotations) core

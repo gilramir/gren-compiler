@@ -708,6 +708,7 @@ mainEnc main_ =
     MainString -> enum_ 1 0
     MainHtml -> enum_ 1 1
     MainProgram converter -> enum_ 1 2 <> msg 2 (converterEnc converter)
+    MainTask -> enum_ 1 3
 
 managerEnc :: Manager -> Enc
 managerEnc (Manager kind entries init_ onEffects onSelfMsg cmdMap subMap) =

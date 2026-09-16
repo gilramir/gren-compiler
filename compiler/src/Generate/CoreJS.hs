@@ -341,6 +341,7 @@ entry env home main =
         Core.MainProgram (Core.Converter True _) -> JS.Call value [JS.Null]
         Core.MainProgram (Core.Converter False code) ->
           JS.Call value [Expr.codeToExpr (Expr.generate (env {Expr._home = home}) code)]
+        Core.MainTask -> JS.Call (JS.Ref (JsName.fromKernel (Name.fromChars "Scheduler") "runMain")) [value]
 
 data Trie = Trie
   { _main :: Maybe (ModuleName.Canonical, Core.Main),
