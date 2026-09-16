@@ -85,8 +85,14 @@ spec = do
           names = [t <> "_" <> op | t <- ["i32", "i64", "u32", "u64"], op <- ops]
        in filter (\n -> primFromName n == Nothing) names `shouldBe` []
 
-    it "gives every primitive an arity of at least one" $
-      filter (\p -> primArity p < 1) allPrims `shouldBe` []
+    it "gives every primitive but source_new an arity of at least one" $
+      -- @source_new@ is the only one that takes nothing (D252): @Source.new@ is
+      -- a @Task@, and a @Task@ is a description that allocates nothing until it
+      -- is run, so a unit argument would buy no delay the type does not already
+      -- give. Everything that eta-expands a primitive used as a value has to
+      -- cope with an empty argument list because of it
+      -- ('Core.Lower.Expression.primValue').
+      filter (\p -> primArity p < 1) allPrims `shouldBe` [TaskOp SourceNew]
 
   describe "the wire codes" $
     it "keeps the first primitive at zero" $

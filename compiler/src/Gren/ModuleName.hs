@@ -19,6 +19,9 @@ module Gren.ModuleName
     bytes,
     bytesTransient,
     arrayTransient,
+    source,
+    taskInternal,
+    taskModule,
     char,
     string,
     maybe,
@@ -204,6 +207,24 @@ bytesTransient = Canonical Pkg.core "Bytes.Transient"
 -- @Array.Builder@ both import (@m1b-arr-prim.md@ D240).
 arrayTransient :: Canonical
 arrayTransient = Canonical Pkg.core "Array.Transient"
+
+-- | D71's mailbox (@ffi.md@ F4), the pull-based replacement for @Sub@. Unlike
+-- the two transients this one is __exposed__ (D253): @portable-core.md@ P2
+-- keeps @Source@ in @core@, and its whole purpose is to be named in the
+-- signature of every extern that emits events.
+source :: Canonical
+source = Canonical Pkg.core "Source"
+
+-- | Where a @Task@'s type is declared: a module @core@ does not expose, because
+-- @Platform@ — which declared it until close-out item 4 — and @Task@ import each
+-- other (@m1b-source.md@ §SO11), exactly as the two transients' modules exist.
+taskInternal :: Canonical
+taskInternal = Canonical Pkg.core "Task.Internal"
+
+-- | The module a reader writes when they mean a @Task@, which is what an error
+-- message says rather than 'taskInternal'.
+taskModule :: Canonical
+taskModule = Canonical Pkg.core Name.task
 
 -- HTML
 

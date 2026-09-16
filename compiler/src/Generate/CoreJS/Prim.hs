@@ -13,8 +13,9 @@
 --
 -- __Every primitive with a type in @Canonicalize.Prim@ has its JavaScript
 -- here__, and so is reachable from @core@: the numeric groups, the
--- conversions, @str_@ (D206) and @bytes_@ with @bt_@ (D233). @arr_@, @tr_@ and
--- @task_@ have neither yet.
+-- conversions, @str_@ (D206), @bytes_@ with @bt_@ (D233), @arr_@ and @tr_@
+-- (D236) and the three @source_@ ones (D252). The eight @task_@ primitives
+-- beside those have neither yet, and wait for D246.
 --
 -- __The five representations__, which is the whole of what this module knows
 -- that the rest of the compiler does not: an @Int@ is a number brought back
@@ -34,10 +35,12 @@ module Generate.CoreJS.Prim
     isBytes,
     arrayHelpers,
     isArray,
+    sourceHelpers,
+    isSource,
   )
 where
 
-import Core.Prim (ArrPrim (..), BytesPrim (..), ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..), TransientPrim (..))
+import Core.Prim (ArrPrim (..), BytesPrim (..), ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..), TaskPrim (..), TransientPrim (..))
 import Core.Prim qualified as Prim
 import Data.ByteString.Builder qualified as B
 import Data.Name qualified as Name
@@ -77,6 +80,7 @@ prim op args =
     (BytesOp p, _) -> bytes p args
     (ArrOp p, _) -> array p args
     (TransientOp p, _) -> transient p args
+    (TaskOp p, _) -> source p args
     _ ->
       error $
         "Generate.CoreJS.Prim: no JavaScript for "
@@ -582,6 +586,113 @@ transient p args =
     _ -> arityError (TransientOp p) args
   where
     helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
+
+-- | D71's mailbox. Only the three @source_@ primitives are emitted; the eight
+-- @task_@ ones beside them in 'Core.Prim.TaskPrim' have no type yet (D246) and
+-- so cannot be reached from @core@.
+--
+-- @source_new@ carries no arguments (D252), so it is the one primitive whose
+-- JavaScript is a bare reference rather than a call: it names a single
+-- @_Scheduler_binding@ node, shared by every run. That is safe __because its
+-- callback completes synchronously__ — a binding node carries @__kill@, the
+-- cancel function of the process running it, and two processes parked on one
+-- node would share one. Nothing parks here: the node allocates a mailbox and
+-- calls back before it returns, so each /run/ gets its own mailbox and
+-- @__kill@ is @undefined@ every time it is written.
+source :: TaskPrim -> [JS.Expr] -> JS.Expr
+source p args =
+  case (p, args) of
+    (SourceNew, []) -> JS.Ref (JsName.fromLocalHumanReadable "_SourcePrim_new")
+    (SourceNext, [_]) -> helper "_SourcePrim_next" args
+    (SourceClose, [_]) -> helper "_SourcePrim_close" args
+    _ -> arityError (TaskOp p) args
+  where
+    helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
+
+-- | Whether a primitive is one of the three @source_@ ones, whose helpers
+-- 'Generate.CoreJS' emits once in a program that reaches any of them.
+isSource :: PrimOp -> Bool
+isSource op =
+  case op of
+    TaskOp SourceNew -> True
+    TaskOp SourceNext -> True
+    TaskOp SourceClose -> True
+    _ -> False
+
+-- | The @source_@ helpers: D71's single-reader mailbox, which is a queue, at
+-- most one parked reader, and a closed flag.
+--
+-- @next@ answers a one-element array per queued value and an empty one once the
+-- source is closed and drained, and parks otherwise. It answers an array rather
+-- than a @Maybe@ (D254) because a helper is emitted JavaScript: a @Just@ built
+-- here would name a constructor the linker had no reason to keep. @Source.next@
+-- turns it into a @Maybe@ in Geng, where the dependency is real.
+--
+-- Nothing checks that there is only one reader (D245): a second one takes
+-- events from the first, the way a non-linear transient copies, and only the
+-- documentation says not to.
+--
+-- @emit@ and @close@ are what an extern implementation is handed (@ffi.md@ F4);
+-- they are not primitives, and they are reached from the wrapper the extern
+-- generator writes rather than from Geng.
+sourceHelpers :: B.Builder
+sourceHelpers =
+  [r|
+function _SourcePrim_Source() {
+  this.queue = [];
+  this.waiting = null;
+  this.closed = false;
+}
+
+var _SourcePrim_new = _Scheduler_binding(function (callback) {
+  callback(_Scheduler_succeed(new _SourcePrim_Source()));
+});
+
+function _SourcePrim_next(source) {
+  return _Scheduler_binding(function (callback) {
+    if (source.queue.length > 0) {
+      callback(_Scheduler_succeed([source.queue.shift()]));
+      return;
+    }
+    if (source.closed) {
+      callback(_Scheduler_succeed([]));
+      return;
+    }
+    source.waiting = callback;
+    return function () { source.waiting = null; };
+  });
+}
+
+function _SourcePrim_close(source) {
+  return _Scheduler_binding(function (callback) {
+    _SourcePrim_shut(source);
+    callback(_Scheduler_succeed({}));
+  });
+}
+
+// Shared by `close` and by the `close` an extern implementation is handed: a
+// parked reader is answered with the empty array rather than left parked
+// forever.
+function _SourcePrim_shut(source) {
+  source.closed = true;
+  var waiting = source.waiting;
+  if (waiting) {
+    source.waiting = null;
+    waiting(_Scheduler_succeed([]));
+  }
+}
+
+function _SourcePrim_emit(source, value) {
+  if (source.closed) return;
+  var waiting = source.waiting;
+  if (waiting) {
+    source.waiting = null;
+    waiting(_Scheduler_succeed([value]));
+  } else {
+    source.queue.push(value);
+  }
+}
+|]
 
 -- | Whether a primitive is one of the @arr_@ or @tr_@ group, whose helpers
 -- 'Generate.CoreJS' emits once in a program that reaches any of them.

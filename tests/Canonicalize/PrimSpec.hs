@@ -5,6 +5,7 @@ module Canonicalize.PrimSpec where
 import AST.Canonical qualified as Can
 import Canonicalize.Prim qualified as Prim
 import Core.Prim qualified as Core
+import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -121,6 +122,30 @@ spec = do
                      Just (fn [tTransientA] tArray)
                    ]
 
+    it "the three source primitives are D71's mailbox (D252, D253, D254)" $
+      map typeOf ["source_new", "source_next", "source_close"]
+        `shouldBe` [ Just (tTask tSourceA),
+                     Just (fn [tSourceA] (tTask tArray)),
+                     Just (fn [tSourceA] (tTask tUnit))
+                   ]
+
+    it "`source_new` takes no argument at all, so its type is not a function (D252)" $
+      -- The table's only zero-arity entry. `Source.new` is a `Task`, which is
+      -- already a description that allocates nothing until it is run.
+      typeOf "source_new" `shouldBe` Just (tTask tSourceA)
+
+    it "`source_next` answers an Array and not a Maybe (D254)" $
+      -- A primitive answers a sentinel and Geng builds the `Maybe`, as
+      -- `arr_get` and `str_find` do -- except that here it is forced: the
+      -- helper is emitted JavaScript, and a `Just` built there would name a
+      -- constructor the linker had no reason to keep.
+      typeOf "source_next" `shouldBe` Just (fn [tSourceA] (tTask tArray))
+
+    it "the eight task primitives still have no type" $
+      -- They wait for D246, which makes `Task` Geng over them.
+      map answer ["task_succeed", "task_fail", "task_and_then", "task_on_error", "task_concurrent", "task_race", "task_bracket", "task_finally"]
+        `shouldBe` replicate 8 NoTypeYet
+
     it "a transient's type is not the bytes one" $
       (typeOf "tr_new" == typeOf "bt_new") `shouldBe` False
 
@@ -179,6 +204,15 @@ tArray = Can.TType ModuleName.array "Array" [a]
 
 tTransientA :: Can.Type
 tTransientA = Can.TType ModuleName.arrayTransient "Transient" [a]
+
+tSourceA :: Can.Type
+tSourceA = Can.TType ModuleName.source "Source" [a]
+
+tTask :: Can.Type -> Can.Type
+tTask ok = Can.TType ModuleName.taskInternal "Task" [Can.TVar "x", ok]
+
+tUnit :: Can.Type
+tUnit = Can.TRecord Map.empty Nothing
 
 tInt64 :: Can.Type
 tInt64 = Can.TType ModuleName.basics "Int64" []

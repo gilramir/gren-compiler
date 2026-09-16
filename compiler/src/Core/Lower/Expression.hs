@@ -618,10 +618,10 @@ primValue tipe sp op =
       let binders = zipWith (\i t -> Core.Binder (generated i) t sp) [0 ..] argTypes
           built = Core.Expr (Core.EPrim op (map (variable sp) binders)) result sp
        in Core.Expr (Core.ELam binders built) tipe sp
-    _ ->
-      -- Unreachable: every primitive takes at least one argument
-      -- ('Core.Prim.primArity'), so its type is a function type.
-      error ("Core.Lower.Expression: the " ++ show op ++ " primitive is not a function: " ++ show tipe)
+    -- A primitive that takes no arguments is already a value, so there is
+    -- nothing to eta-expand: @source_new@ is the only one (D252), and its type
+    -- is the @Task@ it answers rather than a function type.
+    _ -> Core.Expr (Core.EPrim op []) tipe sp
 
 -- | A constructor used as a value rather than applied.
 --

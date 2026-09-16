@@ -553,13 +553,16 @@ canonicalImpl (Src.ExternImpl _ (A.At _ language) names) =
     )
     (map A.toValue names)
 
--- | Whether a type, past its arguments and through its aliases, is
--- `Platform.Task`, which `Task.Task` is an alias of.
+-- | Whether a type, past its arguments and through its aliases, is a @Task@,
+-- which both `Task.Task` and `Platform.Task` are aliases of. The type itself is
+-- declared in the unexposed `Task.Internal` (@m1b-source.md@ §SO11), because
+-- `Platform` — which declared it until close-out item 4 — and `Task` import each
+-- other.
 endsInTask :: Can.Type -> Bool
 endsInTask tipe =
   case tipe of
     Can.TLambda _ result -> endsInTask result
-    Can.TType home typeName _ -> home == ModuleName.platform && typeName == Name.task
+    Can.TType home typeName _ -> home == ModuleName.taskInternal && typeName == Name.task
     Can.TAlias _ _ _ (Can.Holey aliased) -> endsInTask aliased
     Can.TAlias _ _ _ (Can.Filled aliased) -> endsInTask aliased
     _ -> False

@@ -1848,6 +1848,21 @@ externProblem problem =
           \ fails."
       ]
 
+-- | An error names a module the reader can import. A @Task@'s type is declared
+-- in the unexposed @Task.Internal@ (@m1b-source.md@ §SO11), and nobody writes
+-- that: what the source said was @Task@, so that is what this prints.
 coreType :: Core.Type -> D.Doc
 coreType tipe =
-  D.fromChars (LChar8.unpack (B.toLazyByteString (Pretty.typeToBuilder Pretty.defaultOptions tipe)))
+  D.fromChars (LChar8.unpack (B.toLazyByteString (Pretty.typeToBuilder Pretty.defaultOptions (asWritten tipe))))
+
+asWritten :: Core.Type -> Core.Type
+asWritten tipe =
+  case tipe of
+    Core.TVar _ -> tipe
+    Core.TCon (Core.QualName home name) args
+      | home == ModuleName.taskInternal ->
+          Core.TCon (Core.QualName ModuleName.taskModule name) (map asWritten args)
+      | otherwise -> Core.TCon (Core.QualName home name) (map asWritten args)
+    Core.TFun args result -> Core.TFun (map asWritten args) (asWritten result)
+    Core.TRecord fields ext -> Core.TRecord [(f, asWritten t) | (f, t) <- fields] ext
+    Core.TForall vars constraints body -> Core.TForall vars constraints (asWritten body)

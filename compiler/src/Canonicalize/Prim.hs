@@ -17,7 +17,7 @@ module Canonicalize.Prim
 where
 
 import AST.Canonical qualified as Can
-import Core.Prim (ArrPrim (..), BytesPrim (..), ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..), TransientPrim (..))
+import Core.Prim (ArrPrim (..), BytesPrim (..), ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..), TaskPrim (..), TransientPrim (..))
 import Core.Prim qualified as Prim
 import Data.Map qualified as Map
 import Data.Name qualified as Name
@@ -85,6 +85,7 @@ primType op =
     BytesOp p -> bytesType p
     ArrOp p -> Just (arrType p)
     TransientOp p -> Just (transientType p)
+    TaskOp p -> sourceType p
     _ -> Nothing
 
 -- INTEGERS
@@ -261,6 +262,42 @@ transientType p =
     a = Can.TVar "a"
     tArray = Can.TType ModuleName.array "Array" [a]
     tTransient = Can.TType ModuleName.arrayTransient "Transient" [a]
+
+-- | D71's mailbox (@ffi.md@ F4). Only the three @source_@ primitives have a
+-- type; the eight @task_@ ones beside them in 'Core.Prim.TaskPrim' wait for
+-- D246, which makes @Task@ Geng over them.
+--
+-- @source_new@ takes no argument at all (D252), which makes it the table's only
+-- zero-arity entry: @Source.new@ is a @Task@, and a @Task@ is a description
+-- that allocates nothing until it is run, so a unit argument would buy no delay
+-- the type does not already give. 'fn' over an empty list is the result type,
+-- so nothing here is special-cased.
+--
+-- __@source_next@ answers an @Array@, not a @Maybe@__ (D254), empty meaning the
+-- source is closed and drained. The reason is the one D239 gave for @arr_get@
+-- and D206 for @str_find@: a primitive answers a sentinel and Geng builds the
+-- @Maybe@ around it. Here it is forced rather than chosen — the helper that
+-- would build a @Just@ is emitted JavaScript, and the constructor it named
+-- would be a name the linker had no reason to keep, since a type mentioning
+-- @Maybe@ creates no dependency on its constructors and a @when@ tests a tag
+-- rather than calling one.
+sourceType :: TaskPrim -> Maybe Can.Type
+sourceType p =
+  case p of
+    SourceNew -> Just (fn [] (tTask (Can.TVar "x") tSource))
+    SourceNext -> Just (fn [tSource] (tTask (Can.TVar "x") tArray))
+    SourceClose -> Just (fn [tSource] (tTask (Can.TVar "x") tUnit))
+    _ -> Nothing
+  where
+    a = Can.TVar "a"
+    tSource = Can.TType ModuleName.source "Source" [a]
+    tArray = Can.TType ModuleName.array "Array" [a]
+
+tTask :: Can.Type -> Can.Type -> Can.Type
+tTask x ok = Can.TType ModuleName.taskInternal "Task" [x, ok]
+
+tUnit :: Can.Type
+tUnit = Can.TRecord Map.empty Nothing
 
 fn :: [Can.Type] -> Can.Type -> Can.Type
 fn args result = foldr Can.TLambda result args

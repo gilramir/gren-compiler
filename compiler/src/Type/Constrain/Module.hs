@@ -184,7 +184,7 @@ effectList home name msg =
 
 task :: Type -> Type
 task answer =
-  AppN ModuleName.platform Name.task [never, answer]
+  AppN ModuleName.taskInternal Name.task [never, answer]
 
 router :: Type -> Type -> Type
 router msg self =

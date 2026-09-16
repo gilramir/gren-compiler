@@ -647,7 +647,11 @@ primArity op =
       case p of
         TaskSucceed -> 1
         TaskFail -> 1
-        SourceNew -> 1
+        -- The table's only zero-argument primitive (D252). @Source.new@ is a
+        -- @Task@, and a @Task@ is a description: a unit argument would buy no
+        -- delay that the @Task@ does not already give, and @core@ holds one
+        -- @Source.new@ value either way. Allocating is what /running/ it does.
+        SourceNew -> 0
         SourceNext -> 1
         SourceClose -> 1
         TaskAndThen -> 2

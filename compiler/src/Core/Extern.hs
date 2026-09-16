@@ -63,6 +63,11 @@ data Value
   | -- | @Never@: only ever a @Task@'s error, which the implementation must not
     -- produce.
     Never
+  | -- | D71's mailbox (@ffi.md@ F4). Only ever an /argument/: the wrapper hands
+    -- the implementation @{ emit, close }@ rather than the source itself, so
+    -- the only two things it can do are the two the design gives it. The value
+    -- it carries is checked on the way in, as an array's element is.
+    SourceOf Value
   deriving (Eq, Show)
 
 data Scalar
@@ -118,7 +123,7 @@ classify isPure tipe =
       | otherwise =
           case t of
             Core.TCon (Core.QualName home name) [x, a]
-              | home == ModuleName.platform && name == "Task" ->
+              | home == ModuleName.taskInternal && name == "Task" ->
                   Task <$> errorValue x <*> resultValue a
             -- The front half refused a non-Task @\@extern@ already.
             _ -> Left (DoesNotCross t)
@@ -145,6 +150,10 @@ resultValue t =
     v <- value t
     case v of
       Never -> Left NeverPosition
+      -- A `Source` is the caller's, and an implementation is handed the two
+      -- functions that write into it rather than the mailbox itself, so there
+      -- is nothing it could answer with.
+      SourceOf _ -> Left (DoesNotCross t)
       _ -> Right v
 
 errorValue :: Core.Type -> Either Problem Value
@@ -168,7 +177,16 @@ value t =
               Unit -> Left (DoesNotCross t)
               Never -> Left NeverPosition
               _ -> Right (Array v)
-      | home == ModuleName.platform, name == "Task" -> Left (FunctionPosition t)
+      | home == ModuleName.taskInternal, name == "Task" -> Left (FunctionPosition t)
+      | home == ModuleName.source,
+        name == "Source",
+        [msg] <- args ->
+          do
+            v <- value msg
+            case v of
+              Unit -> Left (DoesNotCross t)
+              Never -> Left NeverPosition
+              _ -> Right (SourceOf v)
       | home == ModuleName.basics, name == "Never", null args -> Right Never
       | null args, Just s <- scalar home name -> Right (Scalar s)
     _ -> Left (DoesNotCross t)

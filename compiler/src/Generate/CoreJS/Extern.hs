@@ -142,6 +142,22 @@ function _Extern_Array(extern, v, element) {
   if (!Array.isArray(v)) _Extern_crash(extern, v, 'Array');
   return v.map(function (x) { return element(extern, x); });
 }
+
+// D71's mailbox, as an implementation sees it: the two things it may do to a
+// source, and not the source itself. `emit` checks its value the way a returned
+// one is checked, so a host number cannot reach a `Source Int64`. Emitting into
+// a closed source is a no-op rather than an error -- an event that arrives
+// while the program is shutting down is the ordinary case, not a mistake.
+function _Extern_source(extern, source, element) {
+  return {
+    emit: function (value) {
+      _SourcePrim_emit(source, element(extern, value));
+    },
+    close: function () {
+      _SourcePrim_shut(source);
+    },
+  };
+}
 function _Extern_Never(extern, v) {
   _Extern_crash(extern, v, 'Never, so the implementation may not fail');
 }
@@ -264,7 +280,7 @@ wrapper home@(ModuleName.Canonical pkg raw) e =
 outArg :: B.Builder -> Extern.Arg -> B.Builder -> B.Builder
 outArg label arg v =
   case arg of
-    Extern.ArgValue value -> outbound 0 value v
+    Extern.ArgValue value -> outbound label 0 value v
     Extern.ArgFunction params result ->
       let names = [B.stringUtf8 ("a" ++ show i) | i <- [0 .. length params - 1]]
           ins = zipWith (inbound label) params names
@@ -274,17 +290,31 @@ outArg label arg v =
               n
                 | n <= 9 -> "A" <> B.intDec n <> "(" <> commas (v : ins) <> ")"
                 | otherwise -> v <> mconcat ["(" <> i <> ")" | i <- ins]
-       in "function (" <> commas names <> ") { return " <> outbound 0 result applied <> "; }"
+       in "function (" <> commas names <> ") { return " <> outbound label 0 result applied <> "; }"
 
-outbound :: Int -> Extern.Value -> B.Builder -> B.Builder
-outbound depth value v =
+outbound :: B.Builder -> Int -> Extern.Value -> B.Builder -> B.Builder
+outbound label depth value v =
   case value of
+    -- D71's mailbox: the implementation is handed the two things it may do to
+    -- a source and never the source itself (@ffi.md@ F4). @emit@ checks its
+    -- value on the way in, exactly as a returned value is checked, so an
+    -- implementation cannot put a host number into a @Source Int64@.
+    Extern.SourceOf element ->
+      "_Extern_source(" <> label <> ", " <> v <> ", " <> elementFn element <> ")"
     Extern.Scalar Extern.Bytes -> "_Extern_bytesOut(" <> v <> ")"
     Extern.Array element
       | holdsBytes element ->
           let x = B.stringUtf8 ("x" ++ show depth)
-           in v <> ".map(function (" <> x <> ") { return " <> outbound (depth + 1) element x <> "; })"
+           in v <> ".map(function (" <> x <> ") { return " <> outbound label (depth + 1) element x <> "; })"
     _ -> v
+
+-- | The check one value of a source or an array gets on the way in, as a
+-- function of the label and the value.
+elementFn :: Extern.Value -> B.Builder
+elementFn element =
+  case element of
+    Extern.Scalar s -> "_Extern_" <> scalarName s
+    _ -> "function (e, x) { return " <> inbound "e" element "x" <> "; }"
 
 holdsBytes :: Extern.Value -> Bool
 holdsBytes value =
@@ -305,11 +335,9 @@ inbound label value v =
     Extern.Var -> v
     Extern.Unit -> "{}"
     Extern.Never -> "_Extern_Never(" <> label <> ", " <> v <> ")"
-  where
-    elementFn element =
-      case element of
-        Extern.Scalar s -> "_Extern_" <> scalarName s
-        _ -> "function (e, x) { return " <> inbound "e" element "x" <> "; }"
+    -- Unreachable: a source is an argument, and 'Core.Extern.resultValue'
+    -- refuses one anywhere else.
+    Extern.SourceOf _ -> v
 
 scalarName :: Extern.Scalar -> B.Builder
 scalarName s =
