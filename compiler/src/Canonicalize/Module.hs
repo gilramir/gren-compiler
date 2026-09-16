@@ -51,6 +51,7 @@ canonicalize :: Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> 
 canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ effects capabilities) =
   do
     checkClassesAreFirstParty pkg (fmap snd classes)
+    Effects.refuse effects
 
     let values = fmap snd valuesWithSourceOrder
     let home = ModuleName.Canonical pkg (Src.getName modul)
@@ -61,8 +62,7 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
         =<< Foreign.createInitialEnv home ifaces (fmap snd imports)
 
     cvalues <- canonicalizeValues env values
-    ceffects <- Effects.canonicalize env values cunions effects
-    cexports <- canonicalizeExports values cunions caliases cclasses cbinops ceffects exports
+    cexports <- canonicalizeExports values cunions caliases cclasses cbinops exports
 
     -- Derived instances first, so that a hand-written one for the same type and
     -- class is the duplicate: the author wrote that one, so the error can point
@@ -86,7 +86,7 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
 
     checkClosedClassesCovered home (fmap snd classes) cclasses cinstances
 
-    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops ceffects (externBodies values) (Set.fromList (map A.toValue capabilities))
+    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities))
 
 -- | Every member of a closed class this module declares has an instance here.
 --
@@ -590,17 +590,16 @@ canonicalizeExports ::
   Map.Map Name.Name alias ->
   Map.Map Name.Name Can.ClassDecl ->
   Map.Map Name.Name binop ->
-  Can.Effects ->
   A.Located Src.Exposing ->
   Result i w Can.Exports
-canonicalizeExports values unions aliases classes binops effects (A.At region exposing) =
+canonicalizeExports values unions aliases classes binops (A.At region exposing) =
   case exposing of
     Src.Open ->
       Result.ok (Can.ExportEverything region)
     Src.Explicit exposeds ->
       do
         let names = Map.fromList (map valueToName values)
-        infos <- traverse (checkExposed names unions aliases classes binops effects) exposeds
+        infos <- traverse (checkExposed names unions aliases classes binops) exposeds
         Can.Export <$> Dups.detect Error.ExportDuplicate (Dups.unions infos)
 
 valueToName :: A.Located Src.Value -> (Name.Name, ())
@@ -613,25 +612,20 @@ checkExposed ::
   Map.Map Name.Name alias ->
   Map.Map Name.Name Can.ClassDecl ->
   Map.Map Name.Name binop ->
-  Can.Effects ->
   Src.Exposed ->
   Result i w (Dups.Dict (A.Located Can.Export))
-checkExposed values unions aliases classes binops effects exposed =
+checkExposed values unions aliases classes binops exposed =
   case exposed of
     Src.Lower (A.At region name) ->
       if Map.member name values
         then ok name region Can.ExportValue
-        else case checkPorts effects name of
+        else case classOf name classes of
+          Just className ->
+            Result.throw (Error.ExportMethodByName region name className)
           Nothing ->
-            ok name region Can.ExportPort
-          Just ports ->
-            case classOf name classes of
-              Just className ->
-                Result.throw (Error.ExportMethodByName region name className)
-              Nothing ->
-                Result.throw $
-                  Error.ExportNotFound region Error.BadVar name $
-                    ports ++ Map.keys values
+            Result.throw $
+              Error.ExportNotFound region Error.BadVar name $
+                Map.keys values
     Src.Operator region name ->
       if Map.member name binops
         then ok name region Can.ExportBinop
@@ -676,16 +670,6 @@ classOf name classes =
   case [className | (className, Can.ClassDecl _ methods) <- Map.toList classes, Map.member name methods] of
     className : _ -> Just className
     [] -> Nothing
-
-checkPorts :: Can.Effects -> Name.Name -> Maybe [Name.Name]
-checkPorts effects name =
-  case effects of
-    Can.NoEffects ->
-      Just []
-    Can.Ports ports ->
-      if Map.member name ports then Nothing else Just (Map.keys ports)
-    Can.Manager _ _ _ _ ->
-      Just []
 
 ok :: Name.Name -> A.Region -> Can.Export -> Result i w (Dups.Dict (A.Located Can.Export))
 ok name region export =

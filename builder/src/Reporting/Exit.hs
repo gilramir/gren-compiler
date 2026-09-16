@@ -2070,15 +2070,13 @@ makeToReport make =
           D.toSimpleNote $
             "Adding a `main` value can be as brief as adding something like this:",
           D.vcat
-            [ D.fillSep [D.cyan "import", "Html"],
+            [ D.fillSep [D.cyan "import", "Console"],
               "",
               D.fillSep [D.green "main", "="],
-              D.indent 2 $ D.fillSep [D.cyan "Html" <> ".text", D.dullyellow "\"Hello!\""]
+              D.indent 4 $ D.fillSep [D.cyan "Console" <> ".write", D.dullyellow "\"Hello!\\n\""]
             ],
           D.reflow $
-            "From there I can create an HTML file that says \"Hello!\" on screen. I recommend\
-            \ looking through https://gren-lang.org/learn for more guidance on how to fill in\
-            \ the `main` value."
+            "A `main` is a `Task Never {}`, and the program ends when it completes."
         ]
     MakeNonMainFilesIntoJavaScript m ms ->
       case ms of
@@ -2099,14 +2097,13 @@ makeToReport make =
               D.toSimpleNote $
                 "Adding a `main` value can be as brief as adding something like this:",
               D.vcat
-                [ D.fillSep [D.cyan "import", "Html"],
+                [ D.fillSep [D.cyan "import", "Console"],
                   "",
                   D.fillSep [D.green "main", "="],
-                  D.indent 2 $ D.fillSep [D.cyan "Html" <> ".text", D.dullyellow "\"Hello!\""]
+                  D.indent 4 $ D.fillSep [D.cyan "Console" <> ".write", D.dullyellow "\"Hello!\\n\""]
                 ],
               D.reflow $
-                "Or use https://packages.gren-lang.org/package/gren-lang/core/latest/module/Platform#worker to\
-                \ make a `main` with no user interface."
+                "A `main` is a `Task Never {}`, and the program ends when it completes."
             ]
         _ : _ ->
           Help.report
@@ -2126,14 +2123,13 @@ makeToReport make =
               D.toSimpleNote $
                 "Adding a `main` value can be as brief as adding something like this:",
               D.vcat
-                [ D.fillSep [D.cyan "import", "Html"],
+                [ D.fillSep [D.cyan "import", "Console"],
                   "",
                   D.fillSep [D.green "main", "="],
-                  D.indent 2 $ D.fillSep [D.cyan "Html" <> ".text", D.dullyellow "\"Hello!\""]
+                  D.indent 4 $ D.fillSep [D.cyan "Console" <> ".write", D.dullyellow "\"Hello!\\n\""]
                 ],
               D.reflow $
-                "Or use https://packages.gren-lang.org/package/gren-lang/core/latest/module/Platform#worker to\
-                \ make a `main` with no user interface."
+                "A `main` is a `Task Never {}`, and the program ends when it completes."
             ]
     MakeCannotBuild buildProblem ->
       toBuildProblemReport buildProblem

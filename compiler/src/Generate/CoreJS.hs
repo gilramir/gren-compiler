@@ -76,8 +76,7 @@ generate mode program kernels exts =
             (flip JS.stmtToBuilder)
             (JS.emptyBuilder firstGeneratedLineNumber)
             (constructors env program)
-      linked = List.foldl' (item env kernels) started (_progLinked program)
-      builder = List.foldl' (flip JS.stmtToBuilder) linked (managers program)
+      builder = List.foldl' (item env kernels) started (_progLinked program)
    in GeneratedResult
         { _source =
             prelude
@@ -110,8 +109,7 @@ generateForRepl ansi localizer program kernels exts home name (Can.Forall _ tipe
             (flip JS.stmtToBuilder)
             (JS.emptyBuilder 0)
             (constructors env program)
-      linked = List.foldl' (item env kernels) started (_progLinked program)
-      builder = List.foldl' (flip JS.stmtToBuilder) linked (managers program)
+      builder = List.foldl' (item env kernels) started (_progLinked program)
    in "process.on('uncaughtException', function(err) { process.stderr.write(err.toString() + '\\n'); process.exit(1); });"
         <> Functions.functions
         <> JS._code builder
@@ -182,8 +180,6 @@ item env kernels builder linked =
   case linked of
     LBind name bind ->
       JS.stmtToBuilder (definition env name bind) builder
-    LPort home port_ ->
-      JS.stmtToBuilder (portDefinition env home port_) builder
     LKernel short ->
       case Map.lookup short kernels of
         Nothing -> error ("Generate.CoreJS: no chunks for kernel module " ++ Name.toChars short)
@@ -232,80 +228,6 @@ curried argNames direct =
       let addArg arg body = JS.Function Nothing [arg] [JS.Return body]
        in foldr addArg (JS.Call (JS.Ref direct) (map JS.Ref argNames)) argNames
 
--- PORTS
-
--- | The runtime call a @port@ declaration stands for (C18).
---
--- Core names the pieces and this assembles the call, which is the half of a port
--- that is not a value: @_Platform_incomingPort@ and its two siblings are raw
--- uncurried JavaScript functions with no @F3@ wrapper, and an input-less task
--- port passes a JavaScript @null@ where the encoder goes and another where the
--- input goes. Neither is anything Core could have written.
-portDefinition :: Expr.Env -> ModuleName.Canonical -> Core.Port -> JS.Stmt
-portDefinition env home (Core.Port binder flow) =
-  let name = Core._binderName binder
-      inner = env {Expr._home = home}
-      converter (Core.Converter _ code) = Expr.codeToExpr (Expr.generate inner code)
-      bytes (Core.Converter b _) = JS.Bool b
-      platform fn = JS.Ref (JsName.fromKernel Name.platform fn)
-      wire = JS.String (Name.toBuilder name)
-   in JS.Var (JsName.fromGlobal home name) $
-        case flow of
-          Core.PortOut c -> JS.Call (platform "outgoingPort") [wire, converter c, bytes c]
-          Core.PortIn c -> JS.Call (platform "incomingPort") [wire, converter c, bytes c]
-          Core.PortTask input output ->
-            let made =
-                  JS.Call
-                    (platform "taskPort")
-                    [ wire,
-                      maybe JS.Null converter input,
-                      converter output,
-                      maybe (JS.Bool False) bytes input,
-                      bytes output
-                    ]
-             in case input of
-                  Just _ -> made
-                  -- No input: the port is a `Task` rather than a function to
-                  -- one, so the runtime's curried constructor is applied to the
-                  -- `null` that stands for the input it will never be given.
-                  -- The second `null` Core cannot write; this is the first.
-                  Nothing -> JS.Call made [JS.Null]
-
--- MANAGERS
-
--- | Registering each @effect module@'s manager with the runtime (C17).
---
--- Last, and it can be: an assignment into @_Platform_effectManagers@ is read
--- when effects are dispatched and never at load, so all it needs is for the
--- five functions to be defined by the time it runs — which the linker has
--- already arranged, because it puts an edge from each entry binding to all five.
---
--- What is __not__ here is @command@ and @subscription@. The old pipeline emits
--- them as part of this node and reaches them through an @Opt.Link@; in Core they
--- are ordinary bindings holding @Platform.leaf \"<module>\"@, so they are already
--- in the link order and the shortcut §J11 left behind goes with the hop.
-managers :: Program -> [JS.Stmt]
-managers program =
-  [ JS.ExprStmt $
-      JS.Assign
-        (JS.LBracket (JS.Ref (JsName.fromKernel Name.platform "effectManagers")) (JS.String (Name.toBuilder raw)))
-        (JS.Call (JS.Ref (JsName.fromKernel Name.platform "createManager")) (managerArgs home m))
-  | (home@(ModuleName.Canonical _ raw), m) <- _progManagers program
-  ]
-
--- | The five slots @_Platform_createManager@ takes, in its order. A @sub@-only
--- manager has no @cmdMap@, and the runtime reads a @0@ in that position.
-managerArgs :: ModuleName.Canonical -> Core.Manager -> [JS.Expr]
-managerArgs home m =
-  let ref (Core.QualName h n) = JS.Ref (JsName.fromGlobal h n)
-      three = [ref (Core._managerInit m), ref (Core._managerOnEffects m), ref (Core._managerOnSelfMsg m)]
-   in case (Core._managerCmdMap m, Core._managerSubMap m) of
-        (Just cmdMap, Nothing) -> three ++ [ref cmdMap]
-        (Nothing, Just subMap) -> three ++ [JS.Int 0, ref subMap]
-        (Just cmdMap, Just subMap) -> three ++ [ref cmdMap, ref subMap]
-        (Nothing, Nothing) ->
-          error ("Generate.CoreJS: a manager with neither map: " ++ ModuleName.toChars (ModuleName._module home))
-
 -- KERNEL
 
 kernel :: Mode.Mode -> [K.Chunk] -> B.Builder
@@ -332,15 +254,10 @@ exports env mains =
    in JsName.toBuilder export <> "(" <> trieToBuilder env (foldr addToTrie emptyTrie mains) <> ");"
 
 -- | What a runtime is handed for one @main@ (C19).
-entry :: Expr.Env -> ModuleName.Canonical -> Core.Main -> JS.Expr
-entry env home main =
+entry :: ModuleName.Canonical -> Core.Main -> JS.Expr
+entry home main =
   let value = JS.Ref (JsName.fromGlobal home Name._main)
    in case main of
-        Core.MainString -> JS.Call (JS.Ref (JsName.fromKernel Name.node "log")) [value]
-        Core.MainHtml -> JS.Call (JS.Ref (JsName.fromKernel Name.virtualDom "init")) [value]
-        Core.MainProgram (Core.Converter True _) -> JS.Call value [JS.Null]
-        Core.MainProgram (Core.Converter False code) ->
-          JS.Call value [Expr.codeToExpr (Expr.generate (env {Expr._home = home}) code)]
         Core.MainTask -> JS.Call (JS.Ref (JsName.fromKernel (Name.fromChars "Scheduler") "runMain")) [value]
 
 data Trie = Trie
@@ -375,7 +292,7 @@ trieToBuilder env (Trie maybeMain subs) =
         case maybeMain of
           Nothing -> "{"
           Just (home, main) ->
-            "{'init':" <> JS._code (JS.exprToBuilder (entry env home main) (JS.emptyBuilder 0)) <> end
+            "{'init':" <> JS._code (JS.exprToBuilder (entry home main) (JS.emptyBuilder 0)) <> end
    in case Map.toList subs of
         [] -> starter "" <> "}"
         (name, sub) : rest ->

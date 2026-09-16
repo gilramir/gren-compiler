@@ -14,10 +14,7 @@ module Core.Refs
     global,
     ctor,
     refsIn,
-    portRefs,
-    mainRefs,
     strictIn,
-    strictPort,
     freeLocals,
     patternBinders,
   )
@@ -123,49 +120,6 @@ strictIn (Core.Expr value _ _) =
     Core.EWitApp body args -> foldMap strictIn (body : args)
   where
     strictBind = strictIn . Core._bindValue
-
--- | A @port@'s converters are evaluated when the port is: a runtime's port
--- constructor takes the converter as a value, so the declaration is as strict as
--- an ordinary binding with the same right-hand side.
-strictPort :: Core.Port -> Set Core.QualName
-strictPort (Core.Port _ flow) =
-  case flow of
-    Core.PortOut c -> strictConv c
-    Core.PortIn c -> strictConv c
-    Core.PortTask input output -> foldMap strictConv input <> strictConv output
-  where
-    strictConv = strictIn . Core._convCode
-
--- | What a @port@ declaration refers to: its converters, and nothing else.
---
--- A port is a declaration rather than an expression (C18), so the linker cannot
--- reach its dependencies by walking a body. This is the body it does not have —
--- and it is why a port needs no rule of its own to stay alive, unlike an effect
--- manager: something in the program refers to the port's /name/, and the name
--- is defined here.
-portRefs :: Core.Port -> Refs
-portRefs (Core.Port _ flow) =
-  case flow of
-    Core.PortOut c -> converterRefs c
-    Core.PortIn c -> converterRefs c
-    Core.PortTask input output -> foldMap converterRefs input <> converterRefs output
-
--- | What a module's @main@ declaration refers to: its flags decoder, and
--- nothing else (C19).
---
--- The same shape as 'portRefs' and for the same reason. It is why @main@ needs
--- no rule of its own either: @main@ is a root, and these are edges out of it, so
--- the decoder is reachable exactly when the program has an entry point.
-mainRefs :: Core.Main -> Refs
-mainRefs m =
-  case m of
-    Core.MainString -> mempty
-    Core.MainHtml -> mempty
-    Core.MainProgram c -> converterRefs c
-    Core.MainTask -> mempty
-
-converterRefs :: Core.Converter -> Refs
-converterRefs = refsIn . Core._convCode
 
 bindRefs :: Core.Bind -> Refs
 bindRefs = refsIn . Core._bindValue

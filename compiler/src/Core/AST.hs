@@ -37,14 +37,9 @@ module Core.AST
     Openness (..),
     InstanceDecl (..),
     Origin (..),
-    Manager (..),
-    ManagerKind (..),
-    Port (..),
-    PortFlow (..),
     Extern (..),
     ExternImpl (..),
     ExternLanguage (..),
-    Converter (..),
     Main (..),
 
     -- * Names
@@ -248,10 +243,6 @@ data Module = Module
     -- so a backend that needs to emit them together can.
     _moduleDefsRec :: ![[QualName]],
     _moduleExports :: ![QualName],
-    -- | The @effect module@ manager this module declares, if it declares one.
-    _moduleManager :: !(Maybe Manager),
-    -- | The @port@s this module declares, by name (C18).
-    _modulePorts :: ![Port],
     -- | What this module's @main@ is, if it declares one (C19).
     _moduleMain :: !(Maybe Main),
     -- | The @\@extern@ declarations this module makes, sorted by name (C6,
@@ -299,118 +290,18 @@ data ExternLanguage
 --
 -- @main@ is an ordinary binding and stays one; what is /not/ a value is the
 -- thing a runtime does with it, which depends on the binding's __type__ and not
--- on its body. A @main : String@ is printed, a @main : Html msg@ is handed to
--- the virtual DOM, a @Program flags model msg@ is applied to a decoder derived
--- from @flags@, and a @Task Never {}@ is run until it completes — four
--- different pieces of a runtime, chosen by a type the emitted code no longer
--- has.
+-- on its body, so the choice is recorded here, beside the binding.
 --
--- So the choice is recorded here, beside the binding, exactly as C17 records a
--- manager's and C18 a port's. The frontend has already rejected every other
--- shape by the time this is built (@Reporting.Error.Main@), so there is no
--- fifth case and no error to report.
+-- There is one kind left. D72 makes a @main@ a @Task Never {}@ on every
+-- executing runtime, and @main : String@, @main : Html msg@ and
+-- @Program flags model msg@ left with @Platform@ (@m1b-source.md@ §SO19, D273).
+-- The type stays a type rather than becoming a flag, because the schema's
+-- enum is where a later kind would go. The frontend has already rejected every
+-- other shape by the time this is built (@Reporting.Error.Main@).
 data Main
-  = -- | @main : String@, on the @node@ platform.
-    MainString
-  | -- | @main : Html msg@, on the @browser@ platform.
-    MainHtml
-  | -- | @main : Program flags model msg@. The converter decodes the flags, and
-    -- is the same one a @port@'s payload gets — @Optimize.Port.toFlagsDecoder@
-    -- is literally @toDecoder@, and this is "Core.Lower.Port"'s.
-    MainProgram !Converter
-  | -- | @main : Task Never {}@, on the @node@ platform (D72,
-    -- @m1b-source.md@ §SO12). The program ends when the task completes, and
-    -- the task is all there is: no flags, no converter.
+  = -- | @main : Task Never {}@ (D72, @m1b-source.md@ §SO12). The program ends
+    -- when the task completes, and the task is all there is.
     MainTask
-  deriving (Eq, Show)
-
--- | What an @effect module@ declares, as a declaration rather than as an
--- expression (C17).
---
--- Registering a manager is a load-time effect on a runtime's own dictionary,
--- and the record it registers has that runtime's field names. Neither is a
--- value any Gren expression computes, so neither is written as one here: Core
--- names the five functions and the kind, and each backend assembles what its
--- runtime wants from them. The JS backend already has @_Platform_createManager@
--- and uses it.
---
--- @portable-core.md@ P3 deletes the whole construct at M1b, and this with it.
-data Manager = Manager
-  { _managerKind :: !ManagerKind,
-    -- | The bindings a program enters the manager through: @command@,
-    -- @subscription@, or both. These are ordinary bindings in '_moduleDefs' —
-    -- @Platform.leaf "<module>"@ — and reaching one of them is what makes the
-    -- manager live, exactly as the @Opt.Link@ to @$fx$@ did in the old
-    -- pipeline.
-    _managerEntries :: ![QualName],
-    _managerInit :: !QualName,
-    _managerOnEffects :: !QualName,
-    _managerOnSelfMsg :: !QualName,
-    -- | Present for 'ManagerCmd' and 'ManagerFx'.
-    _managerCmdMap :: !(Maybe QualName),
-    -- | Present for 'ManagerSub' and 'ManagerFx'.
-    _managerSubMap :: !(Maybe QualName)
-  }
-  deriving (Eq, Show)
-
-data ManagerKind
-  = ManagerCmd
-  | ManagerSub
-  | ManagerFx
-  deriving (Eq, Show)
-
--- | A @port@, as a declaration rather than as an expression (C18, D84).
---
--- A port /defines a name/ — unlike a manager, a program refers to it, so
--- ordinary reachability keeps it alive and no extra rule is needed. What it
--- does not define is a value any Gren expression computes: the runtime's port
--- constructor takes the wire name, the converter and the flags in its own
--- calling convention, and hands back the @Cmd@, @Sub@ or @Task@ the binding
--- stands for. So Core names the pieces and each backend assembles the call its
--- runtime wants, exactly as it does for a 'Manager'.
---
--- The pieces that /are/ ordinary Core are the converters, and they are the
--- whole of what @Optimize.Port@ generates: a JSON encoder or decoder built
--- from the payload type out of @Json.Encode@, @Json.Decode@ and @Maybe@.
---
--- @portable-core.md@ P3 rebuilds the port mechanism on @ffi.md@ F4 at M1b and
--- deletes this with it.
-data Port = Port
-  { -- | The binding a program refers to. Its name is also the wire name the
-    -- runtime registers the port under; they are the same name in the source
-    -- and there is no second one to carry.
-    _portBinder :: !Binder,
-    _portFlow :: !PortFlow
-  }
-  deriving (Eq, Show)
-
--- | Which way a payload crosses, and what converts it.
-data PortFlow
-  = -- | @port foo : Payload -> Cmd msg@. The converter encodes.
-    PortOut !Converter
-  | -- | @port foo : (Payload -> msg) -> Sub msg@. The converter decodes.
-    PortIn !Converter
-  | -- | @port foo : Input -> Task x Payload@, or @port foo : Task x Payload@
-    -- with no input at all. The 'Maybe' is that distinction, and it is the one
-    -- place a runtime's own spelling of "absent" would otherwise have had to
-    -- be written into Core — the JS runtime's is a @null@ in the argument
-    -- position, which is not a Gren value and not something Core can say.
-    PortTask !(Maybe Converter) !Converter
-  deriving (Eq, Show)
-
--- | How one payload crosses the boundary.
-data Converter = Converter
-  { -- | The payload is @Bytes@, and the runtime moves it whole rather than
-    -- through JSON.
-    _convBytes :: !Bool,
-    -- | The encoder — @payload -> Json.Encode.Value@ — or the decoder —
-    -- @Json.Decode.Decoder payload@ — as ordinary Core.
-    --
-    -- @Basics.identity@ when '_convBytes', which is what "no conversion" is
-    -- as an expression, and not dead weight: a @Bytes@ /outgoing/ port really
-    -- does apply it before taking the payload's buffer.
-    _convCode :: !Expr
-  }
   deriving (Eq, Show)
 
 -- EXPRESSIONS

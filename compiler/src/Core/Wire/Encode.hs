@@ -386,11 +386,6 @@ qualStrings (QualName (ModuleName.Canonical (Pkg.Name author project) modul) nam
 qual :: Word32 -> QualName -> Enc
 qual tag q = withQual q (u32 tag)
 
--- | An @optional@ qualified name: explicit presence.
-optQual :: Word32 -> Maybe QualName -> Enc
-optQual _ Nothing = mempty
-optQual tag (Just q) = withQual q (\i -> key tag WVarint <> varint (fromIntegral i))
-
 -- | @repeated uint32@ of qualified names, packed like 'repText'.
 repQual :: Word32 -> [QualName] -> Enc
 repQual _ [] = mempty
@@ -654,11 +649,6 @@ originCode :: Origin -> Word32
 originCode Derived = 0
 originCode Written = 1
 
-managerKindCode :: ManagerKind -> Word32
-managerKindCode ManagerCmd = 0
-managerKindCode ManagerSub = 1
-managerKindCode ManagerFx = 2
-
 classDeclEnc :: ClassDecl -> Enc
 classDeclEnc (ClassDecl name param openness methods) =
   qual 1 name
@@ -694,8 +684,6 @@ moduleEnc m =
     <> rep 9 bindEnc (_moduleDefs m)
     <> rep 10 recGroupEnc (_moduleDefsRec m)
     <> repQual 11 (_moduleExports m)
-    <> optMsg 12 managerEnc (_moduleManager m)
-    <> rep 13 portEnc (_modulePorts m)
     <> optMsg 14 mainEnc (_moduleMain m)
     <> rep 15 externEnc (_moduleExterns m)
 
@@ -705,20 +693,7 @@ recGroupEnc names = repQual 1 names
 mainEnc :: Main -> Enc
 mainEnc main_ =
   case main_ of
-    MainString -> enum_ 1 0
-    MainHtml -> enum_ 1 1
-    MainProgram converter -> enum_ 1 2 <> msg 2 (converterEnc converter)
     MainTask -> enum_ 1 3
-
-managerEnc :: Manager -> Enc
-managerEnc (Manager kind entries init_ onEffects onSelfMsg cmdMap subMap) =
-  enum_ 1 (managerKindCode kind)
-    <> repQual 2 entries
-    <> qual 3 init_
-    <> qual 4 onEffects
-    <> qual 5 onSelfMsg
-    <> optQual 6 cmdMap
-    <> optQual 7 subMap
 
 -- | D196. Every field implicit or packed, so a JavaScript extern (code 0) that
 -- is not pure and has no body writes only its binder and its names.
@@ -733,24 +708,6 @@ externImplEnc :: ExternImpl -> Enc
 externImplEnc (ExternImpl language names) =
   enum_ 1 (fromIntegral (fromEnum language))
     <> repText 2 names
-
-portEnc :: Port -> Enc
-portEnc (Port binder flow) =
-  msg 1 (binderEnc binder)
-    <> msg 2 (portFlowEnc flow)
-
-portFlowEnc :: PortFlow -> Enc
-portFlowEnc flow =
-  case flow of
-    PortOut converter -> msg 1 (converterEnc converter)
-    PortIn converter -> msg 2 (converterEnc converter)
-    PortTask input payload ->
-      msg 3 (optMsg 1 converterEnc input <> msg 2 (converterEnc payload))
-
-converterEnc :: Converter -> Enc
-converterEnc (Converter isBytes code) =
-  bool_ 1 isBytes
-    <> msg 2 (exprEnc code)
 
 -- EXPRESSIONS
 

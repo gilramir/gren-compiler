@@ -2,10 +2,11 @@
 
 -- | Is this module's @main@ one the compiler can generate an entry point for?
 --
--- Four rejections, all of them @Reporting.Error.Main@'s. The first three used to
+-- Three rejections, all of them @Reporting.Error.Main@'s. The first two used to
 -- be made on the way past by @Optimize.Module@ — the only user-facing check the
--- old pipeline owned — and the fourth, a @Task@ that is not @Task Never {}@, is
--- D72's. Retiring that pipeline meant giving them a home that is
+-- old pipeline owned — and the third, a @Task@ that is not @Task Never {}@, is
+-- D72's. A fourth, flags a @Program@ could not decode, left with @Platform@
+-- (@m1b-source.md@ §SO19). Retiring that pipeline meant giving them a home that is
 -- about the question rather than about the graph, which is this one, beside
 -- `Nitpick.PatternMatches` and `Nitpick.Debug`.
 --
@@ -57,8 +58,6 @@ check platform annotations modul =
         Lower.NoMain -> Right ()
         Lower.IsMain _ -> Right ()
         Lower.NotRunnable tipe allowed -> Left (E.BadType region tipe allowed)
-        Lower.BadFlags subType invalidPayload ->
-          Left (E.BadFlags region subType invalidPayload)
         Lower.BadTask tipe badErr badAnswer ->
           Left (E.BadTask region tipe badErr badAnswer)
 

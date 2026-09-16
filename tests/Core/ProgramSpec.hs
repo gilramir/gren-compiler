@@ -12,10 +12,11 @@ import Core.AST qualified as Core
 import Core.Program (Missing (..), MissingKind (..), Program (..))
 import Core.Program qualified as Program
 import Core.Refs qualified as Refs
-import Data.List (elemIndex)
 import Data.Map qualified as Map
 import Data.Name (Name)
+import Data.Name qualified as Name
 import Data.Set qualified as Set
+import Data.Utf8 qualified as Utf8
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Test.Hspec
@@ -107,7 +108,8 @@ spec = do
             `shouldBe` [(MissingKernel, kernelName, q "main")]
 
     it "classifies anything else as a value" $
-      -- An effect manager or a port today (§L8), and a lowering bug if neither.
+      -- A lowering bug: effect managers and ports, which were the other two
+      -- (§L8), left with `Platform` (`m1b-source.md` §SO19).
       let p = link [modul home [bind "main" (globalE (qIn other "manager"))]] [q "main"]
        in map _missingKind (_progMissing p) `shouldBe` [MissingValue]
 
@@ -147,83 +149,6 @@ spec = do
           p = link [m] [q "main"]
        in map Core._dataName (_progData p) `shouldBe` [q "Used"]
 
-  describe "effect managers" $ do
-    it "roots a manager's functions when an entry binding is reached" $
-      -- The rule the old pipeline gets from its `Opt.Link` to `$fx$`: using
-      -- `command` is what makes the manager live, and the manager is what needs
-      -- `init`, `onEffects`, `onSelfMsg` and `cmdMap`. None of them is
-      -- mentioned by any expression here.
-      let p = link (managerModules cmdManager) [qIn other "main"]
-       in map snd (map splitQ (names p))
-            `shouldBe` ["cmdMap", "init", "onEffects", "onSelfMsg", "command", "main"]
-
-    it "emits a manager's functions before the entry that reaches them" $
-      -- A runtime registers a manager at load time, reading those names, so
-      -- they have to be defined by then.
-      let p = link (managerModules cmdManager) [qIn other "main"]
-          order = map snd (map splitQ (names p))
-       in (elemIndex "init" order < elemIndex "command" order) `shouldBe` True
-
-    it "reports a manager the program reaches" $
-      let p = link (managerModules cmdManager) [qIn other "main"]
-       in map (fmap Core._managerKind) (_progManagers p)
-            `shouldBe` [(home, Core.ManagerCmd)]
-
-    it "reports no manager when no entry is reached" $
-      let p = link (managerModules cmdManager) [qIn other "unrelated"]
-       in _progManagers p `shouldBe` []
-
-    it "takes both entries of an `Fx` manager, and its two maps" $
-      -- No package in existence declares one — all eleven `effect module`s in
-      -- `core` and `node` are `command` or `subscription`, never both — so this
-      -- is the only thing that exercises the shape.
-      let p = link (managerModules fxManager) [qIn other "both"]
-          reached = map snd (map splitQ (names p))
-       in (all (`elem` reached) ["cmdMap", "subMap", "command", "subscription"], map (fmap Core._managerKind) (_progManagers p))
-            `shouldBe` (True, [(home, Core.ManagerFx)])
-
-    it "does not root the other entry's map when only one entry is reached" $
-      -- `command` and `subscription` are separate bindings, so reaching one
-      -- roots the manager and not the other way in.
-      let p = link (managerModules fxManager) [qIn other "main"]
-       in ("subscription" `elem` map snd (map splitQ (names p))) `shouldBe` False
-
-  describe "ports" $ do
-    it "keeps a port the program reaches, and drops one it does not" $
-      let p = link (portModules [outPort "used", outPort "unused"]) [qIn other "main"]
-       in map (fmap portName) (_progPorts p) `shouldBe` [(home, "used")]
-
-    it "follows a port to its converter" $
-      -- The converter is not a binding, so nothing else names it: an edge from
-      -- the port to what its converter refers to is the only thing keeping the
-      -- encoder alive.
-      let p = link (portModules [outPort "used"]) [qIn other "main"]
-       in (q "encode" `elem` names p) `shouldBe` True
-
-    it "puts a port after the converter's dependencies" $
-      -- The converter has to be defined by the time the port's definition runs,
-      -- which is why ports are ordered with the bindings rather than after them.
-      let p = link (portModules [outPort "used"]) [qIn other "main"]
-          order = map (snd . splitQ) (map fst (_progBindings p) ++ [portQ pt | (_, pt) <- _progPorts p])
-       in (elemIndex "encode" order < elemIndex "used" order) `shouldBe` True
-
-    it "does not report a port as a missing value" $
-      -- A port defines its name. Before C18 it did not, and every port in a
-      -- program was a `MissingValue` line in this summary.
-      let p = link (portModules [outPort "used"]) [qIn other "main"]
-       in _progMissing p `shouldBe` []
-
-    it "takes both converters of a task port with an input" $
-      let p = link (portModules [taskPort "used" True]) [qIn other "main"]
-       in (all (`elem` map (snd . splitQ) (names p)) ["encode", "decode"]) `shouldBe` True
-
-    it "takes only the decoder of a task port with no input" $
-      -- The shape whose runtime call Core cannot write as an expression. What
-      -- the linker sees of it is one converter instead of two.
-      let p = link (portModules [taskPort "used" False]) [qIn other "main"]
-          reached = map (snd . splitQ) (names p)
-       in ("decode" `elem` reached, "encode" `elem` reached) `shouldBe` (True, False)
-
   kernelSpec
 
   mainSpec
@@ -232,126 +157,29 @@ spec = do
 
 -- HELPERS
 
--- | A module declaring ports, and a second module that names one of them.
---
--- Two modules for the same reason 'managerModules' uses two: a root inside the
--- port's own module could reach everything by naming it directly, and what is
--- being tested is that naming the /port/ is enough.
-portModules :: [Core.Port] -> [Core.Module]
-portModules ports =
-  [ (modul home [bind "encode" one, bind "decode" one]) {Core._modulePorts = ports},
-    modul other [bind "main" (globalE (q "used"))]
-  ]
-
--- | An outgoing port whose encoder names @Main.encode@ and nothing else.
-outPort :: Name -> Core.Port
-outPort name =
-  Core.Port (Core.Binder name intT span0) (Core.PortOut (converter "encode"))
-
--- | A task port, with an input converter or without one.
-taskPort :: Name -> Bool -> Core.Port
-taskPort name hasInput =
-  Core.Port (Core.Binder name intT span0) $
-    Core.PortTask
-      (if hasInput then Just (converter "encode") else Nothing)
-      (converter "decode")
-
-converter :: Name -> Core.Converter
-converter name = Core.Converter False (globalE (q name))
-
-portName :: Core.Port -> Name
-portName = Core._binderName . Core._portBinder
-
-portQ :: Core.Port -> Core.QualName
-portQ = q . portName
-
--- | A module with a manager, and a second module that enters it.
---
--- Two modules rather than one because the entries are what the rule is about:
--- a root inside the manager's own module would be free to reach everything by
--- naming it. The entry bindings are @one@ here rather than
--- @Platform.leaf "Main"@ — what matters to the linker is that they are ordinary
--- bindings that name none of the five functions.
-managerModules :: Core.Manager -> [Core.Module]
-managerModules m =
-  [ (modul home defs) {Core._moduleManager = Just m},
-    modul
-      other
-      [ bind "main" (globalE (q "command")),
-        bind "both" (appE (globalE (q "command")) [globalE (q "subscription")]),
-        bind "unrelated" one
-      ]
-  ]
-  where
-    defs =
-      [ bind "command" one,
-        bind "subscription" one,
-        bind "init" one,
-        bind "onEffects" one,
-        bind "onSelfMsg" one,
-        bind "cmdMap" one,
-        bind "subMap" one
-      ]
-
-cmdManager :: Core.Manager
-cmdManager =
-  Core.Manager
-    { Core._managerKind = Core.ManagerCmd,
-      Core._managerEntries = [q "command"],
-      Core._managerInit = q "init",
-      Core._managerOnEffects = q "onEffects",
-      Core._managerOnSelfMsg = q "onSelfMsg",
-      Core._managerCmdMap = Just (q "cmdMap"),
-      Core._managerSubMap = Nothing
-    }
-
-fxManager :: Core.Manager
-fxManager =
-  cmdManager
-    { Core._managerKind = Core.ManagerFx,
-      Core._managerEntries = [q "command", q "subscription"],
-      Core._managerSubMap = Just (q "subMap")
-    }
-
 mainSpec :: Spec
 mainSpec = describe "main" $ do
-  it "keeps what a flags decoder names" $
-    -- The edge C19 adds. Nothing in the program's code refers to `decode`; the
-    -- `main` declaration does, and only because `main` is a root.
-    let p = linkWith Map.empty (mainModules (Core.MainProgram converterTo)) [q "main"]
-     in names p `shouldBe` [q "decode", q "main"]
-
   it "says nothing when main is not a root" $
-    let p = linkWith Map.empty (mainModules (Core.MainProgram converterTo)) [q "other"]
+    let p = linkWith Map.empty mainModules [q "other"]
      in (names p, _progMains p) `shouldBe` ([q "other"], [])
 
-  it "keeps nothing for a static main" $
-    -- `MainString` and `MainHtml` carry no Core: which kernel module a runtime
-    -- enters through is the backend's, not the IR's (C16).
-    let p = linkWith Map.empty (mainModules Core.MainString) [q "main"]
+  it "keeps nothing for main but main" $
+    -- A task `main` carries no Core: which kernel module a runtime enters
+    -- through is the backend's, not the IR's (C16).
+    let p = linkWith Map.empty mainModules [q "main"]
      in names p `shouldBe` [q "main"]
 
   it "reports each root's main, and only a root's" $
-    let p = linkWith Map.empty (mainModules Core.MainHtml) [q "main"]
-     in map snd (_progMains p) `shouldBe` [Core.MainHtml]
+    let p = linkWith Map.empty mainModules [q "main"]
+     in map snd (_progMains p) `shouldBe` [Core.MainTask]
 
-  it "orders the decoder's dependencies before main" $
-    -- The property a backend emitting `main` needs, stated for `main` the same
-    -- way the port tests state it for a port.
-    let p = linkWith Map.empty (mainModules (Core.MainProgram converterTo)) [q "main"]
-     in map linkedName (_progLinked p) `shouldBe` ["decode", "main"]
-
--- | A module whose @main@ is the given declaration, and a second binding the
--- decoder names and nothing else does.
-mainModules :: Core.Main -> [Core.Module]
-mainModules m =
-  [ (modul home [bind "main" one, bind "decode" one, bind "other" one])
-      { Core._moduleMain = Just m
+-- | A module whose @main@ is a task, and a second binding nothing names.
+mainModules :: [Core.Module]
+mainModules =
+  [ (modul home [bind "main" one, bind "other" one])
+      { Core._moduleMain = Just Core.MainTask
       }
   ]
-
-converterTo :: Core.Converter
-converterTo = Core.Converter False (globalE (q "decode"))
 
 kernelSpec :: Spec
 kernelSpec = describe "kernel modules" $ do
@@ -492,35 +320,53 @@ loadOrderSpec = describe "load-time order" $ do
             [q "main"]
      in map linkedName (_progLinked p) `shouldBe` ["calledBack", "Utils", "alias", "main"]
 
-  it "orders a port after the kernel module the backend says it lands in" $
-    -- `compiler#387`, as a property rather than as a bug report: a port's
-    -- runtime call reads module-level state in the kernel chunk that declares
-    -- it, so the chunk has to be emitted first. Core names no runtime function,
-    -- so the edge comes from the backend.
-    let portName = Core.QualName home "used"
+  it "orders an extern after the kernel module the backend says it lands in" $
+    -- `compiler#387`, as a property rather than as a bug report. It was found
+    -- for a port, whose runtime call read module-level state in the kernel
+    -- chunk; ports are gone (§SO19), and an argument-less `Task` extern is the
+    -- same shape: its wrapper is a value built out of the scheduler when it is
+    -- emitted. Core names no runtime function, so the edge comes from the
+    -- backend.
+    let externName = Core.QualName home "used"
         p =
           Program.link
             Program.Backend
-              { Program._backendKernels = Map.singleton "Platform" (kernelModule [] [] []),
+              { Program._backendKernels = Map.singleton "Scheduler" (kernelModule [] [] []),
                 Program._backendEdges =
-                  Map.singleton portName (Refs.global (Program.kernelName "Platform"))
+                  Map.singleton externName (Refs.global (Program.kernelName "Scheduler"))
               }
-            (Map.fromList [(Core._moduleName m, m) | m <- portModules [outPort "used"]])
+            (Map.fromList [(Core._moduleName m, m) | m <- externModules "used"])
             [qIn other "main"]
-     in map linkedName (_progLinked p) `shouldBe` ["encode", "Platform", "used", "main"]
+     in map linkedName (_progLinked p) `shouldBe` ["Scheduler", "used", "main"]
 
-  it "drops the kernel module again when no port reaches it" $
-    -- The edge is not a root: it is only followed from a port that is reached.
+  it "drops the kernel module again when no extern reaches it" $
+    -- The edge is not a root: it is only followed from an extern that is reached.
     let p =
           Program.link
             Program.Backend
-              { Program._backendKernels = Map.singleton "Platform" (kernelModule [] [] []),
+              { Program._backendKernels = Map.singleton "Scheduler" (kernelModule [] [] []),
                 Program._backendEdges =
-                  Map.singleton (Core.QualName home "unused") (Refs.global (Program.kernelName "Platform"))
+                  Map.singleton (Core.QualName home "unused") (Refs.global (Program.kernelName "Scheduler"))
               }
-            (Map.fromList [(Core._moduleName m, m) | m <- portModules [outPort "unused"]])
-            [qIn other "main"]
+            (Map.fromList [(Core._moduleName m, m) | m <- externModules "unused"])
+            [qIn other "unrelated"]
      in _progKernels p `shouldBe` []
+
+-- | A module declaring one extern, and a second module that names it.
+externModules :: Name -> [Core.Module]
+externModules name =
+  [ (modul home [])
+      { Core._moduleExterns =
+          [ Core.Extern
+              { Core._externBinder = Core.Binder name intT span0,
+                Core._externImpls = [Core.ExternImpl Core.ExternJs [Utf8.fromChars "Ext", Utf8.fromChars (Name.toChars name)]],
+                Core._externPure = False,
+                Core._externHasBody = False
+              }
+          ]
+      },
+    modul other [bind "main" (globalE (q name)), bind "unrelated" one]
+  ]
 
 lam :: Name -> Core.Expr -> Core.Expr
 lam name body =
@@ -530,8 +376,8 @@ linkedName :: Program.Linked -> Name
 linkedName item =
   case item of
     Program.LBind (Core.QualName _ n) _ -> n
-    Program.LPort _ port -> Core._binderName (Core._portBinder port)
     Program.LKernel short -> short
+    Program.LExtern _ e -> Core._binderName (Core._externBinder e)
 
 splitQ :: Core.QualName -> (ModuleName.Canonical, Name)
 splitQ (Core.QualName h n) = (h, n)
@@ -613,8 +459,6 @@ modul name defs =
       Core._moduleInstances = [],
       Core._moduleDefs = defs,
       Core._moduleDefsRec = [],
-      Core._moduleManager = Nothing,
-      Core._modulePorts = [],
       Core._moduleMain = Nothing,
       Core._moduleExports = [],
       Core._moduleExterns = []

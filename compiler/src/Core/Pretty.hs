@@ -59,9 +59,7 @@ moduleToBuilder opts m =
       block (map (dataDecl opts) (_moduleData m)),
       block (map (classDecl opts) (_moduleClasses m)),
       block (map (instanceDecl opts) (_moduleInstances m)),
-      block (maybe [] (pure . managerDecl) (_moduleManager m)),
-      block (map (portDecl opts) (_modulePorts m)),
-      block (maybe [] (pure . mainDecl opts) (_moduleMain m)),
+      block (maybe [] (pure . mainDecl) (_moduleMain m)),
       block (map (externDecl opts) (_moduleExterns m)),
       block (map (topBind opts (recNames m)) (_moduleDefs m))
     ]
@@ -89,65 +87,12 @@ externDecl opts (Extern externBinder impls isPure hasBody) =
         <> mconcat [" " <> B.stringUtf8 (show (Utf8.toChars n)) | n <- names]
         <> "\n"
 
--- | An @effect module@'s manager. The entries are also ordinary bindings below,
--- so what this adds is the kind and the four or five names a runtime needs.
-managerDecl :: Manager -> B.Builder
-managerDecl m =
-  mconcat
-    [ "manager " <> kind (_managerKind m) <> "\n",
-      "  entry " <> commas (map qual (_managerEntries m)) <> "\n",
-      "  init " <> qual (_managerInit m) <> "\n",
-      "  onEffects " <> qual (_managerOnEffects m) <> "\n",
-      "  onSelfMsg " <> qual (_managerOnSelfMsg m) <> "\n",
-      maybe "" (\q -> "  cmdMap " <> qual q <> "\n") (_managerCmdMap m),
-      maybe "" (\q -> "  subMap " <> qual q <> "\n") (_managerSubMap m)
-    ]
-  where
-    kind ManagerCmd = "cmd"
-    kind ManagerSub = "sub"
-    kind ManagerFx = "fx"
-
 -- | A @main@ declaration (C19): what a runtime does with the @main@ binding
--- below, and for a program the flags decoder as ordinary Core.
-mainDecl :: Options -> Main -> B.Builder
-mainDecl opts m =
+-- below.
+mainDecl :: Main -> B.Builder
+mainDecl m =
   case m of
-    MainString -> "main string\n"
-    MainHtml -> "main html\n"
-    MainProgram c -> "main program\n" <> converter opts "flags" c
     MainTask -> "main task\n"
-
--- | A @port@ declaration (C18): which way the payload crosses, whether it
--- crosses as bytes, and the converters as ordinary Core.
-portDecl :: Options -> Port -> B.Builder
-portDecl opts (Port portBinder flow) =
-  case flow of
-    PortOut c ->
-      header "out" <> converter opts "encoder" c
-    PortIn c ->
-      header "in" <> converter opts "decoder" c
-    PortTask input output ->
-      header "task"
-        <> maybe "  no input\n" (converter opts "encoder") input
-        <> converter opts "decoder" output
-  where
-    header dir =
-      "port "
-        <> dir
-        <> " "
-        <> name (_binderName portBinder)
-        <> " : "
-        <> typeToBuilder opts (_binderType portBinder)
-        <> "\n"
-
-converter :: Options -> B.Builder -> Converter -> B.Builder
-converter opts label (Converter bytes code) =
-  "  "
-    <> label
-    <> (if bytes then " bytes" else "")
-    <> " =\n"
-    <> expr opts 1 code
-    <> "\n"
 
 recNames :: Module -> [QualName]
 recNames = concat . _moduleDefsRec

@@ -23,14 +23,10 @@
 -- flat list and 'Core.AST._moduleDefsRec' names the groups of more than one, so
 -- a backend that has to emit a mutually recursive group together still can.
 --
--- __Effects are declarations.__ An @effect module@'s manager (C17), a @port@
--- (C18) and a module's @main@ (C19) are each a thing a runtime assembles rather
--- than a value a Gren expression computes, so Core names their pieces and a
--- backend builds what its runtime wants: 'manager' and 'entries' for the first,
--- "Core.Lower.Port" for the other two. Nothing a module declares is dropped any
--- more, which is why the function that used to report what was —
--- @unloweredEffects@ — is gone. @portable-core.md@ P3 and @ffi.md@ F4 delete
--- the first two constructs at M1b; @main@ outlives them.
+-- __A @main@ is a declaration.__ What a runtime does with it is chosen by its
+-- type, which the emitted code no longer has, so Core records the choice (C19).
+-- An @effect module@'s manager (C17) and a @port@ (C18) were declarations of
+-- the same kind until they left with @Platform@ (@m1b-source.md@ §SO19).
 module Core.Lower.Module
   ( lower,
     MainOf (..),
@@ -40,11 +36,9 @@ where
 
 import AST.Canonical qualified as Can
 import AST.Utils.Type qualified as Type
-import Canonicalize.Effects qualified as Effects
 import Core.AST qualified as Core
 import Core.Lower.Expression qualified as Expr
 import Core.Lower.Literal qualified as Literal
-import Core.Lower.Port qualified as Port
 import Core.Lower.Type (lowerAnnotation, lowerClass, lowerType, lowerUnion)
 import Core.Order qualified as Order
 import Core.Refs qualified as Refs
@@ -53,12 +47,9 @@ import Data.Map qualified as Map
 import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.Set qualified as Set
-import Data.Utf8 qualified as Utf8
 import Gren.ModuleName qualified as ModuleName
-import Gren.Package qualified as Pkg
 import Gren.Platform qualified as P
 import Reporting.Annotation qualified as A
-import Reporting.Error.Canonicalize qualified as CE
 import Type.Resolve qualified as Resolve
 
 lower ::
@@ -85,7 +76,6 @@ lower platform annotations types elaboration modul =
       defs =
         definitions home $
           map (Expr.def env) valueDefs
-            ++ entries home (Can._effects modul)
             ++ concatMap (\i -> instanceBinds env (witnessesOf i) i) instances
    in Core.Module
         { Core._moduleName = home,
@@ -100,8 +90,6 @@ lower platform annotations types elaboration modul =
           Core._moduleDefsRec =
             [map (Core.QualName home . bindName) g | g <- defs, length g > 1],
           Core._moduleExports = map (Core.QualName home) (exports modul),
-          Core._moduleManager = manager home (Can._effects modul),
-          Core._modulePorts = ports (Can._effects modul),
           Core._moduleMain = mainFrom (mainOf platform annotations),
           Core._moduleExterns =
             List.sortOn
@@ -291,9 +279,6 @@ data MainOf
   | -- | A @main@ whose type this platform cannot run, with the type names it
     -- can, for @Reporting.Error.Main.BadType@.
     NotRunnable Can.Type [String]
-  | -- | A @Platform.Program@ whose flags cannot come from JavaScript, for
-    -- @Reporting.Error.Main.BadFlags@.
-    BadFlags Can.Type CE.InvalidPayload
   | -- | A @Task@ that is not a @Task Never {}@, for
     -- @Reporting.Error.Main.BadTask@: whether its error type is the wrong one,
     -- and whether its answer is.
@@ -301,36 +286,20 @@ data MainOf
 
 -- | The classification, from the module's annotations and the platform.
 --
--- The platform is what distinguishes @main : String@ from @main : Html msg@,
--- and it arrives from "Compile" for that reason alone.
---
--- The span a decoder is given is the module's own zero span, as a port's is:
--- what is being recorded is a fact about a type, and the binding it belongs to
--- has a real span already. A 'BadFlags' answer never builds one — the decoder
--- for a payload `Canonicalize.Effects.checkPayload` rejects is not a thing that
--- exists, and the module does not reach Core anyway.
+-- The platform decides whether a @main@ can run at all: only @node@ runs a
+-- task today. @main : String@, @main : Html msg@ and @Platform.Program@ left
+-- with @Platform@ (§SO19, D273), and are refused here as any other type is.
 mainOf :: P.Platform -> Map.Map Name Can.Annotation -> MainOf
 mainOf platform annotations =
   case Map.lookup Name._main annotations of
     Nothing -> NoMain
     Just (Can.Forall freeVars tipe) ->
       case Type.deepDealias tipe of
-        Can.TType hm nm []
-          | platform == P.Node && hm == ModuleName.string && nm == Name.string ->
-              IsMain Core.MainString
-        Can.TType hm nm [_]
-          | platform == P.Browser && hm == ModuleName.virtualDom && nm == Name.node ->
-              IsMain Core.MainHtml
         Can.TType hm nm [err, answer]
           | platform == P.Node && hm == ModuleName.taskInternal && nm == Name.task ->
               let badErr = not (isNever err || unconstrained freeVars err)
                   badAnswer = not (isUnit answer || unconstrained freeVars answer)
                in if badErr || badAnswer then BadTask tipe badErr badAnswer else IsMain Core.MainTask
-        Can.TType hm nm [flags, _, _]
-          | hm == ModuleName.platform && nm == Name.program ->
-              case Effects.checkPayload flags of
-                Right () -> IsMain (Core.MainProgram (Port.decoder zeroSpan flags))
-                Left (subType, invalidPayload) -> BadFlags subType invalidPayload
         _ -> NotRunnable tipe (runnableOn platform)
 
 -- | A @main : Task e a@ is runnable when nothing can reach the end of the
@@ -362,8 +331,8 @@ unconstrained freeVars t =
 runnableOn :: P.Platform -> [String]
 runnableOn platform =
   case platform of
-    P.Browser -> ["Html", "Svg", "Program"]
-    P.Node -> ["String", "Program", "Task Never {}"]
+    P.Browser -> []
+    P.Node -> ["Task Never {}"]
     P.Common -> []
 
 -- | What 'lower' keeps. A module that is not rejected has no other answer.
@@ -373,7 +342,6 @@ mainFrom m =
     IsMain main -> Just main
     NoMain -> Nothing
     NotRunnable _ _ -> Nothing
-    BadFlags _ _ -> Nothing
     BadTask {} -> Nothing
 
 -- | The module's definitions, grouped and ordered by C14.
@@ -412,6 +380,10 @@ bindName = Core._binderName . Core._bindBinder
 selfFile :: Core.FileId
 selfFile = Core.FileId 0
 
+-- | The span generated code carries: this module's file, and no position in it.
+zeroSpan :: Core.Span
+zeroSpan = Core.Span selfFile 0 0 0 0
+
 -- DECLARATIONS
 
 data Group
@@ -443,10 +415,9 @@ defName d =
 --
 -- Types and aliases are not values: an alias does not survive lowering at all,
 -- and a datatype is in 'Core.AST._moduleData' whether or not it is exposed.
--- What is left is definitions, operators and ports. An operator is exported
--- under its symbol while the value it names is an ordinary function, so it is
--- that function that goes in the list; a port is exported under its own name
--- and defines it, so it goes in as itself.
+-- What is left is definitions and operators. An operator is exported under its
+-- symbol while the value it names is an ordinary function, so it is that
+-- function that goes in the list.
 --
 -- Sorted rather than taken in the order the two branches produce: @exposing (..)@
 -- would otherwise inherit the declaration order, and an explicit @exposing@ list
@@ -459,13 +430,11 @@ exports modul =
       Can.ExportEverything _ ->
         concatMap (map defName . group) (declGroups (Can._decls modul))
           ++ concatMap (binopTarget modul) (Map.elems (Can._binops modul))
-          ++ portNames (Can._effects modul)
       Can.Export exposed ->
         concat
           [ case entry of
               Can.ExportValue -> [name]
               Can.ExportBinop -> maybe [] (binopTarget modul) (Map.lookup name (Can._binops modul))
-              Can.ExportPort -> [name]
               _ -> []
           | (name, A.At _ entry) <- Map.toAscList exposed
           ]
@@ -481,132 +450,3 @@ binopTarget modul (Can.Binop_ _ _ name) =
   if any (Map.member name . Can._cl_methods) (Map.elems (Can._classes modul))
     then []
     else [name]
-
--- EFFECTS
-
--- | The module's @port@s, as Core declarations (C18).
---
--- Ascending by name, which is both C6's order and the order a reader of the
--- dump wants. "Core.Lower.Port" builds the converters; what is decided here is
--- only that a port is one declaration per @port@ line, named by the binding it
--- defines.
-ports :: Can.Effects -> [Core.Port]
-ports effects =
-  case effects of
-    Can.NoEffects -> []
-    Can.Manager {} -> []
-    Can.Ports ps ->
-      [Port.lower zeroSpan name p | (name, p) <- Map.toAscList ps]
-
-portNames :: Can.Effects -> [Name]
-portNames effects =
-  case effects of
-    Can.NoEffects -> []
-    Can.Manager {} -> []
-    Can.Ports ps -> Map.keys ps
-
--- | The span generated code carries: this module's file, and no position in it.
-zeroSpan :: Core.Span
-zeroSpan = Core.Span selfFile 0 0 0 0
-
--- | An @effect module@'s manager, as a Core declaration.
---
--- The five functions are named rather than referred to: what a runtime does
--- with them is the runtime's business, and the record @_Platform_createManager@
--- builds has that runtime's field names rather than Gren's.
-manager :: ModuleName.Canonical -> Can.Effects -> Maybe Core.Manager
-manager home effects =
-  case effects of
-    Can.NoEffects -> Nothing
-    Can.Ports _ -> Nothing
-    Can.Manager _ _ _ m ->
-      let here = Core.QualName home
-          entry name = here (Name.fromChars name)
-       in Just $
-            Core.Manager
-              { Core._managerKind =
-                  case m of
-                    Can.Cmd _ -> Core.ManagerCmd
-                    Can.Sub _ -> Core.ManagerSub
-                    Can.Fx _ _ -> Core.ManagerFx,
-                Core._managerEntries = map entry (entryNames m),
-                Core._managerInit = here (Name.fromChars "init"),
-                Core._managerOnEffects = here (Name.fromChars "onEffects"),
-                Core._managerOnSelfMsg = here (Name.fromChars "onSelfMsg"),
-                Core._managerCmdMap =
-                  case m of
-                    Can.Sub _ -> Nothing
-                    _ -> Just (here (Name.fromChars "cmdMap")),
-                Core._managerSubMap =
-                  case m of
-                    Can.Cmd _ -> Nothing
-                    _ -> Just (here (Name.fromChars "subMap"))
-              }
-
--- | Which of @command@ and @subscription@ a manager declares.
-entryNames :: Can.Manager -> [String]
-entryNames m =
-  case m of
-    Can.Cmd _ -> ["command"]
-    Can.Sub _ -> ["subscription"]
-    Can.Fx _ _ -> ["command", "subscription"]
-
--- | @command@ and @subscription@ as ordinary bindings.
---
--- @_Platform_leaf(home)@ closes over the module name and reads nothing else, so
--- this really is what the value is: a partial application of a kernel function
--- to a string. @Optimize.Module@ got the same JavaScript from a graph edge —
--- an @Opt.Link@ to the manager node, which emits the @var@ as one of its own
--- statements — which is why the old pipeline needed no binding here and a
--- Core-only program representation does.
---
--- The type is the one @Type.Constrain.Module.letCmd@ gives it, with @msg@ for
--- the variable a fresh one stands for there: a manager's effect type applied to
--- a message, to that runtime's @Cmd@ or @Sub@ of the same message.
-entries :: ModuleName.Canonical -> Can.Effects -> [Core.Bind]
-entries home effects =
-  case effects of
-    Can.NoEffects -> []
-    Can.Ports _ -> []
-    Can.Manager _ _ _ m ->
-      [ leaf home name (effectType home m name)
-      | name <- entryNames m
-      ]
-
-leaf :: ModuleName.Canonical -> String -> Core.Type -> Core.Bind
-leaf (ModuleName.Canonical _ raw) name tipe =
-  let sp = zeroSpan
-      string = Core.TCon (Core.QualName ModuleName.string Name.string) []
-      platformLeaf =
-        Core.Expr
-          (Core.EGlobal (Core.QualName kernelPlatform (Name.fromChars "leaf")))
-          (Core.TFun [string] tipe)
-          sp
-      home_ = Core.Expr (Core.ELit (Core.LString (Utf8.fromChars (ModuleName.toChars raw)))) string sp
-   in Core.Bind
-        (Core.Binder (Name.fromChars name) (generalize tipe) sp)
-        (Core.Expr (Core.EApp platformLeaf [home_]) tipe sp)
-
--- | @Foo.MyCmd msg -> Platform.Cmd.Cmd msg@, or the @Sub@ of the same shape.
-effectType :: ModuleName.Canonical -> Can.Manager -> String -> Core.Type
-effectType home m name =
-  let msg = Core.TVar msgVar
-      effect tipe = Core.TCon (Core.QualName home tipe) [msg]
-      wrapper modul tipe = Core.TCon (Core.QualName modul tipe) [msg]
-   in case (m, name) of
-        (Can.Cmd cmd, _) -> Core.TFun [effect cmd] (wrapper ModuleName.cmd Name.cmd)
-        (Can.Sub sub, _) -> Core.TFun [effect sub] (wrapper ModuleName.sub Name.sub)
-        (Can.Fx cmd _, "command") -> Core.TFun [effect cmd] (wrapper ModuleName.cmd Name.cmd)
-        (Can.Fx _ sub, _) -> Core.TFun [effect sub] (wrapper ModuleName.sub Name.sub)
-
-generalize :: Core.Type -> Core.Type
-generalize = Core.TForall [msgVar] []
-
--- | The message variable's name. `Type.Constrain.Module` uses a fresh
--- unification variable and never names it; Core needs a name and C6 needs it to
--- be the same one every time.
-msgVar :: Name
-msgVar = Name.fromChars "msg"
-
-kernelPlatform :: ModuleName.Canonical
-kernelPlatform = ModuleName.Canonical Pkg.kernel Name.platform

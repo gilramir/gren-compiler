@@ -32,7 +32,8 @@
 -- And one thing it produces that is a measurement rather than an output:
 -- '_progMissing', the names reachable code refers to and no Core module
 -- defines. It is every kernel function and nothing else now — effect managers
--- closed at C17 and ports at C18 — which is C16's decision that kernel
+-- and ports, which C17 and C18 closed, left with @Platform@ (@m1b-source.md@
+-- §SO19) — which is C16's decision that kernel
 -- JavaScript stays in the build system, and the list is what says so rather
 -- than a claim that it does.
 module Core.Program
@@ -53,7 +54,7 @@ where
 
 import Core.AST qualified as Core
 import Core.Order qualified as Order
-import Core.Refs (Refs (..), ctor, global, mainRefs, portRefs, refsIn, strictIn, strictPort)
+import Core.Refs (Refs (..), ctor, global, refsIn, strictIn)
 import Data.ByteString.Builder qualified as B
 import Data.List qualified as List
 import Data.Map (Map)
@@ -71,8 +72,8 @@ import Gren.Package qualified as Pkg
 data Program = Program
   { _progRoots :: [Core.QualName],
     -- | Everything the program is made of, in link order: one list, because a
-    -- backend emits into one file and the order between a binding, a port and a
-    -- kernel module is exactly what stops a name being used before it is
+    -- backend emits into one file and the order between a binding, an extern
+    -- and a kernel module is exactly what stops a name being used before it is
     -- defined. @compiler#387@ is what that costs when it is got wrong. The three
     -- fields below are views of this one.
     _progLinked :: [Linked],
@@ -85,14 +86,6 @@ data Program = Program
     _progData :: [Core.DataDecl],
     -- | Every record field named by reachable code.
     _progFields :: Set Name,
-    -- | The @effect module@ managers a runtime has to register, because an entry
-    -- binding of each is reachable. Empty once P3 lands.
-    _progManagers :: [(ModuleName.Canonical, Core.Manager)],
-    -- | The reachable @port@s, in link order among themselves. A port is a
-    -- declaration and not a 'Core.AST.Bind', so it is not in '_progBindings';
-    -- it is ordered with them all the same, so that a backend emitting a port
-    -- has already emitted the converter's dependencies. Empty once P3 lands.
-    _progPorts :: [(ModuleName.Canonical, Core.Port)],
     -- | The kernel modules reachable code reaches, in link order among the
     -- rest. Empty once @ffi.md@ F7 retires the kernel.
     _progKernels :: [Name],
@@ -109,12 +102,11 @@ data Program = Program
 
 -- | One thing a backend emits, under the order it is emitted in.
 --
--- A port, a kernel module and an extern are not bindings and cannot be ('Core.AST.Port' is
--- a declaration, C18; kernel JavaScript is not Core at all, C16), but all three
--- define names the others use, so all three are ordered together.
+-- A kernel module and an extern are not bindings and cannot be (kernel
+-- JavaScript is not Core at all, C16; an extern is a declaration, D196), but
+-- both define names the others use, so all three are ordered together.
 data Linked
   = LBind !Core.QualName !Core.Bind
-  | LPort !ModuleName.Canonical !Core.Port
   | LKernel !Name
   | LExtern !ModuleName.Canonical !Core.Extern
 
@@ -131,10 +123,10 @@ data Backend = Backend
     _backendKernels :: Map Name Kernel,
     -- | Extra edges, from a declaration to the name a runtime enters it through.
     --
-    -- A @port@'s runtime constructor lives in a kernel module and reads
-    -- module-level state in it, so the chunk has to be emitted first; a static
-    -- @main@ is handed to one. __Which__ name that is is the backend's business
-    -- and Core names none of them (C16, C18, C19), so the backend says so here.
+    -- A @main@ is handed to a kernel function, and an argument-less extern's
+    -- wrapper is built out of one. __Which__ name that is is the backend's
+    -- business and Core names none of them (C16, C19), so the backend says so
+    -- here.
     --
     -- Edges and not roots: a root makes the kernel module reachable and says
     -- nothing about /when/, and when is the whole content of @compiler#387@.
@@ -205,8 +197,8 @@ data MissingKind
   | -- | A @Debug@ value, which the frontend routes through its own module.
     MissingDebug
   | -- | Anything else, which is now a lowering bug: every value a program can
-    -- refer to is either a binding, a constructor, a datatype or a port, and
-    -- Core carries all four.
+    -- refer to is either a binding, a constructor, a datatype or an extern,
+    -- and Core carries all four.
     MissingValue
   deriving (Eq, Ord, Show)
 
@@ -247,23 +239,19 @@ chooseExterns language bodies =
 link :: Backend -> Map ModuleName.Canonical Core.Module -> [Core.QualName] -> Program
 link backend modules roots =
   let binds = Map.fromList (concatMap moduleBindings (Map.toAscList modules))
-      ports = Map.fromList (concatMap modulePorts (Map.toAscList modules))
       externs = Map.fromList (concatMap moduleExterns (Map.toAscList modules))
       kernelNodes = Map.mapKeys kernelName (_backendKernels backend)
-      -- A port, a kernel module and an extern define a name the same way a binding does, so
-      -- reachability and the order are computed over the three together and
+      -- A kernel module and an extern define a name the same way a binding does,
+      -- so reachability and the order are computed over the three together and
       -- split apart afterwards.
-      defined = Set.unions [Map.keysSet binds, Map.keysSet ports, Map.keysSet kernelNodes, Map.keysSet externs]
+      defined = Set.unions [Map.keysSet binds, Map.keysSet kernelNodes, Map.keysSet externs]
       ctorOwner = Map.fromList (concatMap moduleCtors (Map.toAscList modules))
       datas = Map.fromList (concatMap moduleDatas (Map.toAscList modules))
       refs =
         Map.unionsWith
           (<>)
-          [ managerRefs modules,
-            entryRefs modules,
-            _backendEdges backend,
+          [ _backendEdges backend,
             Map.map (refsIn . Core._bindValue) binds,
-            Map.map (portRefs . snd) ports,
             Map.map (kernelRefs ctorOwner) kernelNodes
           ]
 
@@ -283,17 +271,13 @@ link backend modules roots =
         Map.unionsWith
           Set.union
           [ Map.map (Set.map resolve . strictIn . Core._bindValue) binds,
-            -- A port's runtime call runs when the port is emitted, so the kernel
-            -- module it lands in is strict too — which is the ordering
-            -- @compiler#387@ is about, stated where every other order is.
-            Map.map (Set.map resolve . strictPort . snd) ports,
-            Map.map (Set.map resolve . _refGlobals) (Map.restrictKeys (_backendEdges backend) (Map.keysSet ports)),
-            -- The same for an extern: an argument-less one is a value the
-            -- wrapper builds when it is emitted, out of the runtime the backend
-            -- names.
+            -- An argument-less extern is a value the wrapper builds when it is
+            -- emitted, out of the runtime the backend names, so the kernel
+            -- module it lands in is strict — the ordering @compiler#387@ was
+            -- about for ports, stated where every other order is.
             Map.map (Set.map resolve . _refGlobals) (Map.restrictKeys (_backendEdges backend) (Map.keysSet externs))
           ]
-      items = Maybe.mapMaybe (linkedItem binds ports externs) (concatMap (settle strict) groups)
+      items = Maybe.mapMaybe (linkedItem binds externs) (concatMap (settle strict) groups)
    in Program
         { _progRoots = roots,
           _progLinked = items,
@@ -301,27 +285,11 @@ link backend modules roots =
           _progRecursive = [group | group <- groups, length group > 1],
           _progData = reachedDatas,
           _progFields = Set.unions (map _refFields (Map.elems reachedRefs)),
-          _progManagers = reachedManagers reached modules,
-          _progPorts = [(home, p) | LPort home p <- items],
           _progKernels = [short | LKernel short <- items],
           _progExterns = [(home, e) | LExtern home e <- items],
           _progMains = mains modules roots,
           _progMissing = missing defined ctorOwner datas roots reachedRefs
         }
-
--- | The extra edges a module's @main@ declaration puts in the graph: from the
--- @main@ binding to whatever its flags decoder names (C19).
---
--- Edges rather than roots, exactly as 'managerRefs' are: a @main@ that nothing
--- links from is not an entry point, and a decoder is needed precisely when the
--- @main@ it decodes for is emitted.
-entryRefs :: Map ModuleName.Canonical Core.Module -> Map Core.QualName Refs
-entryRefs modules =
-  Map.fromList
-    [ (Core.QualName home Name._main, mainRefs m)
-    | (home, modul) <- Map.toAscList modules,
-      Just m <- [Core._moduleMain modul]
-    ]
 
 -- | Each root's @main@, in root order.
 --
@@ -367,75 +335,22 @@ resolve q =
 -- exactly that reason.
 linkedItem ::
   Map Core.QualName Core.Bind ->
-  Map Core.QualName (ModuleName.Canonical, Core.Port) ->
   Map Core.QualName (ModuleName.Canonical, Core.Extern) ->
   Core.QualName ->
   Maybe Linked
-linkedItem binds ports externs q =
+linkedItem binds externs q =
   case Map.lookup q binds of
     Just b -> Just (LBind q b)
     Nothing ->
-      case Map.lookup q ports of
-        Just (home, p) -> Just (LPort home p)
-        Nothing ->
-          case Map.lookup q externs of
-            Just (home, e) -> Just (LExtern home e)
-            Nothing -> LKernel <$> kernelHome q
-
--- | The extra edges an @effect module@'s manager puts in the graph: from each
--- entry binding — @command@, @subscription@ — to the five functions the manager
--- is assembled from.
---
--- They are edges rather than a separate root set for two reasons. Reaching
--- @Task.command@ is exactly what makes the @Task@ manager live, which is the
--- rule the old pipeline got from its @Opt.Link@ to @$fx$@; and a runtime
--- registers a manager at load time, reading those five names, so they have to be
--- emitted before the entry is — which is what an edge says and a root set does
--- not.
-managerRefs :: Map ModuleName.Canonical Core.Module -> Map Core.QualName Refs
-managerRefs modules =
-  Map.fromList
-    [ (entry, foldMap global (managerImpl m))
-    | modul <- Map.elems modules,
-      Just m <- [Core._moduleManager modul],
-      entry <- Core._managerEntries m
-    ]
-
--- | The functions a manager is assembled from, in the order a runtime wants
--- them.
-managerImpl :: Core.Manager -> [Core.QualName]
-managerImpl m =
-  [ Core._managerInit m,
-    Core._managerOnEffects m,
-    Core._managerOnSelfMsg m
-  ]
-    ++ Maybe.maybeToList (Core._managerCmdMap m)
-    ++ Maybe.maybeToList (Core._managerSubMap m)
-
--- | The managers a program has to register: the ones an entry binding reached.
-reachedManagers :: Set Core.QualName -> Map ModuleName.Canonical Core.Module -> [(ModuleName.Canonical, Core.Manager)]
-reachedManagers reached modules =
-  [ (home, m)
-  | (home, modul) <- Map.toAscList modules,
-    Just m <- [Core._moduleManager modul],
-    any (`Set.member` reached) (Core._managerEntries m)
-  ]
+      case Map.lookup q externs of
+        Just (home, e) -> Just (LExtern home e)
+        Nothing -> LKernel <$> kernelHome q
 
 moduleBindings :: (ModuleName.Canonical, Core.Module) -> [(Core.QualName, Core.Bind)]
 moduleBindings (home, m) =
   [(Core.QualName home (Core._binderName (Core._bindBinder b)), b) | b <- Core._moduleDefs m]
 
--- | A port, under the name it defines, with its module beside it — a backend
--- registering one needs the module for nothing but the record it builds, and
--- carrying it here saves every consumer a second lookup.
-modulePorts :: (ModuleName.Canonical, Core.Module) -> [(Core.QualName, (ModuleName.Canonical, Core.Port))]
-modulePorts (home, m) =
-  [ (Core.QualName home (Core._binderName (Core._portBinder p)), (home, p))
-  | p <- Core._modulePorts m
-  ]
-
--- | An extern, under the name it defines, with its module beside it, as
--- 'modulePorts' has.
+-- | An extern, under the name it defines, with its module beside it.
 moduleExterns :: (ModuleName.Canonical, Core.Module) -> [(Core.QualName, (ModuleName.Canonical, Core.Extern))]
 moduleExterns (home, m) =
   [ (Core.QualName home (Core._binderName (Core._externBinder e)), (home, e))
@@ -567,11 +482,6 @@ render p =
         ],
       "data " <> int (length (_progData p)) <> "\n",
       "fields " <> int (Set.size (_progFields p)) <> "\n",
-      "managers " <> int (length (_progManagers p)) <> "\n",
-      mconcat
-        [ "  " <> B.stringUtf8 (ModuleName.toChars raw) <> " " <> managerKind m <> " " <> B.stringUtf8 (List.intercalate ", " (map qualToChars (managerImpl m))) <> "\n"
-        | (ModuleName.Canonical _ raw, m) <- _progManagers p
-        ],
       "mains " <> int (length (_progMains p)) <> "\n",
       mconcat
         [ "  " <> B.stringUtf8 (ModuleName.toChars raw) <> " " <> mainKind m <> "\n"
@@ -591,11 +501,6 @@ render p =
               [ "  " <> B.stringUtf8 (ModuleName.toChars raw) <> "." <> B.stringUtf8 (Name.toChars (Core._binderName (Core._externBinder e))) <> "\n"
               | (ModuleName.Canonical _ raw, e) <- _progExterns p
               ],
-      "ports " <> int (length (_progPorts p)) <> "\n",
-      mconcat
-        [ "  " <> B.stringUtf8 (ModuleName.toChars raw) <> "." <> B.stringUtf8 (Name.toChars (Core._binderName (Core._portBinder port))) <> " " <> portFlow port <> "\n"
-        | (ModuleName.Canonical _ raw, port) <- _progPorts p
-        ],
       "missing " <> int (length (_progMissing p)) <> "\n",
       mconcat
         [ "  " <> kind (_missingKind m) <> " " <> qualB (_missingName m) <> " <- " <> qualB (_missingUsedBy m) <> "\n"
@@ -610,36 +515,12 @@ render p =
         MissingDebug -> "debug "
         MissingValue -> "value "
 
--- | Which way a port's payload crosses, and whether it crosses as bytes: the
--- two things a reader of the summary would otherwise have to open the Core to
--- find.
-portFlow :: Core.Port -> B.Builder
-portFlow (Core.Port _ flow) =
-  case flow of
-    Core.PortOut c -> "out " <> bytes c
-    Core.PortIn c -> "in " <> bytes c
-    Core.PortTask input output ->
-      "task " <> maybe "()" bytes input <> " -> " <> bytes output
-  where
-    bytes c = if Core._convBytes c then "bytes" else "json"
-
--- | Which of the four things a runtime does with @main@, and for a program
--- whether its flags cross as bytes: what a reader would otherwise open the Core
--- to find, as with 'portFlow'.
+-- | What a runtime does with @main@. There is one answer left (§SO19), and
+-- the line stays so that a later kind has somewhere to go.
 mainKind :: Core.Main -> B.Builder
 mainKind m =
   case m of
-    Core.MainString -> "string"
-    Core.MainHtml -> "html"
-    Core.MainProgram c -> "program " <> if Core._convBytes c then "bytes" else "json"
     Core.MainTask -> "task"
-
-managerKind :: Core.Manager -> B.Builder
-managerKind m =
-  case Core._managerKind m of
-    Core.ManagerCmd -> "cmd"
-    Core.ManagerSub -> "sub"
-    Core.ManagerFx -> "fx "
 
 qualB :: Core.QualName -> B.Builder
 qualB = B.stringUtf8 . qualToChars

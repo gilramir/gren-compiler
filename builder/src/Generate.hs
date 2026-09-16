@@ -192,30 +192,26 @@ kernelInfo chunks =
 
 -- | The kernel module each declaration's runtime call lands in.
 --
--- A @port@'s constructor is in the kernel @Platform@ module and registers the
--- port in a @var@ that module declares, so the chunk has to come first; a
--- @main : String@ is printed by kernel @Node@ and a @main : Html msg@ is handed
--- to kernel @VirtualDom@. None of those names is in Core and none should be —
--- C16 keeps kernel JavaScript in the build system, C18 and C19 keep the runtime
--- call out of the declaration — so the JS backend supplies them here, where the
--- backend is already chosen.
+-- A @main@ is handed to @_Scheduler_runMain@ (D72, @m1b-source.md@ §SO12),
+-- which is `core`'s and not `node`'s, because a program whose `main` is a
+-- `Task` need not depend on `node` at all, and the whole program to
+-- @_Platform_export@. A @Task@ extern's wrapper is the scheduler's binding
+-- (D193). None of those names is in Core and none should be — C16 keeps
+-- kernel JavaScript in the build system, and C19 keeps the runtime call out of
+-- the declaration — so the JS backend supplies them here, where the backend is
+-- already chosen.
 --
--- @compiler#387@ is the bug this prevents, and it is why these are edges rather
--- than roots: stock 0.6.6 emits a port's @var@ above the kernel @var@ it
--- registers itself in, because @Optimize.Module.addPort@ records the converter's
--- dependencies and not the module the generated call lands in.
+-- @compiler#387@ is why these are edges rather than roots: stock 0.6.6 emitted
+-- a port's @var@ above the kernel @var@ it registered itself in. Ports are gone
+-- (§SO19), and an argument-less extern is the same shape of problem.
 runtimeEdges :: Map.Map ModuleName.Canonical Core.Module -> Map.Map Core.QualName Refs.Refs
 runtimeEdges cores =
   Map.fromList $
     concat
-      [ [ (Core.QualName home (Core._binderName (Core._portBinder p)), kernel N.platform)
-        | p <- Core._modulePorts modul
+      [ [ (Core.QualName home N._main, kernel short)
+        | Just Core.MainTask <- [Core._moduleMain modul],
+          short <- [N.fromChars "Scheduler", N.platform]
         ]
-          ++ [ (Core.QualName home N._main, kernel short)
-             | Just m <- [Core._moduleMain modul],
-               short <- staticHomes m
-             ]
-          -- A @Task@ extern's wrapper is the scheduler's binding (D193).
           ++ [ (Core.QualName home (Core._binderName (Core._externBinder e)), kernel (N.fromChars "Scheduler"))
              | e <- Core._moduleExterns modul,
                not (Core._externPure e)
@@ -224,18 +220,6 @@ runtimeEdges cores =
       ]
   where
     kernel = Refs.global . Program.kernelName
-    staticHomes m =
-      case m of
-        Core.MainString -> [N.node]
-        Core.MainHtml -> [N.virtualDom]
-        Core.MainProgram _ -> []
-        -- `_Scheduler_runMain` (D72, @m1b-source.md@ §SO12). It is `core`'s
-        -- and not `node`'s, because a program whose `main` is a `Task` need not
-        -- depend on `node` at all. The other three reach `_Platform_export`,
-        -- which every entry point is handed to, through the kernel they land
-        -- in or through `Platform.worker`; a task reaches nothing else, so it
-        -- names `Platform` itself.
-        Core.MainTask -> [N.fromChars "Scheduler", N.platform]
 
 -- | The linked Core program (§J15).
 --

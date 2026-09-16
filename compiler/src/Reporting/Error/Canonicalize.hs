@@ -3,8 +3,6 @@
 module Reporting.Error.Canonicalize
   ( Error (..),
     BadArityContext (..),
-    InvalidPayload (..),
-    PortProblem (..),
     DuplicatePatternContext (..),
     PossibleNames (..),
     VarKind (..),
@@ -76,8 +74,9 @@ data Error
   | DuplicateAliasArg Name.Name Name.Name A.Region A.Region
   | DuplicateUnionArg Name.Name Name.Name A.Region A.Region
   | DuplicatePattern DuplicatePatternContext Name.Name A.Region A.Region
-  | EffectNotFound A.Region Name.Name
-  | EffectFunctionNotFound A.Region Name.Name
+  | -- | An @effect module@ (@m1b-source.md@ §SO19). Effect managers are gone,
+    -- and the parser still takes the header until 6c.
+    EffectModule A.Region
   | ExportDuplicate Name.Name A.Region A.Region
   | ExportNotFound A.Region VarKind Name.Name [Name.Name]
   | ExportOpenAlias A.Region Name.Name
@@ -94,8 +93,8 @@ data Error
   | NotFoundType A.Region (Maybe Name.Name) Name.Name PossibleNames
   | NotFoundVariant A.Region (Maybe Name.Name) Name.Name PossibleNames
   | NotFoundBinop A.Region Name.Name (Set.Set Name.Name)
-  | PortPayloadInvalid A.Region Name.Name Can.Type InvalidPayload
-  | PortTypeInvalid A.Region Name.Name PortProblem
+  | -- | A @port@, which left with effect managers (§SO19).
+    PortDeclaration A.Region Name.Name
   | PrimOutsideCore A.Region Name.Name
   | PrimUnknown A.Region Name.Name
   | PrimHasNoTypeYet A.Region Name.Name
@@ -125,25 +124,6 @@ data DuplicatePatternContext
   | DPCaseBranch
   | DPLetBinding
   | DPDestruct
-
-data InvalidPayload
-  = ExtendedRecord
-  | Function
-  | TypeVariable Name.Name
-  | UnsupportedType Name.Name
-
-data PortProblem
-  = CmdNoArg
-  | CmdExtraArgs Int
-  | CmdBadMsg
-  | SubBad
-  | TaskNoArg
-  | TaskOneArg
-  | TaskExtraArgs Int
-  | TaskExtraInputs Int
-  | TaskBadError
-  | TaskBadPayload
-  | NotCmdOrSub
 
 data PossibleNames = PossibleNames
   { _locals :: Set.Set Name.Name,
@@ -313,27 +293,22 @@ toReport source err =
             "This `let` expression defines `" <> Name.toChars name <> "` more than once!"
           DPDestruct ->
             "This pattern contains multiple `" <> Name.toChars name <> "` variables."
-    EffectNotFound region name ->
-      Report.Report "EFFECT PROBLEM" region [] $
+    EffectModule region ->
+      Report.Report "EFFECT MODULE" region [] $
         Code.toSnippet
           source
           region
           Nothing
-          ( D.reflow $
-              "You have declared that `" ++ Name.toChars name ++ "` is an effect type:",
-            D.reflow $
-              "But I cannot find a custom type named `" ++ Name.toChars name ++ "` in this file!"
-          )
-    EffectFunctionNotFound region name ->
-      Report.Report "EFFECT PROBLEM" region [] $
-        Code.toSnippet
-          source
-          region
-          Nothing
-          ( D.reflow $
-              "This kind of effect module must define a `" ++ Name.toChars name ++ "` function.",
-            D.reflow $
-              "But I cannot find `" ++ Name.toChars name ++ "` in this file!"
+          ( D.reflow "This module is an `effect module`, and Geng has no effect managers:",
+            D.stack
+              [ D.reflow
+                  "A module that talks to the host declares an `@extern` for each thing it does,\
+                  \ and answers a `Task`. Events the host produces arrive through a `Source`,\
+                  \ which a task reads.",
+                D.reflow
+                  "Remove `effect` and the `where` clause from the header, and write the manager's\
+                  \ commands and subscriptions as tasks."
+              ]
           )
     ExportDuplicate name r1 r2 ->
       let messageThatEndsWithPunctuation =
@@ -1013,156 +988,18 @@ toReport source err =
                                       alts ->
                                         ["Maybe", "you", "want"] ++ D.commaSep "or" format alts ++ ["instead?"]
                               )
-    PortPayloadInvalid region portName _badType invalidPayload ->
-      let formatDetails (aBadKindOfThing, elaboration) =
-            Report.Report "PORT ERROR" region [] $
-              Code.toSnippet
-                source
-                region
-                Nothing
-                ( D.reflow $
-                    "The `" <> Name.toChars portName <> "` port is trying to transmit " <> aBadKindOfThing <> ":",
-                  D.stack
-                    [ elaboration,
-                      D.link
-                        "Hint"
-                        "Ports are not a traditional FFI, so if you have tons of annoying ports, definitely read"
-                        "ports"
-                        "to learn how they are meant to work. They require a different mindset!"
-                    ]
-                )
-       in formatDetails $
-            case invalidPayload of
-              ExtendedRecord ->
-                ( "an extended record",
-                  D.reflow $
-                    "But the exact shape of the record must be known at compile time. No type variables!"
-                )
-              Function ->
-                ( "a function",
-                  D.reflow $
-                    "But functions cannot be sent in and out ports. If we allowed functions in from JS\
-                    \ they may perform some side-effects. If we let functions out, they could produce\
-                    \ incorrect results because Gren optimizations assume there are no side-effects."
-                )
-              TypeVariable name ->
-                ( "an unspecified type",
-                  D.reflow $
-                    "But type variables like `"
-                      <> Name.toChars name
-                      <> "` cannot flow through ports.\
-                         \ I need to know exactly what type of data I am getting, so I can guarantee that\
-                         \ unexpected data cannot sneak in and crash the Gren program."
-                )
-              UnsupportedType name ->
-                ( "a `" <> Name.toChars name <> "` value",
-                  D.stack
-                    [ D.reflow $ "I cannot handle that. The types that CAN flow in and out of Gren include:",
-                      D.indent 4 $
-                        D.reflow $
-                          "Ints, Floats, Bools, Strings, Maybes, Lists, Arrays,\
-                          \ records, and JSON values.",
-                      D.reflow $
-                        "Since JSON values can flow through, you can use JSON encoders and decoders\
-                        \ to allow other types through as well. More advanced users often just do\
-                        \ everything with encoders and decoders for more control and better errors."
-                    ]
-                )
-    PortTypeInvalid region name portProblem ->
-      let formatDetails (before, after) =
-            Report.Report "BAD PORT" region [] $
-              Code.toSnippet source region Nothing $
-                ( D.reflow before,
-                  D.stack
-                    [ after,
-                      D.link
-                        "Hint"
-                        "Read"
-                        "ports"
-                        "for more advice. For example, do not end up with one port per JS function!"
-                    ]
-                )
-       in formatDetails $
-            case portProblem of
-              CmdNoArg ->
-                ( "The `" <> Name.toChars name <> "` port cannot be just a command.",
-                  D.reflow
-                    "It can be (() -> Cmd msg) if you just need to trigger a JavaScript\
-                    \ function, but there is often a better way to set things up."
-                )
-              CmdExtraArgs n ->
-                ( "The `" <> Name.toChars name <> "` port can only send ONE value out to JavaScript.",
-                  let theseItemsInSomething
-                        | n == 2 = "both of these items into a record"
-                        | n == 3 = "these " ++ show n ++ " items into a record"
-                        | otherwise = "these " ++ show n ++ " items into a record"
-                   in D.reflow $
-                        "You can put " ++ theseItemsInSomething ++ " to send them out though."
-                )
-              CmdBadMsg ->
-                ( "The `" <> Name.toChars name <> "` port cannot send any messages to the `update` function.",
-                  D.reflow
-                    "It must produce a (Cmd msg) type. Notice the lower case `msg` type\
-                    \ variable. The command will trigger some JS code, but it will not send\
-                    \ anything particular back to Gren."
-                )
-              SubBad ->
-                ( "There is something off about this `" <> Name.toChars name <> "` port declaration.",
-                  D.stack
-                    [ D.reflow
-                        "To receive messages from JavaScript, you need to define a port like this:",
-                      D.indent 4 $
-                        D.dullyellow $
-                          D.fromChars $
-                            "port " <> Name.toChars name <> " : (Int -> msg) -> Sub msg",
-                      D.reflow
-                        "Now every time JS sends an `Int` to this port, it is converted to a `msg`.\
-                        \ And if you subscribe, those `msg` values will be piped into your `update`\
-                        \ function. The only thing you can customize here is the `Int` type."
-                    ]
-                )
-              TaskNoArg ->
-                ( "The `" <> Name.toChars name <> "` port is missing arguments to the `Task` type.",
-                  D.reflow
-                    "You need to specify `Task.PortError` as the first argument, and the second argument\
-                    \ should be what you expect to receive when the `Task` is resolved."
-                )
-              TaskOneArg ->
-                ( "The `" <> Name.toChars name <> "` port is missing an argument in the `Task` type.",
-                  D.reflow
-                    "You need to specify the type you expect to receive when the `Task` is resolved."
-                )
-              TaskExtraArgs num ->
-                ( "The `" <> Name.toChars name <> "` port is defined with too many type arguments (" <> show num <> ").",
-                  D.reflow
-                    "`Task` only accepts two arguments: the error type and the success type."
-                )
-              TaskExtraInputs num ->
-                ( "The `" <> Name.toChars name <> "` port is defined with too many function arguments (" <> show num <> ").",
-                  D.reflow
-                    "A task-based port can accept at most 1 argument."
-                )
-              TaskBadError ->
-                ( "The `"
-                    <> Name.toChars name
-                    <> "` port needs to be specified with `Json.Encode.Value` as the\
-                       \ first argument for the `Task` type.",
-                  D.reflow
-                    "Anything can go wrong when you execute code in JavaScript. Since we cannot promise\
-                    \ the shape of the error, we use `Json.Encode.Value` as the error type, as it's the\
-                    \ most flexible solution."
-                )
-              TaskBadPayload ->
-                ( "The `" <> Name.toChars name <> "` port is defined with an unsupported success value.",
-                  D.reflow
-                    "Only valid JSON values can be resolved by task-based ports."
-                )
-              NotCmdOrSub ->
-                ( "I am confused about the `" <> Name.toChars name <> "` port declaration.",
-                  D.reflow
-                    "Ports need to produce a command (Cmd), a subscription (Sub) or a task but\
-                    \ this is none of those. I do not know how to handle this."
-                )
+    PortDeclaration region name ->
+      Report.Report "PORT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "The `" ++ Name.toChars name ++ "` port cannot be declared, because Geng has no ports:",
+            D.reflow
+              "A call into JavaScript is an `@extern` that answers a `Task`, and values JavaScript\
+              \ sends in arrive through a `Source`, which a task reads."
+          )
     PrimOutsideCore region name ->
       Report.Report "PRIMITIVE OUTSIDE CORE" region [] $
         Code.toSnippet

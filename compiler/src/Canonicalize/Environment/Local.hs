@@ -70,7 +70,7 @@ addVars module_ classes (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
 -- would then have two answers. So the duplicate check runs over both and only
 -- the values are kept.
 collectVars :: Src.Module -> Classes -> Result i w (Map.Map Name.Name Env.Var)
-collectVars (Src.Module _ _ _ _ values classes _ _ _ _ _ _ effects _) canClasses =
+collectVars (Src.Module _ _ _ _ values classes _ _ _ _ _ _ _ _) canClasses =
   let addDecl dict (A.At _ (Src.Value (A.At region name) _ _ _ _)) =
         Dups.insert name region (Env.TopLevel region) dict
       addMethod dict (A.At _ (Src.Class _ _ methods _)) =
@@ -80,31 +80,11 @@ collectVars (Src.Module _ _ _ _ values classes _ _ _ _ _ _ effects _) canClasses
       dups =
         List.foldl'
           addDecl
-          (List.foldl' addMethod (toEffectDups effects) (fmap snd classes))
+          (List.foldl' addMethod Dups.none (fmap snd classes))
           (fmap snd values)
    in do
         both <- Dups.detect Error.DuplicateDecl dups
         Result.ok (Map.difference both (methodIndex canClasses))
-
-toEffectDups :: Src.Effects -> Dups.Dict Env.Var
-toEffectDups effects =
-  case effects of
-    Src.NoEffects ->
-      Dups.none
-    Src.Ports ports _ ->
-      let addPort dict (Src.Port (A.At region name) _) =
-            Dups.insert name region (Env.TopLevel region) dict
-       in List.foldl' addPort Dups.none (fmap snd ports)
-    Src.Manager _ manager _ ->
-      case manager of
-        Src.Cmd (A.At region _) _ ->
-          Dups.one "command" region (Env.TopLevel region)
-        Src.Sub (A.At region _) _ ->
-          Dups.one "subscription" region (Env.TopLevel region)
-        Src.Fx (A.At regionCmd _) (A.At regionSub _) _ ->
-          Dups.union
-            (Dups.one "command" regionCmd (Env.TopLevel regionCmd))
-            (Dups.one "subscription" regionSub (Env.TopLevel regionSub))
 
 -- ADD CLASSES
 

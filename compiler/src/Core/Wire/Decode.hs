@@ -231,6 +231,22 @@ next name tag wire body =
               _ -> failAt here ("field " ++ show tag ++ " has the wrong wire type")
       _ -> pure Nothing
 
+-- | A field the schema has deleted and marked @reserved@ (@m1a-wire.md@ §B10).
+--
+-- Without this a producer that still writes one is told the field is out of
+-- order, since its tag is below the message's highest; the truth is that it is
+-- from before the deletion, and that is what a reader of the error needs.
+removed :: String -> Word32 -> P ()
+removed name tag =
+  do
+    here <- offset
+    peeked <- peekKey
+    case peeked of
+      Just k
+        | keyTag k == tag ->
+            failAt here ("field " ++ show tag ++ " (" ++ name ++ ") was deleted from the schema and is reserved")
+      _ -> pure ()
+
 -- | A length-delimited payload, read by a parser that must consume all of it.
 submessage :: P a -> P a
 submessage body =
@@ -452,15 +468,6 @@ qual name tag =
     case got of
       Nothing -> failP ("field " ++ show tag ++ " (" ++ name ++ ") is missing")
       Just i -> resolveQual i
-
--- | An @optional@ qualified name.
-optQual :: String -> Word32 -> P (Maybe QualName)
-optQual name tag =
-  do
-    got <- next name tag WVarint varint
-    case got of
-      Nothing -> pure Nothing
-      Just i -> Just <$> resolveQual i
 
 -- | @repeated uint32@ of qualified names, packed like 'repText'.
 repQual :: String -> Word32 -> P [QualName]
@@ -871,12 +878,6 @@ originFromCode 0 = Just Derived
 originFromCode 1 = Just Written
 originFromCode _ = Nothing
 
-managerKindFromCode :: Word32 -> Maybe ManagerKind
-managerKindFromCode 0 = Just ManagerCmd
-managerKindFromCode 1 = Just ManagerSub
-managerKindFromCode 2 = Just ManagerFx
-managerKindFromCode _ = Nothing
-
 classDeclP :: P ClassDecl
 classDeclP =
   message "ClassDecl" 4 $
@@ -940,8 +941,10 @@ moduleBodyP =
     defs <- rep "defs" 9 bindP
     defsRec <- rep "defs_rec" 10 recGroupP
     exports <- repQual "exports" 11
-    manager <- optMsg "manager" 12 managerP
-    ports <- rep "ports" 13 portP
+    -- Effect managers and ports left with @Platform@ (@m1b-source.md@ §SO19,
+    -- D274).
+    removed "manager" 12
+    removed "ports" 13
     main_ <- optMsg "main" 14 mainP
     here <- offset
     externs <- rep "externs" 15 externP
@@ -963,8 +966,6 @@ moduleBodyP =
           _moduleDefs = defs,
           _moduleDefsRec = defsRec,
           _moduleExports = exports,
-          _moduleManager = manager,
-          _modulePorts = ports,
           _moduleMain = main_,
           _moduleExterns = externs
         }
@@ -1011,82 +1012,18 @@ externLanguageFromCode _ = Nothing
 recGroupP :: P [QualName]
 recGroupP = message "RecGroup" 1 (repQual "names" 1)
 
--- | C19's well-formedness rule, which the schema cannot state: @flags@ is
--- present exactly when the kind is @MAIN_KIND_PROGRAM@.
+-- | C19. One kind is left, and the others' values are reserved (§SO19, D274);
+-- so is @flags@, which only a @Program@ main carried.
 mainP :: P Main
 mainP =
   message "Main" 2 $
     do
       here <- offset
       code <- defaulted "kind" 1 WVarint (0 :: Word64) varint
-      flags <- optMsg "flags" 2 converterP
-      case (code, flags) of
-        (0, Nothing) -> pure MainString
-        (1, Nothing) -> pure MainHtml
-        (2, Just converter) -> pure (MainProgram converter)
-        (3, Nothing) -> pure MainTask
-        (2, Nothing) -> failAt here "a Program main has no flags converter"
-        (_, Just _) -> failAt here "only a Program main may carry a flags converter"
+      removed "flags" 2
+      case code of
+        3 -> pure MainTask
         _ -> failAt here ("no such main kind: " ++ show code)
-
--- | C17's: @cmd_map@ is present for CMD and FX, @sub_map@ for SUB and FX.
-managerP :: P Manager
-managerP =
-  message "Manager" 7 $
-    do
-      here <- offset
-      kind <- enum_ "kind" 1 managerKindFromCode
-      entries <- repQual "entries" 2
-      init_ <- qual "init" 3
-      onEffects <- qual "on_effects" 4
-      onSelfMsg <- qual "on_self_msg" 5
-      cmdMap <- optQual "cmd_map" 6
-      subMap <- optQual "sub_map" 7
-      let wantsCmd = kind /= ManagerSub
-      let wantsSub = kind /= ManagerCmd
-      when (wantsCmd /= isJust' cmdMap) $
-        failAt here "cmd_map is present exactly for a cmd or fx manager"
-      when (wantsSub /= isJust' subMap) $
-        failAt here "sub_map is present exactly for a sub or fx manager"
-      pure (Manager kind entries init_ onEffects onSelfMsg cmdMap subMap)
-
-isJust' :: Maybe a -> Bool
-isJust' Nothing = False
-isJust' (Just _) = True
-
-portP :: P Port
-portP =
-  message "Port" 2 $
-    do
-      binder <- msg "binder" 1 binderP
-      flow <- msg "flow" 2 portFlowP
-      pure (Port binder flow)
-
-portFlowP :: P PortFlow
-portFlowP =
-  message "PortFlow" 3 $
-    oneof
-      "flow"
-      [ (1, WBytes, PortOut <$> submessage converterP),
-        (2, WBytes, PortIn <$> submessage converterP),
-        (3, WBytes, submessage portTaskP)
-      ]
-
-portTaskP :: P PortFlow
-portTaskP =
-  message "PortTask" 2 $
-    do
-      input <- optMsg "input" 1 converterP
-      payload <- msg "payload" 2 converterP
-      pure (PortTask input payload)
-
-converterP :: P Converter
-converterP =
-  message "Converter" 2 $
-    do
-      isBytes <- bool_ "bytes" 1
-      code <- msg "code" 2 exprP
-      pure (Converter isBytes code)
 
 -- EXPRESSIONS
 

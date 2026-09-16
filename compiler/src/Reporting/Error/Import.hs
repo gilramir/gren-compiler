@@ -8,6 +8,7 @@ module Reporting.Error.Import
 where
 
 import Data.Map qualified as Map
+import Data.Name qualified as Name
 import Data.Set qualified as Set
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
@@ -34,9 +35,41 @@ data Problem
 
 -- TO REPORT
 
+-- | The modules that left with effect managers (@m1b-source.md@ §SO19), which a
+-- program written for Gren imports and deserves to be told about rather than
+-- offered a list of names that look alike.
+removedPlatformModules :: [ModuleName.Raw]
+removedPlatformModules =
+  map Name.fromChars ["Platform", "Platform.Cmd", "Platform.Sub"]
+
 toReport :: Code.Source -> Error -> Report.Report
 toReport source (Error region name unimportedModules problem) =
   case problem of
+    NotFound
+      | name `elem` removedPlatformModules ->
+          Report.Report "MODULE REMOVED" region [] $
+            Code.toSnippet
+              source
+              region
+              Nothing
+              ( D.reflow $
+                  "You are trying to import `" ++ ModuleName.toChars name ++ "`, and Geng has no such module:",
+                D.stack
+                  [ D.reflow
+                      "`Platform`, `Platform.Cmd` and `Platform.Sub` were how a program became a\
+                      \ model, an update and subscriptions. Geng has none of the three, nor effect\
+                      \ managers or ports. A program is a `main : Task Never {}`, and it ends when\
+                      \ the task completes:",
+                    D.indent 4 $
+                      D.vcat
+                        [ "main : Task Never {}",
+                          "main =",
+                          "    Console.write \"Hello!\\n\""
+                        ],
+                    D.reflow
+                      "What a subscription delivered arrives through a `Source`, which a task reads."
+                  ]
+              )
     NotFound ->
       Report.Report "MODULE NOT FOUND" region [] $
         Code.toSnippet

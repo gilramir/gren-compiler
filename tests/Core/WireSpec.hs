@@ -13,9 +13,9 @@
 -- literals, because D2's sized integers and @Float32@ arrive at M1b.
 --
 -- So this file builds them by hand. Every constructor of 'Expr_', 'Pattern',
--- 'Literal' and 'CrashKind', plus the three declarations C17, C18 and C19 added
--- after C10 was written — 'Manager', 'Port' and 'Main' — in one module that is
--- encoded, decoded and compared.
+-- 'Literal' and 'CrashKind', plus 'Main', which C19 added after C10 was written,
+-- in one module that is encoded, decoded and compared. C17's 'Manager' and C18's
+-- 'Port' were here too until they left with @Platform@ (@m1b-source.md@ §SO19).
 --
 -- The comparison is structural equality, which the round-trip needs and the
 -- byte comparison in the harness covers from the other side: a field written at
@@ -64,12 +64,6 @@ spec = do
 
     it "carries a module with every crash kind" $
       roundTrip (moduleWith (map (bindOf . crash) everyCrash))
-
-    it "carries an effect manager" $
-      roundTrip ((moduleWith []) {_moduleManager = Just manager})
-
-    it "carries every port flow, including the input-less task port" $
-      roundTrip ((moduleWith []) {_modulePorts = ports})
 
     it "carries externs in every language, pure and not (D196)" $
       roundTrip ((moduleWith []) {_moduleExterns = externs})
@@ -316,8 +310,6 @@ moduleWith defs =
       _moduleDefs = defs,
       _moduleDefsRec = [[qual "a", qual "b"]],
       _moduleExports = [qual "b"],
-      _moduleManager = Nothing,
-      _modulePorts = [],
       _moduleMain = Nothing,
       _moduleExterns = []
     }
@@ -416,35 +408,7 @@ refused m =
         Right _ -> expectationFailure "the reader accepted an extern it should refuse"
 
 everyMain :: [Main]
-everyMain = [MainString, MainHtml, MainProgram converter, MainTask]
-
-converter :: Converter
-converter = Converter False var
-
-bytesConverter :: Converter
-bytesConverter = Converter True var
-
--- | One of each flow, including C18's input-less task port — the case where a
--- runtime's own spelling of "absent" would otherwise have had to enter Core.
-ports :: [Port]
-ports =
-  [ Port (binder "out") (PortOut converter),
-    Port (binder "in") (PortIn bytesConverter),
-    Port (binder "task") (PortTask (Just converter) converter),
-    Port (binder "taskNoInput") (PortTask Nothing converter)
-  ]
-
-manager :: Manager
-manager =
-  Manager
-    { _managerKind = ManagerFx,
-      _managerEntries = [qual "command", qual "subscription"],
-      _managerInit = qual "init",
-      _managerOnEffects = qual "onEffects",
-      _managerOnSelfMsg = qual "onSelfMsg",
-      _managerCmdMap = Just (qual "cmdMap"),
-      _managerSubMap = Just (qual "subMap")
-    }
+everyMain = [MainTask]
 
 dataDecl :: DataDecl
 dataDecl =

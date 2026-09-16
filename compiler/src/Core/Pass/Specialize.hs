@@ -548,9 +548,7 @@ conversion (Core.QualName home name)
 onExprs :: (Core.Expr -> Core.Expr) -> Core.Module -> Core.Module
 onExprs f modul =
   modul
-    { Core._moduleDefs = [Core.Bind b (f v) | Core.Bind b v <- Core._moduleDefs modul],
-      Core._modulePorts = map (port f) (Core._modulePorts modul),
-      Core._moduleMain = fmap (main_ f) (Core._moduleMain modul)
+    { Core._moduleDefs = [Core.Bind b (f v) | Core.Bind b v <- Core._moduleDefs modul]
     }
 
 -- | C14's order, recomputed, because the module gained bindings.
@@ -576,22 +574,6 @@ reorder home defs =
       | group <- Order.groups (Map.keys byName) deps
       ]
 
-port :: (Core.Expr -> Core.Expr) -> Core.Port -> Core.Port
-port f p = p {Core._portFlow = flow (Core._portFlow p)}
-  where
-    flow fl =
-      case fl of
-        Core.PortOut c -> Core.PortOut (conv c)
-        Core.PortIn c -> Core.PortIn (conv c)
-        Core.PortTask i o -> Core.PortTask (fmap conv i) (conv o)
-    conv c = c {Core._convCode = f (Core._convCode c)}
-
-main_ :: (Core.Expr -> Core.Expr) -> Core.Main -> Core.Main
-main_ f m =
-  case m of
-    Core.MainProgram c -> Core.MainProgram (c {Core._convCode = f (Core._convCode c)})
-    _ -> m
-
 -- | Every expression a module holds, for the two walks that have to agree about
 -- the set: 'demand' reads it and 'module_' rewrites it.
 --
@@ -601,14 +583,6 @@ main_ f m =
 exprsOf :: Core.Module -> [Core.Expr]
 exprsOf modul =
   map Core._bindValue (Core._moduleDefs modul)
-    ++ concatMap (converters . Core._portFlow) (Core._modulePorts modul)
-    ++ [Core._convCode c | Just (Core.MainProgram c) <- [Core._moduleMain modul]]
-  where
-    converters fl =
-      case fl of
-        Core.PortOut c -> [Core._convCode c]
-        Core.PortIn c -> [Core._convCode c]
-        Core.PortTask i o -> map Core._convCode (maybe [] pure i ++ [o])
 
 -- SUBSTITUTION
 

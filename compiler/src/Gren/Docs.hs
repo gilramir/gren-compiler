@@ -256,7 +256,7 @@ precDecoder =
 -- FROM MODULE
 
 fromModule :: Can.Module -> Either E.Error Module
-fromModule modul@(Can.Module _ exports docs _ _ _ _ _ _ _ _ _) =
+fromModule modul@(Can.Module _ exports docs _ _ _ _ _ _ _ _) =
   case exports of
     Can.ExportEverything region ->
       Left (E.ImplicitExposing region)
@@ -395,9 +395,9 @@ onlyInExports name (A.At region _) =
 -- CHECK DEFS
 
 checkDefs :: Map.Map Name.Name (A.Located Can.Export) -> Src.DocComment -> Map.Map Name.Name Src.DocComment -> Can.Module -> Either E.Error Module
-checkDefs exportDict overview comments (Can.Module name _ _ decls unions aliases _ _ infixes effects _ _) =
+checkDefs exportDict overview comments (Can.Module name _ _ decls unions aliases _ _ infixes _ _) =
   let types = gatherTypes decls Map.empty
-      info = Info comments types unions aliases infixes effects
+      info = Info comments types unions aliases infixes
    in case Result.run (Map.traverseWithKey (checkExport info) exportDict) of
         (_, Left problems) -> Left $ E.DefProblems (OneOrMore.destruct NE.List problems)
         (_, Right inserters) -> Right $ foldr ($) (emptyModule name overview) inserters
@@ -411,8 +411,7 @@ data Info = Info
     _iValues :: Map.Map Name.Name (Either A.Region Can.Type),
     _iUnions :: Map.Map Name.Name Can.Union,
     _iAliases :: Map.Map Name.Name Can.Alias,
-    _iBinops :: Map.Map Name.Name Can.Binop,
-    _iEffects :: Can.Effects
+    _iBinops :: Map.Map Name.Name Can.Binop
   }
 
 checkExport :: Info -> Name.Name -> A.Located Can.Export -> Result.Result i w E.DefProblem (Module -> Module)
@@ -451,12 +450,6 @@ checkExport info name (A.At region export) =
         comment <- getComment region name info
         Result.ok $ \m ->
           m {_unions = Map.insert name (Union comment tvars []) (_unions m)}
-    Can.ExportPort ->
-      do
-        tipe <- getType name info
-        comment <- getComment region name info
-        Result.ok $ \m ->
-          m {_values = Map.insert name (Value comment tipe) (_values m)}
 
 getComment :: A.Region -> Name.Name -> Info -> Result.Result i w E.DefProblem Comment
 getComment region name info =

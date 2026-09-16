@@ -52,9 +52,6 @@ module AST.Canonical
     Ctor (..),
     Exports (..),
     Export (..),
-    Effects (..),
-    Port (..),
-    Manager (..),
   )
 where
 
@@ -342,7 +339,6 @@ data Module = Module
     -- 'Gren.Interface', which is where the closure can be assembled (D122).
     _instances :: Map.Map InstanceKey Instance,
     _binops :: Map.Map Name Binop,
-    _effects :: Effects,
     -- | The extern declarations with a Geng body (D222, @m1b-json.md@ §O17),
     -- by name. Each one's definition is an ordinary 'TypedDef' in '_decls',
     -- and "Core.Lower.Module" makes it an extern entry beside its binding.
@@ -574,27 +570,6 @@ data Export
   | ExportClass
   | ExportUnionOpen
   | ExportUnionClosed
-  | ExportPort
-  deriving (Show)
-
--- EFFECTS
-
-data Effects
-  = NoEffects
-  | Ports (Map.Map Name Port)
-  | Manager A.Region A.Region A.Region Manager
-  deriving (Show)
-
-data Port
-  = Incoming {_freeVars :: FreeVars, _payload :: Type, _func :: Type}
-  | Outgoing {_freeVars :: FreeVars, _payload :: Type, _func :: Type}
-  | Task {_freeVars :: FreeVars, _input :: Maybe Type, _payload :: Type, _func :: Type}
-  deriving (Show)
-
-data Manager
-  = Cmd Name
-  | Sub Name
-  | Fx Name Name
   deriving (Show)
 
 -- BINARY
