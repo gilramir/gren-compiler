@@ -30,7 +30,6 @@ import Task exposing (Task)
 import Dict exposing (Dict)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
-import HttpClient
 import Bytes exposing (Bytes)
 import Terminal
 import Cli.Parser
@@ -39,16 +38,19 @@ import SemanticVersion exposing (SemanticVersion)
 import Json.Encode as Json
 
 
-main : Node.Program Model Msg
+{-| The front end is a task (D72): it reads its environment, does what the
+arguments ask, and ends with the status that answers, once standard output and
+error are written through. It was a `Node.defineProgram` whose messages only
+ever carried the next command (geng-lang `m1b-source.md` §SO18).
+-}
+main : Task Never {}
 main =
-    Node.defineProgram
-        { init = init
-        , update = update
-        , subscriptions = \_model -> Sub.none
-        }
+    Node.getEnvironment
+        |> Task.andThen start
+        |> Task.andThen Node.setExitCode
 
 
-type alias Model = 
+type alias Context =
     { args : Array String
     , stdout : Stream.Writable Bytes
     , stderr : Stream.Writable Bytes
@@ -59,394 +61,159 @@ type alias Model =
     , backendPath : Path
     , fsPermission : FileSystem.Permission
     , cpPermission : ChildProcess.Permission
-    , httpPermission : HttpClient.Permission
     , pathToString : Path -> String
     }
 
 
--- `Init.await`'s shape, for an ordinary task: `init` was an `Init.Task` chain
--- until D258 made minting a capability the application's rather than a type's.
-await : Task x a -> (a -> Task x b) -> Task x b
-await task fn =
-    Task.andThen fn task
-
-
-init : Node.Environment -> Task Never { model : Model, command : Cmd Msg }
-init env =
-    await FileSystem.initialize <| \fsPermission ->
-    await ChildProcess.initialize <| \cpPermission ->
-    await HttpClient.initialize <| \httpPermission ->
-    await Terminal.initialize <| \terminalConfig ->
-    await Node.getEnvironmentVariables <| \envVars ->
-    await (FileSystem.homeDirectory fsPermission) <| \homeDir ->
+start : Node.Environment -> Task Never Int
+start env =
+    Task.await FileSystem.initialize <| \fsPermission ->
+    Task.await ChildProcess.initialize <| \cpPermission ->
+    Task.await Terminal.initialize <| \terminalConfig ->
+    Task.await Node.getEnvironmentVariables <| \envVars ->
+    Task.await (FileSystem.homeDirectory fsPermission) <| \homeDir ->
         let
-            userArgs =
-                Array.dropFirst 2 env.args
-
             interactiveTerminal =
                 terminalConfig /= Nothing
-
-            useColor =
-                interactiveTerminal && not (Dict.member "NO_COLOR" envVars)
 
             cacheRoot =
                 Compiler.Paths.cacheRoot env.platform envVars homeDir Meta.version
 
-            backendBinary =
-                Compiler.Paths.backendBinary env.platform cacheRoot                
-
-            maybePaths =
+            -- Stock downloads its backend from gren-lang's releases. That
+            -- binary is stock Gren, never this compiler's backend, and saving
+            -- it under `geng` is the confusion D174 renamed the command to
+            -- end. So nothing is downloaded: the backend is `GENG_BIN`, or one
+            -- already put at the cache path.
+            backendPath =
                 when { platform = env.platform, override = Dict.get "GENG_BIN" envVars } is
                     { override = Just overridePath, platform = Node.Win32 } ->
-                        Just <|
-                            { remotePath = Nothing
-                            , localPath = Path.fromWin32String overridePath
-                            }
-                    
+                        Path.fromWin32String overridePath
+
                     { override = Just overridePath } ->
-                        Just <|
-                            { remotePath = Nothing
-                            , localPath = Path.fromPosixString overridePath
-                            }
+                        Path.fromPosixString overridePath
 
-                    -- Stock downloads its backend from gren-lang's releases.
-                    -- That binary is stock Gren, never this compiler's backend,
-                    -- and saving it under `geng` is the confusion D174 renamed
-                    -- the command to end. So nothing is downloaded: the backend
-                    -- is `GENG_BIN`, or one already put at the cache path.
                     _ ->
-                        Just
-                            { remotePath = Nothing
-                            , localPath = backendBinary
-                            }
+                        Compiler.Paths.backendBinary env.platform cacheRoot
 
-        in
-        Node.startProgram
-            { model =
-                { args = userArgs
+            context =
+                { args = Array.dropFirst 2 env.args
                 , stdout = env.stdout
                 , stderr = env.stderr
                 , stdin = env.stdin
                 , interactive = interactiveTerminal
-                , useColor = useColor
+                , useColor = interactiveTerminal && not (Dict.member "NO_COLOR" envVars)
                 , cacheRoot = cacheRoot
-                , backendPath =
-                    when maybePaths is
-                        Just paths ->
-                            paths.localPath
-
-                        Nothing ->
-                            backendBinary
+                , backendPath = backendPath
                 , fsPermission = fsPermission
                 , cpPermission = cpPermission
-                , httpPermission = httpPermission
                 , pathToString =
                     if env.platform == Node.Win32 then
                         Path.toWin32String
                     else
                         Path.toPosixString
                 }
-            , command =
-                when maybePaths is
-                    Just paths ->
-                        FileSystem.checkAccess fsPermission [] paths.localPath
-                            |> Task.attempt 
-                                (\result -> 
-                                    ExistanceChecked
-                                        { maybeRemotePath = paths.remotePath
-                                        , localPath = paths.localPath
-                                        , existanceResult = result
-                                        }
-                                )
-
-                    Nothing ->
-                        Stream.Log.line env.stderr "We currently don't support this platform/arch."
-                            |> Task.map (\_ -> Node.exitWithCode 1)
-                            |> Task.executeCmd
-            }
-
-
-type Msg
-    = ExistanceChecked 
-        { maybeRemotePath : Maybe String
-        , localPath : Path
-        , existanceResult : Result FileSystem.Error Path
-        }
-    | CompilerDownloaded 
-        { localPath : Path
-        , downloadResult : Result HttpClient.Error (HttpClient.Response (Stream.Readable Bytes))
-        }
-    | CompilerInstalled (Result CompilerInstalledError Path)
-    | CompilerInitialized { headless : Bool, backendStreams : ChildProcess.StreamIO, encodedCommand : Bytes }
-    | CompilerRan Int
-    | CompiledForRun { path : Path, exitCode : Int }
-    | RunExited Int
-    | RedirectTerminalIO
-        (Result
-            Stream.Error
-            { source : Stream.Readable Bytes
-            , target : Stream.Writable Bytes
-            }
-        )
-    | RunCmd (Cmd Msg) -- TODO: remove
-
-
-type CompilerInstalledError
-    = CI_FsErr FileSystem.Error
-    | CI_StreamErr Stream.Error
-
-
-update : Msg -> Model -> { model : Model, command : Cmd Msg }
-update msg model =
-    let
-        endWithError errorStr =
-            Stream.Log.line model.stderr errorStr
-                |> Task.map (\_ -> Node.exitWithCode 1)
-                |> Task.executeCmd
-    in
-    { model = model
-    , command =
-        when msg is
-            ExistanceChecked { maybeRemotePath, localPath, existanceResult = Err _ } ->
-                when maybeRemotePath is
-                    Just remotePath ->
-                        Stream.Log.line model.stdout ("Compiler not found at " ++ model.pathToString localPath ++ ". Downloading...")
-                            |> Task.andThen (\_ -> Compiler.Backend.download model.httpPermission remotePath)
-                            |> Task.attempt (\result -> CompilerDownloaded { localPath = localPath, downloadResult = result })
-            
-                    Nothing ->
-                        endWithError
-                            ("Compiler backend not found at "
-                                ++ model.pathToString localPath
-                                ++ ". Set GENG_BIN to the `geng` a build of the compiler produced."
-                            )
-
-            ExistanceChecked { existanceResult = Ok compilerPath } ->
-                parseUserArgs model compilerPath
-
-            CompilerDownloaded { localPath, downloadResult = Err ((HttpClient.BadStatus res) as err) } ->
-                if res.statusCode == 302 then
-                    when Dict.get "location" res.headers is
-                        Just [ location ] ->
-                            Compiler.Backend.download model.httpPermission location
-                                |> Task.attempt (\result -> CompilerDownloaded { localPath = localPath, downloadResult = result })
-
-                        _ ->
-                            endWithError "Missing, or vague, 'location' header in 302 response from server."
-
-                else
-                    endWithError (HttpClient.errorToString err)
-        
-            CompilerDownloaded { downloadResult = Err err } ->
-                endWithError (HttpClient.errorToString err)
-        
-            CompilerDownloaded { localPath, downloadResult = Ok res } ->
-                let
-                    cacheFolder =
-                        Path.parentPath localPath
-                            |> Maybe.withDefault Path.empty
-                in
-                FileSystem.makeDirectory model.fsPermission { recursive = True } cacheFolder
-                    |> Task.andThen
-                        (\_cacheFolder ->
-                            FileSystem.writeFileStream model.fsPermission FileSystem.Replace localPath
+        in
+        FileSystem.checkAccess fsPermission [] backendPath
+            |> Task.andThen (parseUserArgs context)
+            |> Task.onError
+                (\_ ->
+                    Stream.Log.line context.stderr
+                        ("Compiler backend not found at "
+                            ++ context.pathToString backendPath
+                            ++ ". Set GENG_BIN to the `geng` a build of the compiler produced."
                         )
-                    |> Task.mapError CI_FsErr
-                    |> Task.andThen
-                        (\fileStream ->
-                            Stream.pipeTo fileStream res.data
-                                |> Task.mapError CI_StreamErr
-                        )
-                    |> Task.andThen 
-                        (\_ ->
-                            FileSystem.changeAccess
-                                model.fsPermission
-                                { owner = [ FileSystem.Read, FileSystem.Write, FileSystem.Execute ]
-                                , group = [ FileSystem.Read, FileSystem.Execute ]
-                                , others = [ FileSystem.Read, FileSystem.Execute ]
-                                }
-                                localPath
-                                |> Task.mapError CI_FsErr
-                        )
-                    |> Task.andThen 
-                        (\binPath -> 
-                            Stream.Log.line model.stdout "Downloaded"
-                                |> Task.map (\_ -> binPath)
-                        )
-                    |> Task.attempt CompilerInstalled
-        
-            CompilerInstalled (Err err) ->
-                when err is
-                    CI_FsErr fsErr ->
-                        endWithError ("Failed to install binary after download, due to file system error: " ++ FileSystem.errorToString fsErr)
-
-                    CI_StreamErr streamErr ->
-                        endWithError ("Failed to download binary, due to streaming error: " ++ Stream.errorToString streamErr)
-        
-            CompilerInstalled (Ok compilerPath) ->
-                parseUserArgs model compilerPath
-
-            CompilerInitialized { backendStreams, encodedCommand, headless } ->
-                Cmd.batch
-                    [ if headless then
-                        Stream.write encodedCommand backendStreams.input
-                            |> Task.map (\_ -> Cmd.none)
-                            |> Task.onError
-                                (\e ->
-                                    Stream.Log.line model.stderr (Stream.errorToString e)
-                                        |> Task.map (\_ -> Node.exitWithCode 1)
-                                )
-                            |> Task.executeCmd
-                      else
-                        Stream.write encodedCommand backendStreams.input
-                            |> Task.map (\_ -> { source = model.stdin, target = backendStreams.input })
-                            |> Task.attempt RedirectTerminalIO
-                    , if headless then
-                        Cmd.none
-                      else
-                        Task.succeed { source = backendStreams.output, target = model.stdout }
-                            |> Task.attempt RedirectTerminalIO
-                    , Task.succeed { source = backendStreams.error, target = model.stderr }
-                        |> Task.attempt RedirectTerminalIO
-                    ]
-
-            CompilerRan exitCode ->
-                Node.exitWithCode exitCode
-            
-            CompiledForRun { path, exitCode } ->
-                if exitCode == 0 then
-                    Terminal.Run.run 
-                        { cpPermission = model.cpPermission
-                        , fsPermission = model.fsPermission
-                        , pathToString = model.pathToString
-                        , path = path
-                        , onExit = RunExited
-                        }
-                        |> Task.onError
-                            (\error ->
-                                Terminal.Run.prettifyError error
-                                    |> Report.toString (Report.Terminal { useColor = model.useColor }) model.pathToString
-                                    |> Stream.Log.line model.stderr
-                                    |> Task.map (\_ -> Node.exitWithCode 1)
-                            )
-                        |> Task.perform RunCmd
-
-                else
-                    Node.exitWithCode exitCode
-
-            RunExited exitCode ->
-                Node.exitWithCode exitCode
-
-            RedirectTerminalIO (Ok streams) ->
-                Stream.read streams.source
-                    |> Task.andThen (\str -> Stream.write str streams.target)
-                    |> Task.map (\_ -> streams)
-                    |> Task.attempt RedirectTerminalIO
-
-            RedirectTerminalIO (Err error) ->
-                when error is
-                    Stream.Closed ->
-                        Cmd.none
-
-                    _ ->
-                        Stream.Log.line model.stderr ("Something went wrong when communicating with compiler backend: " ++ Stream.errorToString error)
-                            |> Task.map (\_ -> Node.exitWithCode 1)
-                            |> Task.executeCmd
-
-            RunCmd cmd ->
-                cmd
-        }
+                        |> Task.map (\_ -> 1)
+                )
 
 
-parseUserArgs : Model -> Path -> Cmd Msg
-parseUserArgs model compilerPath =
+parseUserArgs : Context -> Path -> Task x Int
+parseUserArgs context compilerPath =
     let
         printOpts =
-            { useColor = model.useColor
+            { useColor = context.useColor
             }
 
         endWithError prettyErr =
             Report.prettyPrint printOpts prettyErr
-                |> Stream.Log.string model.stderr
-                |> Task.map (\_ -> Node.exitWithCode 1)
+                |> endWithErrorString
 
         endWithErrorString stringErr =
-            Stream.Log.string model.stderr stringErr
-                |> Task.map (\_ -> Node.exitWithCode 1)
+            Stream.Log.string context.stderr stringErr
+                |> Task.map (\_ -> 1)
 
         endWithErrorReport outputType report =
-            Report.toString outputType model.pathToString report
+            Report.toString outputType context.pathToString report
                 |> endWithErrorString
+
+        succeeded task =
+            Task.map (\_ -> 0) task
     in
-    when Cli.Parser.run model.args CliParser.parser is
+    when Cli.Parser.run context.args CliParser.parser is
         Cli.Parser.UnknownCommand commandName ->
             endWithErrorString ("I don't recognize this command: " ++ commandName ++ "\n")
-                |> Task.perform RunCmd
     
         Cli.Parser.BadFlags err ->
             err
                 |> Cli.Parser.flagErrorPrettified
                 |> endWithError
-                |> Task.perform RunCmd
     
         Cli.Parser.BadArguments err ->
             err
                 |> Cli.Parser.argumentErrorPrettified
                 |> endWithError
-                |> Task.perform RunCmd
     
         Cli.Parser.HelpText prettifiedText ->
             prettifiedText
                 |> Report.prettyPrint printOpts
-                |> Stream.Log.line model.stdout
-                |> Task.execute
+                |> Stream.Log.line context.stdout
+                |> succeeded
     
         Cli.Parser.Success parsedCommand ->
             let
-                initWithCommand backendCommand =
-                    \streams ->
-                        CompilerInitialized
-                            { backendStreams = streams
-                            , headless = False
-                            , encodedCommand =
-                                Compiler.Backend.encodeCommand
-                                    { interactiveSession = model.interactive
-                                    , pathToString = model.pathToString
-                                    }
-                                    backendCommand
-                            }
+                backend backendCommand =
+                    startBackend context compilerPath
+                        |> Task.andThen
+                            (talkToBackend context
+                                { headless = False
+                                , encodedCommand =
+                                    Compiler.Backend.encodeCommand
+                                        { interactiveSession = context.interactive
+                                        , pathToString = context.pathToString
+                                        }
+                                        backendCommand
+                                }
+                            )
             in
             when parsedCommand is
                 CliParser.Init flags ->
                     Terminal.Init.run
-                        { fsPermission = model.fsPermission
-                        , cpPermission = model.cpPermission
-                        , cacheRoot = model.cacheRoot
-                        , stdout = model.stdout
-                        , stdin = model.stdin
-                        , interactive = model.interactive
-                        , useColor = model.useColor
+                        { fsPermission = context.fsPermission
+                        , cpPermission = context.cpPermission
+                        , cacheRoot = context.cacheRoot
+                        , stdout = context.stdout
+                        , stdin = context.stdin
+                        , interactive = context.interactive
+                        , useColor = context.useColor
                         , package = flags.package
                         , platform = flags.platform
                         }
-                        |> Task.map (\_ -> Cmd.none)
+                        |> succeeded
                         |> Task.mapError Terminal.Init.prettifyError
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
-                        |> Task.perform RunCmd
 
                 CliParser.Repl flags ->
-                    Terminal.PackageInstall.readProjectOutline model.fsPermission
+                    Terminal.PackageInstall.readProjectOutline context.fsPermission
                         |> Task.onError
                             (\err ->
                                 when err is
                                     Terminal.PackageInstall.ReadProjectOutlineNoProject _ ->
                                         Terminal.Repl.setupGlobalReplProject
-                                            { stdout = model.stdout
-                                            , stdin = model.stdin
-                                            , fsPermission = model.fsPermission
-                                            , cpPermission = model.cpPermission
-                                            , cacheRoot = model.cacheRoot
-                                            , useColor = model.useColor
+                                            { stdout = context.stdout
+                                            , stdin = context.stdin
+                                            , fsPermission = context.fsPermission
+                                            , cpPermission = context.cpPermission
+                                            , cacheRoot = context.cacheRoot
+                                            , useColor = context.useColor
                                             }
                                             |> Task.mapError Terminal.Repl.prettifyError
 
@@ -457,13 +224,13 @@ parseUserArgs model compilerPath =
                         |> Task.andThen
                             (\projectOutline ->
                                 Terminal.PackageInstall.run
-                                    { fsPermission = model.fsPermission
-                                    , cpPermission = model.cpPermission
-                                    , cacheRoot = model.cacheRoot
-                                    , interactive = model.interactive
-                                    , useColor = model.useColor
-                                    , stdout = model.stdout
-                                    , stdin = model.stdin
+                                    { fsPermission = context.fsPermission
+                                    , cpPermission = context.cpPermission
+                                    , cacheRoot = context.cacheRoot
+                                    , interactive = context.interactive
+                                    , useColor = context.useColor
+                                    , stdout = context.stdout
+                                    , stdin = context.stdin
                                     , strictAppResolution = True
                                     }
                                     projectOutline
@@ -471,19 +238,16 @@ parseUserArgs model compilerPath =
                             )
                         |> Task.andThen
                             (\resolved ->
-                                startBackend model compilerPath
-                                    (initWithCommand <|
-                                        Compiler.Backend.Repl
-                                            { interpreter = flags.interpreter
-                                            , projectPath = resolved.projectPath
-                                            , outline = resolved.outline
-                                            , rootSources = resolved.rootSources
-                                            , dependencies = resolved.dependencies
-                                            }
-                                    )
+                                backend <|
+                                    Compiler.Backend.Repl
+                                        { interpreter = flags.interpreter
+                                        , projectPath = resolved.projectPath
+                                        , outline = resolved.outline
+                                        , rootSources = resolved.rootSources
+                                        , dependencies = resolved.dependencies
+                                        }
                             )
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
-                        |> Task.perform RunCmd
 
                 CliParser.Make flags ->
                     let
@@ -496,7 +260,7 @@ parseUserArgs model compilerPath =
                                         |> Task.map Stream.writable
 
                                 _ ->
-                                    Task.succeed model.stdout
+                                    Task.succeed context.stdout
 
                         reportType =
                             when flags.report is
@@ -507,57 +271,59 @@ parseUserArgs model compilerPath =
                                     Report.Terminal printOpts
                     in
                     determineOutputStreamForResolve
-                        |> Task.andThen (\output -> resolveProject { model | stdout = output })
-                        |> Task.andThen (verifyMakeFlags model.fsPermission flags.entryPoints flags.output)
+                        |> Task.andThen (\output -> resolveProject { context | stdout = output })
+                        |> Task.andThen (verifyMakeFlags context.fsPermission flags.entryPoints flags.output)
                         |> Task.andThen
                             (\resolved ->
-                                startBackend model compilerPath
-                                    (initWithCommand <|
-                                        Compiler.Backend.Make
-                                            { optimize = flags.optimize
-                                            , sourcemaps = flags.sourcemaps
-                                            , output = flags.output
-                                            , report = flags.report
-                                            , projectPath = resolved.projectPath
-                                            , entryPoints = flags.entryPoints
-                                            , outline = resolved.outline
-                                            , rootSources = resolved.rootSources
-                                            , dependencies = resolved.dependencies
-                                            }
-                                    )
+                                backend <|
+                                    Compiler.Backend.Make
+                                        { optimize = flags.optimize
+                                        , sourcemaps = flags.sourcemaps
+                                        , output = flags.output
+                                        , report = flags.report
+                                        , projectPath = resolved.projectPath
+                                        , entryPoints = flags.entryPoints
+                                        , outline = resolved.outline
+                                        , rootSources = resolved.rootSources
+                                        , dependencies = resolved.dependencies
+                                        }
                             )
                         |> Task.onError (endWithErrorReport reportType)
-                        |> Task.perform RunCmd
 
                 CliParser.Run opts ->
                     Terminal.Run.make
-                        { fsPermission = model.fsPermission
-                        , cpPermission = model.cpPermission
-                        , cacheRoot = model.cacheRoot
-                        , useColor = model.useColor
+                        { fsPermission = context.fsPermission
+                        , cpPermission = context.cpPermission
+                        , cacheRoot = context.cacheRoot
+                        , useColor = context.useColor
                         , compilerPath = compilerPath
-                        , pathToString = model.pathToString
+                        , pathToString = context.pathToString
                         , moduleName = opts.moduleName
                         , package = opts.package
-                        , onBackendInitialized = 
-                            (\{ backendStreams, encodedCommand } ->
-                                CompilerInitialized
-                                    { backendStreams = backendStreams
-                                    , encodedCommand = encodedCommand
-                                    , headless = True
-                                    }
-                            )
-                        , onCompiled = 
-                            (\outputPath exitCode ->
-                                CompiledForRun
-                                    { path = outputPath
-                                    , exitCode = exitCode
-                                    }
-                            )
                         }
+                        |> Task.andThen
+                            (\compiling ->
+                                talkToBackend context
+                                    { headless = True
+                                    , encodedCommand = compiling.encodedCommand
+                                    }
+                                    compiling.backend
+                                    |> Task.andThen
+                                        (\exitCode ->
+                                            if exitCode == 0 then
+                                                Terminal.Run.run
+                                                    { cpPermission = context.cpPermission
+                                                    , fsPermission = context.fsPermission
+                                                    , pathToString = context.pathToString
+                                                    , path = compiling.outputPath
+                                                    }
+
+                                            else
+                                                Task.succeed exitCode
+                                        )
+                            )
                         |> Task.mapError Terminal.Run.prettifyError
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
-                        |> Task.perform RunCmd
 
                 CliParser.Docs flags ->
                     let
@@ -570,7 +336,7 @@ parseUserArgs model compilerPath =
                                         |> Task.map Stream.writable
 
                                 _ ->
-                                    Task.succeed model.stdout
+                                    Task.succeed context.stdout
 
                         reportType =
                             when flags.report is
@@ -581,154 +347,137 @@ parseUserArgs model compilerPath =
                                     Report.Terminal printOpts
                     in
                     determineOutputStreamForResolve
-                        |> Task.andThen (\output -> resolveProject { model | stdout = output })
+                        |> Task.andThen (\output -> resolveProject { context | stdout = output })
                         |> Task.andThen
                             (\resolved ->
-                                startBackend model compilerPath
-                                    (initWithCommand <|
-                                        Compiler.Backend.Docs
-                                            { output = flags.output
-                                            , report = flags.report
-                                            , projectPath = resolved.projectPath
-                                            , outline = resolved.outline
-                                            , rootSources = resolved.rootSources
-                                            , dependencies = resolved.dependencies
-                                            }
-                                    )
+                                backend <|
+                                    Compiler.Backend.Docs
+                                        { output = flags.output
+                                        , report = flags.report
+                                        , projectPath = resolved.projectPath
+                                        , outline = resolved.outline
+                                        , rootSources = resolved.rootSources
+                                        , dependencies = resolved.dependencies
+                                        }
                             )
                         |> Task.onError (endWithErrorReport reportType)
-                        |> Task.perform RunCmd
 
                 CliParser.PackageInstall Nothing ->
-                    resolveProject model
+                    resolveProject context
                         |> Task.andThen
                             (\res ->
-                                Terminal.PackageInstall.cleanPackageDirectory model.fsPermission res
+                                Terminal.PackageInstall.cleanPackageDirectory context.fsPermission res
                                     |> Task.mapError (\_ -> Report.empty)
                             )
-                        |> Task.map (\_ -> Cmd.none)
+                        |> succeeded
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
-                        |> Task.perform RunCmd
 
                 CliParser.PackageInstall (Just requestedPackage) ->
-                    Terminal.PackageInstall.readProjectOutline model.fsPermission
+                    Terminal.PackageInstall.readProjectOutline context.fsPermission
                         |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
                         |> Task.andThen
                             (\projectOutline ->
                                 Terminal.PackageInstall.addPackage
-                                    { fsPermission = model.fsPermission
-                                    , cpPermission = model.cpPermission
-                                    , cacheRoot = model.cacheRoot
-                                    , interactive = model.interactive
-                                    , useColor = model.useColor
-                                    , stdout = model.stdout
-                                    , stdin = model.stdin
+                                    { fsPermission = context.fsPermission
+                                    , cpPermission = context.cpPermission
+                                    , cacheRoot = context.cacheRoot
+                                    , interactive = context.interactive
+                                    , useColor = context.useColor
+                                    , stdout = context.stdout
+                                    , stdin = context.stdin
                                     , strictAppResolution = True
                                     }
                                     projectOutline
                                     requestedPackage
                                     |> Task.mapError Terminal.PackageInstall.prettifyAddPackageError
                             )
-                        |> Task.map (\_ -> Cmd.none)
+                        |> succeeded
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
-                        |> Task.perform RunCmd
 
                 CliParser.PackageUninstall packageName ->
-                    Terminal.PackageInstall.readProjectOutline model.fsPermission
+                    Terminal.PackageInstall.readProjectOutline context.fsPermission
                         |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
                         |> Task.andThen
                             (\projectOutline ->
                                 Terminal.PackageUninstall.run
-                                    { fsPermission = model.fsPermission
-                                    , cpPermission = model.cpPermission
-                                    , cacheRoot = model.cacheRoot
-                                    , interactive = model.interactive
-                                    , useColor = model.useColor
-                                    , stdout = model.stdout
-                                    , stdin = model.stdin
+                                    { fsPermission = context.fsPermission
+                                    , cpPermission = context.cpPermission
+                                    , cacheRoot = context.cacheRoot
+                                    , interactive = context.interactive
+                                    , useColor = context.useColor
+                                    , stdout = context.stdout
+                                    , stdin = context.stdin
                                     }
                                     projectOutline
                                     packageName
                                     |> Task.mapError Terminal.PackageUninstall.prettifyError
                                     |> Task.andThen
                                         (\res ->
-                                            Terminal.PackageInstall.cleanPackageDirectory model.fsPermission res
+                                            Terminal.PackageInstall.cleanPackageDirectory context.fsPermission res
                                                 |> Task.mapError (\_ -> Report.empty)
                                         )
                             )
-                        |> Task.map (\_ -> Cmd.none)
+                        |> succeeded
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
-                        |> Task.perform RunCmd
 
                 CliParser.PackageOutdated ->
-                    Terminal.PackageInstall.readProjectOutline model.fsPermission
+                    Terminal.PackageInstall.readProjectOutline context.fsPermission
                         |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
                         |> Task.andThen
                             (\projectOutline ->
                                 Terminal.PackageOutdated.run
-                                    { fsPermission = model.fsPermission
-                                    , cpPermission = model.cpPermission
-                                    , interactive = model.interactive
-                                    , useColor = model.useColor
-                                    , stdout = model.stdout
-                                    , stdin = model.stdin
+                                    { fsPermission = context.fsPermission
+                                    , cpPermission = context.cpPermission
+                                    , interactive = context.interactive
+                                    , useColor = context.useColor
+                                    , stdout = context.stdout
+                                    , stdin = context.stdin
                                     }
                                     projectOutline
                                     |> Task.mapError Terminal.PackageOutdated.prettifyError
                             )
-                        |> Task.map (\_ -> Cmd.none)
+                        |> succeeded
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
-                        |> Task.perform RunCmd
 
                 CliParser.PackageValidate ->
-                    Terminal.PackageInstall.readProjectOutline model.fsPermission
+                    Terminal.PackageInstall.readProjectOutline context.fsPermission
                         |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
                         |> Task.andThen
                             (\projectOutline ->
                                 Terminal.PackageValidate.run
-                                    { fsPermission = model.fsPermission
-                                    , cpPermission = model.cpPermission
-                                    , cacheRoot = model.cacheRoot
-                                    , interactive = model.interactive
-                                    , useColor = model.useColor
-                                    , stdout = model.stdout
-                                    , stdin = model.stdin
+                                    { fsPermission = context.fsPermission
+                                    , cpPermission = context.cpPermission
+                                    , cacheRoot = context.cacheRoot
+                                    , interactive = context.interactive
+                                    , useColor = context.useColor
+                                    , stdout = context.stdout
+                                    , stdin = context.stdin
                                     }
                                     projectOutline
                                     |> Task.mapError Terminal.PackageValidate.prettifyError
                             )
-                        |> Task.andThen
-                            (\backendFlags ->
-                                startBackend model compilerPath
-                                    (initWithCommand <| Compiler.Backend.PackageValidate backendFlags)
-                            )
+                        |> Task.andThen (\backendFlags -> backend (Compiler.Backend.PackageValidate backendFlags))
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
-                        |> Task.perform RunCmd
 
                 CliParser.PackageBump ->
-                    Terminal.PackageInstall.readProjectOutline model.fsPermission
+                    Terminal.PackageInstall.readProjectOutline context.fsPermission
                         |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
                         |> Task.andThen
                             (\projectOutline ->
                                 Terminal.PackageBump.run
-                                    { fsPermission = model.fsPermission
-                                    , cpPermission = model.cpPermission
-                                    , cacheRoot = model.cacheRoot
-                                    , interactive = model.interactive
-                                    , useColor = model.useColor
-                                    , stdout = model.stdout
-                                    , stdin = model.stdin
+                                    { fsPermission = context.fsPermission
+                                    , cpPermission = context.cpPermission
+                                    , cacheRoot = context.cacheRoot
+                                    , interactive = context.interactive
+                                    , useColor = context.useColor
+                                    , stdout = context.stdout
+                                    , stdin = context.stdin
                                     }
                                     projectOutline
                                     |> Task.mapError Terminal.PackageBump.prettifyError
                             )
-                        |> Task.andThen
-                            (\backendFlags ->
-                                startBackend model compilerPath
-                                    (initWithCommand <| Compiler.Backend.PackageBump backendFlags)
-                            )
+                        |> Task.andThen (\backendFlags -> backend (Compiler.Backend.PackageBump backendFlags))
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
-                        |> Task.perform RunCmd
 
                 CliParser.PackageDiff args ->
                     let
@@ -736,32 +485,32 @@ parseUserArgs model compilerPath =
                             when args is
                                 CliParser.DiffLatest ->
                                     Terminal.PackageDiff.runLocal
-                                        { fsPermission = model.fsPermission
-                                        , cpPermission = model.cpPermission
-                                        , cacheRoot = model.cacheRoot
-                                        , interactive = model.interactive
-                                        , useColor = model.useColor
-                                        , stdout = model.stdout
-                                        , stdin = model.stdin
+                                        { fsPermission = context.fsPermission
+                                        , cpPermission = context.cpPermission
+                                        , cacheRoot = context.cacheRoot
+                                        , interactive = context.interactive
+                                        , useColor = context.useColor
+                                        , stdout = context.stdout
+                                        , stdin = context.stdin
                                         }
                                         Nothing
                                         |> Task.mapError Terminal.PackageDiff.prettifyLocalError
 
                                 CliParser.DiffVersion version ->
                                     Terminal.PackageDiff.runLocal
-                                        { fsPermission = model.fsPermission
-                                        , cpPermission = model.cpPermission
-                                        , cacheRoot = model.cacheRoot
-                                        , interactive = model.interactive
-                                        , useColor = model.useColor
-                                        , stdout = model.stdout
-                                        , stdin = model.stdin
+                                        { fsPermission = context.fsPermission
+                                        , cpPermission = context.cpPermission
+                                        , cacheRoot = context.cacheRoot
+                                        , interactive = context.interactive
+                                        , useColor = context.useColor
+                                        , stdout = context.stdout
+                                        , stdin = context.stdin
                                         }
                                         (Just version)
                                         |> Task.mapError Terminal.PackageDiff.prettifyLocalError
 
                                 CliParser.DiffRange { lower, upper } ->
-                                    Terminal.PackageInstall.readProjectOutline model.fsPermission
+                                    Terminal.PackageInstall.readProjectOutline context.fsPermission
                                         |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
                                         |> Task.andThen
                                             (\{ outline } ->
@@ -774,13 +523,13 @@ parseUserArgs model compilerPath =
 
                                                     Outline.Pkg pkgOutline ->
                                                         Terminal.PackageDiff.runGlobal
-                                                            { fsPermission = model.fsPermission
-                                                            , cpPermission = model.cpPermission
-                                                            , cacheRoot = model.cacheRoot
-                                                            , interactive = model.interactive
-                                                            , useColor = model.useColor
-                                                            , stdout = model.stdout
-                                                            , stdin = model.stdin
+                                                            { fsPermission = context.fsPermission
+                                                            , cpPermission = context.cpPermission
+                                                            , cacheRoot = context.cacheRoot
+                                                            , interactive = context.interactive
+                                                            , useColor = context.useColor
+                                                            , stdout = context.stdout
+                                                            , stdin = context.stdin
                                                             }
                                                             pkgOutline.name
                                                             lower
@@ -790,13 +539,13 @@ parseUserArgs model compilerPath =
 
                                 CliParser.DiffGlobal { package, lower, upper } ->
                                     Terminal.PackageDiff.runGlobal
-                                        { fsPermission = model.fsPermission
-                                        , cpPermission = model.cpPermission
-                                        , cacheRoot = model.cacheRoot
-                                        , interactive = model.interactive
-                                        , useColor = model.useColor
-                                        , stdout = model.stdout
-                                        , stdin = model.stdin
+                                        { fsPermission = context.fsPermission
+                                        , cpPermission = context.cpPermission
+                                        , cacheRoot = context.cacheRoot
+                                        , interactive = context.interactive
+                                        , useColor = context.useColor
+                                        , stdout = context.stdout
+                                        , stdin = context.stdin
                                         }
                                         package
                                         lower
@@ -804,47 +553,40 @@ parseUserArgs model compilerPath =
                                         |> Task.mapError Terminal.PackageDiff.prettifyGlobalError
                     in
                     diffTask
-                        |> Task.andThen
-                            (\backendFlags ->
-                                startBackend model compilerPath
-                                    (initWithCommand <| Compiler.Backend.PackageDiff backendFlags)
-                            )
+                        |> Task.andThen (\backendFlags -> backend (Compiler.Backend.PackageDiff backendFlags))
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
-                        |> Task.perform RunCmd
 
                 CliParser.Paths opts ->
                     Terminal.Paths.run
-                        { fsPermission = model.fsPermission
-                        , stdout = model.stdout
-                        , pathToString = model.pathToString
-                        , cacheRoot = model.cacheRoot
-                        , backendPath = model.backendPath
+                        { fsPermission = context.fsPermission
+                        , stdout = context.stdout
+                        , pathToString = context.pathToString
+                        , cacheRoot = context.cacheRoot
+                        , backendPath = context.backendPath
                         }
                         opts
-                        |> Task.map (\_ -> Cmd.none)
+                        |> succeeded
                         |> Task.mapError Terminal.Paths.errorToString
                         |> Task.onError endWithErrorString
-                        |> Task.perform RunCmd
 
                 CliParser.Protobuf protobufFlags ->
                     Terminal.Protobuf.run
-                        { fsPermission = model.fsPermission
-                        , pathToString = model.pathToString
+                        { fsPermission = context.fsPermission
+                        , pathToString = context.pathToString
                         , paths = protobufFlags.paths
                         , describe = protobufFlags.describe
                         , protoPath = protobufFlags.protoPath
                         , output = protobufFlags.output
                         }
-                        |> Task.andThen (Stream.Log.string model.stdout)
-                        |> Task.map (\_ -> Cmd.none)
+                        |> Task.andThen (Stream.Log.string context.stdout)
+                        |> succeeded
                         |> Task.onError endWithErrorString
-                        |> Task.perform RunCmd
 
                 CliParser.Format formatFlags ->
                     -- Only the no-argument form is a question about a project;
                     -- `geng fmt Some/File.gren` must work wherever the file is.
                     (if formatFlags.paths == [] then
-                        Terminal.PackageInstall.readProjectOutline model.fsPermission
+                        Terminal.PackageInstall.readProjectOutline context.fsPermission
                             |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
                             |> Task.map Terminal.Format.Project
 
@@ -854,30 +596,26 @@ parseUserArgs model compilerPath =
                         |> Task.andThen
                             (\sources ->
                                 Terminal.Format.run
-                                    { stdout = model.stdout
-                                    , fsPermission = model.fsPermission
-                                    , pathToString = model.pathToString
+                                    { stdout = context.stdout
+                                    , fsPermission = context.fsPermission
+                                    , pathToString = context.pathToString
                                     , sources = sources
                                     , check = formatFlags.check
                                     }
                                     |> Task.mapError Terminal.Format.prettifyError
                             )
-                        |> Task.andThen (Stream.Log.line model.stdout)
-                        |> Task.map (\_ -> Cmd.none)
+                        |> Task.andThen (Stream.Log.line context.stdout)
+                        |> succeeded
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
-                        |> Task.perform RunCmd
 
 
-{-| Start the backend with `onStarted` for its streams, and end the program with
-its exit code when it exits.
--}
-startBackend : Model -> Path -> (ChildProcess.StreamIO -> Msg) -> Task Report (Cmd Msg)
-startBackend model compilerPath onStarted =
+startBackend : Context -> Path -> Task Report ChildProcess.Child
+startBackend context compilerPath =
     Compiler.Backend.run
-        model.cpPermission
-        { useColor = model.useColor
+        context.cpPermission
+        { useColor = context.useColor
         , compilerPath = compilerPath
-        , pathToString = model.pathToString
+        , pathToString = context.pathToString
         }
         |> Task.mapError
             (\err ->
@@ -886,36 +624,105 @@ startBackend model compilerPath onStarted =
                     Nothing
                     (PP.words ("I could not start " ++ err.program ++ ": " ++ err.errorCode))
             )
-        |> Task.map
-            (\child ->
-                Cmd.batch
-                    [ when ChildProcess.streams child is
-                        Just streams ->
-                            Task.succeed (onStarted streams)
-                                |> Task.perform identity
 
-                        Nothing ->
-                            Cmd.none
-                    , ChildProcess.waitForExit child
-                        |> Task.perform CompilerRan
-                    ]
+
+{-| Hand the backend its command, and answer its exit status once it has exited
+and everything it wrote has been passed on.
+
+Its standard output and error are copied to ours until each closes, and
+`waitForExit` answers when it exits, so those three run concurrently and all of
+them end. Our standard input is copied to the backend's for as long as the
+backend runs, which is what the REPL reads. That copy ends only when our input
+closes, and at a terminal it never does, so it races the backend's exit, and
+losing cancels it (D109).
+
+The program this replaced sent itself a message per chunk and exited the moment
+the backend did, which could land before the backend's last output had been
+read. `headless` is `geng run`'s compile, whose output is not ours to show and
+which reads no input.
+-}
+talkToBackend : Context -> { headless : Bool, encodedCommand : Bytes } -> ChildProcess.Child -> Task x Int
+talkToBackend context { headless, encodedCommand } child =
+    let
+        exited =
+            ChildProcess.waitForExit child
+    in
+    when ChildProcess.streams child is
+        Nothing ->
+            exited
+
+        Just streams ->
+            let
+                input =
+                    Stream.write encodedCommand streams.input
+                        |> Task.andThen
+                            (\_ ->
+                                if headless then
+                                    Task.succeed {}
+
+                                else
+                                    copy context.stdin streams.input
+                            )
+                        |> Task.andThen (\_ -> Task.map (\_ -> {}) exited)
+            in
+            Task.concurrent
+                [ Task.race input [ Task.map (\_ -> {}) exited ]
+                , if headless then
+                    Task.succeed {}
+
+                  else
+                    copy streams.output context.stdout
+                , copy streams.error context.stderr
+                ]
+                |> Task.andThen (\_ -> exited)
+                |> Task.onError
+                    (\error ->
+                        Stream.Log.line context.stderr ("Something went wrong when communicating with compiler backend: " ++ Stream.errorToString error)
+                            |> Task.map (\_ -> 1)
+                    )
+
+
+{-| Copy chunks from `source` to `target` until `source` closes.
+-}
+copy : Stream.Readable Bytes -> Stream.Writable Bytes -> Task Stream.Error {}
+copy source target =
+    Stream.read source
+        |> Task.map Just
+        |> Task.onError
+            (\error ->
+                when error is
+                    Stream.Closed ->
+                        Task.succeed Nothing
+
+                    _ ->
+                        Task.fail error
+            )
+        |> Task.andThen
+            (\chunk ->
+                when chunk is
+                    Just bytes ->
+                        Stream.write bytes target
+                            |> Task.andThen (\_ -> copy source target)
+
+                    Nothing ->
+                        Task.succeed {}
             )
 
 
-resolveProject : Model -> Task Report Terminal.PackageInstall.PackageResolution
-resolveProject model =
-    Terminal.PackageInstall.readProjectOutline model.fsPermission
+resolveProject : Context -> Task Report Terminal.PackageInstall.PackageResolution
+resolveProject context =
+    Terminal.PackageInstall.readProjectOutline context.fsPermission
         |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
         |> Task.andThen
             (\projectOutline ->
                 Terminal.PackageInstall.run
-                    { fsPermission = model.fsPermission
-                    , cpPermission = model.cpPermission
-                    , cacheRoot = model.cacheRoot
-                    , interactive = model.interactive
-                    , useColor = model.useColor
-                    , stdout = model.stdout
-                    , stdin = model.stdin
+                    { fsPermission = context.fsPermission
+                    , cpPermission = context.cpPermission
+                    , cacheRoot = context.cacheRoot
+                    , interactive = context.interactive
+                    , useColor = context.useColor
+                    , stdout = context.stdout
+                    , stdin = context.stdin
                     , strictAppResolution = True
                     }
                     projectOutline

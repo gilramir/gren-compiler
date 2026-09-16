@@ -37,7 +37,7 @@ type Error
     | SpawnError ChildProcess.SpawnError
 
 
-type alias MakeConfig msg =
+type alias MakeConfig =
     { fsPermission : FileSystem.Permission
     , cacheRoot : Compiler.Paths.CacheRoot
     , cpPermission : ChildProcess.Permission
@@ -46,17 +46,24 @@ type alias MakeConfig msg =
     , pathToString : Path -> String
     , moduleName : ModuleName
     , package : Maybe PackageName
-    , onBackendInitialized : { backendStreams : ChildProcess.StreamIO, encodedCommand : Bytes } -> msg
-    , onCompiled : Path -> Int -> msg
     }
 
 
-type alias RunConfig msg =
+{-| The backend, started, with the command to hand it and where it will write
+the program.
+-}
+type alias Compiling =
+    { backend : ChildProcess.Child
+    , encodedCommand : Bytes
+    , outputPath : Path
+    }
+
+
+type alias RunConfig =
     { cpPermission : ChildProcess.Permission
     , fsPermission : FileSystem.Permission
     , pathToString : Path -> String
     , path : Path
-    , onExit : Int -> msg
     }
 
 
@@ -66,7 +73,7 @@ type alias ProjectOutline =
     }
 
 
-make : MakeConfig msg -> Task Error (Cmd msg)
+make : MakeConfig -> Task Error Compiling
 make config =
     when config.package is
         Just packageName ->
@@ -78,7 +85,7 @@ make config =
                 |> Task.andThen (makeProject config)
 
 
-makeProject : MakeConfig msg -> ProjectOutline -> Task Error (Cmd msg)
+makeProject : MakeConfig -> ProjectOutline -> Task Error Compiling
 makeProject config projectOutline =
     when getOutputPath projectOutline is
         Nothing ->
@@ -126,7 +133,7 @@ makeProject config projectOutline =
                             }
                         )
 
-                compile : Bytes -> Task Error (Cmd msg)
+                compile : Bytes -> Task Error Compiling
                 compile encodedCommand =
                     Compiler.Backend.run
                         config.cpPermission
@@ -137,22 +144,10 @@ makeProject config projectOutline =
                         |> Task.mapError SpawnError
                         |> Task.map
                             (\child ->
-                                Cmd.batch
-                                    [ when ChildProcess.streams child is
-                                        Just streams ->
-                                            Task.succeed
-                                                (config.onBackendInitialized
-                                                    { backendStreams = streams
-                                                    , encodedCommand = encodedCommand
-                                                    }
-                                                )
-                                                |> Task.perform identity
-
-                                        Nothing ->
-                                            Cmd.none
-                                    , ChildProcess.waitForExit child
-                                        |> Task.perform (config.onCompiled outputPath)
-                                    ]
+                                { backend = child
+                                , encodedCommand = encodedCommand
+                                , outputPath = outputPath
+                                }
                             )
             in
             Help.getNullStream
@@ -161,7 +156,7 @@ makeProject config projectOutline =
                 |> Task.andThen compile
 
 
-clonePackage : MakeConfig msg -> PackageName -> Task Error ProjectOutline
+clonePackage : MakeConfig -> PackageName -> Task Error ProjectOutline
 clonePackage config packageName =
     let
         clone =
@@ -193,7 +188,9 @@ clonePackage config packageName =
             }
 
 
-run : RunConfig msg -> Task Error (Cmd msg)
+{-| Run the program `make` built, and answer its exit status.
+-}
+run : RunConfig -> Task Error Int
 run config =
     let
         getOutline =
@@ -221,7 +218,7 @@ run config =
                 ChildProcess.defaultSpawnOptions ChildProcess.Integrated
                     |> ChildProcess.spawn config.cpPermission command [ path ]
                     |> Task.mapError SpawnError
-                    |> Task.map (\child -> ChildProcess.waitForExit child |> Task.perform config.onExit)
+                    |> Task.andThen ChildProcess.waitForExit
         in
         when projectPlatform is
             Platform.Node ->
