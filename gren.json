@@ -8,6 +8,7 @@
     "dependencies": {
         "direct": {
             "gren-lang/core": "local:../../gren-lang/core",
+            "geng/stream": "local:../../../packages/stream",
             "gren-lang/node": "local:../../gren-lang/node",
             "gren-lang/compiler-node": "local:../../gren-lang/compiler-node",
             "gren-lang/compiler-common": "local:../../gren-lang/compiler-common",
