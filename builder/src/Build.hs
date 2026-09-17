@@ -88,7 +88,7 @@ makeEnv key root (Details.Details _ validOutline buildID locals foreigns _) =
       do
         srcDirs <- traverse (Outline.toAbsoluteSrcDir root) (NE.toList givenSrcDirs)
         return $ Env key root Parse.Application platform srcDirs buildID locals foreigns
-    Details.ValidPkg platform pkg _ ->
+    Details.ValidPkg platform pkg _ _ ->
       do
         srcDir <- Outline.toAbsoluteSrcDir root (Outline.RelativeSrcDir "src")
         return $ Env key root (Parse.Package pkg) platform [srcDir] buildID locals foreigns
@@ -145,7 +145,28 @@ fromExposed style root details sources docsGoal exposed@(NE.List e es) =
             putMVar rmvar resultMVars
             results <- traverse readMVar resultMVars
             writeDetails root details results
-            finalizeExposed root docsGoal exposed results
+            finalized <- finalizeExposed root docsGoal exposed results
+            return (finalized >>= checkDeclaredTarget details results)
+
+-- | A package built as the project is held to its declared @target@ the way it
+-- is when it is built as a dependency ("Gren.Details", D321), once its modules
+-- have compiled.
+checkDeclaredTarget :: Details.Details -> Map.Map ModuleName.Raw Result -> docs -> Either Exit.BuildProblem docs
+checkDeclaredTarget (Details.Details _ validOutline _ _ _ _) results docs =
+  case validOutline of
+    Details.ValidPkg _ pkg _ declared ->
+      case Details.targetDrift pkg declared (Map.mapMaybe resultCore results) of
+        Just drift -> Left (Exit.BuildProjectProblem (Exit.BP_TargetDrift drift))
+        Nothing -> Right docs
+    Details.ValidApp _ _ ->
+      Right docs
+  where
+    resultCore result =
+      case result of
+        RNew _ _ core _ -> Just core
+        RSame _ _ core _ -> Just core
+        RCached _ _ core -> Just core
+        _ -> Nothing
 
 -- FROM PATHS
 

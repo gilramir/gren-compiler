@@ -15,6 +15,7 @@ module Gren.Details
     loadInterfaces,
     Cores,
     loadCores,
+    targetDrift,
     Kernels,
     loadKernels,
     toHeader,
@@ -26,8 +27,9 @@ import AST.Source qualified as Src
 import Compile qualified
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, readMVar, takeMVar)
-import Control.Monad (liftM2, liftM3)
+import Control.Monad (liftM2, liftM3, liftM4)
 import Core.AST qualified as Core
+import Core.Target qualified as Target
 import Core.Wire qualified as Wire
 import Data.Binary (Binary, get, getWord8, put, putWord8)
 import Data.ByteString qualified as BS
@@ -42,6 +44,7 @@ import Data.Maybe qualified as Maybe
 import Data.Name qualified as Name
 import Data.NonEmptyList qualified as NE
 import Data.OneOrMore qualified as OneOrMore
+import Data.Set qualified as Set
 import Data.Word (Word64)
 import Directories qualified as Dirs
 import File qualified
@@ -111,7 +114,9 @@ type BuildID = Word64
 
 data ValidOutline
   = ValidApp P.Platform (NE.List Outline.SrcDir)
-  | ValidPkg P.Platform Pkg.Name [ModuleName.Raw]
+  | -- | The last field is the targets its @geng.toml@ declares, if it declares
+    -- any, which 'Build' checks the package's own modules against (D321).
+    ValidPkg P.Platform Pkg.Name [ModuleName.Raw] (Maybe (Set.Set Target.Target))
   deriving (Eq)
 
 data Dependency = Dependency
@@ -225,9 +230,9 @@ load :: FilePath -> Outline.Outline -> Map.Map Pkg.Name Dependency -> IO (Either
 load root outline solution =
   let (validOutline, directDeps) =
         case outline of
-          Outline.Pkg (Outline.PkgOutline pkg _ _ _ exposed direct _ rootPlatform) ->
-            (ValidPkg rootPlatform pkg (Outline.flattenExposed exposed), directDependencies pkg direct)
-          Outline.App (Outline.AppOutline _ rootPlatform srcDirs direct _) ->
+          Outline.Pkg (Outline.PkgOutline pkg _ _ _ exposed direct _ rootPlatform declared) ->
+            (ValidPkg rootPlatform pkg (Outline.flattenExposed exposed) declared, directDependencies pkg direct)
+          Outline.App (Outline.AppOutline _ rootPlatform srcDirs direct _ _) ->
             (ValidApp rootPlatform srcDirs, directDependencies Pkg.application direct)
       prints = packageFingerprints solution
       fingerprint = dependencyFingerprint prints
@@ -534,16 +539,26 @@ build cache depsMVar fingerprint pkg (Dependency outline sources) =
     (Outline.App _) ->
       do
         return $ Left $ Just $ Exit.BD_BadBuild pkg V.one Map.empty
-    (Outline.Pkg (Outline.PkgOutline _ _ _ version exposed deps _ platform)) ->
+    (Outline.Pkg (Outline.PkgOutline _ _ _ version exposed deps _ platform declared)) ->
       do
         let path = Dirs.packageArtifacts cache pkg version fingerprint
         cached <- readDepArtifacts path
         case cached of
-          Just artifacts -> return (Right artifacts)
-          Nothing -> compileDep path depsMVar pkg sources exposed deps platform
+          Just artifacts ->
+            return $ case targetDrift pkg declared (_cores artifacts) of
+              Just drift -> Left (Just (Exit.BD_TargetDrift drift))
+              Nothing -> Right artifacts
+          Nothing -> compileDep path depsMVar pkg sources exposed deps platform declared
 
-compileDep :: FilePath -> MVar (Map.Map Pkg.Name (MVar Dep)) -> Pkg.Name -> Map.Map ModuleName.Raw ByteString -> Outline.Exposed -> Map.Map Pkg.Name a -> P.Platform -> IO Dep
-compileDep path depsMVar pkg sources exposed deps platform =
+-- | A package's modules, compiled, and checked against the targets its
+-- @geng.toml@ declares before anything is written to the cache (D50, D321).
+--
+-- A cached package is checked too, from the Core its artifacts hold. The
+-- artifacts are named for the package's sources and not its manifest, so a
+-- @target@ edited after they were written would otherwise pass unchecked
+-- (§MF9.4).
+compileDep :: FilePath -> MVar (Map.Map Pkg.Name (MVar Dep)) -> Pkg.Name -> Map.Map ModuleName.Raw ByteString -> Outline.Exposed -> Map.Map Pkg.Name a -> P.Platform -> Maybe (Set.Set Target.Target) -> IO Dep
+compileDep path depsMVar pkg sources exposed deps platform declared =
   do
     allDeps <- readMVar depsMVar
     directDeps <- traverse readMVar (Map.intersection allDeps (directDependencies pkg deps))
@@ -584,9 +599,35 @@ compileDep path depsMVar pkg sources exposed deps platform =
                         cores = gatherCores results
                         kernels = gatherKernels results
                         artifacts = DepArtifacts ifaces cores kernels
-                     in do
-                          writeDepArtifacts path artifacts
-                          return (Right artifacts)
+                     in case targetDrift pkg declared cores of
+                          Just drift ->
+                            return $ Left $ Just $ Exit.BD_TargetDrift drift
+                          Nothing ->
+                            do
+                              writeDepArtifacts path artifacts
+                              return (Right artifacts)
+
+-- | What is wrong with a package's declared @target@, if anything: the targets
+-- it declares and does not serve, each with the declarations that are why, and
+-- the ones it serves and does not declare (D318).
+targetDrift :: Pkg.Name -> Maybe (Set.Set Target.Target) -> Map.Map ModuleName.Raw Core.Module -> Maybe Exit.TargetDrift
+targetDrift pkg declared cores =
+  case declared of
+    Nothing -> Nothing
+    Just targets
+      | targets == derived -> Nothing
+      | otherwise ->
+          Just $
+            Exit.TargetDrift
+              pkg
+              targets
+              derived
+              [ (target, Target.refusals target canonical)
+              | target <- Set.toAscList (Set.difference targets derived)
+              ]
+  where
+    canonical = Map.mapKeys (ModuleName.Canonical pkg) cores
+    derived = Target.packageTargets cores
 
 -- GATHER
 
@@ -844,14 +885,14 @@ instance Binary ValidOutline where
   put outline =
     case outline of
       ValidApp a b -> putWord8 0 >> put a >> put b
-      ValidPkg a b c -> putWord8 1 >> put a >> put b >> put c
+      ValidPkg a b c d -> putWord8 1 >> put a >> put b >> put c >> put (fmap (map fromEnum . Set.toAscList) d)
 
   get =
     do
       n <- getWord8
       case n of
         0 -> liftM2 ValidApp get get
-        1 -> liftM3 ValidPkg get get get
+        1 -> liftM4 (\a b c d -> ValidPkg a b c (fmap (Set.fromList . map toEnum) (d :: Maybe [Int]))) get get get get
         _ -> fail "binary encoding of ValidOutline was corrupted"
 
 instance Binary Local where

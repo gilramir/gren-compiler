@@ -16,6 +16,7 @@ import Bytes exposing (Bytes)
 import ChildProcess
 import Compiler.Backend
 import Compiler.Outline as Outline exposing (Outline)
+import Compiler.Runtime as Runtime
 import Compiler.Platform as Platform
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
@@ -208,7 +209,8 @@ run config =
             projectPlatform =
                 when outline is
                     Outline.Pkg outline_ ->
-                        outline_.platform
+                        Runtime.toPlatform outline_.runtime
+                            |> Maybe.withDefault Platform.Common
                     Outline.App outline_ ->
                         outline_.platform
 
@@ -264,7 +266,8 @@ getOutputPath projectOutline =
         platform =
             when projectOutline.outline is
                 Outline.Pkg outline ->
-                    outline.platform
+                    Runtime.toPlatform outline.runtime
+                        |> Maybe.withDefault Platform.Common
                 Outline.App outline ->
                     outline.platform
 

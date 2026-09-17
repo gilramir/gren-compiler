@@ -16,6 +16,7 @@ import FileSystem.Path as Path exposing (Path)
 import Bytes exposing (Bytes)
 import Json.Encode as Json
 import Compiler.Backend
+import Compiler.Runtime as Runtime
 import Compiler.Platform as Platform exposing (Platform)
 import Compiler.PackageName as PackageName exposing (PackageName)
 import Compiler.Outline as Outline exposing (Outline)
@@ -175,7 +176,8 @@ generateManifest config projectPath deps =
         outline =
             if config.package then
                 Outline.Pkg
-                    { platform = config.platform
+                    { runtime = Runtime.fromPlatform config.platform
+                    , target = Nothing
                     , name = PackageName.example
                     , summary = ""
                     , license = License.bsd3
@@ -189,6 +191,7 @@ generateManifest config projectPath deps =
             else
                 Outline.App
                     { platform = config.platform
+                    , target = "js"
                     , sourceDirectories = [ Path.fromPosixString "src" ]
                     , gengVersion = compiler
                     , dependencies = dependencies

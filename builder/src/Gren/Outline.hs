@@ -24,10 +24,12 @@ where
 import AbsoluteSrcDir (AbsoluteSrcDir)
 import AbsoluteSrcDir qualified
 import Control.Monad (liftM)
+import Core.Target qualified as Target
 import Data.Binary (Binary, get, getWord8, put, putWord8)
 import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.NonEmptyList qualified as NE
+import Data.Set qualified as Set
 import Foreign.Ptr (minusPtr)
 import Gren.Constraint qualified as Con
 import Gren.Licenses qualified as Licenses
@@ -60,7 +62,10 @@ data AppOutline = AppOutline
     _app_platform :: Platform.Platform,
     _app_source_dirs :: NE.List SrcDir,
     _app_deps_direct :: Map.Map Pkg.Name (PossibleFilePath V.Version),
-    _app_deps_indirect :: Map.Map Pkg.Name (PossibleFilePath V.Version)
+    _app_deps_indirect :: Map.Map Pkg.Name (PossibleFilePath V.Version),
+    -- | The target the application is built for, @js@ unless its @geng.toml@
+    -- says otherwise (D308, §MF9).
+    _app_target :: Target.Target
   }
   deriving (Show)
 
@@ -72,7 +77,11 @@ data PkgOutline = PkgOutline
     _pkg_exposed :: Exposed,
     _pkg_deps :: Map.Map Pkg.Name (PossibleFilePath Con.Constraint),
     _pkg_gren_version :: Con.Constraint,
-    _pkg_platform :: Platform.Platform
+    _pkg_platform :: Platform.Platform,
+    -- | The targets the package's @geng.toml@ declares, @any@ being all of
+    -- them, or 'Nothing' when it declares none. What its externs serve is
+    -- derived, and this is checked against it (D50, D318).
+    _pkg_target :: Maybe (Set.Set Target.Target)
   }
   deriving (Show)
 
@@ -105,9 +114,9 @@ flattenExposed exposed =
 platform :: Outline -> Platform.Platform
 platform outline =
   case outline of
-    App (AppOutline _ pltform _ _ _) ->
+    App (AppOutline _ pltform _ _ _ _) ->
       pltform
-    Pkg (PkgOutline _ _ _ _ _ _ _ pltform) ->
+    Pkg (PkgOutline _ _ _ _ _ _ _ pltform _) ->
       pltform
 
 dependencyConstraints :: Outline -> Map.Map Pkg.Name (PossibleFilePath Con.Constraint)
@@ -174,7 +183,7 @@ setVersionLine version = go False
 encode :: Outline -> E.Value
 encode outline =
   case outline of
-    App (AppOutline gren pltform srcDirs depsDirect depsTrans) ->
+    App (AppOutline gren pltform srcDirs depsDirect depsTrans target) ->
       E.object
         [ "type" ==> E.chars "application",
           "platform" ==> Platform.encode pltform,
@@ -184,10 +193,11 @@ encode outline =
             ==> E.object
               [ "direct" ==> encodeDeps V.encode depsDirect,
                 "indirect" ==> encodeDeps V.encode depsTrans
-              ]
+              ],
+          "target" ==> E.chars (Target.toChars target)
         ]
-    Pkg (PkgOutline name summary license version exposed deps gren pltform) ->
-      E.object
+    Pkg (PkgOutline name summary license version exposed deps gren pltform target) ->
+      E.object $
         [ "type" ==> E.string (Json.fromChars "package"),
           "platform" ==> Platform.encode pltform,
           "name" ==> Pkg.encode name,
@@ -198,6 +208,11 @@ encode outline =
           "gren-version" ==> Con.encode gren,
           "dependencies" ==> encodeDeps Con.encode deps
         ]
+          ++ case target of
+            Nothing -> []
+            Just targets
+              | targets == Target.everything -> ["target" ==> E.chars "any"]
+              | otherwise -> ["target" ==> E.list (E.chars . Target.toChars) (Set.toAscList targets)]
 
 encodeExposed :: Exposed -> E.Value
 encodeExposed exposed =
@@ -236,7 +251,7 @@ toAbsoluteSrcDir root srcDir =
 sourceDirs :: Outline -> NE.List SrcDir
 sourceDirs outline =
   case outline of
-    App (AppOutline _ _ srcDirs _ _) ->
+    App (AppOutline _ _ srcDirs _ _ _) ->
       srcDirs
     Pkg _ ->
       NE.singleton (RelativeSrcDir "src")
@@ -265,6 +280,7 @@ appDecoder =
     <*> D.field "source-directories" dirsDecoder
     <*> D.field "dependencies" (D.field "direct" (depsDecoder versionOrFilePathDecoder))
     <*> D.field "dependencies" (D.field "indirect" (depsDecoder versionOrFilePathDecoder))
+    <*> D.oneOf [D.field "target" targetDecoder, D.succeed Target.Js]
 
 pkgDecoder :: Decoder PkgOutline
 pkgDecoder =
@@ -277,8 +293,27 @@ pkgDecoder =
     <*> D.field "dependencies" (depsDecoder constraintOrFilePathDecoder)
     <*> D.field "gren-version" constraintDecoder
     <*> D.field "platform" (Platform.decoder Exit.OP_BadPlatform)
+    <*> D.oneOf [Just <$> D.field "target" targetsDecoder, D.succeed Nothing]
 
 -- JSON DECODE HELPERS
+
+-- | One target. Only the front end writes the outline, and it has already
+-- refused a name that is not one (@Compiler.Outline@).
+targetDecoder :: Decoder Target.Target
+targetDecoder =
+  do
+    chars <- D.string
+    maybe (D.failure Exit.OP_BadTarget) D.succeed (Target.fromChars (Json.toChars chars))
+
+-- | @"any"@, or a list of targets.
+targetsDecoder :: Decoder (Set.Set Target.Target)
+targetsDecoder =
+  D.oneOf
+    [ do
+        chars <- D.string
+        if Json.toChars chars == "any" then D.succeed Target.everything else D.failure Exit.OP_BadTarget,
+      Set.fromList <$> D.list targetDecoder
+    ]
 
 nameDecoder :: Decoder Pkg.Name
 nameDecoder =

@@ -7,6 +7,7 @@ where
 
 import Build qualified
 import Core.AST qualified as Core
+import Core.Target qualified as Target
 import Data.ByteString.Builder qualified as B
 import Data.ByteString.Char8 qualified as ByteString8
 import Data.Map (Map)
@@ -91,17 +92,17 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                     return ()
                   (Platform.Browser, [name]) ->
                     do
-                      (CoreJS.GeneratedResult source sourceMap) <- generate details (Generate.extSources outline sources deps) desiredMode artifacts
+                      (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
                       let bundle = prepareOutput withSourceMaps flags Html.leadingLines sourceMap source
                       writeToDisk style "index.html" (Html.sandwich name bundle) (NE.List name [])
                   (Platform.Node, [name]) ->
                     do
-                      (CoreJS.GeneratedResult source sourceMap) <- generate details (Generate.extSources outline sources deps) desiredMode artifacts
+                      (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
                       let bundle = prepareOutput withSourceMaps flags Node.leadingLines sourceMap (Node.sandwich name source)
                       writeToDisk style "app" bundle (NE.List name [])
                   (_, name : names) ->
                     do
-                      (CoreJS.GeneratedResult source sourceMap) <- generate details (Generate.extSources outline sources deps) desiredMode artifacts
+                      (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
                       let bundle = prepareOutput withSourceMaps flags 0 sourceMap source
                       writeToDisk style "index.js" bundle (NE.List name names)
               Just DevStdOut ->
@@ -110,7 +111,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                     return ()
                   _ ->
                     do
-                      (CoreJS.GeneratedResult source sourceMap) <- generate details (Generate.extSources outline sources deps) desiredMode artifacts
+                      (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
                       let bundle = prepareOutput withSourceMaps flags 0 sourceMap source
                       Task.io $ B.hPutBuilder IO.stdout bundle
               Just DevNull ->
@@ -119,7 +120,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                 case platform of
                   Platform.Node -> do
                     name <- hasOneMain artifacts
-                    (CoreJS.GeneratedResult source sourceMap) <- generate details (Generate.extSources outline sources deps) desiredMode artifacts
+                    (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
                     let bundle = prepareOutput withSourceMaps flags Node.leadingLines sourceMap (Node.sandwich name source)
                     writeToDisk style target bundle (NE.List name [])
                   _ -> do
@@ -127,7 +128,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
               Just (JS target) ->
                 case getNoMains artifacts of
                   [] -> do
-                    (CoreJS.GeneratedResult source sourceMap) <- generate details (Generate.extSources outline sources deps) desiredMode artifacts
+                    (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
                     let bundle = prepareOutput withSourceMaps flags 0 sourceMap source
                     writeToDisk style target bundle (Build.getRootNames artifacts)
                   name : names ->
@@ -136,7 +137,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                 case platform of
                   Platform.Browser -> do
                     name <- hasOneMain artifacts
-                    (CoreJS.GeneratedResult source sourceMap) <- generate details (Generate.extSources outline sources deps) desiredMode artifacts
+                    (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
                     let bundle = prepareOutput withSourceMaps flags Html.leadingLines sourceMap source
                     writeToDisk style target (Html.sandwich name bundle) (NE.List name [])
                   _ -> do
@@ -160,7 +161,7 @@ getExposed (Details.Details _ validOutline _ _ _ _) =
   case validOutline of
     Details.ValidApp _ _ ->
       Task.throw Exit.MakeAppNeedsFileNames
-    Details.ValidPkg _ _ exposed ->
+    Details.ValidPkg _ _ exposed _ ->
       case exposed of
         [] -> Task.throw Exit.MakePkgNeedsExposing
         m : ms -> return (NE.List m ms)
@@ -170,7 +171,7 @@ getPlatform (Details.Details _ validOutline _ _ _ _) = do
   case validOutline of
     Details.ValidApp platform _ ->
       platform
-    Details.ValidPkg platform _ _ ->
+    Details.ValidPkg platform _ _ _ ->
       platform
 
 -- BUILD PROJECTS
@@ -294,11 +295,20 @@ writeToDisk style target builder names =
 
 -- GENERATE
 
+-- | What the build is for: an application's @target@, which is @js@ unless its
+-- @geng.toml@ says otherwise. A package is built for nothing in particular, and
+-- only an application is ever generated.
+targetOf :: Outline -> Target.Target
+targetOf outline =
+  case outline of
+    Outline.App app -> Outline._app_target app
+    Outline.Pkg _ -> Target.Js
+
 data DesiredMode = Dev | Prod
 
-generate :: Details.Details -> Generate.ExtSources -> DesiredMode -> Build.Artifacts -> Task CoreJS.GeneratedResult
-generate details sources desiredMode artifacts =
+generate :: Target.Target -> Details.Details -> Generate.ExtSources -> DesiredMode -> Build.Artifacts -> Task CoreJS.GeneratedResult
+generate target details sources desiredMode artifacts =
   Task.mapError Exit.MakeBadGenerate $
     case desiredMode of
-      Dev -> Generate.dev details sources artifacts
-      Prod -> Generate.prod details sources artifacts
+      Dev -> Generate.dev target details sources artifacts
+      Prod -> Generate.prod target details sources artifacts

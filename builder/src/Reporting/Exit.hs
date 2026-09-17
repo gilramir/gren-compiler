@@ -19,6 +19,7 @@ module Reporting.Exit
     PossibleFilePath (..),
     Details (..),
     DetailsBadDep (..),
+    TargetDrift (..),
     BuildProblem (..),
     BuildProjectProblem (..),
     DocsProblem (..),
@@ -30,12 +31,15 @@ module Reporting.Exit
   )
 where
 
+import Core.AST qualified as Core
+import Core.Target qualified as Target
 import Data.ByteString qualified as BS
 import Data.ByteString.UTF8 qualified as BS_UTF8
 import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name qualified as N
 import Data.NonEmptyList qualified as NE
+import Data.Set qualified as Set
 import Gren.Constraint qualified as C
 import Gren.Magnitude qualified as M
 import Gren.ModuleName qualified as ModuleName
@@ -802,6 +806,7 @@ data OutlineProblem
   | OP_BadSummaryTooLong
   | OP_NoSrcDirs
   | OP_BadPlatform
+  | OP_BadTarget
 
 data PossibleFilePath otherError
   = OP_AttemptedFilePath (Row, Col)
@@ -815,6 +820,12 @@ data Details
 data DetailsBadDep
   = BD_BadBuild Pkg.Name V.Version (Map.Map Pkg.Name V.Version)
   | BD_UnsignedBuild Pkg.Name V.Version
+  | BD_TargetDrift TargetDrift
+
+-- | A package whose declared @target@ is not what its externs serve (D50,
+-- D318): the package, what it declares, what is derived, and for each target
+-- it declares and does not serve, the modules that are why.
+data TargetDrift = TargetDrift Pkg.Name (Set.Set Target.Target) (Set.Set Target.Target) [(Target.Target, [Target.Refusal])]
 
 toDetailsReport :: Details -> Help.Report
 toDetailsReport details =
@@ -861,6 +872,8 @@ toDetailsReport details =
                     \ give you much more specific information about why this package is failing to\
                     \ build, which will in turn make it easier for the package author to fix it!"
                 ]
+            BD_TargetDrift drift ->
+              targetDriftReport drift
             BD_UnsignedBuild pkg vsn ->
               Help.report
                 "PROBLEM BUILDING DEPENDENCIES (UNSIGNED KERNEL CODE)"
@@ -874,6 +887,82 @@ toDetailsReport details =
                   D.toSimpleNote $
                     "To help with the root problem, please report this to the package author."
                 ]
+
+-- TARGETS
+
+targetDriftReport :: TargetDrift -> Help.Report
+targetDriftReport (TargetDrift pkg declared derived refused) =
+  Help.report
+    "TARGET DOES NOT MATCH THE EXTERNS"
+    Nothing
+    ( "The geng.toml of "
+        ++ Pkg.toChars pkg
+        ++ " says its target is "
+        ++ targetsToChars declared
+        ++ ", and its externs serve "
+        ++ targetsToChars derived
+        ++ "."
+    )
+    ( [ D.indent 4 $
+          D.vcat $
+            concat
+              [ D.fromChars (Target.toChars target ++ " is not served by:") : map (D.indent 4 . refusalDoc) refusals
+              | (target, refusals) <- refused
+              ]
+      | not (null refused)
+      ]
+        ++ [ D.reflow $
+               "The target is derived from the externs, so writing it down only has it checked. Write\
+               \ target = "
+                 ++ targetsToToml derived
+                 ++ ", or leave it out (packaging.md K3, D50, D318)."
+           ]
+    )
+
+-- | A set of targets as a sentence says it.
+targetsToChars :: Set.Set Target.Target -> String
+targetsToChars targets
+  | targets == Target.everything = "any"
+  | Set.null targets = "no target"
+  | otherwise =
+      case map Target.toChars (Set.toAscList targets) of
+        [one] -> one
+        names -> List.intercalate ", " (init names) ++ " and " ++ last names
+
+-- | A set of targets as @geng.toml@ writes it.
+targetsToToml :: Set.Set Target.Target -> String
+targetsToToml targets
+  | targets == Target.everything = "\"any\""
+  | otherwise = "[" ++ List.intercalate ", " (map (show . Target.toChars) (Set.toAscList targets)) ++ "]"
+
+-- | The modules that refuse a target, under their packages.
+refusalDocs :: [Target.Refusal] -> [D.Doc]
+refusalDocs refusals =
+  concat
+    [ D.fromChars (packageToChars pkg) : map (D.indent 4 . refusalDoc) group
+    | group@(first : _) <- List.groupBy (\a b -> packageOf a == packageOf b) (List.sortOn sortKey refusals),
+      let pkg = packageOf first
+    ]
+  where
+    packageOf = ModuleName._package . Target._refusalModule
+    sortKey (Target.Refusal (ModuleName.Canonical pkg name) _) = (Pkg.toChars pkg, ModuleName.toChars name)
+    packageToChars pkg =
+      if pkg == Pkg.application then "the application" else Pkg.toChars pkg
+
+-- | One module that refuses a target: its declarations, each with the languages
+-- it has rows for.
+refusalDoc :: Target.Refusal -> D.Doc
+refusalDoc (Target.Refusal home externs) =
+  D.fromChars $
+    ModuleName.toChars (ModuleName._module home)
+      ++ ": "
+      ++ List.intercalate ", " [N.toChars name ++ " (" ++ List.intercalate ", " (map languageToChars languages) ++ ")" | (name, languages) <- externs]
+  where
+    languageToChars language =
+      case language of
+        Core.ExternJs -> "js"
+        Core.ExternErlang -> "erlang"
+        Core.ExternC -> "c"
 
 --
 
@@ -1248,6 +1337,7 @@ data BuildProjectProblem
   | BP_CannotLoadDependencies
   | BP_Cycle ModuleName.Raw [ModuleName.Raw]
   | BP_MissingExposed (NE.List (ModuleName.Raw, Import.Problem))
+  | BP_TargetDrift TargetDrift
 
 toBuildProblemReport :: BuildProblem -> Help.Report
 toBuildProblemReport problem =
@@ -1260,6 +1350,8 @@ toBuildProblemReport problem =
 toProjectProblemReport :: BuildProjectProblem -> Help.Report
 toProjectProblemReport projectProblem =
   case projectProblem of
+    BP_TargetDrift drift ->
+      targetDriftReport drift
     BP_PathUnknown path ->
       Help.report
         "FILE NOT FOUND"
@@ -1441,7 +1533,9 @@ toModuleNameConventionTable srcDir names =
 data Generate
   = GenerateCannotLoadArtifacts
   | GenerateCannotOptimizeDebugValues ModuleName.Raw [ModuleName.Raw]
-  | GenerateExternUnimplemented [(ModuleName.Raw, N.Name, Maybe FilePath)]
+  | GenerateExternUnimplemented [(ModuleName.Raw, N.Name, FilePath)]
+  | GenerateTargetRefused Target.Target [Target.Refusal]
+  | GenerateNoBackend Target.Target
 
 toGenerateReport :: Generate -> Help.Report
 toGenerateReport problem =
@@ -1455,19 +1549,37 @@ toGenerateReport problem =
         "These externs are used by the program, and there is no JavaScript to call for them:"
         [ D.indent 4 $
             D.vcat
-              [ D.fromChars $
-                  ModuleName.toChars m
-                    ++ "."
-                    ++ N.toChars name
-                    ++ case file of
-                      Nothing -> ": it has no `js` implementation"
-                      Just path -> ": " ++ path ++ " is not in its package"
-              | (m, name, file) <- List.sort problems
+              [ D.fromChars $ ModuleName.toChars m ++ "." ++ N.toChars name ++ ": " ++ path ++ " is not in its package"
+              | (m, name, path) <- List.sort problems
               ],
           D.reflow
             "A `js` extern is implemented by a plain script, `src/Ext/<Module>.js` in the\
             \ package that declares it, which declares the function the attribute names\
             \ (m1b-extern.md §H15, D198)."
+        ]
+    GenerateTargetRefused target refusals ->
+      Help.report
+        "EXTERNS DO NOT SERVE THE TARGET"
+        Nothing
+        ( "This program is built for the "
+            ++ Target.toChars target
+            ++ " target, and these modules it is made of have externs with no implementation for it:"
+        )
+        [ D.indent 4 $ D.vcat $ refusalDocs refusals,
+          D.reflow
+            "An extern serves the targets of the languages it has rows for: js serves js and\
+            \ wasm, erlang serves beam, and c serves native. One with a Geng body as well serves\
+            \ every target (ffi.md F1, D77, D222)."
+        ]
+    GenerateNoBackend target ->
+      Help.report
+        "NO BACKEND FOR THE TARGET"
+        Nothing
+        ( "This application's geng.toml builds it for the "
+            ++ Target.toChars target
+            ++ " target, and this compiler has no backend for it."
+        )
+        [ D.reflow "It has one backend, which writes JavaScript for the js target."
         ]
     GenerateCannotOptimizeDebugValues m ms ->
       Help.report

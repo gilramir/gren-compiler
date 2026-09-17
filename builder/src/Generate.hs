@@ -15,6 +15,7 @@ import Core.Pass qualified as Pass
 import Core.Pretty qualified as Pretty
 import Core.Program qualified as Program
 import Core.Refs qualified as Refs
+import Core.Target qualified as Target
 import Core.Wire qualified as Wire
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as B
@@ -53,9 +54,10 @@ type Task a =
 -- each, which is what made the Core path a measured claim rather than a stated
 -- one (@docs\/m1a-js-on-core.md@ §J3 items 6 and 7). It stopped being useful
 -- when the old path stopped being an independent answer.
-dev :: Details.Details -> ExtSources -> Build.Artifacts -> Task CoreJS.GeneratedResult
-dev details sources artifacts =
+dev :: Target.Target -> Details.Details -> ExtSources -> Build.Artifacts -> Task CoreJS.GeneratedResult
+dev target details sources artifacts =
   do
+    checkTarget target details artifacts
     kernels <- kernelChunks details
     dumpCore details artifacts kernels
     spikeC details artifacts
@@ -65,9 +67,10 @@ dev details sources artifacts =
 
 -- | An @--optimize@ build: 'dev', with the field table filled in and @Debug@
 -- refused.
-prod :: Details.Details -> ExtSources -> Build.Artifacts -> Task CoreJS.GeneratedResult
-prod details sources artifacts =
+prod :: Target.Target -> Details.Details -> ExtSources -> Build.Artifacts -> Task CoreJS.GeneratedResult
+prod target details sources artifacts =
   do
+    checkTarget target details artifacts
     checkForDebugUses artifacts
     kernels <- kernelChunks details
     dumpCore details artifacts kernels
@@ -75,6 +78,31 @@ prod details sources artifacts =
     exts <- externFiles sources program
     let mode = Mode.Prod (CoreJS.shortenFieldNames (Program._progFields program))
     return $ CoreJS.generate mode program kernels exts
+
+-- TARGET
+
+-- | The build's target against the modules it is made of, before any backend is
+-- asked (@ffi.md@ F1, D77, D320), and then whether there is a backend.
+--
+-- The modules are the project's own and every module they refer to, a module
+-- at a time ('Target.reached'), so a module is refused for an extern nothing
+-- in the program calls, as F1 says a build that imports it is. That is what
+-- leaves 'externFiles' only a missing file to find: an extern with no @js@ row
+-- and no body can no longer reach it.
+checkTarget :: Target.Target -> Details.Details -> Build.Artifacts -> Task ()
+checkTarget target details artifacts@(Build.Artifacts pkg _ _ _) =
+  let own = Map.mapKeys (ModuleName.Canonical pkg) (ownCore artifacts)
+   in checkReached target (Map.union own (Details.loadCores details)) (Map.keys own)
+
+checkReached :: Target.Target -> Map.Map ModuleName.Canonical Core.Module -> [ModuleName.Canonical] -> Task ()
+checkReached target cores starts =
+  case Target.refusals target (Target.reached cores starts) of
+    [] ->
+      if target == Target.Js
+        then return ()
+        else Task.throw (Exit.GenerateNoBackend target)
+    refusals ->
+      Task.throw (Exit.GenerateTargetRefused target refusals)
 
 -- PROGRAM CORE
 
@@ -392,16 +420,18 @@ repl details sources ansi artifacts@(Build.ReplArtifacts home _ localizer annota
 -- its Core here too (D98).
 linkReplCore :: Details.Details -> Build.ReplArtifacts -> N.Name -> Map.Map N.Name [K.Chunk] -> Task Program.Program
 linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels =
-  Task.io $
-    do
-      let deps = Details.loadCores details
-      let own =
-            Map.fromList
-              [ (ModuleName.Canonical (ModuleName._package home) raw, core)
-              | (raw, core) <- map replModuleCore modules
-              ]
-      cores <- Program.chooseExterns Core.ExternJs Dump.externBodies . Pass.run <$> throughWire (Map.union own deps)
-      return (checked (Program.link (replBackend kernels cores home name) cores (replRoots home name)))
+  do
+    let deps = Details.loadCores details
+    let own =
+          Map.fromList
+            [ (ModuleName.Canonical (ModuleName._package home) raw, core)
+            | (raw, core) <- map replModuleCore modules
+            ]
+    checkReached Target.Js (Map.union own deps) (Map.keys own)
+    Task.io $
+      do
+        cores <- Program.chooseExterns Core.ExternJs Dump.externBodies . Pass.run <$> throughWire (Map.union own deps)
+        return (checked (Program.link (replBackend kernels cores home name) cores (replRoots home name)))
 
 replModuleCore :: Build.Module -> (ModuleName.Raw, Core.Module)
 replModuleCore modul =
@@ -478,8 +508,9 @@ extSources outline sources deps =
 -- | The implementation file of every reachable @js@ extern, by package and
 -- module (D198).
 --
--- A reachable extern with no @js@ row, or whose file is not there, is refused
--- here, at build time, rather than left for the program to find when it loads.
+-- A reachable extern whose file is not there is refused here, at build time,
+-- rather than left for the program to find when it loads. One with no @js@ row
+-- at all never gets here: 'checkTarget' has refused its module.
 -- A file that is there but lacks the function, or has it at another arity, is
 -- the load-time check F1's table gives JavaScript.
 externFiles :: ExtSources -> Program.Program -> Task (Map.Map (Pkg.Name, N.Name) BS.ByteString)
@@ -493,12 +524,12 @@ externFiles sources program =
         ]
       found =
         [ case moduls of
-            [] -> Left (ModuleName._module home, name, Nothing)
+            [] -> error ("Generate.externFiles: " ++ N.toChars name ++ " has no js row, which checkTarget refuses")
             modul : _ ->
               let pkg = ModuleName._package home
                   short = N.fromChars (Utf8.toChars modul)
                in case Map.lookup (N.fromChars ("Ext." ++ Utf8.toChars modul)) =<< Map.lookup pkg sources of
-                    Nothing -> Left (ModuleName._module home, name, Just ("src/Ext/" ++ Utf8.toChars modul ++ ".js"))
+                    Nothing -> Left (ModuleName._module home, name, "src/Ext/" ++ Utf8.toChars modul ++ ".js")
                     Just bytes -> Right ((pkg, short), bytes)
         | (home, name, moduls) <- wanted
         ]

@@ -50,7 +50,7 @@ run flags@(Flags _ _ _ currentVersion publishedVersion) =
 -- BUMP
 
 bump :: Flags -> Outline.PkgOutline -> Outline.PkgOutline -> Task.Task Exit.Bump ()
-bump flags@(Flags _ _ knownVersions _ _) currentOutline@(Outline.PkgOutline _ _ _ vsn _ _ _ _) publishedOutline =
+bump flags@(Flags _ _ knownVersions _ _) currentOutline@(Outline.PkgOutline _ _ _ vsn _ _ _ _ _) publishedOutline =
   Task.eio id $
     case reverse knownVersions of
       (v : vs) ->
@@ -69,7 +69,7 @@ bump flags@(Flags _ _ knownVersions _ _) currentOutline@(Outline.PkgOutline _ _ 
 -- SUGGEST VERSION
 
 suggestVersion :: Flags -> Outline.PkgOutline -> Outline.PkgOutline -> Task.Task Exit.Bump ()
-suggestVersion flags@(Flags _ root _ (Command.ProjectInfo _ currentSources currentDeps) (Command.ProjectInfo _ publishedSources publishedDeps)) currentOutline@(Outline.PkgOutline _ _ _ vsn _ _ _ _) publishedOutline =
+suggestVersion flags@(Flags _ root _ (Command.ProjectInfo _ currentSources currentDeps) (Command.ProjectInfo _ publishedSources publishedDeps)) currentOutline@(Outline.PkgOutline _ _ _ vsn _ _ _ _ _) publishedOutline =
   do
     newDocs <- generateDocs root currentOutline currentSources currentDeps
     oldDocs <- generateDocs root publishedOutline publishedSources publishedDeps
@@ -96,7 +96,7 @@ suggestVersion flags@(Flags _ root _ (Command.ProjectInfo _ currentSources curre
               <> ") in geng.toml? [Y/n] "
 
 generateDocs :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Bump Docs.Documentation
-generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _) sources solution =
+generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _ _) sources solution =
   do
     details <-
       Task.eio Exit.BumpBadDetails $

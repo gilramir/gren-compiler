@@ -82,7 +82,7 @@ getExposed (Details.Details _ validOutline _ _ _ _) =
   case validOutline of
     Details.ValidApp _ _ ->
       Task.throw Exit.DocsApplication
-    Details.ValidPkg _ _ exposed ->
+    Details.ValidPkg _ _ exposed _ ->
       case exposed of
         [] -> Task.throw Exit.DocsNoExposed
         m : ms -> return (NE.List m ms)

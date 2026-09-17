@@ -64,7 +64,7 @@ diff (Flags _ root (Command.ProjectInfo _ currentSources currentSolution) (Comma
 -- GENERATE DOCS
 
 generateDocs :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Diff Docs.Documentation
-generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _) sources solution =
+generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _ _) sources solution =
   do
     details <-
       Task.eio Exit.DiffBadDetails $

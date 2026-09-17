@@ -42,13 +42,13 @@ validate (Flags root knownVersions (Command.ProjectInfo currentOutline currentSo
   case (currentOutline, maybePreviousVersion) of
     (Outline.App _, _) ->
       Task.throw Exit.ValidateApplication
-    (Outline.Pkg currentPkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _), Nothing) ->
+    (Outline.Pkg currentPkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _ _), Nothing) ->
       do
         _ <- buildProject root currentPkgOutline currentSources currentDeps
         Task.io $ putStrLn "Everything looks good!"
-    (Outline.Pkg (Outline.PkgOutline _ _ _ _ _ _ _ _), Just (Command.ProjectInfo (Outline.App _) _ _)) ->
+    (Outline.Pkg (Outline.PkgOutline _ _ _ _ _ _ _ _ _), Just (Command.ProjectInfo (Outline.App _) _ _)) ->
       error "Previous version is app"
-    (Outline.Pkg currentPkgOutline@(Outline.PkgOutline _ _ _ vsn _ _ _ _), Just (Command.ProjectInfo (Outline.Pkg previousOutline) previousSources previousDeps)) ->
+    (Outline.Pkg currentPkgOutline@(Outline.PkgOutline _ _ _ vsn _ _ _ _ _), Just (Command.ProjectInfo (Outline.Pkg previousOutline) previousSources previousDeps)) ->
       do
         currentDocs <- buildProject root currentPkgOutline currentSources currentDeps
         previousDocs <- buildProject root previousOutline previousSources previousDeps
@@ -58,7 +58,7 @@ validate (Flags root knownVersions (Command.ProjectInfo currentOutline currentSo
         Task.io $ putStrLn "Everything looks good!"
 
 buildProject :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Validate Docs.Documentation
-buildProject root pkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _) sources solution =
+buildProject root pkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _ _) sources solution =
   do
     details@(Details.Details _ outline _ _ _ _) <-
       Task.eio Exit.ValidateBadDetails $
@@ -67,8 +67,8 @@ buildProject root pkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _) sources soluti
     exposed <-
       case outline of
         Details.ValidApp _ _ -> Task.throw Exit.ValidateApplication
-        Details.ValidPkg _ _ [] -> Task.throw Exit.ValidateNoExposed
-        Details.ValidPkg _ _ (e : es) -> return (NE.List e es)
+        Details.ValidPkg _ _ [] _ -> Task.throw Exit.ValidateNoExposed
+        Details.ValidPkg _ _ (e : es) _ -> return (NE.List e es)
 
     Task.eio Exit.ValidateBuildProblem $
       Build.fromExposed Reporting.silent root details sources Build.KeepDocs exposed

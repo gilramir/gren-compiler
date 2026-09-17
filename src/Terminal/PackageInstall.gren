@@ -43,6 +43,7 @@ import Compiler.Dependencies as Dependencies
 import Compiler.Lock as Lock exposing (Lock)
 import Compiler.Backend
 import Compiler.Platform as Platform exposing (Platform)
+import Compiler.Runtime as Runtime exposing (Runtime)
 import Compiler.Package as Package
 import Git
 import Node
@@ -100,8 +101,9 @@ type PackageInstallError
     | PackageInstallInvalidLock { path : Path, message : String }
     | PackageInstallInvalidConfig { path : Path, message : String }
     | PackageInstallRootIncompatibleCompiler SemanticVersionRange
+    | PackageInstallRootRuntimeNotBuilt Runtime
     | PackageInstallIncompatibleCompiler { package : PackageName, packageCompiler : SemanticVersionRange }
-    | PackageInstallIncompatiblePlatform { package : PackageName, rootPlatform : Platform, packagePlatform : Platform }
+    | PackageInstallIncompatibleRuntime { package : PackageName, rootRuntime : Runtime, packageRuntime : Runtime }
     | PackageInstallCoreNotFound { path : Path, error : FileSystem.Error }
     | PackageInstallCoreListed { listedBy : Maybe PackageName }
 
@@ -818,23 +820,27 @@ finish env { projectPath, outline } isCore state =
         entry loaded =
             { name = loaded.name, version = loaded.version, origin = loaded.origin }
 
-        { rootPlatform, rootCompiler } =
+        { rootRuntime, rootCompiler } =
             when outline is
                 Outline.App appOutline ->
-                    { rootPlatform = appOutline.platform
+                    { rootRuntime = Runtime.fromPlatform appOutline.platform
                     , rootCompiler = appOutline.gengVersion
                     }
 
                 Outline.Pkg pkgOutline ->
-                    { rootPlatform = pkgOutline.platform
+                    { rootRuntime = pkgOutline.runtime
                     , rootCompiler = pkgOutline.gengVersion
                     }
+
+        -- D24: a package is usable when the project's runtime is the one it
+        -- declares or below it. A project for a runtime the compiler does not
+        -- build for is refused before this is asked (D319).
 
         incompatible =
             Array.findFirst
                 (\loaded ->
                     not (SemanticVersionRange.contains Meta.version loaded.outline.gengVersion)
-                        || not (Platform.isCompatible rootPlatform loaded.outline.platform)
+                        || not (Runtime.isAtOrBelow rootRuntime loaded.outline.runtime)
                 )
                 chosen
                 |> Maybe.map
@@ -846,10 +852,10 @@ finish env { projectPath, outline } isCore state =
                                 }
 
                         else
-                            PackageInstallIncompatiblePlatform
+                            PackageInstallIncompatibleRuntime
                                 { package = loaded.name
-                                , rootPlatform = rootPlatform
-                                , packagePlatform = loaded.outline.platform
+                                , rootRuntime = rootRuntime
+                                , packageRuntime = loaded.outline.runtime
                                 }
                     )
 
@@ -878,6 +884,9 @@ finish env { projectPath, outline } isCore state =
         Nothing ->
             if not (SemanticVersionRange.contains Meta.version rootCompiler) then
                 Task.fail (PackageInstallRootIncompatibleCompiler rootCompiler)
+
+            else if not (Runtime.isBuilt rootRuntime) then
+                Task.fail (PackageInstallRootRuntimeNotBuilt rootRuntime)
 
             else
                 when incompatible is
@@ -1184,24 +1193,38 @@ prettifyError error =
                     ]
                 )
 
-        PackageInstallIncompatiblePlatform { package, rootPlatform, packagePlatform } ->
+        PackageInstallIncompatibleRuntime { package, rootRuntime, packageRuntime } ->
             Report.create
-                "INCOMPATIBLE PACKAGE"
+                "INCOMPATIBLE RUNTIME"
                 Nothing
                 (PP.verticalBlock
                     [ PP.words
                         ( PackageName.toString package
-                            ++ " targets the "
-                            ++ Platform.toString packagePlatform
-                            ++ " platform."
+                            ++ " works on the "
+                            ++ Runtime.toString packageRuntime
+                            ++ " runtime, and this project is for "
+                            ++ Runtime.toString rootRuntime
+                            ++ ", which is not "
+                            ++ Runtime.toString packageRuntime
+                            ++ " or below it."
                         )
                     , PP.empty
                     , PP.words
-                        ( "However, the current project targets the "
-                            ++ Platform.toString rootPlatform
-                            ++ ", which is not compatible."
-                        )
+                        "A package declares the most general runtime it works on, and a project can use it when the project's runtime is that one or below it: any is above browser, node, beam, os and host, and os is above linux, darwin and windows (D24)."
                     ]
+                )
+
+        PackageInstallRootRuntimeNotBuilt runtime ->
+            Report.create
+                "RUNTIME NOT BUILT FOR"
+                Nothing
+                (PP.words
+                    ("The geng.toml file says this package works on the "
+                        ++ Runtime.toString runtime
+                        ++ " runtime, and this compiler builds for any, browser and node, so it cannot build it as the project. It can still be a dependency of a project whose runtime is "
+                        ++ Runtime.toString runtime
+                        ++ " or below it, once a compiler builds for one (D319)."
+                    )
                 )
 
         PackageInstallCoreNotFound { path, error = fsErr } ->
