@@ -50,6 +50,7 @@ type alias Config =
     { fsPermission : FileSystem.Permission
     , cpPermission : ChildProcess.Permission
     , cacheRoot : Compiler.Paths.CacheRoot
+    , corePath : Path
     , interactive : Bool
     , useColor : Bool
     , stdout : Stream.Writable Bytes
@@ -89,11 +90,21 @@ type PackageInstallError
     | PackageInstallRootIncompatibleCompiler SemanticVersionRange
     | PackageInstallIncompatibleCompiler { package : PackageName, rootCompiler : SemanticVersionRange, packageCompiler : SemanticVersionRange }
     | PackageInstallIncompatiblePlatform { package : PackageName, rootPlatform : Platform, packagePlatform : Platform }
+    | PackageInstallCoreNotFound { path : Path, error : FileSystem.Error }
+    | PackageInstallCoreListed { listedBy : Maybe PackageName }
 
 
 run : Config -> Options -> Task PackageInstallError PackageResolution
 run config { projectPath, outline } =
     let
+        isCore =
+            when outline is
+                Outline.Pkg pkgOutline ->
+                    PackageName.isCore pkgOutline.name
+
+                Outline.App _ ->
+                    False
+
         rootDeps =
             when outline is
                 Outline.App appOutline ->
@@ -112,7 +123,48 @@ run config { projectPath, outline } =
 
                 Outline.Pkg pkgOutline ->
                     pkgOutline.dependencies
+        -- `core` is every project's and no manifest's (K7, D297): it is loaded
+        -- from where the toolchain keeps it, and the solver never sees it,
+        -- because nothing may ask for a version of it.
+        loadCore =
+            if isCore then
+                []
+
+            else
+                [ config.corePath
+                    |> FileSystem.checkAccess config.fsPermission []
+                    |> Task.mapError (\err -> PackageInstallCoreNotFound { path = config.corePath, error = err })
+                    |> Task.andThen (\_ -> loadPackageFromPath config.fsPermission PackageName.core config.corePath)
+                    |> Task.map Just
+                ]
     in
+    (if Dict.member (PackageName.toString PackageName.core) rootDeps then
+        Task.fail (PackageInstallCoreListed { listedBy = Nothing })
+
+     else
+        Task.succeed {}
+    )
+        |> Task.andThen (\{} -> loadRootPackages config projectPath outline rootDeps loadCore)
+        |> Task.andThen (installStep config)
+        |> Task.andThen
+            (\resolution ->
+                if resolution.didDownload then
+                    Stream.Log.line config.stdout ""
+                        |> Task.map (\_ -> resolution)
+
+                else
+                    Task.succeed resolution
+            )
+
+
+loadRootPackages :
+    Config
+    -> Path
+    -> Outline
+    -> Dict String (Outline.VersionConstraint SemanticVersionRange)
+    -> Array (Task PackageInstallError (Maybe LoadedPackage))
+    -> Task PackageInstallError StepOptions
+loadRootPackages config projectPath outline rootDeps loadCore =
     rootDeps
         |> Dict.foldl
             (\key value acc ->
@@ -153,6 +205,7 @@ run config { projectPath, outline } =
                         loadPackageFromPath config.fsPermission name path
                             |> Task.map Just
             )
+        |> Array.append loadCore
         |> Task.concurrent
         |> Task.map (Array.mapAndKeepJust identity)
         |> Task.andThen
@@ -258,16 +311,6 @@ run config { projectPath, outline } =
                             }
                         )
             )
-        |> Task.andThen (installStep config)
-        |> Task.andThen
-            (\resolution ->
-                if resolution.didDownload then
-                    Stream.Log.line config.stdout ""
-                        |> Task.map (\_ -> resolution)
-
-                else
-                    Task.succeed resolution
-            )
 
 
 type alias StepOptions =
@@ -356,6 +399,10 @@ installStep config opts =
 
             else when Dict.get packageNameString opts.loadedPackages is
                 Just loadedPackage ->
+                    if Dict.member (PackageName.toString PackageName.core) loadedPackage.outline.dependencies then
+                        Task.fail (PackageInstallCoreListed { listedBy = Just loadedPackage.outline.name })
+
+                    else
                     let
                         localDependenciesCheck =
                             loadedPackage.outline.dependencies
@@ -877,6 +924,54 @@ prettifyError error =
                 )
 
 
+        PackageInstallCoreNotFound { path, error = fsErr } ->
+            Report.create
+                "CORE NOT FOUND"
+                (Just path)
+                (PP.verticalBlock
+                    [ PP.words "Every project is compiled against core, which comes with the compiler rather than from a dependency, and I cannot find it here:"
+                    , PP.empty
+                    , PP.text (Path.toPosixString path)
+                        |> PP.indent
+                        |> PP.color PP.Yellow
+                    , PP.empty
+                    , PP.words "The error is:"
+                    , PP.empty
+                    , PP.words (FileSystem.errorToString fsErr)
+                        |> PP.indent
+                    , PP.empty
+                    , PP.words "I look for it beside the compiler, in the core directory next to the one I was run from. Set GENG_CORE to use a core somewhere else."
+                    ]
+                )
+
+        PackageInstallCoreListed { listedBy } ->
+            Report.create
+                "CORE IS NOT A DEPENDENCY"
+                (when listedBy is
+                    Nothing ->
+                        Just (Path.fromPosixString "gren.json")
+
+                    Just _ ->
+                        Nothing
+                )
+                (PP.verticalBlock
+                    [ when listedBy is
+                        Nothing ->
+                            PP.words "Your gren.json lists core as a dependency."
+
+                        Just package ->
+                            PP.block
+                                [ PP.words "The gren.json of"
+                                , PP.text (" " ++ PackageName.toString package ++ " ")
+                                    |> PP.color PP.Green
+                                , PP.words "lists core as a dependency."
+                                ]
+                    , PP.empty
+                    , PP.words "core comes with the compiler, and every project is compiled against the one this compiler has. A manifest never lists it, so there is no version of it to ask for. Remove it from the dependencies."
+                    ]
+                )
+
+
 outlineFindSourcesErrorToString : Outline.FindSourceFilesError -> String
 outlineFindSourcesErrorToString err =
     when err is
@@ -1214,11 +1309,7 @@ packageBundlePath : PackageName -> SemanticVersion -> Path -> Path
 packageBundlePath name version projectPath =
     let
         normalizedName =
-            (PackageName.toString name ++ "__" ++ SemanticVersion.toString version)
-                |> String.replace "-" "_"
-                |> String.replace "." "_"
-                |> String.replace "/" "_"
-                |> String.append ".pkg.gz"
+            PackageName.toFileName name ++ "__" ++ String.replace "." "_" (SemanticVersion.toString version) ++ ".pkg.gz"
     in
     Path.join
         [ projectPath
@@ -1231,10 +1322,7 @@ localRepoPath : PackageName -> SemanticVersion -> Path -> Path
 localRepoPath name version projectPath =
     let
         normalizedName =
-            (PackageName.toString name ++ "__" ++ SemanticVersion.toString version)
-                |> String.replace "-" "_"
-                |> String.replace "." "_"
-                |> String.replace "/" "_"
+            PackageName.toFileName name ++ "__" ++ String.replace "." "_" (SemanticVersion.toString version)
     in
     Path.join
         [ projectPath

@@ -179,7 +179,7 @@ globalsOf = List.sort . go
 -- BUILDING CORE
 
 home :: ModuleName.Canonical
-home = ModuleName.Canonical Pkg.dummyName "Main"
+home = ModuleName.Canonical Pkg.application "Main"
 
 span0 :: Core.Span
 span0 = Core.Span (Core.FileId 0) 1 1 1 1

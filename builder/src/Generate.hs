@@ -471,7 +471,7 @@ extSources :: Outline.Outline -> Build.Sources -> Map.Map Pkg.Name Details.Depen
 extSources outline sources deps =
   let own =
         case outline of
-          Outline.App _ -> Pkg.dummyName
+          Outline.App _ -> Pkg.application
           Outline.Pkg pkgOutline -> Outline._pkg_name pkgOutline
    in Map.insert own (Map.map Build._source_data sources) (Map.map Details._dep_sources deps)
 

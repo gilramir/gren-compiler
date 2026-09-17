@@ -187,8 +187,8 @@ type Cores =
 -- it.
 --
 -- Only a dependency contributes: a project's own kernel modules are 'RKernel' in
--- "Build", which adds nothing to a root's artifacts, and only a @gren-lang@
--- kernel package may contain one at all.
+-- "Build", which adds nothing to a root's artifacts, and only @core@ may
+-- contain one at all.
 type Kernels =
   Map.Map Name.Name [Kernel.Chunk]
 
@@ -226,9 +226,9 @@ load root outline solution =
   let (validOutline, directDeps) =
         case outline of
           Outline.Pkg (Outline.PkgOutline pkg _ _ _ exposed direct _ rootPlatform) ->
-            (ValidPkg rootPlatform pkg (Outline.flattenExposed exposed), Map.map (const ()) direct)
+            (ValidPkg rootPlatform pkg (Outline.flattenExposed exposed), directDependencies pkg direct)
           Outline.App (Outline.AppOutline _ rootPlatform srcDirs direct _) ->
-            (ValidApp rootPlatform srcDirs, Map.map (const ()) direct)
+            (ValidApp rootPlatform srcDirs, directDependencies Pkg.application direct)
       prints = packageFingerprints solution
       fingerprint = dependencyFingerprint prints
    in do
@@ -289,7 +289,7 @@ encodeCore core =
 -- against__, all length-prefixed and in ascending order. That last part is what
 -- makes it a Merkle hash rather than a checksum of a directory, and it is what
 -- makes the number the right name for a file in a cache shared by every project
--- on the machine: two projects that resolve @gren-lang\/core@ to the same
+-- on the machine: two projects that resolve @core@ to the same
 -- version but resolve something it depends on differently compile two different
 -- @core@s, and they must not be handed each other's.
 --
@@ -337,8 +337,23 @@ versionOf outline =
 depsOf :: Outline -> Map.Map Pkg.Name ()
 depsOf outline =
   case outline of
-    Outline.Pkg pkgOutline -> Map.map (const ()) (Outline._pkg_deps pkgOutline)
+    Outline.Pkg pkgOutline -> directDependencies (Outline._pkg_name pkgOutline) (Outline._pkg_deps pkgOutline)
     Outline.App _ -> Map.empty
+
+-- | What a project is compiled against: the dependencies its manifest lists,
+-- and @core@, which no manifest lists because every project has it (K7, D297).
+-- @core@ is the one package that is not compiled against itself.
+--
+-- The front end puts @core@ in the solution, from beside its own install or
+-- from @GENG_CORE@. This is the other half: without it @core@ would be compiled
+-- and then left out of every package's interfaces, and the first @import Array@
+-- would not find a module.
+directDependencies :: Pkg.Name -> Map.Map Pkg.Name a -> Map.Map Pkg.Name ()
+directDependencies pkg deps =
+  let listed = Map.map (const ()) deps
+   in if pkg == Pkg.core
+        then listed
+        else Map.insert Pkg.core () listed
 
 -- | The whole dependency set as one number, for @d.dat@: every package's
 -- fingerprint, named and in ascending order.
@@ -531,7 +546,7 @@ compileDep :: FilePath -> MVar (Map.Map Pkg.Name (MVar Dep)) -> Pkg.Name -> Map.
 compileDep path depsMVar pkg sources exposed deps platform =
   do
     allDeps <- readMVar depsMVar
-    directDeps <- traverse readMVar (Map.intersection allDeps deps)
+    directDeps <- traverse readMVar (Map.intersection allDeps (directDependencies pkg deps))
     case sequence directDeps of
       Left _ ->
         do

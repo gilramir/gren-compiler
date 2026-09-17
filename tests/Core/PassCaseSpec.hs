@@ -136,7 +136,7 @@ leafPatterns e =
 -- BUILDING CORE
 
 home :: ModuleName.Canonical
-home = ModuleName.Canonical Pkg.dummyName "Main"
+home = ModuleName.Canonical Pkg.application "Main"
 
 q :: Name -> Core.QualName
 q = Core.QualName home

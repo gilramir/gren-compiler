@@ -3,10 +3,6 @@ module Directories
     greni,
     grenc,
     artifactKey,
-    findRoot,
-    PackageCache,
-    getPackageCache,
-    package,
     ArtifactCache,
     getArtifactCache,
     packageArtifacts,
@@ -23,7 +19,6 @@ import Gren.Version qualified as V
 import System.Directory qualified as Dir
 import System.Environment qualified as Env
 import System.FilePath ((<.>), (</>))
-import System.FilePath qualified as FP
 import System.IO.Unsafe (unsafePerformIO)
 
 -- PATHS
@@ -113,43 +108,11 @@ toArtifactPath :: FilePath -> ModuleName.Raw -> String -> FilePath
 toArtifactPath root name ext =
   projectCache root </> ModuleName.toHyphenPath name <.> ext
 
--- ROOT
-
-findRoot :: IO (Maybe FilePath)
-findRoot =
-  do
-    dir <- Dir.getCurrentDirectory
-    findRootHelp (FP.splitDirectories dir)
-
-findRootHelp :: [String] -> IO (Maybe FilePath)
-findRootHelp dirs =
-  case dirs of
-    [] ->
-      return Nothing
-    _ : _ ->
-      do
-        exists <- Dir.doesFileExist (FP.joinPath dirs </> "gren.json")
-        if exists
-          then return (Just (FP.joinPath dirs))
-          else findRootHelp (init dirs)
-
--- PACKAGE CACHES
-
-newtype PackageCache = PackageCache FilePath
-
-getPackageCache :: IO PackageCache
-getPackageCache =
-  PackageCache <$> getCacheDir "packages"
-
-package :: PackageCache -> Pkg.Name -> V.Version -> FilePath
-package (PackageCache dir) name version =
-  dir </> Pkg.toFilePath name </> V.toChars version
-
 -- ARTIFACT CACHE
 
 -- | Where a compiled dependency goes, and it is not in the project (D101).
 --
--- Compiling @gren-lang\/core@ produces the same interfaces, the same Core and
+-- Compiling @core@ produces the same interfaces, the same Core and
 -- the same kernel chunks for every project that compiles it against the same
 -- versions of the same packages with the same compiler. Writing that into
 -- @<project>\/.gren\/@ made every project and every fresh checkout pay for it
@@ -159,9 +122,10 @@ package (PackageCache dir) name version =
 --
 -- This is roughly where stock kept the same thing, as @artifacts.dat@ beside
 -- the downloaded sources, before the half of the cache that read it was
--- removed. It is beside them rather than among them: 'PackageCache' holds what
--- was fetched from the registry and is the same for every compiler, and one
--- directory should not hold both that and this compiler build's output.
+-- removed. It is beside them rather than among them: the front end's
+-- @packages@ directory holds what was fetched and is the same for every
+-- compiler, and one directory should not hold both that and this compiler
+-- build's output.
 newtype ArtifactCache = ArtifactCache FilePath
 
 -- | Under 'artifactKey' rather than under the language version, which is the

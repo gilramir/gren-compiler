@@ -37,6 +37,7 @@ type alias Config =
     , fsPermission : FileSystem.Permission
     , cpPermission : ChildProcess.Permission
     , cacheRoot : Compiler.Paths.CacheRoot
+    , corePath : Path
     , interactive : Bool
     , useColor : Bool
     , package : Bool
@@ -137,17 +138,20 @@ runNonInteractive config projectPath =
         |> Task.andThen (generateGrenJson config projectPath)
 
 
+{-| The packages a new project starts with. `core` is not one of them: every
+project has it and no manifest lists it (K7).
+-}
 dependenciesForPlatform : Platform -> Array PackageName
 dependenciesForPlatform platform =
   when platform is
     Platform.Common ->
-        [ PackageName.core ]
+        []
 
     Platform.Browser ->
-        [ PackageName.core, PackageName.browser ]
+        [ PackageName.browser ]
 
     Platform.Node ->
-        [ PackageName.core, PackageName.node ]
+        [ PackageName.node ]
 
 
 generateGrenJson : Config -> Path -> Array { name : PackageName, version : SemanticVersion } -> Task Error Outline
@@ -198,6 +202,7 @@ generateGrenJson config projectPath deps =
         , fsPermission = config.fsPermission
         , cpPermission = config.cpPermission
         , cacheRoot = config.cacheRoot
+        , corePath = config.corePath
         , interactive = config.interactive
         , useColor = config.useColor
         , strictAppResolution = False

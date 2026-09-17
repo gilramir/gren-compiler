@@ -51,7 +51,7 @@ maybePCtor isJust args =
   Can.PCtor
     { Can._p_home =
         ModuleName.Canonical
-          (Pkg.Name (Utf8.fromChars "core") (Utf8.fromChars "gren-lang"))
+          Pkg.core
           (Utf8.fromChars "Maybe"),
       Can._p_type = (N.fromChars "Maybe"),
       Can._p_union = maybeUnion,

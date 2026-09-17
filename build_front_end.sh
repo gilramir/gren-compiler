@@ -13,7 +13,10 @@
 # A checkout with none can produce the first one with stock Gren against `core`
 # at the last commit before class syntax landed there. An `app` from before the
 # command was renamed (D174) reads `GREN_BIN` rather than `GENG_BIN`; give it
-# that name for the first build, and the self-check below still applies.
+# that name for the first build, and the self-check below still applies. An `app`
+# from before package identifiers (geng-lang `m1b-manifest.md` §MF7) cannot read
+# a manifest that names `github.com/...` or leaves `core` out: build the first
+# one with it from a copy of the sources beside the pre-5b manifests.
 set -e
 
 cd "$(dirname "$(realpath "$0")")"

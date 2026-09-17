@@ -37,6 +37,7 @@ type alias Config =
     , fsPermission : FileSystem.Permission
     , cpPermission : ChildProcess.Permission
     , cacheRoot : Compiler.Paths.CacheRoot
+    , corePath : Path
     , useColor : Bool
     }
 
@@ -70,6 +71,7 @@ setupGlobalReplProject config =
                                     , cpPermission = config.cpPermission
                                     , fsPermission = config.fsPermission
                                     , cacheRoot = config.cacheRoot
+                                    , corePath = config.corePath
                                     , interactive = False
                                     , useColor = config.useColor
                                     , package = False

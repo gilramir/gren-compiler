@@ -269,7 +269,7 @@ gatherSources (Flags _ _ _ _ _ _ outline sources deps) =
   let mappedSources =
         case outline of
           Outline.App _ ->
-            Map.map Build._source_data (Map.mapKeys (ModuleName.Canonical Package.dummyName) sources)
+            Map.map Build._source_data (Map.mapKeys (ModuleName.Canonical Package.application) sources)
           Outline.Pkg pkgOutline ->
             Map.map Build._source_data (Map.mapKeys (ModuleName.Canonical (Outline._pkg_name pkgOutline)) sources)
 

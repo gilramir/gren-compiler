@@ -1,21 +1,21 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE UnboxedTuples #-}
+{-# LANGUAGE KindSignatures #-}
 
 module Gren.Package
-  ( Name (..),
-    Author,
-    Project,
-    Canonical (..),
+  ( Name,
     isKernel,
     isFirstParty,
+    isValid,
     toChars,
-    toUrl,
     toFilePath,
     toJsonString,
+    escapedSegments,
+    toUtf8,
+    fromUtf8,
     --
-    dummyName,
+    application,
     kernel,
     core,
     browser,
@@ -23,7 +23,6 @@ module Gren.Package
     url,
     --
     suggestions,
-    nearbyNames,
     --
     decoder,
     encode,
@@ -33,118 +32,190 @@ module Gren.Package
   )
 where
 
-import Control.Monad (liftM2)
 import Data.Binary (Binary, get, put)
+import Data.Char qualified as Char
 import Data.Coerce qualified as Coerce
+import Data.Kind (Type)
 import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Data.Utf8 qualified as Utf8
 import Data.Word (Word8)
 import Foreign.Ptr (Ptr, minusPtr, plusPtr)
-import Gren.Version qualified as V
 import Json.Decode qualified as D
 import Json.Encode qualified as E
 import Json.String qualified as Json
 import Parse.Primitives (Col, Row)
 import Parse.Primitives qualified as P
-import Reporting.Suggest qualified as Suggest
-import System.FilePath ((</>))
+import System.FilePath (joinPath)
 
 -- PACKAGE NAMES
 
-data Name = Name
-  { _author :: !Author,
-    _project :: !Project
-  }
-  deriving (Ord, Show)
+-- | A package identifier (@packaging.md@ K7, D76): a URL path — the host, then
+-- the path to the package within its repository — or @core@, the one package
+-- the toolchain distributes.
+--
+-- It was an author and a project, which is Gren's shape and GitHub's, and it is
+-- one string now because nothing about an identifier divides it in two: a
+-- package below a repository's root has as many parts as its path does (D295).
+newtype Name = Name (Utf8.Utf8 IDENTIFIER)
+  deriving (Eq, Ord)
 
-type Author = Utf8.Utf8 AUTHOR
+data IDENTIFIER
 
-type Project = Utf8.Utf8 PROJECT
-
-data AUTHOR
-
-data PROJECT
-
-data Canonical = Canonical
-  { _name :: !Name,
-    _version :: !V.Version
-  }
-  deriving (Ord)
+instance Show Name where
+  show = show . toChars
 
 -- HELPERS
 
+-- | Whether a package may hold kernel code, write @infix@ declarations and
+-- reach a kernel module without importing it. Only @core@ does any of them
+-- since the splicer's other clients left (D45); it was every package @gren-lang@
+-- authors.
 isKernel :: Name -> Bool
-isKernel (Name author _) =
-  author == gren
+isKernel name =
+  name == core
 
 -- | Whether a package may declare classes and instances (`classes.md` §8.3).
 --
--- Today this asks exactly what 'isKernel' asks, and it is written separately
--- because the two mean different things and part company at K7: a first-party
--- package is one whose identifier begins with @github.com/geng-language/@, which
--- is not something a package name of this shape can yet say. Until it can, the
--- toolchain-distributed packages are the ones @gren-lang@ authors.
+-- @core@, and a package whose identifier begins with
+-- @github.com/geng-language/@, the first-party prefix D289 settles. It is kept
+-- apart from 'isKernel' because the two mean different things: a first-party
+-- package is an ordinary hosted package that D59's class gate admits until D10
+-- opens, and it holds no kernel code.
 --
 -- §8.4 gates classes and instances __together__, and the gate lifts when D10
 -- opens rather than when any verb lands.
 isFirstParty :: Name -> Bool
-isFirstParty (Name author _) =
-  author == gren
+isFirstParty name =
+  name == core || List.isPrefixOf firstPartyPrefix (toChars name)
+
+firstPartyPrefix :: String
+firstPartyPrefix =
+  "github.com/geng-language/"
 
 toChars :: Name -> String
-toChars (Name author project) =
-  Utf8.toChars author <> "/" <> Utf8.toChars project
+toChars (Name identifier) =
+  Utf8.toChars identifier
 
-toUrl :: Name -> String
-toUrl (Name author project) =
-  Utf8.toChars author ++ "/" ++ Utf8.toChars project
-
+-- | Where a package's artifacts sit below a cache directory: one directory per
+-- path element, so @core@ is @core@ and @github.com/x/y@ is @github.com/x/y@.
 toFilePath :: Name -> FilePath
-toFilePath (Name author project) =
-  Utf8.toChars author </> Utf8.toChars project
+toFilePath name =
+  joinPath (splitSegments (toChars name))
+
+-- | The identifier's bytes, as whatever string type the caller keeps: the wire
+-- format's string table holds them beside every other name.
+toUtf8 :: Name -> Utf8.Utf8 (t :: Type)
+toUtf8 (Name identifier) =
+  Coerce.coerce identifier
+
+-- | A name read back from somewhere that already holds one, which is the Core
+-- wire format. It is not checked with 'isValid', because 'application' and
+-- 'kernel' are names Core carries and no manifest may write.
+fromUtf8 :: Utf8.Utf8 (t :: Type) -> Name
+fromUtf8 bytes =
+  Name (Coerce.coerce bytes)
 
 toJsonString :: Name -> Json.String
-toJsonString (Name author project) =
-  Utf8.join 0x2F {-/-} [Coerce.coerce author, Coerce.coerce project]
+toJsonString (Name identifier) =
+  Coerce.coerce identifier
+
+-- | The identifier's path elements, each escaped so that what is left is
+-- letters, digits and underscores: @_@ is @_u@, @.@ is @_d@ and @-@ is @_h@
+-- (D296). The escape is injective within an element, and an escaped element
+-- has no character a separator could be, so a generated name joins them with
+-- whatever separator its language allows and stays injective: the JavaScript
+-- one with @$@, a dump file with @-@ and the C spike with @_s@.
+escapedSegments :: Name -> [String]
+escapedSegments name =
+  map (concatMap escape) (splitSegments (toChars name))
+  where
+    escape c =
+      case c of
+        '_' -> "_u"
+        '.' -> "_d"
+        '-' -> "_h"
+        _ -> [c]
+
+splitSegments :: String -> [String]
+splitSegments chars =
+  case break (== '/') chars of
+    (segment, []) -> [segment]
+    (segment, _ : rest) -> segment : splitSegments rest
+
+-- | Whether a string is an identifier a manifest may write (K7): @core@, or a
+-- host with a dot in it, lower-case, then one or more path elements, with no
+-- scheme, no empty element, no @.@ or @..@ element and no trailing slash.
+--
+-- An element is ASCII letters, digits, @.@, @_@ and @-@, and does not begin or
+-- end with a dot, which is Go's module path rule less the tilde. Those are the
+-- characters 'escapedSegments' has an escape for.
+isValid :: String -> Bool
+isValid chars =
+  chars == "core"
+    || case splitSegments chars of
+      host : path@(_ : _) -> isHost host && all isElement path
+      _ -> False
+
+isHost :: String -> Bool
+isHost host =
+  elem '.' host
+    && all (\c -> Char.isAsciiLower c || Char.isDigit c || c == '.' || c == '-') host
+    && not (List.isInfixOf ".." host)
+    && notAtEitherEnd '.' host
+    && notAtEitherEnd '-' host
+
+isElement :: String -> Bool
+isElement element =
+  not (null element)
+    && all (\c -> Char.isAsciiLower c || Char.isAsciiUpper c || Char.isDigit c || c == '.' || c == '_' || c == '-') element
+    && notAtEitherEnd '.' element
+
+notAtEitherEnd :: Char -> String -> Bool
+notAtEitherEnd c chars =
+  not (List.isPrefixOf [c] chars) && not (List.isSuffixOf [c] chars)
 
 -- COMMON PACKAGE NAMES
 
-toName :: Author -> [Char] -> Name
-toName author project =
-  Name author (Utf8.fromChars project)
+fromChars :: String -> Name
+fromChars chars =
+  Name (Utf8.fromChars chars)
 
-dummyName :: Name
-dummyName =
-  toName (Utf8.fromChars "author") "project"
+-- | The name an application's own modules are compiled under. An application
+-- has no identifier (K8), so this is not one: it has no dot, and no manifest can
+-- write it, which is what keeps it from ever naming a real package.
+application :: Name
+application =
+  fromChars "app"
 
+-- | The pseudo-package the kernel's names live under, which leaves with the
+-- splicer. It has no dot either.
 kernel :: Name
 kernel =
-  toName gren "kernel"
+  fromChars "kernel"
 
 core :: Name
 core =
-  toName gren "core"
+  fromChars "core"
 
 browser :: Name
 browser =
-  toName gren "browser"
+  fromChars "github.com/geng-language/browser"
 
 node :: Name
 node =
-  toName gren "node"
+  fromChars "github.com/geng-language/node"
 
 url :: Name
 url =
-  toName gren "url"
-
-gren :: Author
-gren =
-  Utf8.fromChars "gren-lang"
+  fromChars "github.com/geng-language/url"
 
 -- PACKAGE SUGGESTIONS
 
+-- | Modules a missing import is likely to have meant, and the package to install
+-- for each. @core@'s modules are not in it: @core@ is never installed, so a
+-- @core@ module that cannot be found is not one a suggestion could supply.
 suggestions :: Map.Map Name.Name Name
 suggestions =
   Map.fromList
@@ -156,10 +227,6 @@ suggestions =
       "Html.Attributes" ==> browser,
       "Html.Events" ==> browser,
       "Http" ==> browser,
-      "Json.Decode" ==> core,
-      "Json.Encode" ==> core,
-      "Random" ==> core,
-      "Time" ==> core,
       "Url.Parser" ==> url,
       "Url" ==> url
     ]
@@ -168,46 +235,11 @@ suggestions =
 (==>) moduleName package =
   (Utf8.fromChars moduleName, package)
 
--- NEARBY NAMES
-
-nearbyNames :: Name -> [Name] -> [Name]
-nearbyNames (Name author1 project1) possibleNames =
-  let authorDist = authorDistance (Utf8.toChars author1)
-      projectDist = projectDistance (Utf8.toChars project1)
-
-      nameDistance (Name author2 project2) =
-        authorDist author2 + projectDist project2
-   in take 4 $ List.sortOn nameDistance possibleNames
-
-authorDistance :: [Char] -> Author -> Int
-authorDistance given possibility =
-  if possibility == gren
-    then 0
-    else abs (Suggest.distance given (Utf8.toChars possibility))
-
-projectDistance :: [Char] -> Project -> Int
-projectDistance given possibility =
-  abs (Suggest.distance given (Utf8.toChars possibility))
-
--- INSTANCES
-
-instance Eq Name where
-  (==) (Name author1 project1) (Name author2 project2) =
-    project1 == project2 && author1 == author2
-
-instance Eq Canonical where
-  (==) (Canonical package1 version1) (Canonical package2 version2) =
-    version1 == version2 && package1 == package2
-
 -- BINARY
 
-instance Binary Name where -- PERF try storing as a Word16
-  get = liftM2 Name Utf8.getUnder256 Utf8.getUnder256
-  put (Name a b) = Utf8.putUnder256 a >> Utf8.putUnder256 b
-
-instance Binary Canonical where
-  get = liftM2 Canonical get get
-  put (Canonical a b) = put a >> put b
+instance Binary Name where
+  get = fmap Name Utf8.getVeryLong
+  put (Name identifier) = Utf8.putVeryLong identifier
 
 -- JSON
 
@@ -227,60 +259,35 @@ keyDecoder toError =
 
 -- PARSER
 
+-- | Every character an identifier may hold, then 'isValid' over the lot. A
+-- string that is not an identifier is refused at its end, which is where the
+-- decoder's report points.
 parser :: P.Parser (Row, Col) Name
 parser =
-  do
-    author <- parseName isAlphaOrDigit isAlphaOrDigit
-    P.word1 0x2F {-/-} (,)
-    project <- parseName isLower isLowerOrDigit
-    return (Name author project)
-
-parseName :: (Word8 -> Bool) -> (Word8 -> Bool) -> P.Parser (Row, Col) (Utf8.Utf8 t)
-parseName isGoodStart isGoodInner =
   P.Parser $ \(P.State src pos end indent row col) cok _ cerr eerr ->
-    if pos >= end
-      then eerr row col (,)
-      else
-        let !word = P.unsafeIndex pos
-         in if not (isGoodStart word)
-              then eerr row col (,)
-              else
-                let (# isGood, newPos #) = chompName isGoodInner (plusPtr pos 1) end False
-                    !len = fromIntegral (minusPtr newPos pos)
-                    !newCol = col + len
-                 in if isGood && len < 256
-                      then
-                        let !newState = P.State src newPos end indent row newCol
-                         in cok (Utf8.fromPtr pos newPos) newState
-                      else cerr row newCol (,)
+    let !newPos = chompIdentifier pos end
+        !len = minusPtr newPos pos
+        !newCol = col + fromIntegral len
+     in if len == 0
+          then eerr row col (,)
+          else
+            let !identifier = Utf8.fromPtr pos newPos
+             in if isValid (Utf8.toChars identifier)
+                  then cok (Name identifier) (P.State src newPos end indent row newCol)
+                  else cerr row newCol (,)
 
-isLower :: Word8 -> Bool
-isLower word =
-  0x61 {-a-} <= word && word <= 0x7A {-z-}
+chompIdentifier :: Ptr Word8 -> Ptr Word8 -> Ptr Word8
+chompIdentifier pos end =
+  if pos < end && isIdentifierByte (P.unsafeIndex pos)
+    then chompIdentifier (plusPtr pos 1) end
+    else pos
 
-isLowerOrDigit :: Word8 -> Bool
-isLowerOrDigit word =
-  0x61 {-a-} <= word && word <= 0x7A {-z-}
-    || 0x30 {-0-} <= word && word <= 0x39 {-9-}
-
-isAlphaOrDigit :: Word8 -> Bool
-isAlphaOrDigit word =
+isIdentifierByte :: Word8 -> Bool
+isIdentifierByte word =
   0x61 {-a-} <= word && word <= 0x7A {-z-}
     || 0x41 {-A-} <= word && word <= 0x5A {-Z-}
     || 0x30 {-0-} <= word && word <= 0x39 {-9-}
-
-chompName :: (Word8 -> Bool) -> Ptr Word8 -> Ptr Word8 -> Bool -> (# Bool, Ptr Word8 #)
-chompName isGoodChar pos end prevWasDash =
-  if pos >= end
-    then (# not prevWasDash, pos #)
-    else
-      let !word = P.unsafeIndex pos
-       in if isGoodChar word
-            then chompName isGoodChar (plusPtr pos 1) end False
-            else
-              if word == 0x2D {---}
-                then
-                  if prevWasDash
-                    then (# False, pos #)
-                    else chompName isGoodChar (plusPtr pos 1) end True
-                else (# True, pos #)
+    || word == 0x2E {-.-}
+    || word == 0x2F {-/-}
+    || word == 0x5F {-_-}
+    || word == 0x2D {---}

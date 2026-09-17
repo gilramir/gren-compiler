@@ -219,15 +219,15 @@ isLeft (Right _) = False
 -- THE PIECES
 
 home :: ModuleName.Canonical
-home = ModuleName.Canonical (Pkg.Name (utf8 "gren-lang") (utf8 "core")) "Basics"
+home = ModuleName.Canonical Pkg.core "Basics"
 
 otherHome :: ModuleName.Canonical
-otherHome = ModuleName.Canonical (Pkg.Name (utf8 "author") (utf8 "project")) "Some.Module"
+otherHome = ModuleName.Canonical Pkg.application "Some.Module"
 
 qual :: Name.Name -> QualName
 qual = QualName home
 
--- | Neither 'Pkg.Author' nor 'Core.AST.Text' has an 'IsString' instance, and
+-- | 'Core.AST.Text' has no 'IsString' instance, and
 -- 'Core.AST.Text' deliberately does not: its whole purpose is that putting
 -- undecoded JavaScript string-literal source there is a type error rather than
 -- a thing to remember.

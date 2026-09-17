@@ -550,15 +550,15 @@ withQualTable quals body =
   do
     let keys = map sortKey quals
     unless (and (zipWith (<) keys (drop 1 keys))) $
-      failP "the qualified-name table is not in ascending (author, project, module, name) order"
+      failP "the qualified-name table is not in ascending (package, module, name) order"
     let table = Map.fromList (zip [1 ..] quals)
     P (\env input -> unP body env {_quals = table} input)
 
--- | (author, project, module, name), each as UTF-8 bytes — which is what
+-- | (package, module, name), each as UTF-8 bytes — which is what
 -- @Ord (Utf8 t)@ is, checked rather than assumed.
-sortKey :: QualName -> (Str, Str, Str, Str)
-sortKey (QualName (ModuleName.Canonical (Pkg.Name author project) modul) name) =
-  (asStr author, asStr project, asStr modul, asStr name)
+sortKey :: QualName -> (Str, Str, Str)
+sortKey (QualName (ModuleName.Canonical package modul) name) =
+  (Pkg.toUtf8 package, asStr modul, asStr name)
 
 asStr :: Utf8.Utf8 t -> Str
 asStr = Coerce.coerce
@@ -704,12 +704,13 @@ validUtf8 = go . BS.unpack
 
 moduleNameP :: P ModuleName.Canonical
 moduleNameP =
-  message "ModuleName" 3 $
+  message "ModuleName" 4 $
     do
-      author <- text "author" 1
-      project <- text "project" 2
+      removed "author" 1
+      removed "project" 2
       modul <- text "module" 3
-      pure (ModuleName.Canonical (Pkg.Name author project) modul)
+      package <- text "package" 4
+      pure (ModuleName.Canonical (Pkg.fromUtf8 (package :: Str)) modul)
 
 -- SPANS
 

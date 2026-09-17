@@ -410,10 +410,10 @@ names :: Program -> [Core.QualName]
 names = map fst . _progBindings
 
 home :: ModuleName.Canonical
-home = ModuleName.Canonical Pkg.dummyName "Main"
+home = ModuleName.Canonical Pkg.application "Main"
 
 other :: ModuleName.Canonical
-other = ModuleName.Canonical Pkg.dummyName "Other"
+other = ModuleName.Canonical Pkg.application "Other"
 
 q :: Name -> Core.QualName
 q = Core.QualName home

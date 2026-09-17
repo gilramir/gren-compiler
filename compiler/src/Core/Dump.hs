@@ -36,6 +36,7 @@ module Core.Dump
 where
 
 import Data.ByteString.Builder qualified as B
+import Data.List qualified as List
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import System.Directory qualified as Dir
@@ -44,14 +45,17 @@ import System.FilePath ((<.>), (</>))
 import System.IO.Unsafe (unsafePerformIO)
 
 -- | One flat directory, one file per module, named so that two packages with
--- the same module name do not collide. A package name has a slash in it, which
--- a file name cannot, so it becomes a dash.
+-- the same module name do not collide. A package identifier has slashes in it,
+-- which a file name cannot, so its path elements are escaped as a JavaScript
+-- name's are (D296) and joined by dashes: @core.Basics.core@, and
+-- @github_dcom-geng_hlanguage-node.FileSystem.core@. An escaped element has no
+-- dot and no dash, so the first dot ends the package.
 fileName :: ModuleName.Canonical -> FilePath
 fileName home = baseName home <.> "core"
 
 baseName :: ModuleName.Canonical -> FilePath
 baseName (ModuleName.Canonical pkg raw) =
-  let package = map (\c -> if c == '/' then '-' else c) (Pkg.toChars pkg)
+  let package = List.intercalate "-" (Pkg.escapedSegments pkg)
    in package ++ "." ++ ModuleName.toChars raw
 
 -- | The same name with the wire format's extension, so that a dump directory

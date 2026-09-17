@@ -39,6 +39,7 @@ type alias Config =
     { fsPermission : FileSystem.Permission
     , cpPermission : ChildProcess.Permission
     , cacheRoot : Compiler.Paths.CacheRoot
+    , corePath : Path
     , interactive : Bool
     , useColor : Bool
     , stdout : Stream.Writable Bytes
@@ -112,6 +113,7 @@ runLocal config maybeVersion =
                                         { fsPermission = config.fsPermission
                                         , cpPermission = config.cpPermission
                                         , cacheRoot = config.cacheRoot
+                                        , corePath = config.corePath
                                         , interactive = config.interactive
                                         , useColor = config.useColor
                                         , stdout = config.stdout
@@ -222,6 +224,7 @@ installHiddenProject config projectPath packageName packageVersion =
                                 { fsPermission = config.fsPermission
                                 , cpPermission = config.cpPermission
                                 , cacheRoot = config.cacheRoot
+                                , corePath = config.corePath
                                 , interactive = config.interactive
                                 , useColor = config.useColor
                                 , stdout = config.stdout

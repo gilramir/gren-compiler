@@ -444,7 +444,7 @@ packageCommands =
                         you would say:
                         """
                     , PP.empty
-                    , PP.text "geng package install gren-lang/browser"
+                    , PP.text "geng package install github.com/geng-language/browser"
                         |> PP.indent
                         |> PP.color PP.Green
                     , PP.empty
@@ -483,7 +483,7 @@ packageCommands =
                         you would say:
                         """
                     , PP.empty
-                    , PP.text "geng package uninstall gren-lang/browser"
+                    , PP.text "geng package uninstall github.com/geng-language/browser"
                         |> PP.indent
                         |> PP.color PP.Green
                     , PP.empty
@@ -628,7 +628,7 @@ packageCommands =
                         versions 1.0.0 and 2.0.0, you can say:
                         """
                     , PP.empty
-                    , PP.text "geng package diff gren-lang/browser 1.0.0 2.0.0"
+                    , PP.text "geng package diff github.com/geng-language/browser 1.0.0 2.0.0"
                         |> PP.indent
                         |> PP.color PP.Green
                     , PP.empty

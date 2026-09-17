@@ -95,7 +95,7 @@ declKind str =
 
 moduleClasses :: String -> Either String [Kind]
 moduleClasses str =
-  case Module.fromByteString (Module.Package Pkg.dummyName) (Utf8.fromString str) of
+  case Module.fromByteString (Module.Package Pkg.application) (Utf8.fromString str) of
     Left _ ->
       Left "did not parse"
     Right modul ->

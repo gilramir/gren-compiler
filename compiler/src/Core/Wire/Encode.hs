@@ -55,8 +55,8 @@ import Gren.Package qualified as Pkg
 
 -- | Every string in a module, as one type.
 --
--- 'Utf8.Utf8'\'s phantom parameter keeps 'Data.Name.Name', 'Pkg.Author',
--- 'Pkg.Project' and 'Core.AST.Text' apart in the compiler, which is the point of
+-- 'Utf8.Utf8'\'s phantom parameter keeps 'Data.Name.Name', a package
+-- identifier and 'Core.AST.Text' apart in the compiler, which is the point of
 -- it — @Core.AST@\'s header explains why putting undecoded JavaScript source in
 -- the last of those has to be a type error. The table does not care: they are
 -- all UTF-8 bytes and the representation is identical, so a coercion is the
@@ -170,7 +170,7 @@ run enc =
 --
 -- @Ord QualName@ compares '_qnHome' first, and @Ord ModuleName.Canonical@
 -- compares the /module/ before the /package/ — so the derived order is
--- (module, author, project, name), which is a perfectly good total order and a
+-- (module, package, name), which is a perfectly good total order and a
 -- surprising thing for a second frontend to have to reproduce. C6's whole
 -- discipline is that an order which is not written down is a dependency on a
 -- container's implementation, and this is that hazard in its purest form: the
@@ -180,9 +180,8 @@ run enc =
 -- Strings got away with the derived instance because @Ord (Utf8 t)@ /is/ UTF-8
 -- byte order — checked, not assumed. This one does not, so it is written out.
 qualOrder :: QualName -> QualName -> Ordering
-qualOrder (QualName (ModuleName.Canonical (Pkg.Name a1 p1) m1) n1) (QualName (ModuleName.Canonical (Pkg.Name a2 p2) m2) n2) =
-  compare (str a1) (str a2)
-    <> compare (str p1) (str p2)
+qualOrder (QualName (ModuleName.Canonical p1 m1) n1) (QualName (ModuleName.Canonical p2 m2) n2) =
+  compare (Pkg.toUtf8 p1 :: Str) (Pkg.toUtf8 p2)
     <> compare (str m1) (str m2)
     <> compare (str n1) (str n2)
 
@@ -370,16 +369,16 @@ withQual q what =
             -- Unreachable, for 'indexOf'\'s reason: one 'Enc', run twice.
             Bad ["Core.Wire.Encode: a qualified name is not in the name table"]
 
--- | The four strings a qualified name is made of.
+-- | The three strings a qualified name is made of.
 --
 -- 'withQual' has to report these as well as the name itself, and forgetting to
 -- was the one bug this change had: the name table's entries index into the
 -- __string__ table, so a qualified name that is only ever seen as an index
--- still puts four strings in the table it indexes into. The two tables are not
+-- still puts three strings in the table it indexes into. The two tables are not
 -- independent, and the collecting pass is where that shows.
 qualStrings :: QualName -> [Str]
-qualStrings (QualName (ModuleName.Canonical (Pkg.Name author project) modul) name) =
-  filter (\s -> Utf8.size s > 0) [str author, str project, str modul, str name]
+qualStrings (QualName (ModuleName.Canonical package modul) name) =
+  filter (\s -> Utf8.size s > 0) [Pkg.toUtf8 package, str modul, str name]
 
 -- | A qualified-name field. Every one of them is required where it appears, so
 -- there is no index 0 to write and rule 5 has nothing to skip.
@@ -545,10 +544,9 @@ unit tag = msg tag mempty
 -- NAMES
 
 moduleNameEnc :: ModuleName.Canonical -> Enc
-moduleNameEnc (ModuleName.Canonical (Pkg.Name author project) modul) =
-  text 1 author
-    <> text 2 project
-    <> text 3 modul
+moduleNameEnc (ModuleName.Canonical package modul) =
+  text 3 modul
+    <> text 4 (Pkg.toUtf8 package :: Str)
 
 -- SPANS
 

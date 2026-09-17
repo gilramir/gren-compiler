@@ -78,12 +78,19 @@ fromKernel :: Name.Name -> Name.Name -> Name
 fromKernel home name =
   Name ("_" <> Name.toBuilder home <> "_" <> Name.toBuilder name)
 
+-- | @$core$$Basics@, and @$github_dcom$geng_hlanguage$node$$FileSystem@.
+--
+-- The package's path elements are escaped and joined by @$@ (D296), and __the
+-- package ends at @$$@__, which is the one thing D296 did not write. Without it
+-- the name is not injective after all: a package path element may begin with a
+-- capital as a module does, so @example.com/x/Y@'s @Basics@ and @example.com/x@'s
+-- @Y.Basics@ would both be @$example_dcom$x$Y$Basics@. An escaped element is never
+-- empty, so @$$@ cannot occur inside the package, and a module part never begins
+-- with one.
 homeToBuilder :: ModuleName.Canonical -> B.Builder
-homeToBuilder (ModuleName.Canonical (Pkg.Name author project) home) =
-  usd
-    <> Utf8.toEscapedBuilder 0x2D {- - -} 0x5F {- _ -} author
+homeToBuilder (ModuleName.Canonical package home) =
+  foldMap (\segment -> usd <> B.stringUtf8 segment) (Pkg.escapedSegments package)
     <> usd
-    <> Utf8.toEscapedBuilder 0x2D {- - -} 0x5F {- _ -} project
     <> usd
     <> Utf8.toEscapedBuilder 0x2E {- . -} 0x24 home
 

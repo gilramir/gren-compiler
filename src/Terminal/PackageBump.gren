@@ -36,6 +36,7 @@ type alias Config =
     { fsPermission : FileSystem.Permission
     , cpPermission : ChildProcess.Permission
     , cacheRoot : Compiler.Paths.CacheRoot
+    , corePath : Path
     , interactive : Bool
     , useColor : Bool
     , stdout : Stream.Writable Bytes
@@ -92,6 +93,7 @@ run config { projectPath, outline } =
                                 { fsPermission = config.fsPermission
                                 , cpPermission = config.cpPermission
                                 , cacheRoot = config.cacheRoot
+                                , corePath = config.corePath
                                 , interactive = config.interactive
                                 , useColor = config.useColor
                                 , stdout = config.stdout
@@ -139,6 +141,7 @@ run config { projectPath, outline } =
                                                     { fsPermission = config.fsPermission
                                                     , cpPermission = config.cpPermission
                                                     , cacheRoot = config.cacheRoot
+                                                    , corePath = config.corePath
                                                     , interactive = config.interactive
                                                     , useColor = config.useColor
                                                     , stdout = config.stdout

@@ -40,6 +40,7 @@ type Error
 type alias MakeConfig =
     { fsPermission : FileSystem.Permission
     , cacheRoot : Compiler.Paths.CacheRoot
+    , corePath : Path
     , cpPermission : ChildProcess.Permission
     , useColor : Bool
     , compilerPath : Path
@@ -105,6 +106,7 @@ makeProject config projectOutline =
                         { fsPermission = config.fsPermission
                         , cpPermission = config.cpPermission
                         , cacheRoot = config.cacheRoot
+                        , corePath = config.corePath
                         , useColor = config.useColor
                         , interactive = False
                         , stdout = nullStream |> Stream.writable

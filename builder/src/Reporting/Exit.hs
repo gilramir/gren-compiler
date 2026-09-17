@@ -15,8 +15,6 @@ module Reporting.Exit
     validateToReport,
     newPackageOverview,
     --
-    Solver (..),
-    Outline (..),
     OutlineProblem (..),
     PossibleFilePath (..),
     Details (..),
@@ -42,19 +40,14 @@ import Gren.Constraint qualified as C
 import Gren.Magnitude qualified as M
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
-import Gren.Platform qualified as Platform
 import Gren.Version qualified as V
-import Json.Decode qualified as Decode
 import Json.Encode qualified as Encode
 import Json.String qualified as Json
 import Parse.Primitives (Col, Row)
-import Reporting.Annotation qualified as A
 import Reporting.Doc qualified as D
 import Reporting.Error qualified as Error
 import Reporting.Error.Import qualified as Import
-import Reporting.Error.Json qualified as Json
 import Reporting.Exit.Help qualified as Help
-import Reporting.Render.Code qualified as Code
 import System.FilePath ((<.>), (</>))
 import System.FilePath qualified as FP
 
@@ -76,7 +69,6 @@ toJson report =
 
 data Diff
   = DiffNoOutline
-  | DiffBadOutline Outline
   | DiffApplication
   | DiffNoExposed
   | DiffUnpublished
@@ -98,8 +90,6 @@ diffToReport diff =
         [ D.reflow $ "If you are just curious to see a diff, try running this command:",
           D.indent 4 $ D.green $ "geng diff gren/http 1.0.0 2.0.0"
         ]
-    DiffBadOutline outline ->
-      toOutlineReport outline
     DiffApplication ->
       Help.report
         "CANNOT DIFF APPLICATIONS"
@@ -172,7 +162,6 @@ diffToReport diff =
 
 data Bump
   = BumpNoOutline
-  | BumpBadOutline Outline
   | BumpApplication
   | BumpUnexpectedVersion V.Version [V.Version]
   | BumpBadDetails Details
@@ -193,8 +182,6 @@ bumpToReport bump =
             \ you run this command from a directory with an gren.json file, I will try to bump\
             \ the version in there based on the API changes."
         ]
-    BumpBadOutline outline ->
-      toOutlineReport outline
     BumpApplication ->
       Help.report
         "CANNOT BUMP APPLICATIONS"
@@ -293,7 +280,6 @@ bumpToReport bump =
 
 data Docs
   = DocsNoOutline
-  | DocsBadOutline Outline
   | DocsApplication
   | DocsBadDetails Details
   | DocsNoExposed
@@ -312,8 +298,6 @@ docsToReport docs =
             \ you run this command from a directory with an gren.json file, I will try to generate\
             \ documentation for the modules listed in the exposed-modules field."
         ]
-    DocsBadOutline outline ->
-      toOutlineReport outline
     DocsApplication ->
       Help.report
         "CANNOT BUILD DOCS FOR APPLICATIONS"
@@ -379,7 +363,6 @@ newPackageOverview =
 
 data Validate
   = ValidateNoOutline
-  | ValidateBadOutline Outline
   | ValidateBadDetails Details
   | ValidateApplication
   | ValidateNotInitialVersion V.Version
@@ -390,7 +373,6 @@ data Validate
   | ValidateNoReadme
   | ValidateShortReadme
   | ValidateNoLicense
-  | ValidateHasLocalDependencies
   | ValidateBuildProblem BuildProblem
   | ValidateCannotGetDocs V.Version V.Version DocsProblem
   | ValidateMissingTag V.Version
@@ -409,8 +391,6 @@ validateToReport validate =
             "Gren packages always have an gren.json that states the version number,\
             \ dependencies, exposed modules, etc."
         ]
-    ValidateBadOutline outline ->
-      toOutlineReport outline
     ValidateBadDetails problem ->
       toDetailsReport problem
     ValidateApplication ->
@@ -637,16 +617,6 @@ validateToReport validate =
             \ license text must appear in the root of your project in a file\
             \ named LICENSE. Add that file and you will be all set!"
         ]
-    ValidateHasLocalDependencies ->
-      Help.report
-        "FOUND LOCAL DEPENDENCIES"
-        (Just "gren.json")
-        "When installing a package, all of the package's dependencies are also installed.\
-        \ Local (on-disk) dependencies cannot be installed over the network, so when you\
-        \ rely on such a package, no one else can install your package either."
-        [ D.reflow
-            "Remove all local dependencies (those prefixed with local:) from your gren.json file."
-        ]
     ValidateBuildProblem buildProblem ->
       toBuildProblemReport buildProblem
     ValidateCannotGetDocs old new docsProblem ->
@@ -818,230 +788,7 @@ toDocsProblemReport problem context =
             \ for some reason."
         ]
 
--- SOLVER
-
-data Solver
-  = SolverBadCacheData Pkg.Name V.Version
-  | SolverBadLocalDepWrongName FilePath Pkg.Name Pkg.Name
-  | SolverBadLocalDepExpectedPkg FilePath Pkg.Name
-  | SolverBadLocalDepInvalidGrenJson FilePath Pkg.Name
-  | SolverLocalDepNotFound FilePath Pkg.Name
-  | SolverTransientLocalDep Pkg.Name Pkg.Name
-  | SolverBadGitOperationUnversionedPkg Pkg.Name ()
-  | SolverBadGitOperationVersionedPkg Pkg.Name V.Version ()
-  | SolverIncompatibleSolvedVersion Pkg.Name Pkg.Name C.Constraint V.Version
-  | SolverIncompatibleVersionRanges Pkg.Name Pkg.Name C.Constraint C.Constraint
-  | SolverIncompatiblePlatforms Pkg.Name Platform.Platform Platform.Platform
-
-toSolverReport :: Solver -> Help.Report
-toSolverReport problem =
-  case problem of
-    SolverBadCacheData pkg vsn ->
-      Help.report
-        "PROBLEM SOLVING PACKAGE CONSTRAINTS"
-        Nothing
-        ( "I need the gren.json of "
-            ++ Pkg.toChars pkg
-            ++ " "
-            ++ V.toChars vsn
-            ++ " to\
-               \ help me search for a set of compatible packages. I had it cached locally, but\
-               \ it looks like the file was corrupted!"
-        )
-        [ D.reflow
-            "I deleted the cached version, so the next run should download a fresh copy.\
-            \ Hopefully that will get you unstuck, but it will not resolve the root\
-            \ problem if a 3rd party tool is modifing cached files for some reason."
-        ]
-    SolverBadLocalDepWrongName filePath expectedPkgName actualPkgName ->
-      Help.report
-        "PROBLEM SOLVING PACKAGE CONSTRAINTS"
-        Nothing
-        ( "You have included "
-            ++ Pkg.toChars expectedPkgName
-            ++ " as a local dependency (located at "
-            ++ filePath
-            ++ ") but the gren.json file says that the package name is "
-            ++ Pkg.toChars actualPkgName
-            ++ "."
-        )
-        [ D.reflow
-            "Verify that the path is correct, and that the name is set correctly."
-        ]
-    SolverBadLocalDepExpectedPkg filePath expectedPkgName ->
-      Help.report
-        "PROBLEM SOLVING PACKAGE CONSTRAINTS"
-        Nothing
-        ( "You have included "
-            ++ Pkg.toChars expectedPkgName
-            ++ " as a local dependency (located at "
-            ++ filePath
-            ++ ") but the gren.json file says that it is an application, and not a package."
-        )
-        [ D.reflow
-            "Verify that the path is correct, and that the project is setup correctly."
-        ]
-    SolverBadLocalDepInvalidGrenJson filePath expectedPkgName ->
-      Help.report
-        "PROBLEM SOLVING PACKAGE CONSTRAINTS"
-        Nothing
-        ( "You have included "
-            ++ Pkg.toChars expectedPkgName
-            ++ " as a local dependency (located at "
-            ++ filePath
-            ++ ") but I'm having trouble parsing its gren.json file."
-        )
-        [ D.reflow
-            "Verify that the path is correct, and that the project is setup correctly. \
-            \It might help to run geng make at this location."
-        ]
-    SolverLocalDepNotFound filePath expectedPkgName ->
-      Help.report
-        "PROBLEM SOLVING PACKAGE CONSTRAINTS"
-        Nothing
-        ( "You have included "
-            ++ Pkg.toChars expectedPkgName
-            ++ " as a local dependency (located at "
-            ++ filePath
-            ++ ") but I cannot find a gren.json file at that location."
-        )
-        [ D.reflow
-            "Verify that the path is correct."
-        ]
-    SolverTransientLocalDep pkgName depName ->
-      Help.report
-        "PROBLEM SOLVING PACKAGE CONSTRAINTS"
-        Nothing
-        ( Pkg.toChars pkgName
-            ++ " has defined a dependency on "
-            ++ Pkg.toChars depName
-            ++ " with an incompatible source."
-        )
-        [ D.reflow $
-            "This could mean that your application has specified "
-              ++ Pkg.toChars depName
-              ++ " as a versioned dependency while "
-              ++ Pkg.toChars pkgName
-              ++ " has defined it as a local dependency. It could also mean that "
-              ++ " the package has been defined as a local dependency in both places, but"
-              ++ " with different paths."
-        ]
-    SolverBadGitOperationUnversionedPkg pkg gitError ->
-      toGitErrorReport "PROBLEM SOLVING PACKAGE CONSTRAINTS" gitError $
-        "I need the gren.json of "
-          ++ Pkg.toChars pkg
-          ++ " to help me search for a set of compatible packages"
-    SolverBadGitOperationVersionedPkg pkg vsn gitError ->
-      toGitErrorReport "PROBLEM SOLVING PACKAGE CONSTRAINTS" gitError $
-        "I need the gren.json of "
-          ++ Pkg.toChars pkg
-          ++ " "
-          ++ V.toChars vsn
-          ++ " to help me search for a set of compatible packages"
-    SolverIncompatibleSolvedVersion project dependency constraint solvedVsn ->
-      Help.report
-        "PROBLEM SOLVING PACKAGE CONSTRAINTS"
-        Nothing
-        ( Pkg.toChars project
-            ++ " requires "
-            ++ Pkg.toChars dependency
-            ++ " with a version within "
-            ++ C.toChars constraint
-            ++ ", however your project or another dependency is only compatible with version "
-            ++ V.toChars solvedVsn
-            ++ "!"
-        )
-        [ D.fillSep $
-            [ "I",
-              "generally",
-              "recommend",
-              "installing",
-              "packages",
-              "with",
-              "the",
-              D.green "geng package install",
-              "command,",
-              "as",
-              "it",
-              "helps",
-              "with",
-              "finding",
-              "compatible",
-              "transient",
-              "dependencies."
-            ]
-        ]
-    SolverIncompatibleVersionRanges project dependency requestedConstraint otherConstraint ->
-      Help.report
-        "PROBLEM SOLVING PACKAGE CONSTRAINTS"
-        Nothing
-        ( Pkg.toChars project
-            ++ " requires "
-            ++ Pkg.toChars dependency
-            ++ " with a version within "
-            ++ C.toChars requestedConstraint
-            ++ ", however your project or another one of your dependencies requires a version within "
-            ++ C.toChars otherConstraint
-            ++ "!"
-        )
-        [ D.fillSep $
-            [ "I",
-              "generally",
-              "recommend",
-              "installing",
-              "packages",
-              "with",
-              "the",
-              D.green "geng package install",
-              "command,",
-              "as",
-              "it",
-              "helps",
-              "with",
-              "finding",
-              "compatible",
-              "transient",
-              "dependencies."
-            ]
-        ]
-    SolverIncompatiblePlatforms project rootPlatform projectPlatform ->
-      Help.report
-        "PROBLEM SOLVING PACKAGE CONSTRAINTS"
-        Nothing
-        ( Pkg.toChars project
-            ++ " targets the "
-            ++ Platform.toChars projectPlatform
-            ++ " platform, however your project targets the "
-            ++ Platform.toChars rootPlatform
-            ++ " platform"
-            ++ "!"
-        )
-        [ D.fillSep $
-            [ "Hint: ",
-              D.green "browser",
-              "and",
-              D.green "node",
-              "packages",
-              "doesn't",
-              "mix.",
-              "Only",
-              D.green "common",
-              "packages",
-              "can",
-              "be",
-              "used",
-              "everywhere."
-            ]
-        ]
-
 -- OUTLINE
-
-data Outline
-  = OutlineHasBadStructure (Decode.Error OutlineProblem)
-  | OutlineHasMissingSrcDirs FilePath [FilePath]
-  | OutlineHasDuplicateSrcDirs FilePath FilePath FilePath
-  | OutlineNoPkgCore
-  | OutlineNoAppCore
 
 data OutlineProblem
   = OP_BadType
@@ -1060,583 +807,12 @@ data PossibleFilePath otherError
   = OP_AttemptedFilePath (Row, Col)
   | OP_AttemptedOther otherError
 
-toOutlineReport :: Outline -> Help.Report
-toOutlineReport problem =
-  case problem of
-    OutlineHasBadStructure decodeError ->
-      Json.toReport "gren.json" (Json.FailureToReport toOutlineProblemReport) decodeError $
-        Json.ExplicitReason "I ran into a problem with your gren.json file."
-    OutlineHasMissingSrcDirs dir dirs ->
-      case dirs of
-        [] ->
-          Help.report
-            "MISSING SOURCE DIRECTORY"
-            (Just "gren.json")
-            "I need a valid gren.json file, but the \"source-directories\" field lists the following directory:"
-            [ D.indent 4 $ D.red $ D.fromChars dir,
-              D.reflow $
-                "I cannot find it though. Is it missing? Is there a typo?"
-            ]
-        _ : _ ->
-          Help.report
-            "MISSING SOURCE DIRECTORIES"
-            (Just "gren.json")
-            "I need a valid gren.json file, but the \"source-directories\" field lists the following directories:"
-            [ D.indent 4 $
-                D.vcat $
-                  map (D.red . D.fromChars) (dir : dirs),
-              D.reflow $
-                "I cannot find them though. Are they missing? Are there typos?"
-            ]
-    OutlineHasDuplicateSrcDirs canonicalDir dir1 dir2 ->
-      if dir1 == dir2
-        then
-          Help.report
-            "REDUNDANT SOURCE DIRECTORIES"
-            (Just "gren.json")
-            "I need a valid gren.json file, but the \"source-directories\" field lists the same directory twice:"
-            [ D.indent 4 $
-                D.vcat $
-                  map (D.red . D.fromChars) [dir1, dir2],
-              D.reflow $
-                "Remove one of the entries!"
-            ]
-        else
-          Help.report
-            "REDUNDANT SOURCE DIRECTORIES"
-            (Just "gren.json")
-            "I need a valid gren.json file, but the \"source-directories\" field has some redundant directories:"
-            [ D.indent 4 $
-                D.vcat $
-                  map (D.red . D.fromChars) [dir1, dir2],
-              D.reflow $
-                "These are two different ways of refering to the same directory:",
-              D.indent 4 $ D.dullyellow $ D.fromChars canonicalDir,
-              D.reflow $
-                "Remove one of the redundant entries from your \"source-directories\" field."
-            ]
-    OutlineNoPkgCore ->
-      Help.report
-        "MISSING DEPENDENCY"
-        (Just "gren.json")
-        "I need to see an \"gren-lang/core\" dependency your gren.json file. The default imports\
-        \ of `List` and `Maybe` do not work without it."
-        [ D.reflow $
-            "If you modified your gren.json by hand, try to change it back! And if you are\
-            \ having trouble getting back to a working gren.json, it may be easier to find a\
-            \ working package and start fresh with their gren.json file."
-        ]
-    OutlineNoAppCore ->
-      Help.report
-        "MISSING DEPENDENCY"
-        (Just "gren.json")
-        "I need to see an \"gren-lang/core\" dependency your gren.json file. The default imports\
-        \ of `List` and `Maybe` do not work without it."
-        [ D.reflow $
-            "If you modified your gren.json by hand, try to change it back! And if you are\
-            \ having trouble getting back to a working gren.json, it may be easier to delete it\
-            \ and use `geng init` to start fresh."
-        ]
-
-toOutlineProblemReport :: FilePath -> Code.Source -> Json.Context -> A.Region -> OutlineProblem -> Help.Report
-toOutlineProblemReport path source _ region problem =
-  let toHighlight row col =
-        Just $ A.Region (A.Position row col) (A.Position row col)
-
-      toSnippet title highlight pair =
-        Help.jsonReport title (Just path) $
-          Code.toSnippet source region highlight pair
-   in case problem of
-        OP_BadType ->
-          toSnippet
-            "UNEXPECTED TYPE"
-            Nothing
-            ( D.reflow $
-                "I got stuck while reading your gren.json file. I cannot handle a \"type\" like this:",
-              D.fillSep
-                [ "Try",
-                  "changing",
-                  "the",
-                  "\"type\"",
-                  "to",
-                  D.green "\"application\"",
-                  "or",
-                  D.green "\"package\"",
-                  "instead."
-                ]
-            )
-        OP_BadPkgName row col ->
-          toSnippet
-            "INVALID PACKAGE NAME"
-            (toHighlight row col)
-            ( D.reflow $
-                "I got stuck while reading your gren.json file. I ran into trouble with the package name:",
-              D.stack
-                [ D.fillSep
-                    [ "Package",
-                      "names",
-                      "are",
-                      "always",
-                      "written",
-                      "as",
-                      D.green "\"author/project\"",
-                      "so",
-                      "I",
-                      "am",
-                      "expecting",
-                      "to",
-                      "see",
-                      "something",
-                      "like:"
-                    ],
-                  D.dullyellow $
-                    D.indent 4 $
-                      D.vcat $
-                        [ "\"mdgriffith/gren-ui\"",
-                          "\"w0rm/gren-physics\"",
-                          "\"Microsoft/gren-json-tree-view\"",
-                          "\"FordLabs/gren-star-rating\"",
-                          "\"1602/json-schema\""
-                        ],
-                  D.reflow
-                    "The author name should match your GitHub name exactly, and the project name\
-                    \ needs to follow these rules:",
-                  D.indent 4 $
-                    D.vcat $
-                      [ "+--------------------------------------+-----------+------------+",
-                        "| RULE                                 | BAD       | GOOD       |",
-                        "+--------------------------------------+-----------+------------+",
-                        "| only lower case, digits, and hyphens | gren-HTTP  | gren-http |",
-                        "| no leading digits                    | 3D         | gren-3d   |",
-                        "| no non-ASCII characters              | gren-bjørn | gren-bear |",
-                        "| no underscores                       | gren_ui    | gren-ui   |",
-                        "| no double hyphens                    | gren--hash | gren-hash |",
-                        "| no starting or ending hyphen         | -gren-tar- | gren-tar  |",
-                        "+--------------------------------------+-----------+------------+"
-                      ],
-                  D.toSimpleNote $
-                    "These rules only apply to the project name, so you should never need\
-                    \ to change your GitHub name!"
-                ]
-            )
-        OP_BadVersion (OP_AttemptedFilePath (row, col)) ->
-          toSnippet
-            "PROBLEM WITH DEPENDENCY FILE PATH"
-            (toHighlight row col)
-            ( D.reflow $
-                "I got stuck while reading your gren.json file. I was expecting a file path here:",
-              D.fillSep
-                [ "I",
-                  "need",
-                  "something",
-                  "like",
-                  D.green "\"local:..\"",
-                  "or",
-                  D.green "\"local:/absolute/path/to/project\"",
-                  "that",
-                  "explicitly",
-                  "states",
-                  "where",
-                  "to",
-                  "find",
-                  "the",
-                  "dependency."
-                ]
-            )
-        OP_BadVersion (OP_AttemptedOther (row, col)) ->
-          toSnippet
-            "PROBLEM WITH VERSION"
-            (toHighlight row col)
-            ( D.reflow $
-                "I got stuck while reading your gren.json file. I was expecting a version number here:",
-              D.fillSep
-                [ "I",
-                  "need",
-                  "something",
-                  "like",
-                  D.green "\"1.0.0\"",
-                  "or",
-                  D.green "\"2.0.4\"",
-                  "that",
-                  "explicitly",
-                  "states",
-                  "all",
-                  "three",
-                  "numbers!"
-                ]
-            )
-        OP_BadConstraint (OP_AttemptedFilePath (row, col)) ->
-          toSnippet
-            "PROBLEM WITH DEPENDENCY FILE PATH"
-            (toHighlight row col)
-            ( D.reflow $
-                "I got stuck while reading your gren.json file. I was expecting a file path here:",
-              D.fillSep
-                [ "I",
-                  "need",
-                  "something",
-                  "like",
-                  D.green "\"local:..\"",
-                  "or",
-                  D.green "\"local:/absolute/path/to/project\"",
-                  "that",
-                  "explicitly",
-                  "states",
-                  "where",
-                  "to",
-                  "find",
-                  "the",
-                  "dependency."
-                ]
-            )
-        OP_BadConstraint (OP_AttemptedOther constraintError) ->
-          case constraintError of
-            C.BadFormat row col ->
-              toSnippet
-                "PROBLEM WITH CONSTRAINT"
-                (toHighlight row col)
-                ( D.reflow $
-                    "I got stuck while reading your gren.json file. I do not understand this version constraint:",
-                  D.stack
-                    [ D.fillSep
-                        [ "I",
-                          "need",
-                          "something",
-                          "like",
-                          D.green "\"1.0.0 <= v < 2.0.0\"",
-                          "that",
-                          "explicitly",
-                          "lists",
-                          "the",
-                          "lower",
-                          "and",
-                          "upper",
-                          "bounds."
-                        ],
-                      D.toSimpleNote $
-                        "The spaces in there are required! Taking them out will confuse me. Adding\
-                        \ extra spaces confuses me too. I recommend starting with a valid example\
-                        \ and just changing the version numbers."
-                    ]
-                )
-            C.InvalidRange before after ->
-              if before == after
-                then
-                  toSnippet
-                    "PROBLEM WITH CONSTRAINT"
-                    Nothing
-                    ( D.reflow $
-                        "I got stuck while reading your grenjson file. I ran into an invalid version constraint:",
-                      D.fillSep
-                        [ "Gren",
-                          "checks",
-                          "that",
-                          "all",
-                          "package",
-                          "APIs",
-                          "follow",
-                          "semantic",
-                          "versioning,",
-                          "so",
-                          "it",
-                          "is",
-                          "best",
-                          "to",
-                          "use",
-                          "wide",
-                          "constraints.",
-                          "I",
-                          "recommend",
-                          D.green $ "\"" <> D.fromVersion before <> " <= v < " <> D.fromVersion (V.bumpMajor after) <> "\"",
-                          "since",
-                          "it",
-                          "is",
-                          "guaranteed",
-                          "that",
-                          "breaking",
-                          "API",
-                          "changes",
-                          "cannot",
-                          "happen",
-                          "in",
-                          "any",
-                          "of",
-                          "the",
-                          "versions",
-                          "in",
-                          "that",
-                          "range."
-                        ]
-                    )
-                else
-                  toSnippet
-                    "PROBLEM WITH CONSTRAINT"
-                    Nothing
-                    ( D.reflow $
-                        "I got stuck while reading your gren.json file. I ran into an invalid version constraint:",
-                      D.fillSep
-                        [ "Maybe",
-                          "you",
-                          "want",
-                          "something",
-                          "like",
-                          D.green $ "\"" <> D.fromVersion before <> " <= v < " <> D.fromVersion (V.bumpMajor before) <> "\"",
-                          "instead?",
-                          "Gren",
-                          "checks",
-                          "that",
-                          "all",
-                          "package",
-                          "APIs",
-                          "follow",
-                          "semantic",
-                          "versioning,",
-                          "so",
-                          "it",
-                          "is",
-                          "guaranteed",
-                          "that",
-                          "breaking",
-                          "API",
-                          "changes",
-                          "cannot",
-                          "happen",
-                          "in",
-                          "any",
-                          "of",
-                          "the",
-                          "versions",
-                          "in",
-                          "that",
-                          "range."
-                        ]
-                    )
-        OP_BadModuleName row col ->
-          toSnippet
-            "PROBLEM WITH MODULE NAME"
-            (toHighlight row col)
-            ( D.reflow $
-                "I got stuck while reading your gren.json file. I was expecting a module name here:",
-              D.fillSep
-                [ "I",
-                  "need",
-                  "something",
-                  "like",
-                  D.green "\"Html.Events\"",
-                  "or",
-                  D.green "\"Browser.Navigation\"",
-                  "where",
-                  "each",
-                  "segment",
-                  "starts",
-                  "with",
-                  "a",
-                  "capital",
-                  "letter",
-                  "and",
-                  "the",
-                  "segments",
-                  "are",
-                  "separated",
-                  "by",
-                  "dots."
-                ]
-            )
-        OP_BadModuleHeaderTooLong ->
-          toSnippet
-            "HEADER TOO LONG"
-            Nothing
-            ( D.reflow $
-                "I got stuck while reading your gren.json file. This section header is too long:",
-              D.stack
-                [ D.fillSep
-                    [ "I",
-                      "need",
-                      "it",
-                      "to",
-                      "be",
-                      D.green "under",
-                      D.green "20",
-                      D.green "bytes",
-                      "so",
-                      "it",
-                      "renders",
-                      "nicely",
-                      "on",
-                      "the",
-                      "package",
-                      "website!"
-                    ],
-                  D.toSimpleNote
-                    "I count the length in bytes, so using non-ASCII characters costs extra.\
-                    \ Please report your case at https://github.com/gren-lang/compiler/issues if this seems\
-                    \ overly restrictive for your needs."
-                ]
-            )
-        OP_BadDependencyName row col ->
-          toSnippet
-            "PROBLEM WITH DEPENDENCY NAME"
-            (toHighlight row col)
-            ( D.reflow $
-                "I got stuck while reading your gren.json file. There is something wrong with this dependency name:",
-              D.stack
-                [ D.fillSep
-                    [ "Package",
-                      "names",
-                      "always",
-                      "include",
-                      "the",
-                      "name",
-                      "of",
-                      "the",
-                      "author,",
-                      "so",
-                      "I",
-                      "am",
-                      "expecting",
-                      "to",
-                      "see",
-                      "dependencies",
-                      "like",
-                      D.dullyellow "\"mdgriffith/gren-ui\"",
-                      "and",
-                      D.dullyellow "\"Microsoft/gren-json-tree-view\"" <> "."
-                    ],
-                  D.fillSep $
-                    [ "I",
-                      "generally",
-                      "recommend",
-                      "finding",
-                      "installing",
-                      "packages",
-                      "with",
-                      "the",
-                      D.green "geng package install",
-                      "command!"
-                    ]
-                ]
-            )
-        OP_BadLicense _ suggestions ->
-          toSnippet
-            "UNKNOWN LICENSE"
-            Nothing
-            ( D.reflow $
-                "I got stuck while reading your gren.json file. I do not know about this type of license:",
-              D.stack
-                [ D.fillSep
-                    [ "Gren",
-                      "packages",
-                      "generally",
-                      "use",
-                      D.green "\"BSD-3-Clause\"",
-                      "or",
-                      D.green "\"MIT\"" <> ",",
-                      "but",
-                      "I",
-                      "accept",
-                      "any",
-                      "OSI",
-                      "approved",
-                      "SPDX",
-                      "license.",
-                      "Here",
-                      "some",
-                      "that",
-                      "seem",
-                      "close",
-                      "to",
-                      "what",
-                      "you",
-                      "wrote:"
-                    ],
-                  D.indent 4 $ D.dullyellow $ D.vcat $ map (D.fromChars . Json.toChars) suggestions,
-                  D.reflow $
-                    "Check out https://spdx.org/licenses/ for the full list of options."
-                ]
-            )
-        OP_BadSummaryTooLong ->
-          toSnippet
-            "SUMMARY TOO LONG"
-            Nothing
-            ( D.reflow $
-                "I got stuck while reading your gren.json file. Your \"summary\" is too long:",
-              D.stack
-                [ D.fillSep
-                    [ "I",
-                      "need",
-                      "it",
-                      "to",
-                      "be",
-                      D.green "under",
-                      D.green "80",
-                      D.green "bytes",
-                      "so",
-                      "it",
-                      "renders",
-                      "nicely",
-                      "on",
-                      "the",
-                      "package",
-                      "website!"
-                    ],
-                  D.toSimpleNote
-                    "I count the length in bytes, so using non-ASCII characters costs extra.\
-                    \ Please report your case at https://github.com/gren-lang/compiler/issues if this seems\
-                    \ overly restrictive for your needs."
-                ]
-            )
-        OP_NoSrcDirs ->
-          toSnippet
-            "NO SOURCE DIRECTORIES"
-            Nothing
-            ( D.reflow $
-                "I got stuck while reading your gren.json file. You do not have any \"source-directories\" listed here:",
-              D.fillSep
-                [ "I",
-                  "need",
-                  "something",
-                  "like",
-                  D.green "[\"src\"]",
-                  "so",
-                  "I",
-                  "know",
-                  "where",
-                  "to",
-                  "look",
-                  "for",
-                  "your",
-                  "modules!"
-                ]
-            )
-        OP_BadPlatform ->
-          toSnippet
-            "UNKNOWN PLATFORM"
-            Nothing
-            ( D.reflow $
-                "I got stuck while reading your gren.json file. I don't recognize the \"platform\" value.",
-              D.fillSep
-                [ "It",
-                  "must",
-                  "be",
-                  "one",
-                  "of",
-                  D.green "\"common\"",
-                  ",",
-                  D.green "\"browser\"",
-                  "or",
-                  D.green "\"node\"",
-                  "."
-                ]
-            )
-
 -- DETAILS
 
 data Details
   = DetailsNoSolution
-  | DetailsSolverProblem Solver
   | DetailsBadGrenInPkg C.Constraint
   | DetailsBadGrenInAppOutline V.Version
-  | DetailsBadOutline Outline
   | DetailsBadDeps FilePath [DetailsBadDep]
   | DetailsDuplicatedDep Pkg.Name
   | DetailsMissingDeps [(Pkg.Name, V.Version)]
@@ -1680,8 +856,6 @@ toDetailsReport details =
             "Please ask for help on the community forums if you try those paths and are still\
             \ having problems!"
         ]
-    DetailsSolverProblem solver ->
-      toSolverReport solver
     DetailsBadGrenInPkg constraint ->
       Help.report
         "GREN VERSION MISMATCH"
@@ -1717,8 +891,6 @@ toDetailsReport details =
               "now."
             ]
         ]
-    DetailsBadOutline outline ->
-      toOutlineReport outline
     DetailsBadDeps cacheDir deps ->
       case deps of
         [] ->

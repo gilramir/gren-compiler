@@ -9,14 +9,12 @@ module Gren.Outline
     Exposed (..),
     SrcDir (..),
     PossibleFilePath (..),
-    read,
     write,
     encode,
     decoder,
     defaultSummary,
     flattenExposed,
     toAbsoluteSrcDir,
-    toGiven,
     sourceDirs,
     platform,
     dependencyConstraints,
@@ -25,13 +23,11 @@ where
 
 import AbsoluteSrcDir (AbsoluteSrcDir)
 import AbsoluteSrcDir qualified
-import Control.Monad (filterM, liftM)
+import Control.Monad (liftM)
 import Data.Binary (Binary, get, getWord8, put, putWord8)
 import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.NonEmptyList qualified as NE
-import Data.OneOrMore qualified as OneOrMore
-import File qualified
 import Foreign.Ptr (minusPtr)
 import Gren.Constraint qualified as Con
 import Gren.Licenses qualified as Licenses
@@ -48,7 +44,6 @@ import Json.String qualified as Json
 import Parse.Primitives qualified as P
 import Reporting.Annotation qualified as A
 import Reporting.Exit qualified as Exit
-import System.Directory qualified as Dir
 import System.FilePath ((</>))
 import System.FilePath qualified as FP
 import Prelude hiding (read)
@@ -184,49 +179,7 @@ encodeSrcDir srcDir =
     AbsoluteSrcDir dir -> E.chars dir
     RelativeSrcDir dir -> E.chars dir
 
--- PARSE AND VERIFY
-
-read :: FilePath -> IO (Either Exit.Outline Outline)
-read root =
-  do
-    bytes <- File.readUtf8 (root </> "gren.json")
-    case D.fromByteString decoder bytes of
-      Left err ->
-        return $ Left (Exit.OutlineHasBadStructure err)
-      Right outline ->
-        case outline of
-          Pkg (PkgOutline pkg _ _ _ _ deps _ _) ->
-            return $
-              if Map.notMember Pkg.core deps && pkg /= Pkg.core
-                then Left Exit.OutlineNoPkgCore
-                else Right outline
-          App (AppOutline _ _ srcDirs direct _)
-            | Map.notMember Pkg.core direct ->
-                return $ Left Exit.OutlineNoAppCore
-            | otherwise ->
-                do
-                  badDirs <- filterM (isSrcDirMissing root) (NE.toList srcDirs)
-                  case map toGiven badDirs of
-                    d : ds ->
-                      return $ Left (Exit.OutlineHasMissingSrcDirs d ds)
-                    [] ->
-                      do
-                        maybeDups <- detectDuplicates root (NE.toList srcDirs)
-                        case maybeDups of
-                          Nothing ->
-                            return $ Right outline
-                          Just (canonicalDir, (dir1, dir2)) ->
-                            return $ Left (Exit.OutlineHasDuplicateSrcDirs canonicalDir dir1 dir2)
-
-isSrcDirMissing :: FilePath -> SrcDir -> IO Bool
-isSrcDirMissing root srcDir =
-  not <$> Dir.doesDirectoryExist (toAbsolute root srcDir)
-
-toGiven :: SrcDir -> FilePath
-toGiven srcDir =
-  case srcDir of
-    AbsoluteSrcDir dir -> dir
-    RelativeSrcDir dir -> dir
+-- SOURCE DIRECTORIES
 
 toAbsolute :: FilePath -> SrcDir -> FilePath
 toAbsolute root srcDir =
@@ -237,27 +190,6 @@ toAbsolute root srcDir =
 toAbsoluteSrcDir :: FilePath -> SrcDir -> IO AbsoluteSrcDir
 toAbsoluteSrcDir root srcDir =
   AbsoluteSrcDir.fromFilePath (toAbsolute root srcDir)
-
-detectDuplicates :: FilePath -> [SrcDir] -> IO (Maybe (FilePath, (FilePath, FilePath)))
-detectDuplicates root srcDirs =
-  do
-    pairs <- traverse (toPair root) srcDirs
-    return $
-      Map.lookupMin $
-        Map.mapMaybe isDup $
-          Map.fromListWith OneOrMore.more pairs
-
-toPair :: FilePath -> SrcDir -> IO (FilePath, OneOrMore.OneOrMore FilePath)
-toPair root srcDir =
-  do
-    key <- Dir.canonicalizePath (toAbsolute root srcDir)
-    return (key, OneOrMore.one (toGiven srcDir))
-
-isDup :: OneOrMore.OneOrMore FilePath -> Maybe (FilePath, FilePath)
-isDup paths =
-  case paths of
-    OneOrMore.One _ -> Nothing
-    OneOrMore.More a b -> Just (OneOrMore.getFirstTwo a b)
 
 sourceDirs :: Outline -> NE.List SrcDir
 sourceDirs outline =

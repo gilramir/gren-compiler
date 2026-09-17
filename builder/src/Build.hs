@@ -778,7 +778,7 @@ projectTypeToPkg :: Parse.ProjectType -> Pkg.Name
 projectTypeToPkg projectType =
   case projectType of
     Parse.Package pkg -> pkg
-    Parse.Application -> Pkg.dummyName
+    Parse.Application -> Pkg.application
 
 -- WRITE DETAILS
 

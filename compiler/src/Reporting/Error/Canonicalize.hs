@@ -553,7 +553,7 @@ toReport source err =
           ( D.reflow $
               "`"
                 ++ Name.toChars className
-                ++ "` is a closed class, so only `gren/core` may declare an instance of it:",
+                ++ "` is a closed class, so only `core` may declare an instance of it:",
             D.reflow $
               "Which types are in `"
                 ++ Name.toChars className
@@ -975,7 +975,7 @@ toReport source err =
           ( D.reflow $
               "This `@prim` names the `"
                 ++ Name.toChars name
-                ++ "` primitive, and only `gren/core` may name a primitive:",
+                ++ "` primitive, and only `core` may name a primitive:",
             D.reflow
               "A primitive is not a capability a package can be granted -- it is the language\
               \ itself, and its preconditions are guarded by the functions `core` wraps it in.\

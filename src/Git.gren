@@ -95,11 +95,23 @@ report title context err =
                 ]
             )
 
+{-| Where a package's repository is: `https://` and its identifier (K7).
+
+Both are still what they were when an identifier was an `author/name` on GitHub,
+for a package at its repository's root on a host that answers `https`. Finding
+the root of a package below it, `ssh://` and `[sources]` are K9's resolution,
+which `m1b-manifest.md` §MF3 puts at 5c.
+-}
+repositoryUrl : PackageName -> String
+repositoryUrl name =
+    "https://" ++ PackageName.toString name ++ ".git"
+
+
 clonePackage : ChildProcess.Permission -> Path -> PackageName -> SemanticVersion -> Task Error ChildProcess.SuccessfulRun
 clonePackage cpPerm repo name version =
     let
-        githubUrl =
-            "https://github.com/" ++ PackageName.toString name ++ ".git"
+        url =
+            repositoryUrl name
 
         args =
             [ "clone"
@@ -107,7 +119,7 @@ clonePackage cpPerm repo name version =
             , SemanticVersion.toString version
             , "--depth"
             , "1"
-            , githubUrl
+            , url
             , Path.toPosixString repo
             ]
     in
@@ -143,9 +155,7 @@ clonePackageCached :
 clonePackageCached { childProcessPermission, fileSystemPermission, cacheRoot, packageName, version } =
     let
         packageDir =
-            PackageName.toString packageName ++ "__" ++ SemanticVersion.toString version
-                |> String.replace "/" "_"
-                |> String.replace "." "_"
+            PackageName.toFileName packageName ++ "__" ++ String.replace "." "_" (SemanticVersion.toString version)
                 |> Path.fromPosixString
 
         packageSourcesDir =
@@ -197,13 +207,13 @@ fetchLatestVersion cpPerm name =
 fetchVersions : ChildProcess.Permission -> PackageName -> Task Error (Array SemanticVersion)
 fetchVersions cpPerm name =
     let
-        githubUrl =
-            "https://github.com/" ++ PackageName.toString name ++ ".git"
+        url =
+            repositoryUrl name
 
         args =
             [ "ls-remote"
             , "--tags"
-            , githubUrl
+            , url
             ]
     in
     ChildProcess.run

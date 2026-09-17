@@ -58,6 +58,7 @@ type alias Context =
     , useColor : Bool
     , interactive : Bool
     , cacheRoot : Compiler.Paths.CacheRoot
+    , corePath : Path
     , backendPath : Path
     , fsPermission : FileSystem.Permission
     , cpPermission : ChildProcess.Permission
@@ -72,6 +73,7 @@ start env =
     Task.await Terminal.initialize <| \terminalConfig ->
     Task.await Node.getEnvironmentVariables <| \envVars ->
     Task.await (FileSystem.homeDirectory fsPermission) <| \homeDir ->
+    Task.await (findCore fsPermission env envVars) <| \corePath ->
         let
             interactiveTerminal =
                 terminalConfig /= Nothing
@@ -103,6 +105,7 @@ start env =
                 , interactive = interactiveTerminal
                 , useColor = interactiveTerminal && not (Dict.member "NO_COLOR" envVars)
                 , cacheRoot = cacheRoot
+                , corePath = corePath
                 , backendPath = backendPath
                 , fsPermission = fsPermission
                 , cpPermission = cpPermission
@@ -124,6 +127,47 @@ start env =
                         )
                         |> Task.map (\_ -> 1)
                 )
+
+
+{-| Where `core` is (D297). Every project is compiled against it and no manifest
+lists it, so the front end has to know where it is before it reads a project.
+
+`GENG_CORE`, when it is set. Otherwise the `core` directory beside the
+directory the front end runs from: a checkout's `vendor/gren-lang/core` beside
+`vendor/gren-lang/compiler/app`, and an install's `core` beside its `bin/`. The
+script's own path is resolved first, since an install is usually reached through
+a link.
+-}
+findCore : FileSystem.Permission -> Node.Environment -> Dict String String -> Task Never Path
+findCore fsPermission env envVars =
+    let
+        fromString =
+            if env.platform == Node.Win32 then
+                Path.fromWin32String
+
+            else
+                Path.fromPosixString
+
+        besideInstall script =
+            script
+                |> Path.parentPath
+                |> Maybe.andThen Path.parentPath
+                |> Maybe.withDefault Path.empty
+                |> Path.append (Path.fromPosixString "core")
+    in
+    when Dict.get "GENG_CORE" envVars is
+        Just override ->
+            Task.succeed (fromString override)
+
+        Nothing ->
+            when Array.get 1 env.args is
+                Just script ->
+                    FileSystem.realPath fsPermission (fromString script)
+                        |> Task.map besideInstall
+                        |> Task.onError (\_ -> Task.succeed (besideInstall (fromString script)))
+
+                Nothing ->
+                    Task.succeed (Path.fromPosixString "core")
 
 
 parseUserArgs : Context -> Path -> Task x Int
@@ -190,6 +234,7 @@ parseUserArgs context compilerPath =
                         { fsPermission = context.fsPermission
                         , cpPermission = context.cpPermission
                         , cacheRoot = context.cacheRoot
+                        , corePath = context.corePath
                         , stdout = context.stdout
                         , stdin = context.stdin
                         , interactive = context.interactive
@@ -213,6 +258,7 @@ parseUserArgs context compilerPath =
                                             , fsPermission = context.fsPermission
                                             , cpPermission = context.cpPermission
                                             , cacheRoot = context.cacheRoot
+                                            , corePath = context.corePath
                                             , useColor = context.useColor
                                             }
                                             |> Task.mapError Terminal.Repl.prettifyError
@@ -227,6 +273,7 @@ parseUserArgs context compilerPath =
                                     { fsPermission = context.fsPermission
                                     , cpPermission = context.cpPermission
                                     , cacheRoot = context.cacheRoot
+                                    , corePath = context.corePath
                                     , interactive = context.interactive
                                     , useColor = context.useColor
                                     , stdout = context.stdout
@@ -295,6 +342,7 @@ parseUserArgs context compilerPath =
                         { fsPermission = context.fsPermission
                         , cpPermission = context.cpPermission
                         , cacheRoot = context.cacheRoot
+                        , corePath = context.corePath
                         , useColor = context.useColor
                         , compilerPath = compilerPath
                         , pathToString = context.pathToString
@@ -381,6 +429,7 @@ parseUserArgs context compilerPath =
                                     { fsPermission = context.fsPermission
                                     , cpPermission = context.cpPermission
                                     , cacheRoot = context.cacheRoot
+                                    , corePath = context.corePath
                                     , interactive = context.interactive
                                     , useColor = context.useColor
                                     , stdout = context.stdout
@@ -403,6 +452,7 @@ parseUserArgs context compilerPath =
                                     { fsPermission = context.fsPermission
                                     , cpPermission = context.cpPermission
                                     , cacheRoot = context.cacheRoot
+                                    , corePath = context.corePath
                                     , interactive = context.interactive
                                     , useColor = context.useColor
                                     , stdout = context.stdout
@@ -448,6 +498,7 @@ parseUserArgs context compilerPath =
                                     { fsPermission = context.fsPermission
                                     , cpPermission = context.cpPermission
                                     , cacheRoot = context.cacheRoot
+                                    , corePath = context.corePath
                                     , interactive = context.interactive
                                     , useColor = context.useColor
                                     , stdout = context.stdout
@@ -468,6 +519,7 @@ parseUserArgs context compilerPath =
                                     { fsPermission = context.fsPermission
                                     , cpPermission = context.cpPermission
                                     , cacheRoot = context.cacheRoot
+                                    , corePath = context.corePath
                                     , interactive = context.interactive
                                     , useColor = context.useColor
                                     , stdout = context.stdout
@@ -488,6 +540,7 @@ parseUserArgs context compilerPath =
                                         { fsPermission = context.fsPermission
                                         , cpPermission = context.cpPermission
                                         , cacheRoot = context.cacheRoot
+                                        , corePath = context.corePath
                                         , interactive = context.interactive
                                         , useColor = context.useColor
                                         , stdout = context.stdout
@@ -501,6 +554,7 @@ parseUserArgs context compilerPath =
                                         { fsPermission = context.fsPermission
                                         , cpPermission = context.cpPermission
                                         , cacheRoot = context.cacheRoot
+                                        , corePath = context.corePath
                                         , interactive = context.interactive
                                         , useColor = context.useColor
                                         , stdout = context.stdout
@@ -526,6 +580,7 @@ parseUserArgs context compilerPath =
                                                             { fsPermission = context.fsPermission
                                                             , cpPermission = context.cpPermission
                                                             , cacheRoot = context.cacheRoot
+                                                            , corePath = context.corePath
                                                             , interactive = context.interactive
                                                             , useColor = context.useColor
                                                             , stdout = context.stdout
@@ -542,6 +597,7 @@ parseUserArgs context compilerPath =
                                         { fsPermission = context.fsPermission
                                         , cpPermission = context.cpPermission
                                         , cacheRoot = context.cacheRoot
+                                        , corePath = context.corePath
                                         , interactive = context.interactive
                                         , useColor = context.useColor
                                         , stdout = context.stdout
@@ -719,6 +775,7 @@ resolveProject context =
                     { fsPermission = context.fsPermission
                     , cpPermission = context.cpPermission
                     , cacheRoot = context.cacheRoot
+                    , corePath = context.corePath
                     , interactive = context.interactive
                     , useColor = context.useColor
                     , stdout = context.stdout

@@ -1301,17 +1301,17 @@ primCName :: Prim.PrimOp -> String
 primCName op =
   "geng_prim_" ++ Name.toChars (Prim.primVarName op)
 
--- | Is this a @gren\/kernel@ name? Those are what §X5's C kernel implements.
+-- | Is this a @kernel@ name? Those are what §X5's C kernel implements.
 isKernel :: Core.QualName -> Bool
 isKernel (Core.QualName (ModuleName.Canonical pkg _) _) = pkg == Pkg.kernel
 
--- | @gren-lang\/kernel:Basics.add@ becomes @geng_kernel_Basics_add@.
+-- | @kernel:Basics.add@ becomes @geng_kernel_Basics_add@.
 kernelCName :: Core.QualName -> String
 kernelCName (Core.QualName (ModuleName.Canonical _ raw) n) =
   "geng_kernel_" ++ mangle (ModuleName.toChars raw) ++ "_" ++ mangle (Name.toChars n)
 
 -- | Core reaches a kernel name through the @core@ binding that wraps it, so a
--- call to @Basics.add@ is an 'Core.AST.EApp' of a @gren-lang\/core@ global whose
+-- call to @Basics.add@ is an 'Core.AST.EApp' of a @core@ global whose
 -- body is the kernel reference. The spike shortcuts that one hop: a @core@
 -- binding whose whole body is a kernel global is the kernel function.
 --
@@ -1631,13 +1631,15 @@ patternNames pat =
 
 -- | A Core name as a C identifier.
 --
--- @gren-lang\/core:Basics.add@ becomes @geng_gren_lang_core__Basics_add@. The
--- package is in it because two packages may hold the same module name, which
--- is the same reason 'Core.Dump.fileName' puts it in a file name.
+-- @core:Basics.add@ becomes @geng_core__Basics_add@. The package is in it
+-- because two packages may hold the same module name, which is the same reason
+-- 'Core.Dump.fileName' puts it in a file name. Its path elements are escaped as
+-- the JavaScript names' are (D296) and joined by @_s@, so an escaped package has
+-- no @__@ in it and the first one ends it.
 cName :: Core.QualName -> String
 cName (Core.QualName (ModuleName.Canonical pkg raw) n) =
   "geng_"
-    ++ mangle (Pkg.toChars pkg)
+    ++ List.intercalate "_s" (Pkg.escapedSegments pkg)
     ++ "__"
     ++ mangle (ModuleName.toChars raw)
     ++ "_"

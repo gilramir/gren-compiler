@@ -294,6 +294,7 @@ Test-Suite gren-tests
         Core.WireSpec
         Core.ProgramSpec
         Generate.JavaScript.LiteralSpec
+        Gren.PackageSpec
         Generate.VLQSpec
         Nitpick.PatternMatchesSpec
         Parse.AliasSpec
