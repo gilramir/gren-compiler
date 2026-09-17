@@ -121,7 +121,7 @@ settle home known candidates =
               case Map.lookup name candidates of
                 Nothing -> False
                 Just (Can.Union _ ctors _ _) ->
-                  all (componentDerives home known assumed Component) (concatMap ctorArgs ctors)
+                  all (componentDerives home known assumed) (concatMap ctorArgs ctors)
             kept = Set.filter survives assumed
          in if kept == assumed then assumed else go kept
    in go (Map.keysSet candidates)
@@ -130,38 +130,28 @@ ctorArgs :: Can.Ctor -> [Can.Type]
 ctorArgs (Can.Ctor _ _ _ args) =
   args
 
--- | Where a type sits, which decides what a __record__ there means.
---
--- 'Component' is a constructor's argument, or a field of a record that is one:
--- 'Canonicalize.Derive' compares a record there __inline__, field by field,
--- because a record has no type constructor and so can have no instance.
---
--- 'Argument' is an argument of a type constructor — the @Era@ of
--- @Array Era@ — and there the generated code compares nothing itself: it
--- calls @Array@'s instance, which needs a __witness__ for its element, and a
--- witness is a value that some instance has to supply. So a record derives in
--- one position and not in the other, and §2.1's table, which does not
--- distinguish them, is optimistic by exactly that much (§G37.4).
-data Position
-  = Component
-  | Argument
-  deriving (Eq)
-
 -- | Whether one component type derives the class.
 --
--- §2.1's table read as a predicate, with 'Position' as the fifth answer it
--- does not have:
+-- §2.1's table read as a predicate:
 --
 --   * a __function__ never derives, which is the rule §2.3 calls the single
 --     most visible correctness improvement in the spec;
 --   * a __variable__ always does, because it becomes the instance's context —
 --     @Eq a => Eq (Box a)@ is the head 'Canonicalize.Derive' writes;
---   * a __record__ derives in a 'Component' position when every field does,
---     and never in an 'Argument' one;
+--   * a __record__ derives when every field does;
 --   * a __type constructor__ derives when there is an instance for it — one
 --     published by an import, one this module already has, or one this round
---     is still assuming — and when every argument derives in 'Argument'
---     position.
+--     is still assuming — and when every argument derives.
+--
+-- A record derives wherever it sits. As a constructor's argument, or a field
+-- of one, 'Canonicalize.Derive' compares it inline, field by field. As an
+-- argument of a type constructor — the @Comment@ of @Maybe Comment@ — the
+-- generated code calls @Maybe@'s instance, which is handed a witness for its
+-- element, and since D140 'Type.Resolve.witnessFor' builds that witness out of
+-- the fields' own (§G38). This predicate refused the second position until
+-- D293 (@m1b-test.md@), which is §G37.4's rule outliving the change that
+-- retired it: a transparent type with a @Maybe@ of a record in it had no
+-- instance, and a use of @==@ at it said so.
 --
 -- The argument check is stricter than resolution in one other way: it asks
 -- about every argument rather than only the ones the instance's context
@@ -173,18 +163,16 @@ componentDerives ::
   ModuleName.Canonical ->
   ((ModuleName.Canonical, Name.Name) -> Bool) ->
   Set.Set Name.Name ->
-  Position ->
   Can.Type ->
   Bool
-componentDerives home known assumed position tipe =
+componentDerives home known assumed tipe =
   case Type.iteratedDealias tipe of
     Can.TLambda _ _ ->
       False
     Can.TVar _ ->
       True
     Can.TRecord fields Nothing ->
-      position == Component
-        && all (componentDerives home known assumed Component . fieldType) (Map.elems fields)
+      all (componentDerives home known assumed . fieldType) (Map.elems fields)
     Can.TRecord _ (Just _) ->
       -- An extensible record's row variable is a component whose type nothing
       -- knows, which is the same reason `Canonicalize.Derive` refuses one.
@@ -192,7 +180,7 @@ componentDerives home known assumed position tipe =
     Can.TType tipeHome name args ->
       let here = tipeHome == home && Set.member name assumed
        in (here || known (tipeHome, name))
-            && all (componentDerives home known assumed Argument) args
+            && all (componentDerives home known assumed) args
     Can.TAlias _ _ _ _ ->
       -- Unreachable: `iteratedDealias` above removed every alias it could, and
       -- what it leaves is a holey one, which only appears in an annotation.
