@@ -282,7 +282,7 @@ putException e = do
         D.dullyellow "-- REQUEST ---------------------------------------------------------------------",
         D.reflow $
           "If you are feeling up to it, please try to get your code down to the smallest\
-          \ version that still triggers this message. Ideally in a single Main.gren and\
+          \ version that still triggers this message. Ideally in a single Main.geng and\
           \ geng.toml file.",
         D.reflow $
           "From there open a NEW issue at https://github.com/gren-lang/compiler/issues with\

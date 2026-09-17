@@ -1362,13 +1362,13 @@ toProjectProblemReport projectProblem =
           D.toSimpleNote $
             "If you are just getting started, try working through the examples in the\
             \ official guide https://gren-lang.org/learn to get an idea of the kinds of things\
-            \ that typically go in a src/Main.gren file."
+            \ that typically go in a src/Main.geng file."
         ]
     BP_WithBadExtension path ->
       Help.report
         "UNEXPECTED FILE EXTENSION"
         Nothing
-        "I can only compile Gren files (with a .gren extension) but you want me to compile:"
+        "I can only compile Geng files (with a .geng extension) but you want me to compile:"
         [ D.indent 4 $ D.red $ D.fromChars path,
           D.reflow $ "Is there a typo? Can the file extension be changed?"
         ]
@@ -1507,7 +1507,7 @@ toModuleNameConventionTable :: FilePath -> [String] -> D.Doc
 toModuleNameConventionTable srcDir names =
   let toPair name =
         ( name,
-          srcDir </> map (\c -> if c == '.' then FP.pathSeparator else c) name <.> "gren"
+          srcDir </> map (\c -> if c == '.' then FP.pathSeparator else c) name <.> "geng"
         )
 
       namePairs = map toPair names

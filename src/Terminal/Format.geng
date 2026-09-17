@@ -116,7 +116,7 @@ gather config =
                     (\files ->
                         files
                             -- `findSourceFiles` returns kernel JavaScript too.
-                            |> Array.keepIf (\file -> file.path.extension == "gren")
+                            |> Array.keepIf (\file -> file.path.extension == "geng")
                             |> Array.map
                                 (\file ->
                                     { path = file.path
@@ -172,7 +172,7 @@ expandDirectory config dir =
                     files =
                         entries
                             |> Array.keepIf (\entry -> entry.entityType == FileSystem.File)
-                            |> Array.keepIf (\entry -> entry.path.extension == "gren")
+                            |> Array.keepIf (\entry -> entry.path.extension == "geng")
                             |> Array.keepIf (\entry -> isGrenSourceName entry.path.filename)
                             |> Array.map (\entry -> Path.prepend dir entry.path)
 
@@ -208,7 +208,7 @@ isWalkableDirectory name =
         && name /= "gren_packages"
 
 
-{-| A module name is capitalized, so a walked `.gren` file whose name is not is
+{-| A module name is capitalized, so a walked `.geng` file whose name is not is
 not a module. A file named on the command line is formatted whatever it is
 called: naming it is already the intent this filter has to infer.
 -}
@@ -487,7 +487,7 @@ prettifyError error =
                 "COULD NOT FIND SOURCE CODE"
                 Nothing
                 (PP.verticalBlock
-                    [ PP.words "An error occured while I was searching for .gren files in this project."
+                    [ PP.words "An error occured while I was searching for .geng files in this project."
                     , PP.empty
                     , PP.words "The error is:"
                     , PP.empty

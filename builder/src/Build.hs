@@ -1041,7 +1041,7 @@ getRootInfoHelp :: Env -> FilePath -> FilePath -> IO (Either Exit.BuildProjectPr
 getRootInfoHelp (Env _ _ _ _ srcDirs _ _ _) path absolutePath =
   let (dirs, file) = FP.splitFileName absolutePath
       (final, ext) = FP.splitExtension file
-   in if ext /= ".gren"
+   in if ext /= ".geng"
         then return $ Left $ Exit.BP_WithBadExtension path
         else
           let absoluteSegments = FP.splitDirectories dirs ++ [final]
@@ -1055,8 +1055,8 @@ getRootInfoHelp (Env _ _ _ _ srcDirs _ _ _) path absolutePath =
                     case matchingDirs of
                       d1 : d2 : _ ->
                         do
-                          let p1 = AbsoluteSrcDir.addRelative d1 (FP.joinPath names <.> "gren")
-                          let p2 = AbsoluteSrcDir.addRelative d2 (FP.joinPath names <.> "gren")
+                          let p1 = AbsoluteSrcDir.addRelative d1 (FP.joinPath names <.> "geng")
+                          let p2 = AbsoluteSrcDir.addRelative d2 (FP.joinPath names <.> "geng")
                           return $ Left $ Exit.BP_RootNameDuplicate name p1 p2
                       _ ->
                         return $ Right $ RootInfo absolutePath path (LInside name)
@@ -1067,7 +1067,7 @@ getRootInfoHelp (Env _ _ _ _ srcDirs _ _ _) path absolutePath =
 
 isInsideSrcDirByName :: [String] -> AbsoluteSrcDir -> IO Bool
 isInsideSrcDirByName names srcDir =
-  File.exists (AbsoluteSrcDir.addRelative srcDir (FP.joinPath names <.> "gren"))
+  File.exists (AbsoluteSrcDir.addRelative srcDir (FP.joinPath names <.> "geng"))
 
 isInsideSrcDirByPath :: [String] -> AbsoluteSrcDir -> Maybe (FilePath, Either [String] [String])
 isInsideSrcDirByPath segments (AbsoluteSrcDir srcDir) =

@@ -293,7 +293,7 @@ parser =
                         , PP.empty
                         , PP.words
                             """
-                            This writes the module Shapes.Demo to src/Shapes/Demo.gren. With --describe
+                            This writes the module Shapes.Demo to src/Shapes/Demo.geng. With --describe
                             it prints every message, enum and field the file declares instead.
                             """
                         ]
@@ -331,7 +331,7 @@ parser =
                         , PP.empty
                         , PP.words
                             """
-                            This tries to compile a Gren file named src/Main.gren, generating an index.html
+                            This tries to compile a Geng file named src/Main.geng, generating an index.html
                             file if possible.
                             """
                         ]
@@ -370,7 +370,7 @@ parser =
                         , PP.empty
                         , PP.words
                             """
-                            This tries to compile a Gren file named src/Main.gren.
+                            This tries to compile a Geng file named src/Main.geng.
                             The file must have a `main` function that returns a Node or Browser program.
                             """
                         ]

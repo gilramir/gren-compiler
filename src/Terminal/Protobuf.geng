@@ -155,7 +155,7 @@ generateBelow config path schema placed =
                                     Maybe.withDefault Path.empty config.output
 
                                 target =
-                                    Path.append (Path.fromPosixString (String.replace "." "/" moduleName ++ ".gren")) output
+                                    Path.append (Path.fromPosixString (String.replace "." "/" moduleName ++ ".geng")) output
                             in
                             (when Path.parentPath target is
                                 Just parent ->
