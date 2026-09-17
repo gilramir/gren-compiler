@@ -83,7 +83,7 @@ isKernel (Name author _) =
 --
 -- Today this asks exactly what 'isKernel' asks, and it is written separately
 -- because the two mean different things and part company at K7: a first-party
--- package is one whose identifier begins with @github.com/geng-lang/@, which
+-- package is one whose identifier begins with @github.com/geng-language/@, which
 -- is not something a package name of this shape can yet say. Until it can, the
 -- toolchain-distributed packages are the ones @gren-lang@ authors.
 --
