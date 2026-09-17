@@ -76,7 +76,7 @@ suggestVersion flags@(Flags _ root _ (Command.ProjectInfo _ currentSources curre
     let changes = Diff.diff oldDocs newDocs
     let newVersion = Diff.bump changes vsn
     Task.io $
-      changeVersion flags root currentOutline newVersion $
+      changeVersion flags root newVersion $
         let old = D.fromVersion vsn
             new = D.fromVersion newVersion
             mag = D.fromChars $ M.toChars (Diff.toMagnitude changes)
@@ -93,7 +93,7 @@ suggestVersion flags@(Flags _ root _ (Command.ProjectInfo _ currentSources curre
               <> old
               <> " => "
               <> new
-              <> ") in gren.json? [Y/n] "
+              <> ") in geng.toml? [Y/n] "
 
 generateDocs :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Bump Docs.Documentation
 generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _) sources solution =
@@ -111,18 +111,22 @@ generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _) sources sol
 
 -- CHANGE VERSION
 
-changeVersion :: Flags -> FilePath -> Outline.PkgOutline -> V.Version -> D.Doc -> IO ()
-changeVersion flags root outline targetVersion question =
+changeVersion :: Flags -> FilePath -> V.Version -> D.Doc -> IO ()
+changeVersion flags root targetVersion question =
   do
     approved <- Reporting.ask (not $ _interactive flags) question
     if not approved
       then putStrLn "Okay, I did not change anything!"
       else do
-        Outline.write root $
-          Outline.Pkg $
-            outline {Outline._pkg_version = targetVersion}
-
-        Help.toStdout $
-          "Version changed to "
-            <> D.green (D.fromVersion targetVersion)
-            <> "!\n"
+        written <- Outline.writeVersion root targetVersion
+        if written
+          then
+            Help.toStdout $
+              "Version changed to "
+                <> D.green (D.fromVersion targetVersion)
+                <> "!\n"
+          else
+            Help.toStdout $
+              "I could not find a version line in the [package] table of geng.toml, so I did not change it. Set it to "
+                <> D.green (D.fromVersion targetVersion)
+                <> " by hand.\n"

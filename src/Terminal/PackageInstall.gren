@@ -1,10 +1,12 @@
 module Terminal.PackageInstall exposing
-    ( PackageInstallError (..)
+    ( Config
+    , PackageInstallError (..)
     , PackageResolution
     , run
+    , resolve
+    , writeLock
+    , newerVersions
     , prettifyError
-    --
-    , cleanPackageDirectory
     --
     , AddPackageError (..)
     , addPackage
@@ -14,9 +16,21 @@ module Terminal.PackageInstall exposing
     , readProjectOutline
     , readOutline
     , prettifyProjectOutlineError
-    , localRepoPath
     , outlineFindSourcesErrorToString
     )
+
+
+{-| Which packages a project is built with, and their sources.
+
+A project's `geng.toml` lists ranges. Resolution loads the versions those ranges
+ask for, and the versions their manifests ask for in turn, until nothing new is
+asked for, and then minimal version selection chooses one version of each
+package (`Compiler.Dependencies`, D299). A package comes from its git server
+(`Git`, K9) unless `[sources]` says it comes from somewhere else, and the
+choice is written to `geng.lock` with the commit each version was taken from.
+
+`core` is never among them. It comes with the compiler (K7, D307).
+-}
 
 
 import Cli.PrettyPrinter as PP
@@ -25,11 +39,13 @@ import Meta
 import Compiler.PackageName as PackageName exposing (PackageName)
 import Compiler.Paths
 import Compiler.Outline as Outline exposing (Outline)
-import Compiler.Dependencies
+import Compiler.Dependencies as Dependencies
+import Compiler.Lock as Lock exposing (Lock)
 import Compiler.Backend
 import Compiler.Platform as Platform exposing (Platform)
 import Compiler.Package as Package
 import Git
+import Node
 import Stream
 import Stream.Log
 import Task exposing (Task)
@@ -39,8 +55,6 @@ import FileSystem.Path as Path exposing (Path)
 import Bytes exposing (Bytes)
 import SemanticVersion exposing (SemanticVersion)
 import SemanticVersionRange exposing (SemanticVersionRange)
-import Json.Encode as Json
-import Json.Decode as Decode exposing (Decoder)
 import Terminal.Help as Help
 import Cli.Report as Report exposing (Report)
 import Compiler.ModuleName as ModuleName
@@ -55,7 +69,6 @@ type alias Config =
     , useColor : Bool
     , stdout : Stream.Writable Bytes
     , stdin : Stream.Readable Bytes
-    , strictAppResolution : Bool
     }
 
 
@@ -71,6 +84,7 @@ type alias PackageResolution =
     , rootSources : Dict String Compiler.Backend.SourceFile
     , dependencies : Dict String { path : Path, outline : Outline.PkgOutline, sources : Dict String String }
     , didDownload : Bool
+    , lock : Lock
     }
 
 
@@ -78,24 +92,253 @@ type PackageInstallError
     = PackageInstallFailedToFindProjectSourceFiles Outline.FindSourceFilesError
     | PackageInstallFailedToFindSourceFiles { package : PackageName, error : Outline.FindSourceFilesError }
     | PackageInstallInvalidOutline { package : PackageName, message : String }
-    | PackageInstallFailedToLoadBundleFromDisk { package : PackageName, path : Path, error : FileSystem.Error }
-    | PackageInstallFailedToLoadBundleFromStream { package : PackageName, path : Path, error : Stream.Error }
-    | PackageInstallInvalidBundle { package : PackageName, path : Path, message : String }
-    | PackageInstallConflict { package : PackageName, version1 : SemanticVersionRange, version2 : SemanticVersionRange }
+    | PackageInstallNameMismatch { package : PackageName, found : PackageName, path : Path }
+    | PackageInstallVersionMismatch { package : PackageName, tag : String, found : SemanticVersion }
+    | PackageInstallConflict Dependencies.Conflict
     | PackageInstallGitError { package : PackageName, error : Git.Error }
     | PackageInstallFileSystemError { package : PackageName, error : FileSystem.Error }
-    | PackageInstallCreateBundleError { package : PackageName, path : Path, error : Stream.Error }
-    | PackageInstallMissingIndirectDependency { package : PackageName, version : SemanticVersionRange }
-    | PackageInstallBadLocalDependency { package : PackageName, dependency : PackageName }
+    | PackageInstallInvalidLock { path : Path, message : String }
+    | PackageInstallInvalidConfig { path : Path, message : String }
     | PackageInstallRootIncompatibleCompiler SemanticVersionRange
-    | PackageInstallIncompatibleCompiler { package : PackageName, rootCompiler : SemanticVersionRange, packageCompiler : SemanticVersionRange }
+    | PackageInstallIncompatibleCompiler { package : PackageName, packageCompiler : SemanticVersionRange }
     | PackageInstallIncompatiblePlatform { package : PackageName, rootPlatform : Platform, packagePlatform : Platform }
     | PackageInstallCoreNotFound { path : Path, error : FileSystem.Error }
     | PackageInstallCoreListed { listedBy : Maybe PackageName }
 
 
+{-| Resolve a project's dependencies, load them, and write `geng.lock` if what it
+says has changed.
+-}
 run : Config -> Options -> Task PackageInstallError PackageResolution
-run config { projectPath, outline } =
+run config options =
+    resolve config options
+        |> Task.andThen
+            (\resolution ->
+                writeLock config.fsPermission resolution
+                    |> Task.map (\_ -> resolution)
+            )
+
+
+{-| Write a resolution's `geng.lock`, unless the file already says it. A build
+that changes nothing leaves the file alone, timestamp and all.
+-}
+writeLock : FileSystem.Permission -> PackageResolution -> Task PackageInstallError {}
+writeLock fsPermission resolution =
+    let
+        path =
+            Path.append (Path.fromPosixString Lock.fileName) resolution.projectPath
+
+        text =
+            Lock.encode resolution.lock
+    in
+    FileSystem.readFile fsPermission path
+        |> Task.map (\bytes -> Bytes.toString bytes == Just text)
+        |> Task.onError (\_ -> Task.succeed False)
+        |> Task.andThen
+            (\same ->
+                if same then
+                    Task.succeed {}
+
+                else
+                    FileSystem.writeFile fsPermission (Bytes.fromString text) path
+                        |> Task.map (\_ -> {})
+                        |> Task.mapError (\err -> PackageInstallInvalidLock { path = path, message = FileSystem.errorToString err })
+            )
+
+
+-- SETTING UP
+
+
+{-| What resolution works from: the `[sources]` that apply, with each path made
+absolute and the text the lock file writes for it kept beside it, the lock file
+as it was, and what git runs with.
+-}
+type alias Env =
+    { config : Config
+    , projectPath : Path
+    , sources : Dict String Outline.Source
+    , lockPaths : Dict String String
+    , oldLock : Lock
+    , git : Git.Context
+    }
+
+
+setup : Config -> Options -> Task PackageInstallError Env
+setup config { projectPath, outline } =
+    Task.await Node.getEnvironmentVariables <| \envVars ->
+    Task.await (FileSystem.homeDirectory config.fsPermission) <| \homeDir ->
+    let
+        userConfigPath =
+            Dict.get "XDG_CONFIG_HOME" envVars
+                |> Maybe.map Path.fromPosixString
+                |> Maybe.withDefault (Path.append (Path.fromPosixString ".config") homeDir)
+                |> Path.append (Path.fromPosixString "geng/config.toml")
+
+        rootSources =
+            when outline is
+                Outline.App app ->
+                    app.sources
+
+                Outline.Pkg pkg ->
+                    pkg.sources
+
+        lockPath =
+            Path.append (Path.fromPosixString Lock.fileName) projectPath
+
+        gitEnvironment =
+            -- A git that wants a password or a host key answer would wait for
+            -- one forever, since nothing is at its terminal.
+            Dict.singleton "GIT_TERMINAL_PROMPT" "0"
+                |> (if Dict.member "GIT_SSH_COMMAND" envVars then
+                        identity
+
+                    else
+                        Dict.set "GIT_SSH_COMMAND" "ssh -o BatchMode=yes"
+                   )
+    in
+    Task.await (readUserSources config.fsPermission userConfigPath) <| \userSources ->
+    Task.await (readLock config.fsPermission lockPath) <| \oldLock ->
+    let
+        absolute base source =
+            when source is
+                Outline.LocalPath path ->
+                    if path.root == "" then
+                        Outline.LocalPath (Path.prepend base path)
+
+                    else
+                        source
+
+                _ ->
+                    source
+
+        userBase =
+            Path.parentPath userConfigPath |> Maybe.withDefault Path.empty
+
+        sources =
+            Dict.union
+                (Dict.map (\_ source -> absolute projectPath source) rootSources)
+                (Dict.map (\_ source -> absolute userBase source) userSources)
+
+        lockPathsFrom base table =
+            Dict.foldl
+                (\key source acc ->
+                    when absolute base source is
+                        Outline.LocalPath path ->
+                            Dict.set key
+                                (when source is
+                                    Outline.LocalPath written ->
+                                        if written.root == "" && base == projectPath then
+                                            Path.toPosixString written
+
+                                        else
+                                            Path.toPosixString path
+
+                                    _ ->
+                                        Path.toPosixString path
+                                )
+                                acc
+
+                        _ ->
+                            acc
+                )
+                Dict.empty
+                table
+    in
+    Task.succeed
+        { config = config
+        , projectPath = projectPath
+        , sources = sources
+        , lockPaths = Dict.union (lockPathsFrom projectPath rootSources) (lockPathsFrom userBase userSources)
+        , oldLock = oldLock
+        , git =
+            { cpPermission = config.cpPermission
+            , fsPermission = config.fsPermission
+            , cacheRoot = config.cacheRoot
+            , sources = sources
+            , environment = gitEnvironment
+            }
+        }
+
+
+readUserSources : FileSystem.Permission -> Path -> Task PackageInstallError (Dict String Outline.Source)
+readUserSources fsPermission path =
+    FileSystem.readFile fsPermission path
+        |> Task.map Just
+        |> Task.onError (\_ -> Task.succeed Nothing)
+        |> Task.andThen
+            (\maybeBytes ->
+                when maybeBytes is
+                    Nothing ->
+                        Task.succeed Dict.empty
+
+                    Just bytes ->
+                        when Outline.readSources (Maybe.withDefault "" (Bytes.toString bytes)) is
+                            Ok sources ->
+                                Task.succeed sources
+
+                            Err err ->
+                                Task.fail (PackageInstallInvalidConfig { path = path, message = Outline.readErrorToString err })
+            )
+
+
+readLock : FileSystem.Permission -> Path -> Task PackageInstallError Lock
+readLock fsPermission path =
+    FileSystem.readFile fsPermission path
+        |> Task.map Just
+        |> Task.onError
+            (\err ->
+                if FileSystem.errorIsNoSuchFileOrDirectory err then
+                    Task.succeed Nothing
+
+                else
+                    Task.fail (PackageInstallInvalidLock { path = path, message = FileSystem.errorToString err })
+            )
+        |> Task.andThen
+            (\maybeBytes ->
+                when maybeBytes is
+                    Nothing ->
+                        Task.succeed Lock.empty
+
+                    Just bytes ->
+                        when Lock.decode (Maybe.withDefault "" (Bytes.toString bytes)) is
+                            Ok lock ->
+                                Task.succeed lock
+
+                            Err message ->
+                                Task.fail (PackageInstallInvalidLock { path = path, message = message })
+            )
+
+
+-- RESOLVING
+
+
+type alias Loaded =
+    { name : PackageName
+    , version : SemanticVersion
+    , path : Path
+    , outline : Outline.PkgOutline
+    , sources : Dict String String
+    , origin : Lock.Origin
+    }
+
+
+type alias State =
+    { graph : Dependencies.Graph
+    , loaded : Dict String Loaded
+    , remotes : Dict String Git.Remote
+    , roots : Dict String String
+    }
+
+
+loadedKey : String -> SemanticVersion -> String
+loadedKey name version =
+    name ++ "@" ++ SemanticVersion.toString version
+
+
+{-| Resolve a project's dependencies and load them, without writing anything.
+-}
+resolve : Config -> Options -> Task PackageInstallError PackageResolution
+resolve config ({ projectPath, outline } as options) =
     let
         isCore =
             when outline is
@@ -108,515 +351,585 @@ run config { projectPath, outline } =
         rootDeps =
             when outline is
                 Outline.App appOutline ->
-                    Dict.union
-                        appOutline.dependencies.direct
-                        appOutline.dependencies.indirect
-                        |> Dict.map
-                            (\_ v ->
-                                when v is
-                                    Outline.Version vsn ->
-                                        Outline.Version (SemanticVersionRange.fromExact vsn)
-
-                                    Outline.LocalPath p ->
-                                        Outline.LocalPath p
-                            )
+                    appOutline.dependencies
 
                 Outline.Pkg pkgOutline ->
                     pkgOutline.dependencies
+    in
+    if Dict.member (PackageName.toString PackageName.core) rootDeps then
+        Task.fail (PackageInstallCoreListed { listedBy = Nothing })
+
+    else
+        setup config options
+            |> Task.andThen
+                (\env ->
+                    resolveLoop env
+                        { graph = { root = rootDeps, pinned = Dict.empty, nodes = [] }
+                        , loaded = Dict.empty
+                        , remotes = Dict.empty
+                        , roots = Dict.empty
+                        }
+                        |> Task.andThen (finish env options isCore)
+                )
+
+
+resolveLoop : Env -> State -> Task PackageInstallError State
+resolveLoop env state =
+    let
+        requirementNames =
+            Array.foldl
+                (\node acc -> Dict.union acc node.dependencies)
+                state.graph.root
+                state.graph.nodes
+                |> Dict.keys
+
+        isPinnedSource name =
+            when Git.sourceFor env.sources name is
+                Just { source = Outline.LocalPath _ } ->
+                    True
+
+                Just { source = Outline.Commit _ } ->
+                    True
+
+                _ ->
+                    False
+
+        unpinned =
+            Array.findFirst
+                (\name -> isPinnedSource name && not (Dict.member name state.graph.pinned))
+                requirementNames
+    in
+    when unpinned is
+        Just { value = name } ->
+            loadPinned env state name
+                |> Task.andThen (resolveLoop env)
+
+        Nothing ->
+            when Array.first (Dependencies.wanted state.graph) is
+                Just { name, version } ->
+                    loadHosted env state name version
+                        |> Task.andThen (resolveLoop env)
+
+                Nothing ->
+                    Task.succeed state
+
+
+addLoaded : Loaded -> Bool -> State -> Task PackageInstallError State
+addLoaded loaded pinned state =
+    let
+        nameStr =
+            PackageName.toString loaded.name
+
+        graph =
+            state.graph
+    in
+    if Dict.member (PackageName.toString PackageName.core) loaded.outline.dependencies then
+        Task.fail (PackageInstallCoreListed { listedBy = Just loaded.name })
+
+    else
+        Task.succeed
+            { state
+                | graph =
+                    { graph
+                        | nodes =
+                            Array.pushLast
+                                { name = nameStr
+                                , version = loaded.version
+                                , dependencies = loaded.outline.dependencies
+                                }
+                                graph.nodes
+                        , pinned =
+                            if pinned then
+                                Dict.set nameStr loaded.version graph.pinned
+
+                            else
+                                graph.pinned
+                    }
+                , loaded = Dict.set (loadedKey nameStr loaded.version) loaded state.loaded
+            }
+
+
+toName : String -> PackageName
+toName str =
+    PackageName.fromString str |> Maybe.withDefault PackageName.example
+
+
+{-| A package `[sources]` pins: from a directory, or from a commit. Its version is
+the one its manifest has.
+-}
+loadPinned : Env -> State -> String -> Task PackageInstallError State
+loadPinned env state nameStr =
+    let
+        name =
+            toName nameStr
+    in
+    when Git.sourceFor env.sources nameStr is
+        Just { prefix, source = Outline.LocalPath dir } ->
+            let
+                rest =
+                    PackageName.dropPrefix prefix name |> Maybe.withDefault ""
+
+                packageDir =
+                    below rest dir
+
+                lockText =
+                    Dict.get prefix env.lockPaths
+                        |> Maybe.withDefault (Path.toPosixString dir)
+                        |> (\base -> if rest == "" then base else base ++ "/" ++ rest)
+            in
+            loadPackageFromPath env.config.fsPermission name packageDir
+                |> Task.andThen
+                    (\pkg ->
+                        addLoaded
+                            { name = name
+                            , version = pkg.outline.version
+                            , path = pkg.path
+                            , outline = pkg.outline
+                            , sources = pkg.sources
+                            , origin = Lock.Local (Path.fromPosixString lockText)
+                            }
+                            True
+                            state
+                    )
+
+        Just { prefix, source = Outline.Commit { rev } } ->
+            let
+                rest =
+                    PackageName.dropPrefix prefix name |> Maybe.withDefault ""
+            in
+            Git.checkoutRev env.git { root = prefix, rev = rev }
+                |> Task.mapError (\err -> PackageInstallGitError { package = name, error = err })
+                |> Task.andThen
+                    (\checkout ->
+                        loadPackageFromPath env.config.fsPermission name (below rest checkout.path)
+                            |> Task.andThen
+                                (\pkg ->
+                                    addLoaded
+                                        { name = name
+                                        , version = pkg.outline.version
+                                        , path = pkg.path
+                                        , outline = pkg.outline
+                                        , sources = pkg.sources
+                                        , origin = Lock.Pinned { repository = prefix, commit = checkout.commit }
+                                        }
+                                        True
+                                        state
+                                )
+                    )
+
+        _ ->
+            Task.fail (PackageInstallInvalidOutline { package = name, message = "no source pins this package" })
+
+
+below : String -> Path -> Path
+below rest dir =
+    if rest == "" then
+        dir
+
+    else
+        Path.append (Path.fromPosixString rest) dir
+
+
+{-| The repository root of an identifier: what the identifier and `[sources]`
+say, or what `geng.lock` recorded when it was probed for, or else a probe.
+-}
+rootOf : Env -> State -> String -> Task PackageInstallError { root : String, state : State }
+rootOf env state nameStr =
+    let
+        name =
+            toName nameStr
+
+        fromLock =
+            Array.findFirst
+                (\entry ->
+                    entry.name == name
+                        && (when entry.origin is
+                                Lock.Hosted _ ->
+                                    True
+
+                                _ ->
+                                    False
+                           )
+                )
+                (env.oldLock.packages ++ env.oldLock.read)
+                |> Maybe.andThen
+                    (\{ value } ->
+                        when value.origin is
+                            Lock.Hosted { repository } ->
+                                Just repository
+
+                            _ ->
+                                Nothing
+                    )
+
+        -- A root a server has answered for is where probing stops for every
+        -- identifier below it too, since probing takes the shortest prefix that
+        -- answers. So a second package in a repository costs no probe.
+        fromAnswered =
+            (Dict.values state.roots ++ lockRepositories env.oldLock)
+                |> Array.keepIf (\root -> PackageName.hasPrefix root name)
+                |> Array.sortBy String.count
+                |> Array.first
+    in
+    when Dict.get nameStr state.roots is
+        Just root ->
+            Task.succeed { root = root, state = state }
+
+        Nothing ->
+            when Git.knownRoot env.sources nameStr |> orElse fromLock |> orElse fromAnswered is
+                Just root ->
+                    Task.succeed { root = root, state = { state | roots = Dict.set nameStr root state.roots } }
+
+                Nothing ->
+                    Git.probe env.git nameStr
+                        |> Task.mapError (\err -> PackageInstallGitError { package = name, error = err })
+                        |> Task.andThen
+                            (\remote ->
+                                checkLockedTags env name remote
+                                    |> Task.map
+                                        (\_ ->
+                                            { root = remote.root
+                                            , state =
+                                                { state
+                                                    | roots = Dict.set nameStr remote.root state.roots
+                                                    , remotes = Dict.set remote.root remote state.remotes
+                                                }
+                                            }
+                                        )
+                            )
+
+
+lockRepositories : Lock -> Array String
+lockRepositories lock =
+    Array.mapAndKeepJust
+        (\entry ->
+            when entry.origin is
+                Lock.Hosted { repository } ->
+                    Just repository
+
+                _ ->
+                    Nothing
+        )
+        (lock.packages ++ lock.read)
+
+
+orElse : Maybe a -> Maybe a -> Maybe a
+orElse fallback maybe =
+    when maybe is
+        Just _ ->
+            maybe
+
+        Nothing ->
+            fallback
+
+
+{-| A repository's tags, listed once per resolution.
+-}
+remoteOf : Env -> State -> PackageName -> String -> Task PackageInstallError { remote : Git.Remote, state : State }
+remoteOf env state name root =
+    when Dict.get root state.remotes is
+        Just remote ->
+            Task.succeed { remote = remote, state = state }
+
+        Nothing ->
+            Git.listRefs env.git root
+                |> Task.mapError (\err -> PackageInstallGitError { package = name, error = err })
+                |> Task.andThen
+                    (\remote ->
+                        checkLockedTags env name remote
+                            |> Task.map (\_ -> { remote = remote, state = { state | remotes = Dict.set root remote state.remotes } })
+                    )
+
+
+{-| Whenever a repository's tags are listed, every tag `geng.lock` recorded a
+commit for in that repository has to still name it.
+-}
+checkLockedTags : Env -> PackageName -> Git.Remote -> Task PackageInstallError {}
+checkLockedTags env name remote =
+    let
+        moved =
+            Array.findFirst
+                (\entry ->
+                    when entry.origin is
+                        Lock.Hosted { repository, commit } ->
+                            if repository == remote.root then
+                                when Dict.get (tagFor repository entry.name entry.version) remote.refs is
+                                    Just found ->
+                                        found /= commit
+
+                                    Nothing ->
+                                        False
+
+                            else
+                                False
+
+                        _ ->
+                            False
+                )
+                (env.oldLock.packages ++ env.oldLock.read)
+    in
+    when moved is
+        Just { value = entry } ->
+            when entry.origin is
+                Lock.Hosted { repository, commit } ->
+                    let
+                        tag =
+                            tagFor repository entry.name entry.version
+                    in
+                    Task.fail
+                        (PackageInstallGitError
+                            { package = entry.name
+                            , error =
+                                Git.MovedTag
+                                    { repository = repository
+                                    , tag = tag
+                                    , locked = commit
+                                    , found = Dict.get tag remote.refs |> Maybe.withDefault ""
+                                    }
+                            }
+                        )
+
+                _ ->
+                    Task.succeed {}
+
+        Nothing ->
+            Task.succeed {}
+
+
+tagFor : String -> PackageName -> SemanticVersion -> String
+tagFor root name version =
+    Git.tagName (PackageName.dropPrefix root name |> Maybe.withDefault "") version
+
+
+{-| A released version of a package: its tag's commit, from `geng.lock` if the
+lock recorded it and from the server if not, checked out into the package cache.
+-}
+loadHosted : Env -> State -> String -> SemanticVersion -> Task PackageInstallError State
+loadHosted env state0 nameStr version =
+    let
+        name =
+            toName nameStr
+
+        gitError err =
+            PackageInstallGitError { package = name, error = err }
+    in
+    rootOf env state0 nameStr
+        |> Task.andThen
+            (\{ root, state = state1 } ->
+                let
+                    rest =
+                        PackageName.dropPrefix root name |> Maybe.withDefault ""
+
+                    tag =
+                        Git.tagName rest version
+
+                    locked =
+                        Lock.find name version env.oldLock
+                            |> Maybe.andThen
+                                (\entry ->
+                                    when entry.origin is
+                                        Lock.Hosted { repository, commit } ->
+                                            if repository == root then
+                                                Just commit
+
+                                            else
+                                                Nothing
+
+                                        _ ->
+                                            Nothing
+                                )
+                in
+                (when locked is
+                    Just commit ->
+                        Task.succeed { commit = commit, state = state1 }
+
+                    Nothing ->
+                        remoteOf env state1 name root
+                            |> Task.andThen
+                                (\{ remote, state = state2 } ->
+                                    when Dict.get tag remote.refs is
+                                        Just commit ->
+                                            Task.succeed { commit = commit, state = state2 }
+
+                                        Nothing ->
+                                            Task.fail (gitError (Git.NoSuchTag { repository = root, tag = tag }))
+                                )
+                )
+                    |> Task.andThen
+                        (\{ commit, state = state2 } ->
+                            Git.checkout env.git
+                                { root = root
+                                , url = Dict.get root state2.remotes |> Maybe.map .url
+                                , tag = tag
+                                , commit = commit
+                                }
+                                |> Task.mapError gitError
+                                |> Task.andThen (\dir -> loadPackageFromPath env.config.fsPermission name (below rest dir))
+                                |> Task.andThen
+                                    (\pkg ->
+                                        if pkg.outline.version /= version then
+                                            Task.fail (PackageInstallVersionMismatch { package = name, tag = tag, found = pkg.outline.version })
+
+                                        else
+                                            addLoaded
+                                                { name = name
+                                                , version = version
+                                                , path = pkg.path
+                                                , outline = pkg.outline
+                                                , sources = pkg.sources
+                                                , origin = Lock.Hosted { repository = root, commit = commit }
+                                                }
+                                                False
+                                                state2
+                                    )
+                        )
+            )
+
+
+finish : Env -> Options -> Bool -> State -> Task PackageInstallError PackageResolution
+finish env { projectPath, outline } isCore state =
+    let
+        config =
+            env.config
+
+        selection =
+            Dependencies.select state.graph
+
+        chosen =
+            Dict.foldl
+                (\nameStr version acc ->
+                    when Dict.get (loadedKey nameStr version) state.loaded is
+                        Just loaded ->
+                            Array.pushLast loaded acc
+
+                        Nothing ->
+                            acc
+                )
+                []
+                selection
+
+        chosenKeys =
+            Array.map (\loaded -> loadedKey (PackageName.toString loaded.name) loaded.version) chosen
+
+        passedOver =
+            Dict.values state.loaded
+                |> Array.keepIf (\loaded -> not (Array.member (loadedKey (PackageName.toString loaded.name) loaded.version) chosenKeys))
+
+        entry loaded =
+            { name = loaded.name, version = loaded.version, origin = loaded.origin }
+
+        { rootPlatform, rootCompiler } =
+            when outline is
+                Outline.App appOutline ->
+                    { rootPlatform = appOutline.platform
+                    , rootCompiler = appOutline.gengVersion
+                    }
+
+                Outline.Pkg pkgOutline ->
+                    { rootPlatform = pkgOutline.platform
+                    , rootCompiler = pkgOutline.gengVersion
+                    }
+
+        incompatible =
+            Array.findFirst
+                (\loaded ->
+                    not (SemanticVersionRange.contains Meta.version loaded.outline.gengVersion)
+                        || not (Platform.isCompatible rootPlatform loaded.outline.platform)
+                )
+                chosen
+                |> Maybe.map
+                    (\{ value = loaded } ->
+                        if not (SemanticVersionRange.contains Meta.version loaded.outline.gengVersion) then
+                            PackageInstallIncompatibleCompiler
+                                { package = loaded.name
+                                , packageCompiler = loaded.outline.gengVersion
+                                }
+
+                        else
+                            PackageInstallIncompatiblePlatform
+                                { package = loaded.name
+                                , rootPlatform = rootPlatform
+                                , packagePlatform = loaded.outline.platform
+                                }
+                    )
+
         -- `core` is every project's and no manifest's (K7, D297): it is loaded
-        -- from where the toolchain keeps it, and the solver never sees it,
+        -- from where the toolchain keeps it, and resolution never sees it,
         -- because nothing may ask for a version of it.
         loadCore =
             if isCore then
-                []
+                Task.succeed Dict.empty
 
             else
-                [ config.corePath
+                config.corePath
                     |> FileSystem.checkAccess config.fsPermission []
                     |> Task.mapError (\err -> PackageInstallCoreNotFound { path = config.corePath, error = err })
                     |> Task.andThen (\_ -> loadPackageFromPath config.fsPermission PackageName.core config.corePath)
-                    |> Task.map Just
-                ]
-    in
-    (if Dict.member (PackageName.toString PackageName.core) rootDeps then
-        Task.fail (PackageInstallCoreListed { listedBy = Nothing })
-
-     else
-        Task.succeed {}
-    )
-        |> Task.andThen (\{} -> loadRootPackages config projectPath outline rootDeps loadCore)
-        |> Task.andThen (installStep config)
-        |> Task.andThen
-            (\resolution ->
-                if resolution.didDownload then
-                    Stream.Log.line config.stdout ""
-                        |> Task.map (\_ -> resolution)
-
-                else
-                    Task.succeed resolution
-            )
-
-
-loadRootPackages :
-    Config
-    -> Path
-    -> Outline
-    -> Dict String (Outline.VersionConstraint SemanticVersionRange)
-    -> Array (Task PackageInstallError (Maybe LoadedPackage))
-    -> Task PackageInstallError StepOptions
-loadRootPackages config projectPath outline rootDeps loadCore =
-    rootDeps
-        |> Dict.foldl
-            (\key value acc ->
-                Array.pushLast
-                    { name = PackageName.fromString key |> Maybe.withDefault PackageName.example
-                    , constraint = value
-                    }
-                    acc
-            )
-            []
-        |> Array.map
-            (\{ name, constraint } ->
-                when constraint is
-                    Outline.Version vsn ->
-                        loadPackageFromBundle config.fsPermission name (SemanticVersionRange.lowerBound vsn) projectPath
-                            |> Task.map Just
-                            |> Task.onError
-                                (\err ->
-                                    when err is
-                                        PackageInstallFailedToLoadBundleFromDisk { error = fsErr } ->
-                                            -- Ignore packages that doesn't exist, they
-                                            -- will be created in `installStep`
-                                            if FileSystem.errorIsNoSuchFileOrDirectory fsErr then
-                                                Task.succeed Nothing
-
-                                            else
-                                                Task.fail err
-
-                                        PackageInstallFailedToLoadBundleFromStream { error = streamErr } ->
-                                            -- Assume it fails because the file is missing
-                                            Task.succeed Nothing
-
-                                        _ ->
-                                            Task.fail err
-                                )
-
-                    Outline.LocalPath path ->
-                        loadPackageFromPath config.fsPermission name path
-                            |> Task.map Just
-            )
-        |> Array.append loadCore
-        |> Task.concurrent
-        |> Task.map (Array.mapAndKeepJust identity)
-        |> Task.andThen
-            (\pkgs ->
-                let
-                    pkgsDict =
-                        Array.foldl
-                            (\pkg dict ->
-                                Dict.set
-                                    (PackageName.toString pkg.name)
-                                    pkg
-                                    dict
-                            )
-                            Dict.empty
-                            pkgs
-
-                    loadedPackages =
-                        Dict.map
-                            (\_name pkg ->
-                                { path = pkg.path
-                                , outline = pkg.outline
-                                , sources = pkg.sources
-                                }
-                            )
-                            pkgsDict
-                in
-                Outline.findSourceFiles config.fsPermission outline projectPath
-                    |> Task.onError
-                        (\err ->
-                            when err is
-                                Outline.FileSystemError fsErr ->
-                                    if FileSystem.errorIsNoSuchFileOrDirectory fsErr then
-                                        Task.succeed []
-
-                                    else
-                                        Task.fail <| PackageInstallFailedToFindProjectSourceFiles err
-
-                                _ ->
-                                    Task.fail <| PackageInstallFailedToFindProjectSourceFiles err
-                        )
                     |> Task.map
-                        (\sourceFiles ->
-                            { projectPath = projectPath
-                            , outline = outline
-                            , projectSources =
-                                Array.foldl
-                                    (\{ path, moduleName, source } dict ->
-                                        Dict.set (ModuleName.toString moduleName) { path = path, data = source } dict
-                                    )
-                                    Dict.empty
-                                    sourceFiles
-                            , startedDownload = False
-                            , strictResolution =
-                                when outline is
-                                    Outline.App _ ->
-                                        config.strictAppResolution
-
-                                    Outline.Pkg _ ->
-                                        False
-                            , rootPackages =
-                                Dict.foldl
-                                    (\key value acc ->
-                                        when value is
-                                            Outline.Version vsn ->
-                                                Array.pushLast
-                                                    { name = PackageName.fromString key |> Maybe.withDefault PackageName.example
-                                                    , version = vsn
-                                                    }
-                                                    acc
-
-                                            Outline.LocalPath _ ->
-                                                when Dict.get key loadedPackages is
-                                                    Just { outline = pkgOutline } ->
-                                                        Array.pushLast
-                                                            { name = PackageName.fromString key |> Maybe.withDefault PackageName.example
-                                                            , version = SemanticVersionRange.fromExact pkgOutline.version
-                                                            }
-                                                            acc
-
-                                                    _ ->
-                                                        acc
-                                    )
-                                    []
-                                    rootDeps
-                            , rootPackageConstraints =
-                                Dict.map
-                                    (\key value ->
-                                        when value is
-                                            Outline.Version _ ->
-                                                value
-
-                                            Outline.LocalPath _ ->
-                                                when Dict.get key pkgsDict is
-                                                    Just { path } ->
-                                                        Outline.LocalPath path
-
-                                                    Nothing ->
-                                                        value
-                                    )
-                                    rootDeps
-                            , loadedPackages = loadedPackages
-                            , solvedPackages = Dict.empty
-                            }
+                        (\core ->
+                            Dict.singleton (PackageName.toString PackageName.core)
+                                { path = core.path, outline = core.outline, sources = core.sources }
                         )
-            )
+    in
+    when Array.first (Dependencies.check state.graph selection) is
+        Just conflict ->
+            Task.fail (PackageInstallConflict conflict)
 
+        Nothing ->
+            if not (SemanticVersionRange.contains Meta.version rootCompiler) then
+                Task.fail (PackageInstallRootIncompatibleCompiler rootCompiler)
 
-type alias StepOptions =
-    { projectPath : Path
-    , outline : Outline
-    , projectSources : Dict String Compiler.Backend.SourceFile
-    , strictResolution : Bool
-    , startedDownload : Bool
-    , rootPackages : Array { name : PackageName, version : SemanticVersionRange }
-    , rootPackageConstraints : Dict String (Outline.VersionConstraint SemanticVersionRange)
-    , loadedPackages : Dict String { path : Path, outline : Outline.PkgOutline, sources : Dict String String }
-    , solvedPackages : Dict String Compiler.Dependencies.SimplifiedOutline
-    }
+            else
+                when incompatible is
+                    Just err ->
+                        Task.fail err
 
-
--- TODO: Refactor into smaller functions
-installStep : Config -> StepOptions -> Task PackageInstallError PackageResolution
-installStep config opts =
-    when Compiler.Dependencies.solve opts.rootPackages opts.solvedPackages is
-        Compiler.Dependencies.Complete ->
-            let
-                { rootPlatform, rootCompiler } =
-                    when opts.outline is
-                        Outline.App appOutline ->
-                            { rootPlatform = appOutline.platform
-                            , rootCompiler = SemanticVersionRange.fromExact appOutline.grenVersion
-                            }
-
-                        Outline.Pkg pkgOutline ->
-                            { rootPlatform = pkgOutline.platform
-                            , rootCompiler = pkgOutline.grenVersion
-                            }
-
-                incompatiblePackages =
-                    opts.loadedPackages
-                        |> Dict.mapAndKeepJust
-                            (\_ package ->
-                                when SemanticVersionRange.intersect package.outline.grenVersion rootCompiler is
-                                    Nothing ->
-                                        Just <| PackageInstallIncompatibleCompiler
-                                            { package = package.outline.name
-                                            , rootCompiler = rootCompiler
-                                            , packageCompiler = package.outline.grenVersion
-                                            }
-
-                                    Just _ ->
-                                        if Platform.isCompatible rootPlatform package.outline.platform then
-                                            Nothing
-
-                                        else
-                                            Just <| PackageInstallIncompatiblePlatform
-                                                { package = package.outline.name
-                                                , rootPlatform = rootPlatform
-                                                , packagePlatform = package.outline.platform
-                                                }
-                            )
-            in
-            when SemanticVersionRange.intersect (SemanticVersionRange.fromExact Meta.version) rootCompiler is
-                Nothing ->
-                    Task.fail <| PackageInstallRootIncompatibleCompiler rootCompiler
-
-                Just _ ->
-                    when Dict.first incompatiblePackages is
-                        Just { value = incompatibility } ->
-                            Task.fail incompatibility
-
-                        Nothing ->
-                            Task.succeed
-                                { projectPath = opts.projectPath
-                                , outline = opts.outline
-                                , rootSources = opts.projectSources
-                                , dependencies = opts.loadedPackages
-                                , didDownload = opts.startedDownload
-                                }
-
-        Compiler.Dependencies.Missing { name, version } ->
-            let
-                packageNameString =
-                    PackageName.toString name
-            in
-            if opts.strictResolution && not (Array.any (\dep -> dep.name == name) opts.rootPackages) then
-                Task.fail <| PackageInstallMissingIndirectDependency
-                    { package = name
-                    , version = version
-                    }
-
-            else when Dict.get packageNameString opts.loadedPackages is
-                Just loadedPackage ->
-                    if Dict.member (PackageName.toString PackageName.core) loadedPackage.outline.dependencies then
-                        Task.fail (PackageInstallCoreListed { listedBy = Just loadedPackage.outline.name })
-
-                    else
-                    let
-                        localDependenciesCheck =
-                            loadedPackage.outline.dependencies
-                                |> Dict.foldl
-                                    (\package constraint acc ->
-                                        when constraint is
-                                            Outline.Version _ ->
-                                                acc
-
-                                            Outline.LocalPath path ->
-                                                when  Dict.get package opts.rootPackageConstraints is
-                                                    Nothing ->
-                                                        Task.fail <| PackageInstallBadLocalDependency
-                                                            { package = loadedPackage.outline.name
-                                                            , dependency =
-                                                                PackageName.fromString package
-                                                                    |> Maybe.withDefault PackageName.example
-                                                            }
-
-                                                    Just rootConstraint ->
-                                                        acc
-                                                            |> Task.andThen
-                                                                (\_ ->
-                                                                    Path.join [ loadedPackage.path, path ]
-                                                                        |> FileSystem.realPath config.fsPermission
-                                                                        |> Task.mapError
-                                                                            (\err ->
-                                                                                PackageInstallFileSystemError
-                                                                                    { package = loadedPackage.outline.name
-                                                                                    , error = err
-                                                                                    }
-                                                                            )
-                                                                )
-                                                            |> Task.andThen
-                                                                (\realPath ->
-                                                                    if rootConstraint == Outline.LocalPath realPath then
-                                                                        Task.succeed {}
-
-                                                                    else
-                                                                        Task.fail <| PackageInstallBadLocalDependency
-                                                                            { package = loadedPackage.outline.name
-                                                                            , dependency =
-                                                                                PackageName.fromString package
-                                                                                    |> Maybe.withDefault PackageName.example
-                                                                            }
-                                                                )
-                                    )
-                                    (Task.succeed {})
-                    in
-                    localDependenciesCheck
-                        |> Task.andThen
-                            (\_ ->
-                                installStep config
-                                    { opts
-                                        | solvedPackages =
-                                            Dict.set
-                                                packageNameString
-                                                { name = name
-                                                , version = version
-                                                , dependencies =
-                                                    Dict.mapAndKeepJust
-                                                        (\_ constraint ->
-                                                            when constraint is
-                                                                Outline.Version vsn ->
-                                                                    Just vsn
-
-                                                                Outline.LocalPath _ ->
-                                                                    Nothing
-                                                        )
-                                                        loadedPackage.outline.dependencies
-                                                }
-                                                opts.solvedPackages
-                                    }
-                            )
-                
-                Nothing ->
-                    let
-                        lowerBound =
-                            SemanticVersionRange.lowerBound version
-                    in
-                    loadPackageFromBundle config.fsPermission name lowerBound opts.projectPath
-                        |> Task.map
-                            (\pkg ->
-                                { opts
-                                    | loadedPackages =
-                                        Dict.set
-                                            (PackageName.toString name)
-                                            { path = pkg.path, outline = pkg.outline, sources = pkg.sources }
-                                            opts.loadedPackages
-                                }
-                            )
-                        |> Task.onError
-                            (\_loadError ->
-                                {- TODO: Assuming bundle doesn't exist, creating...
-                                -}
-                                let
-                                    bundlePath =
-                                        packageBundlePath name lowerBound opts.projectPath
-
-                                    packageReportTask =
-                                        Stream.Log.string config.stdout ("    " ++ PackageName.toString name ++ " ")
-
-                                    reportTask =
-                                        if opts.startedDownload then
-                                            packageReportTask
-
-                                        else
-                                            Stream.Log.line config.stdout "Starting downloads...\n"
-                                                |> Task.andThen (\_ -> packageReportTask)
-                                in
-                                reportTask
-                                    |> Task.andThen
-                                        (\_ ->
-                                            Git.clonePackageCached
-                                                { childProcessPermission = config.cpPermission
-                                                , fileSystemPermission = config.fsPermission
-                                                , cacheRoot = config.cacheRoot
-                                                , packageName = name
-                                                , version = lowerBound
-                                                }
-                                                |> Task.mapError
-                                                    (\err ->
-                                                        PackageInstallGitError
-                                                            { package = name
-                                                            , error = err
-                                                            }
-                                                    )
-                                        )
-                                    |> Task.andThen
-                                        (\repoPath ->
-                                            Package.loadFromPath config.fsPermission repoPath
-                                                |> Task.mapError (packageFromPathErrorToPackageInstallError name)
-                                                |> Task.map
-                                                    (\package ->
-                                                        { name = name
-                                                        , path = repoPath
-                                                        , outline = package.outline
-                                                        , sources = package.sources
-                                                        , data = package
-                                                        }
-                                                    )
-                                        )
-                                    |> Task.andThen
-                                        (\pkg ->
-                                            let
-                                                packagesDir =
-                                                    Path.append (Path.fromPosixString "gren_packages") opts.projectPath
-                                            in
-                                            packagesDir
-                                                |> FileSystem.makeDirectory config.fsPermission { recursive = False }
-                                                |> Task.onError
-                                                    (\err ->
-                                                        if FileSystem.errorIsFileExists err then
-                                                            Task.succeed packagesDir
+                    Nothing ->
+                        loadCore
+                            |> Task.andThen
+                                (\coreDependency ->
+                                    Outline.findSourceFiles config.fsPermission outline projectPath
+                                        |> Task.onError
+                                            (\err ->
+                                                when err is
+                                                    Outline.FileSystemError fsErr ->
+                                                        if FileSystem.errorIsNoSuchFileOrDirectory fsErr then
+                                                            Task.succeed []
 
                                                         else
-                                                            Task.fail <| PackageInstallFileSystemError
-                                                                { package = name
-                                                                , error = err
-                                                                }
-                                                    )
-                                                |> Task.andThen
-                                                    (\_ ->
-                                                        FileSystem.writeFileStream config.fsPermission FileSystem.Replace bundlePath
-                                                            |> Task.mapError
-                                                                (\err ->
-                                                                    PackageInstallFileSystemError
-                                                                        { package = name
-                                                                        , error = err
-                                                                        }
-                                                                )
-                                                    )
-                                                |> Task.andThen
-                                                    (\stream ->
-                                                        Package.saveToStream pkg.data stream
-                                                            |> Task.mapError
-                                                                (\ err ->
-                                                                    PackageInstallCreateBundleError
-                                                                        { package = name
-                                                                        , path = bundlePath
-                                                                        , error = err
-                                                                        }
-                                                                )
-                                                    )
-                                                |> Task.andThen
-                                                    (\_ ->
-                                                        PP.text "✔"
-                                                            |> PP.color PP.Green
-                                                            |> PP.toString
-                                                            |> Stream.Log.line config.stdout 
-                                                    )
-                                                |> Task.map (\_ -> { pkg | path = bundlePath })
-                                        )
-                                    |> Task.map
-                                        (\pkg ->
-                                            { opts
-                                                | startedDownload = True
-                                                , loadedPackages =
-                                                    Dict.set
-                                                        (PackageName.toString name)
-                                                        { path = pkg.path, outline = pkg.outline, sources = pkg.sources }
-                                                        opts.loadedPackages
-                                            }
-                                        )
-                            )
-                        |> Task.andThen (installStep config)
-                    
+                                                            Task.fail <| PackageInstallFailedToFindProjectSourceFiles err
 
-        Compiler.Dependencies.Conflict conflict ->
-            Task.fail <| PackageInstallConflict
-                { package = conflict.name
-                , version1 = conflict.version1
-                , version2 = conflict.version2
-                }
+                                                    _ ->
+                                                        Task.fail <| PackageInstallFailedToFindProjectSourceFiles err
+                                            )
+                                        |> Task.map
+                                            (\sourceFiles ->
+                                                { projectPath = projectPath
+                                                , outline = outline
+                                                , rootSources =
+                                                    Array.foldl
+                                                        (\{ path, moduleName, source } dict ->
+                                                            Dict.set (ModuleName.toString moduleName) { path = path, data = source } dict
+                                                        )
+                                                        Dict.empty
+                                                        sourceFiles
+                                                , dependencies =
+                                                    Array.foldl
+                                                        (\loaded dict ->
+                                                            Dict.set (PackageName.toString loaded.name)
+                                                                { path = loaded.path, outline = loaded.outline, sources = loaded.sources }
+                                                                dict
+                                                        )
+                                                        coreDependency
+                                                        chosen
+                                                , didDownload = False
+                                                , lock =
+                                                    { packages = Array.map entry chosen
+                                                    , read = Array.map entry passedOver
+                                                    }
+                                                }
+                                            )
+                                )
 
 
 packageFromPathErrorToPackageInstallError : PackageName -> Package.LoadFromPathError -> PackageInstallError
@@ -628,22 +941,16 @@ packageFromPathErrorToPackageInstallError name err =
                 , error = fsErr
                 }
 
-        Package.FromPathOutlineInvalidString ->
+        Package.FromPathOutlineInvalidToml message ->
             PackageInstallInvalidOutline
                 { package = name
-                , message = "gren.json file does not contain a valid utf-8 encoded string."
-                }
-
-        Package.FromPathOutlineInvalidJson jsonErr ->
-            PackageInstallInvalidOutline
-                { package = name
-                , message = Decode.errorToString jsonErr
+                , message = message
                 }
 
         Package.FromPathOutlineIsApp ->
             PackageInstallInvalidOutline
                 { package = name
-                , message = "Expected package-type outline."
+                , message = "Expected a [package] manifest, and this one is an [application]."
                 }
 
         Package.FromPathFindSourcesError findSourceFilesErr ->
@@ -683,13 +990,13 @@ prettifyError error =
                         |> PP.indent
                     ]
                 )
-        
+
         PackageInstallInvalidOutline { package, message } ->
             Report.create
-                ("INVALID gren.json IN " ++ PackageName.toString package)
+                ("INVALID geng.toml IN " ++ PackageName.toString package)
                 Nothing
                 (PP.verticalBlock
-                    [ PP.words "An error occured while I was reading the gren.json file for this package."
+                    [ PP.words "An error occured while I was reading the geng.toml file for this package."
                     , PP.empty
                     , PP.words "The error is:"
                     , PP.empty
@@ -698,88 +1005,90 @@ prettifyError error =
                     ]
                 )
 
-        PackageInstallFailedToLoadBundleFromDisk { package, path, error = fsErr } ->
+        PackageInstallNameMismatch { package, found, path } ->
             Report.create
-                "FAILED TO LOAD PACKAGE BUNDLE"
+                "PACKAGE NAME MISMATCH"
                 (Just path)
                 (PP.verticalBlock
                     [ PP.block
-                        [ PP.words "An error occured while I was loading the bundle for "
-                        , PP.text (" " ++ PackageName.toString package)
+                        [ PP.words "I was looking for"
+                        , PP.text (" " ++ PackageName.toString package ++ " ")
                             |> PP.color PP.Green
+                        , PP.words "here, and the geng.toml I found names"
+                        , PP.text (" " ++ PackageName.toString found)
+                            |> PP.color PP.Yellow
                         , PP.text "."
                         ]
                     , PP.empty
-                    , PP.words "The error is:"
-                    , PP.empty
-                    , PP.words (FileSystem.errorToString fsErr)
-                        |> PP.indent
-                    , PP.empty
-                    , PP.words "Try to delete it and re-run this command to re-generate the bundle."
+                    , PP.words
+                        """
+                        A package's name is where it lives: the repository, and then the directory
+                        within it. A geng.toml whose name does not say where it is cannot be found
+                        by that name, so it is refused rather than used under the name it was asked
+                        for.
+                        """
                     ]
                 )
 
-        PackageInstallFailedToLoadBundleFromStream { package, path, error = streamErr } ->
+        PackageInstallVersionMismatch { package, tag, found } ->
             Report.create
-                "FAILED TO LOAD PACKAGE BUNDLE"
-                (Just path)
+                "PACKAGE VERSION MISMATCH"
+                Nothing
                 (PP.verticalBlock
-                    [ PP.block
-                        [ PP.words "An error occured while I was loading the bundle for "
-                        , PP.text (" " ++ PackageName.toString package)
-                            |> PP.color PP.Green
-                        , PP.text "."
-                        ]
+                    [ PP.words
+                        ("The tag "
+                            ++ tag
+                            ++ " of "
+                            ++ PackageName.toString package
+                            ++ " is a release of that version, but the geng.toml it names says version "
+                            ++ SemanticVersion.toString found
+                            ++ "."
+                        )
                     , PP.empty
-                    , PP.words "The error is:"
-                    , PP.empty
-                    , PP.words (Stream.errorToString streamErr)
-                        |> PP.indent
-                    , PP.empty
-                    , PP.words "Try to delete it and re-run this command to re-generate the bundle."
+                    , PP.words "This is likely a mistake in how the package was released. Consider letting the package author know."
                     ]
                 )
 
-        PackageInstallInvalidBundle { package, path, message } ->
-            Report.create
-                "FAILED TO LOAD PACKAGE BUNDLE"
-                (Just path)
-                (PP.verticalBlock
-                    [ PP.block
-                        [ PP.words "An error occured while I was loading the bundle for"
-                        , PP.text (" " ++ PackageName.toString package)
-                            |> PP.color PP.Green
-                        , PP.text "."
-                        ]
-                    , PP.empty
-                    , PP.words "The error is:"
-                    , PP.empty
-                    , PP.words message
-                        |> PP.indent
-                    , PP.empty
-                    , PP.words "This is likely due to an error in how the package was published. Consider letting the package author know."
-                    ]
-                )
+        PackageInstallConflict { name, selected, range, requiredBy, chosenBecause } ->
+            let
+                version =
+                    SemanticVersion.toString selected
 
-        PackageInstallConflict { package, version1, version2 } ->
+                chosen =
+                    when chosenBecause is
+                        Dependencies.Pinned ->
+                            "[sources] gives " ++ name ++ " version " ++ version
+
+                        Dependencies.AskedByRoot ->
+                            "I chose version " ++ version ++ " of " ++ name ++ ", because your geng.toml asks for it"
+
+                        Dependencies.AskedBy by ->
+                            "I chose version " ++ version ++ " of " ++ name ++ ", because " ++ by.name ++ " " ++ SemanticVersion.toString by.version ++ " asks for it"
+
+                requirer =
+                    when requiredBy is
+                        Nothing ->
+                            "your geng.toml"
+
+                        Just by ->
+                            by.name ++ " " ++ SemanticVersion.toString by.version
+            in
             Report.create
                 "CANNOT FIND COMPATIBLE VERSION"
                 Nothing
                 (PP.verticalBlock
-                    [ PP.block
-                        [ PP.words "I cannot find a version of"
-                        , PP.text (" " ++ PackageName.toString package ++ " ")
-                            |> PP.color PP.Green
-                        , PP.words "that is compatible with your existing dependencies."
-                        ]
+                    [ PP.words (chosen ++ ", but " ++ requirer ++ " requires a version in this range:")
                     , PP.empty
-                    , PP.words "These are the conflicting versions:"
-                    , PP.empty
-                    , PP.verticalBlock
-                        [ PP.text (SemanticVersionRange.toString version1)
-                        , PP.text (SemanticVersionRange.toString version2)
-                        ]
+                    , PP.text (SemanticVersionRange.toString range)
                         |> PP.indent
+                        |> PP.color PP.Yellow
+                    , PP.empty
+                    , PP.words
+                        """
+                        Each package is built at the highest version anything asks for, and the
+                        version a range asks for is its lower bound. When one package asks for a
+                        version past another's upper bound, one of the two has to change.
+                        """
                     ]
                 )
 
@@ -808,59 +1117,31 @@ prettifyError error =
                     ]
                 )
 
-        PackageInstallCreateBundleError { package, path, error = streamErr } ->
+        PackageInstallInvalidLock { path, message } ->
             Report.create
-                "FAILED TO CREATE PACKAGE BUNDLE"
+                "PROBLEM WITH geng.lock"
                 (Just path)
                 (PP.verticalBlock
-                    [ PP.block
-                        [ PP.words "An error occured while I was creating the bundle for"
-                        , PP.text (" " ++ PackageName.toString package)
-                            |> PP.color PP.Green
-                        , PP.text "."
-                        ]
+                    [ PP.words "I could not use the lock file. The error is:"
                     , PP.empty
-                    , PP.words "The error is:"
-                    , PP.empty
-                    , PP.words (Stream.errorToString streamErr)
+                    , PP.words message
                         |> PP.indent
+                    , PP.empty
+                    , PP.words "geng.lock is written by geng. Deleting it and building again writes a new one, with the commits the tags name now."
                     ]
                 )
 
-        PackageInstallMissingIndirectDependency { package, version } ->
+        PackageInstallInvalidConfig { path, message } ->
             Report.create
-                "MISSING INDIRECT DEPENDENCIES"
-                (Just (Path.fromPosixString "gren.json"))
+                "PROBLEM WITH config.toml"
+                (Just path)
                 (PP.verticalBlock
-                    [ PP.words "I expected to find the following package as an indirect dependency in your gren.json file:"
+                    [ PP.words "I could not read your configuration. The error is:"
                     , PP.empty
-                    , PP.text (PackageName.toString package ++ " " ++ SemanticVersion.toString (SemanticVersionRange.lowerBound version))
+                    , PP.words message
                         |> PP.indent
-                        |> PP.color PP.Green
                     , PP.empty
-                    , PP.words "Try adding them to your gren.json file in the \"indirect\" dependencies object then try this operation again."
-                    ]
-                )
-
-        PackageInstallBadLocalDependency { package, dependency } ->
-            Report.create
-                "INDIRECT LOCAL DEPENDENCY"
-                Nothing
-                (PP.verticalBlock
-                    [ PP.block
-                        [ PP.text (PackageName.toString package ++ " ")
-                            |> PP.color PP.Green
-                        , PP.words "has defined a local dependency on"
-                        , PP.text (" " ++ PackageName.toString dependency ++ " ")
-                            |> PP.color PP.Green
-                        , PP.words "with an incompatible source."
-                        ]
-                    , PP.empty
-                    , PP.words
-                        """
-                        Dependencies are normally not allowed to define local dependencies themselves unless
-                        they happen to point to the same local dependency as the root project.
-                        """
+                    , PP.words "This file holds a [sources] table that applies to every build on this machine, and nothing else."
                     ]
                 )
 
@@ -870,34 +1151,34 @@ prettifyError error =
                 Nothing
                 (PP.verticalBlock
                     [ PP.words
-                        ( "The gren.json file says this project is compatible with a Gren compiler in the "
+                        ( "The geng.toml file says this project is compatible with a Geng compiler in the "
                             ++ SemanticVersionRange.toString rootCompiler
                             ++ " version range."
                         )
                     , PP.empty
                     , PP.words
-                        ( "However, you're currently using a Gren compiler with version "
+                        ( "However, you're currently using a Geng compiler with version "
                             ++ SemanticVersion.toString Meta.version
                             ++ ", which is not compatible."
                         )
                     ]
                 )
 
-        PackageInstallIncompatibleCompiler { package, rootCompiler, packageCompiler } ->
+        PackageInstallIncompatibleCompiler { package, packageCompiler } ->
             Report.create
                 "INCOMPATIBLE PACKAGE"
                 Nothing
                 (PP.verticalBlock
                     [ PP.words
                         ( PackageName.toString package
-                            ++ " requires a Gren compiler in the "
+                            ++ " requires a Geng compiler in the "
                             ++ SemanticVersionRange.toString packageCompiler
                             ++ " version range."
                         )
                     , PP.empty
                     , PP.words
-                        ( "However, the current project requires a compiler in the "
-                            ++ SemanticVersionRange.toString rootCompiler
+                        ( "However, you're currently using a Geng compiler with version "
+                            ++ SemanticVersion.toString Meta.version
                             ++ ", which is not compatible."
                         )
                     ]
@@ -922,7 +1203,6 @@ prettifyError error =
                         )
                     ]
                 )
-
 
         PackageInstallCoreNotFound { path, error = fsErr } ->
             Report.create
@@ -949,7 +1229,7 @@ prettifyError error =
                 "CORE IS NOT A DEPENDENCY"
                 (when listedBy is
                     Nothing ->
-                        Just (Path.fromPosixString "gren.json")
+                        Just (Path.fromPosixString Outline.fileName)
 
                     Just _ ->
                         Nothing
@@ -957,11 +1237,11 @@ prettifyError error =
                 (PP.verticalBlock
                     [ when listedBy is
                         Nothing ->
-                            PP.words "Your gren.json lists core as a dependency."
+                            PP.words "Your geng.toml lists core as a dependency."
 
                         Just package ->
                             PP.block
-                                [ PP.words "The gren.json of"
+                                [ PP.words "The geng.toml of"
                                 , PP.text (" " ++ PackageName.toString package ++ " ")
                                     |> PP.color PP.Green
                                 , PP.words "lists core as a dependency."
@@ -991,40 +1271,82 @@ outlineFindSourcesErrorToString err =
                 ++ " does not contain a valid utf-8 encoded string!"
 
 
--- CLEAN
+-- OUTDATED
 
 
-cleanPackageDirectory : FileSystem.Permission -> PackageResolution -> Task FileSystem.Error {}
-cleanPackageDirectory fsPermission resolution =
+{-| The dependencies `geng.toml` lists that have a release newer than the version
+the project is built with, and the newest release of each. A package `[sources]`
+pins has no releases to compare with, and is left out.
+-}
+newerVersions : Config -> Options -> Task PackageInstallError (Array { name : PackageName, current : SemanticVersion, latest : SemanticVersion })
+newerVersions config ({ outline } as options) =
     let
-        bundlesToKeep =
-            Dict.map
-                (\_ package ->
-                    { name = package.outline.name, version = package.outline.version }
-                )
-                resolution.dependencies
-                |> Dict.values
-                |> Array.map
-                    (\{ name, version } ->
-                        packageBundlePath name version resolution.projectPath
-                    )
+        rootDeps =
+            when outline is
+                Outline.App app ->
+                    app.dependencies
 
-        packagesFolder =
-            Path.append (Path.fromPosixString "gren_packages") resolution.projectPath
+                Outline.Pkg pkg ->
+                    pkg.dependencies
     in
-    FileSystem.listDirectory fsPermission packagesFolder
+    resolve config options
         |> Task.andThen
-            (\files ->
-                Array.map .path files
-                    |> Array.map (Path.prepend packagesFolder)
-                    |> Array.keepIf
-                        (\bundlePath ->
-                            not (Array.member bundlePath bundlesToKeep)
+            (\resolution ->
+                setup config options
+                    |> Task.andThen
+                        (\env ->
+                            resolution.lock.packages
+                                |> Array.keepIf (\entry -> Dict.member (PackageName.toString entry.name) rootDeps)
+                                |> Array.foldl
+                                    (\entry acc ->
+                                        acc
+                                            |> Task.andThen
+                                                (\{ state, found } ->
+                                                    when entry.origin is
+                                                        Lock.Hosted { repository } ->
+                                                            remoteOf env state entry.name repository
+                                                                |> Task.map
+                                                                    (\{ remote, state = next } ->
+                                                                        let
+                                                                            newest =
+                                                                                Git.versions (PackageName.dropPrefix repository entry.name |> Maybe.withDefault "") remote.refs
+                                                                                    |> Dict.values
+                                                                                    |> Array.map .version
+                                                                                    |> Array.sortWith SemanticVersion.compare
+                                                                                    |> Array.last
+                                                                        in
+                                                                        { state = next
+                                                                        , found =
+                                                                            when newest is
+                                                                                Just latest ->
+                                                                                    if SemanticVersion.compare latest entry.version == GT then
+                                                                                        Array.pushLast { name = entry.name, current = entry.version, latest = latest } found
+
+                                                                                    else
+                                                                                        found
+
+                                                                                Nothing ->
+                                                                                    found
+                                                                        }
+                                                                    )
+
+                                                        _ ->
+                                                            Task.succeed { state = state, found = found }
+                                                )
+                                    )
+                                    (Task.succeed
+                                        { state =
+                                            { graph = { root = Dict.empty, pinned = Dict.empty, nodes = [] }
+                                            , loaded = Dict.empty
+                                            , remotes = Dict.empty
+                                            , roots = Dict.empty
+                                            }
+                                        , found = []
+                                        }
+                                    )
+                                |> Task.map .found
                         )
-                    |> Array.map (FileSystem.remove fsPermission { recursive = False })
-                    |> Task.concurrent
             )
-        |> Task.map (\_ -> {})
 
 
 -- ADD PACKAGE
@@ -1035,198 +1357,173 @@ type AddPackageError
     | AddPackagePromptError Stream.Error
     | AddPackageUserCancelled
     | AddPackageWriteOutlineError FileSystem.Error
+    | AddPackageEditOutlineError String
     | AddPackageGitError Git.Error
     | AddPackageInstallError PackageInstallError
 
 
+{-| Add a package to a project's `[dependencies]` at its newest version, as a
+range from that version up to the next breaking one.
+
+The lower bound is the newest release itself rather than the start of its minor
+series, since minimal version selection builds with the lower bound and it has
+to be a version that was released.
+-}
 addPackage : Config -> Options -> PackageName -> Task AddPackageError {}
-addPackage config { projectPath, outline } requestedPackage =
+addPackage config ({ projectPath, outline } as options) requestedPackage =
     let
         packageNameStr =
             PackageName.toString requestedPackage
 
-        grenJsonPath =
-            Path.append (Path.fromPosixString "gren.json") projectPath
+        dependencies =
+            when outline is
+                Outline.App app ->
+                    app.dependencies
+
+                Outline.Pkg pkg ->
+                    pkg.dependencies
+
+        withDependency range =
+            when outline is
+                Outline.App app ->
+                    Outline.App { app | dependencies = Dict.set packageNameStr range app.dependencies }
+
+                Outline.Pkg pkg ->
+                    Outline.Pkg { pkg | dependencies = Dict.set packageNameStr range pkg.dependencies }
     in
-    when outline is
-        Outline.App appOutline ->
-            when
-                { direct = Dict.member packageNameStr appOutline.dependencies.direct
-                , transitive = Dict.get packageNameStr appOutline.dependencies.indirect
-                }
-            is
-                { direct = False, transitive = Nothing } ->
-                    Git.fetchLatestVersion config.cpPermission requestedPackage
-                        |> Task.mapError AddPackageGitError
+    if Dict.member packageNameStr dependencies then
+        Task.fail AddPackageAlreadyInstalled
+
+    else
+        setup config options
+            |> Task.mapError AddPackageInstallError
+            |> Task.andThen (\env -> latestVersion env requestedPackage)
+            |> Task.andThen
+                (\packageVersion ->
+                    let
+                        range =
+                            upToNextBreaking packageVersion
+                    in
+                    resolve config { projectPath = projectPath, outline = withDependency range }
+                        |> Task.mapError AddPackageInstallError
                         |> Task.andThen
-                            (\packageVersion ->
-                                run
-                                    config
-                                    { projectPath = projectPath
-                                    , outline =
-                                        { appOutline
-                                            | dependencies =
-                                                { appOutline.dependencies | direct = Dict.set packageNameStr (Outline.Version packageVersion) appOutline.dependencies.direct
-                                                }
-                                        }
-                                        |> Outline.App
-                                    }
-                                    |> Task.mapError AddPackageInstallError
-                                    |> Task.map (\res -> { resolved = res, packageVersion = packageVersion })
-                            )
-                        |> Task.andThen
-                            (\{ packageVersion, resolved } ->
+                            (\resolved ->
                                 let
-                                    originalPackages =
-                                        (Dict.keys appOutline.dependencies.direct)
-                                            ++ (Dict.keys appOutline.dependencies.indirect)
+                                    before =
+                                        readLockSilently config projectPath
 
-                                    newPackages =
-                                        resolved.dependencies
-                                            |> Dict.keepIf (\k _ -> not <| Array.member k originalPackages)
-                                            |> Dict.map (\_ value -> value.outline.version)
-
-                                    finalOutline =
-                                        Outline.App
-                                            { appOutline
-                                                | dependencies =
-                                                    { appOutline.dependencies
-                                                        | direct = Dict.set packageNameStr (Outline.Version packageVersion) appOutline.dependencies.direct
-                                                        , indirect =
-                                                            Dict.union
-                                                                appOutline.dependencies.indirect
-                                                                (newPackages |> Dict.remove packageNameStr |> Dict.map (\_ v -> Outline.Version v))
-                                                    }
-                                            }
+                                    added =
+                                        before
+                                            |> Task.map
+                                                (\oldLock ->
+                                                    resolved.lock.packages
+                                                        |> Array.keepIf
+                                                            (\entry ->
+                                                                not (Array.any (\old -> old.name == entry.name && old.version == entry.version) oldLock.packages)
+                                                            )
+                                                        |> Array.map (\entry -> PackageName.toString entry.name ++ " " ++ SemanticVersion.toString entry.version)
+                                                )
                                 in
-                                promptUpdateOutline config grenJsonPath newPackages finalOutline
-                                    |> Task.onError
-                                        (\err ->
-                                            when err is
-                                                AddPackageUserCancelled ->
-                                                    { resolved |
-                                                        dependencies =
-                                                            Dict.keepIf
-                                                                (\depNameStr _ ->
-                                                                    Array.member depNameStr originalPackages
-                                                                )
-                                                                resolved.dependencies
-                                                    }
-                                                        |> cleanPackageDirectory config.fsPermission
-                                                        |> Task.mapError (\_ -> err)
-                                                        |> Task.andThen (\_ -> Task.fail err)
-
-                                                _ ->
-                                                    Task.fail err
+                                added
+                                    |> Task.andThen
+                                        (\addedPackages ->
+                                            promptUpdateOutline config
+                                                projectPath
+                                                "The plan is to add the following dependencies:"
+                                                addedPackages
+                                                (Outline.setDependency packageNameStr range)
+                                        )
+                                    |> Task.andThen
+                                        (\{} ->
+                                            writeLock config.fsPermission resolved
+                                                |> Task.mapError AddPackageInstallError
                                         )
                             )
+                )
 
-                { direct = True } ->
-                    Task.fail AddPackageAlreadyInstalled
 
-                { transitive = Just packageVersion } ->
-                    Help.confirm
-                        { stdout = config.stdout
-                        , stdin = config.stdin
-                        , useColor = config.useColor
-                        , interactive = config.interactive
-                        , question = PP.words "Move to direct?"
-                        , defaultValue = True
-                        }
-                        |> Task.mapError AddPackagePromptError
-                        |> Task.andThen
-                            (\answer ->
-                                if answer then
-                                    Task.succeed {}
-
-                                else
-                                    Task.fail AddPackageUserCancelled
-                            )
-                        |> Task.andThen
-                            (\{} ->
-                                { appOutline
-                                    | dependencies =
-                                        { direct = Dict.set packageNameStr packageVersion appOutline.dependencies.direct
-                                        , indirect = Dict.remove packageNameStr appOutline.dependencies.indirect
-                                        }
-                                }
-                                |> Outline.App
-                                |> Outline.toJson
-                                |> Json.encode 4
-                                |> Task.succeed
-                            )
-                        |> Task.andThen
-                            (\newOutline ->
-                                FileSystem.writeFile config.fsPermission (Bytes.fromString newOutline) grenJsonPath
-                                    |> Task.mapError AddPackageWriteOutlineError
-                                    |> Task.map (\_ -> {})
-                            )
-
-        Outline.Pkg pkgOutline ->
-            if Dict.member packageNameStr pkgOutline.dependencies then
-                Task.fail AddPackageAlreadyInstalled
+upToNextBreaking : SemanticVersion -> SemanticVersionRange
+upToNextBreaking version =
+    let
+        upper =
+            if version.major == 0 then
+                { major = 0, minor = version.minor + 1, patch = 0 }
 
             else
-                Git.fetchLatestVersion config.cpPermission requestedPackage
-                    |> Task.mapError AddPackageGitError
-                    |> Task.andThen
-                        (\packageVersion ->
-                            let
-                                finalOutline =
-                                    Outline.Pkg
-                                        { pkgOutline
-                                            | dependencies =
-                                                Dict.set
-                                                    packageNameStr
-                                                    (Outline.Version <| SemanticVersionRange.compatibleWith packageVersion)
-                                                    pkgOutline.dependencies
-                                        }
-                            in
-                            run
-                                config
-                                { projectPath = projectPath
-                                , outline = finalOutline
-                                }
-                                |> Task.mapError AddPackageInstallError
-                                |> Task.andThen
-                                    (\resolved ->
-                                        let
-                                            newPackages =
-                                                Dict.singleton packageNameStr packageVersion
-                                        in
-                                        promptUpdateOutline config grenJsonPath newPackages finalOutline
-                                            |> Task.onError
-                                                (\err ->
-                                                    when err is
-                                                        AddPackageUserCancelled ->
-                                                            { resolved |
-                                                                dependencies =
-                                                                    Dict.remove packageNameStr resolved.dependencies
-                                                            }
-                                                                |> cleanPackageDirectory config.fsPermission
-                                                                |> Task.mapError (\_ -> err)
-                                                                |> Task.andThen (\_ -> Task.fail err)
-
-                                                        _ ->
-                                                            Task.fail err
-                                                )
-                                    )
-                        )
+                { major = version.major + 1, minor = 0, patch = 0 }
+    in
+    SemanticVersionRange.of version upper
+        |> Maybe.withDefault (SemanticVersionRange.fromExact version)
 
 
-promptUpdateOutline : Config -> Path -> Dict String SemanticVersion -> Outline -> Task AddPackageError {}
-promptUpdateOutline config grenJsonPath newPackages finalOutline =
+readLockSilently : Config -> Path -> Task x Lock
+readLockSilently config projectPath =
+    readLock config.fsPermission (Path.append (Path.fromPosixString Lock.fileName) projectPath)
+        |> Task.onError (\_ -> Task.succeed Lock.empty)
+
+
+{-| The newest version of a package: its manifest's, if `[sources]` pins it, and
+its repository's newest release tag if not.
+-}
+latestVersion : Env -> PackageName -> Task AddPackageError SemanticVersion
+latestVersion env name =
     let
+        nameStr =
+            PackageName.toString name
+
+        emptyState =
+            { graph = { root = Dict.empty, pinned = Dict.empty, nodes = [] }
+            , loaded = Dict.empty
+            , remotes = Dict.empty
+            , roots = Dict.empty
+            }
+    in
+    when Git.sourceFor env.sources nameStr is
+        Just { source = Outline.LocalPath _ } ->
+            loadPinned env emptyState nameStr
+                |> Task.mapError AddPackageInstallError
+                |> Task.map (\state -> Dict.get nameStr state.graph.pinned |> Maybe.withDefault { major = 0, minor = 0, patch = 0 })
+
+        Just { source = Outline.Commit _ } ->
+            loadPinned env emptyState nameStr
+                |> Task.mapError AddPackageInstallError
+                |> Task.map (\state -> Dict.get nameStr state.graph.pinned |> Maybe.withDefault { major = 0, minor = 0, patch = 0 })
+
+        _ ->
+            rootOf env emptyState nameStr
+                |> Task.andThen (\{ root, state } -> remoteOf env state name root |> Task.map (\found -> { root = root, remote = found.remote }))
+                |> Task.mapError AddPackageInstallError
+                |> Task.andThen
+                    (\{ root, remote } ->
+                        Git.versions (PackageName.dropPrefix root name |> Maybe.withDefault "") remote.refs
+                            |> Dict.values
+                            |> Array.map .version
+                            |> Array.sortWith SemanticVersion.compare
+                            |> Array.last
+                            |> Maybe.map Task.succeed
+                            |> Maybe.withDefault (Task.fail (AddPackageGitError Git.NoVersions))
+                    )
+
+
+{-| Ask before changing `geng.toml`, and then change only what was asked for,
+through an edit of the file's text that keeps its comments and layout.
+-}
+promptUpdateOutline : Config -> Path -> String -> Array String -> (String -> Result String String) -> Task AddPackageError {}
+promptUpdateOutline config projectPath heading packages edit =
+    let
+        manifestPath =
+            Path.append (Path.fromPosixString Outline.fileName) projectPath
+
         plan =
             PP.verticalBlock
-                [ PP.words "The plan is to add the following dependencies:"
+                [ PP.words heading
                 , PP.empty
-                , Dict.foldl (\k v acc -> Array.pushLast (k ++ " " ++ SemanticVersion.toString v) acc) [] newPackages
+                , packages
                     |> Array.map PP.text
                     |> PP.verticalBlock
                     |> PP.indent
                 , PP.empty
-                , PP.words "Do you want me to update the gren.json file accordingly?"
+                , PP.words "Do you want me to update the geng.toml file accordingly?"
                 ]
     in
     Help.confirm
@@ -1241,20 +1538,24 @@ promptUpdateOutline config grenJsonPath newPackages finalOutline =
         |> Task.andThen
             (\confirmed ->
                 if confirmed then
-                    finalOutline
-                        |> Outline.toJson
-                        |> Json.encode 4
-                        |> Task.succeed
+                    FileSystem.readFile config.fsPermission manifestPath
+                        |> Task.mapError AddPackageWriteOutlineError
 
                 else
                     Task.fail AddPackageUserCancelled
             )
         |> Task.andThen
-            (\newOutline ->
-                FileSystem.writeFile config.fsPermission (Bytes.fromString newOutline) grenJsonPath
-                    |> Task.mapError AddPackageWriteOutlineError
-                    |> Task.map (\_ -> {})
+            (\bytes ->
+                when edit (Maybe.withDefault "" (Bytes.toString bytes)) is
+                    Ok newText ->
+                        FileSystem.writeFile config.fsPermission (Bytes.fromString newText) manifestPath
+                            |> Task.mapError AddPackageWriteOutlineError
+                            |> Task.map (\_ -> {})
+
+                    Err message ->
+                        Task.fail (AddPackageEditOutlineError message)
             )
+
 
 prettifyAddPackageError : AddPackageError -> Report
 prettifyAddPackageError error =
@@ -1286,11 +1587,23 @@ prettifyAddPackageError error =
                 "FAILED TO UPDATE OUTLINE"
                 Nothing
                 (PP.verticalBlock
-                    [ PP.words "An error occured while I was updating the gren.json file."
+                    [ PP.words "An error occured while I was updating the geng.toml file."
                     , PP.empty
                     , PP.words "The error is:"
                     , PP.empty
                     , PP.words (FileSystem.errorToString fsErr)
+                        |> PP.indent
+                    ]
+                )
+
+        AddPackageEditOutlineError message ->
+            Report.create
+                "FAILED TO UPDATE OUTLINE"
+                (Just (Path.fromPosixString Outline.fileName))
+                (PP.verticalBlock
+                    [ PP.words "I could not edit the geng.toml file. The error is:"
+                    , PP.empty
+                    , PP.words message
                         |> PP.indent
                     ]
                 )
@@ -1305,36 +1618,9 @@ prettifyAddPackageError error =
             prettifyError installErr
 
 
-packageBundlePath : PackageName -> SemanticVersion -> Path -> Path
-packageBundlePath name version projectPath =
-    let
-        normalizedName =
-            PackageName.toFileName name ++ "__" ++ String.replace "." "_" (SemanticVersion.toString version) ++ ".pkg.gz"
-    in
-    Path.join
-        [ projectPath
-        , Path.fromPosixString "gren_packages"
-        , Path.fromPosixString normalizedName
-        ]
-
-
-localRepoPath : PackageName -> SemanticVersion -> Path -> Path
-localRepoPath name version projectPath =
-    let
-        normalizedName =
-            PackageName.toFileName name ++ "__" ++ String.replace "." "_" (SemanticVersion.toString version)
-    in
-    Path.join
-        [ projectPath
-        , Path.fromPosixString ".gren/git"
-        , Path.fromPosixString normalizedName
-        ]
-
-
 type ReadProjectOutlineError
     = ReadProjectOutlineNoProject FileSystem.Error
-    | ReadProjectOutlineInvalidGrenJsonString
-    | ReadProjectOutlineInvalidGrenJson Decode.Error
+    | ReadProjectOutlineInvalid { path : Path, message : String }
 
 
 readProjectOutline : FileSystem.Permission -> Task ReadProjectOutlineError { projectPath : Path, outline : Outline }
@@ -1343,18 +1629,19 @@ readProjectOutline fsPermission =
         |> Task.mapError ReadProjectOutlineNoProject
         |> Task.andThen
             (\projectPath ->
-                Outline.readFromPath fsPermission (Path.append (Path.fromPosixString "gren.json") projectPath)
+                let
+                    manifestPath =
+                        Path.append (Path.fromPosixString Outline.fileName) projectPath
+                in
+                Outline.readFromPath fsPermission manifestPath
                     |> Task.mapError
                         (\err ->
                             when err is
                                 Outline.FromPathFileSystemError fsErr ->
                                     ReadProjectOutlineNoProject fsErr
 
-                                Outline.FromPathInvalidString ->
-                                    ReadProjectOutlineInvalidGrenJsonString
-
-                                Outline.FromPathInvalidJson jsonErr ->
-                                    ReadProjectOutlineInvalidGrenJson jsonErr
+                                Outline.FromPathInvalidToml tomlErr ->
+                                    ReadProjectOutlineInvalid { path = manifestPath, message = Outline.readErrorToString tomlErr }
                         )
                     |> Task.map
                         (\outline ->
@@ -1365,35 +1652,21 @@ readProjectOutline fsPermission =
             )
 
 
--- TODO: remove this. Only kept around for compatibility
-readOutline : FileSystem.Permission -> Path -> Task FileSystem.Error (Result Decode.Error Outline)
+{-| Read the `geng.toml` at a path, failing only when it cannot be read and
+answering what was wrong with it otherwise.
+-}
+readOutline : FileSystem.Permission -> Path -> Task FileSystem.Error (Result String Outline)
 readOutline fsPermission path =
     Outline.readFromPath fsPermission path
         |> Task.map Ok
         |> Task.onError
             (\err ->
-                Task.succeed (Err err)
-            )
-        |> Task.andThen
-            (\result ->
-                when result is
-                    Ok outline ->
-                        Task.succeed <| Ok outline
-                    
-                    Err (Outline.FromPathFileSystemError fsErr) ->
+                when err is
+                    Outline.FromPathFileSystemError fsErr ->
                         Task.fail fsErr
 
-                    Err Outline.FromPathInvalidString ->
-                        when Decode.decodeString Outline.jsonDecoder "" is
-                            Ok _ ->
-                                -- cannot happen
-                                readOutline fsPermission path
-
-                            err ->
-                                Task.succeed <| err
-
-                    Err (Outline.FromPathInvalidJson jsonErr) ->
-                        Task.succeed <| Err jsonErr
+                    Outline.FromPathInvalidToml tomlErr ->
+                        Task.succeed (Err (Outline.readErrorToString tomlErr))
             )
 
 
@@ -1403,9 +1676,9 @@ prettifyProjectOutlineError error =
         ReadProjectOutlineNoProject _ ->
             Report.create
                 "COULDN'T FIND PROJECT"
-                (Just (Path.fromPosixString "gren.json"))
+                (Just (Path.fromPosixString Outline.fileName))
                 (PP.verticalBlock
-                    [ PP.words "I couldn't find a Gren project."
+                    [ PP.words "I couldn't find a Geng project: a directory with a geng.toml in it, here or above."
                     , PP.empty
                     , PP.words "You can create new projects using"
                     , PP.empty
@@ -1415,133 +1688,49 @@ prettifyProjectOutlineError error =
                     ]
                 )
 
-        ReadProjectOutlineInvalidGrenJsonString ->
+        ReadProjectOutlineInvalid { path, message } ->
             Report.create
                 "FAILED TO READ OUTLINE"
-                (Just (Path.fromPosixString "gren.json"))
+                (Just path)
                 (PP.verticalBlock
-                    [ PP.words "Something seems to be wrong with the gren.json file."
-                    , PP.empty
-                    , PP.words "It doesn't contain a valid utf-8 encoded string."
-                    ]
-                )
-
-        ReadProjectOutlineInvalidGrenJson jsonErr ->
-            Report.create
-                "FAILED TO READ OUTLINE"
-                (Just (Path.fromPosixString "gren.json"))
-                (PP.verticalBlock
-                    [ PP.words "Something seems to be wrong with the gren.json file."
+                    [ PP.words "Something seems to be wrong with the geng.toml file."
                     , PP.empty
                     , PP.words "The error I'm having is:"
                     , PP.empty
-                    , PP.text (Decode.errorToString jsonErr)
+                    , PP.text message
                         |> PP.indent
                     ]
                 )
 
 
-type alias LoadedPackage =
-    { name : PackageName
-    , path : Path
-    , outline : Outline.PkgOutline
-    , sources : Dict String String
-    }
-
-
-loadPackageFromPath : FileSystem.Permission -> PackageName -> Path -> Task PackageInstallError LoadedPackage
+loadPackageFromPath : FileSystem.Permission -> PackageName -> Path -> Task PackageInstallError { path : Path, outline : Outline.PkgOutline, sources : Dict String String }
 loadPackageFromPath fsPermission name path =
     FileSystem.realPath fsPermission path
         |> Task.mapError
             (\err ->
-                PackageInstallInvalidOutline
+                PackageInstallFileSystemError
                     { package = name
-                    , message = FileSystem.errorToString err
+                    , error = err
                     }
             )
         |> Task.andThen
             (\realPath ->
-                Package.loadFromPath fsPermission path
+                Package.loadFromPath fsPermission realPath
                     |> Task.mapError (packageFromPathErrorToPackageInstallError name)
                     |> Task.andThen
                         (\package ->
                             if name /= package.outline.name then
-                                Task.fail <| PackageInstallInvalidOutline
+                                Task.fail <| PackageInstallNameMismatch
                                     { package = name
-                                    , message = "Name in gren.json was expected to be " ++ PackageName.toString name
+                                    , found = package.outline.name
+                                    , path = Path.append (Path.fromPosixString Outline.fileName) realPath
                                     }
 
                             else
                                 Task.succeed
-                                    { name = name
-                                    , path = realPath
+                                    { path = realPath
                                     , outline = package.outline
                                     , sources = package.sources
                                     }
                         )
             )
-
-
-
-loadPackageFromBundle : FileSystem.Permission -> PackageName -> SemanticVersion -> Path -> Task PackageInstallError LoadedPackage
-loadPackageFromBundle fsPermission name vsn projectPath =
-    let
-        bundlePath =
-            packageBundlePath name vsn projectPath
-    in
-    bundlePath
-        |> FileSystem.readFileStream fsPermission FileSystem.Beginning
-        |> Task.mapError
-            (\fsErr ->
-                PackageInstallFailedToLoadBundleFromDisk
-                    { package = name
-                    , path = bundlePath
-                    , error = fsErr
-                    }
-            )
-        |> Task.andThen
-            (\stream ->
-                Package.loadFromStream stream
-                    |> Task.mapError
-                        (\err ->
-                            when err is
-                                Package.FromStreamStreamError streamErr ->
-                                    PackageInstallFailedToLoadBundleFromStream
-                                        { package = name
-                                        , path = bundlePath
-                                        , error = streamErr
-                                        }
-
-                                Package.FromStreamInvalidJson jsonErr ->
-                                    PackageInstallInvalidBundle
-                                        { package = name
-                                        , path = bundlePath
-                                        , message = Decode.errorToString jsonErr
-                                        }
-                        )
-                    |> Task.andThen
-                        (\bundle ->
-                            if name /= bundle.outline.name then
-                                Task.fail <| PackageInstallInvalidBundle
-                                    { package = name
-                                    , path = bundlePath
-                                    , message = "Package name mismatch. Expected " ++ PackageName.toString name 
-                                    }
-
-                            else if vsn /= bundle.outline.version then
-                                Task.fail <| PackageInstallInvalidBundle
-                                    { package = name
-                                    , path = bundlePath
-                                    , message = "Package version mismatch. Expected " ++ SemanticVersion.toString vsn
-                                    }
-
-                            else
-                                Task.succeed
-                                    { name = name
-                                    , path = bundlePath
-                                    , outline = bundle.outline
-                                    , sources = bundle.sources
-                                    }
-                        )
-            )
-

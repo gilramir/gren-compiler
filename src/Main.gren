@@ -278,7 +278,6 @@ parseUserArgs context compilerPath =
                                     , useColor = context.useColor
                                     , stdout = context.stdout
                                     , stdin = context.stdin
-                                    , strictAppResolution = True
                                     }
                                     projectOutline
                                     |> Task.mapError Terminal.PackageInstall.prettifyError
@@ -412,11 +411,7 @@ parseUserArgs context compilerPath =
 
                 CliParser.PackageInstall Nothing ->
                     resolveProject context
-                        |> Task.andThen
-                            (\res ->
-                                Terminal.PackageInstall.cleanPackageDirectory context.fsPermission res
-                                    |> Task.mapError (\_ -> Report.empty)
-                            )
+                        |> Task.map (\_ -> {})
                         |> succeeded
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
 
@@ -434,7 +429,6 @@ parseUserArgs context compilerPath =
                                     , useColor = context.useColor
                                     , stdout = context.stdout
                                     , stdin = context.stdin
-                                    , strictAppResolution = True
                                     }
                                     projectOutline
                                     requestedPackage
@@ -461,11 +455,7 @@ parseUserArgs context compilerPath =
                                     projectOutline
                                     packageName
                                     |> Task.mapError Terminal.PackageUninstall.prettifyError
-                                    |> Task.andThen
-                                        (\res ->
-                                            Terminal.PackageInstall.cleanPackageDirectory context.fsPermission res
-                                                |> Task.mapError (\_ -> Report.empty)
-                                        )
+                                    |> Task.map (\_ -> {})
                             )
                         |> succeeded
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
@@ -478,6 +468,8 @@ parseUserArgs context compilerPath =
                                 Terminal.PackageOutdated.run
                                     { fsPermission = context.fsPermission
                                     , cpPermission = context.cpPermission
+                                    , cacheRoot = context.cacheRoot
+                                    , corePath = context.corePath
                                     , interactive = context.interactive
                                     , useColor = context.useColor
                                     , stdout = context.stdout
@@ -780,7 +772,6 @@ resolveProject context =
                     , useColor = context.useColor
                     , stdout = context.stdout
                     , stdin = context.stdin
-                    , strictAppResolution = True
                     }
                     projectOutline
                     |> Task.mapError Terminal.PackageInstall.prettifyError

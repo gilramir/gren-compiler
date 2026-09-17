@@ -1,6 +1,19 @@
 module Git exposing
     ( Error(..)
     , report
+    --
+    , Context
+    , Refs
+    , Remote
+    , sourceFor
+    , knownRoot
+    , probe
+    , listRefs
+    , versions
+    , tagName
+    , checkout
+    , checkoutRev
+    --
     , clonePackage
     , clonePackageCached
     , fetchLatestVersion
@@ -10,11 +23,39 @@ module Git exposing
     )
 
 
+{-| Packages come from git servers (Geng's `packaging.md` K9).
+
+There is no registry. An identifier names the server and the path, the
+repository's tags are its versions, and a lock file keeps the commit each tag
+named. Finding a package is three questions, each answered here:
+
+  - **Where does the repository end?** A `[sources]` entry can say; a path
+    element ending in `.git` says; on a well-known host it is the first three
+    elements; and otherwise the resolver asks the server about each prefix,
+    shortest first, and the first that answers is the root ([knownRoot](#knownRoot),
+    [probe](#probe)).
+  - **How is it reached?** `https://` and then `ssh://`, unless `[sources]`
+    rewrites the URL ([listRefs](#listRefs)).
+  - **Which versions does it have?** A tag `v1.2.0` for a package at the root,
+    and `path/v1.2.0` for one below it ([versions](#versions)).
+
+A version is fetched once, into the package cache, under its repository and
+commit ([checkout](#checkout)).
+
+The functions at the bottom are older and GitHub-only, for `geng package
+validate`, `bump` and `diff`, which publish from a repository's root and keep
+that until a package is published from somewhere else (D300).
+-}
+
+
 import Bytes
 import ChildProcess
+import Compiler.Outline as Outline
+import Dict exposing (Dict)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Compiler.PackageName as PackageName exposing (PackageName)
+import Random
 import SemanticVersion exposing (SemanticVersion)
 import Task exposing (Task)
 import Terminal.Help as Help
@@ -28,6 +69,10 @@ type Error
     | NoSuchRepo
     | NoSuchRepoOrVersion SemanticVersion
     | FailedCommand { args : Array String, message : String }
+    | NoRepository { identifier : String, tried : Array String }
+    | NoSuchTag { repository : String, tag : String }
+    | MovedTag { repository : String, tag : String, locked : String, found : String }
+    | CacheError FileSystem.Error
 
 
 report : String -> String -> Error -> Report
@@ -38,13 +83,12 @@ report title context err =
             title
             Nothing
             ( PP.verticalBlock
-                [ PP.words (context ++ ", but I couldn't find any semver compatible tags in this repo.")
+                [ PP.words (context ++ ", but I couldn't find any version tags in this repository.")
                 , PP.empty
                 , PP.words
                     """
-                    Gren packages are just git repositories with tags following the
-                    semantic versioning scheme. However, it seems that this particular repo
-                    doesn't have _any_ semantic version tags!
+                    A package's versions are its repository's tags: v1.2.0 for a package at the
+                    root of the repository, and path/v1.2.0 for one in a directory below it.
                     """
                 ]
             )
@@ -54,13 +98,7 @@ report title context err =
             title
             Nothing
             ( PP.verticalBlock
-                [ PP.words (context ++ ", but I couldn't find the repo on github.")
-                , PP.empty
-                , PP.words
-                    """
-                    Gren packages are just git repositories hosted on github, however
-                    it seems like this repo doesn't exist.
-                    """
+                [ PP.words (context ++ ", but I couldn't find the repository.")
                 ]
             )
 
@@ -69,12 +107,7 @@ report title context err =
             title
             Nothing
             ( PP.verticalBlock
-                [ PP.words <| context ++ ", but I couldn't find the correct version of this package on github."
-                , PP.empty
-                , PP.words <|
-                    "Gren packages are just git repositories hosted on github with semver formatted tags. However, it seems like this package, or version "
-                      ++ SemanticVersion.toString vsn
-                      ++ ", doesn't exist."
+                [ PP.words <| context ++ ", but I couldn't find the repository, or its tag v" ++ SemanticVersion.toString vsn ++ "."
                 ]
             )
 
@@ -95,12 +128,611 @@ report title context err =
                 ]
             )
 
-{-| Where a package's repository is: `https://` and its identifier (K7).
+        NoRepository { identifier, tried } ->
+          Report.create
+            title
+            Nothing
+            ( PP.verticalBlock
+                [ PP.words (context ++ ", but no git server answered for " ++ identifier ++ ". I tried:")
+                , PP.empty
+                , PP.verticalBlock (Array.map PP.text tried)
+                    |> PP.indent
+                , PP.empty
+                , PP.words
+                    """
+                    A package is found from its identifier: the repository is the first path
+                    element that ends in .git, or the first three elements on github.com,
+                    bitbucket.org, codeberg.org and sr.ht, or else the shortest prefix a server
+                    answers for. A [sources] entry can say where the repository is and how to
+                    reach it.
+                    """
+                ]
+            )
 
-Both are still what they were when an identifier was an `author/name` on GitHub,
-for a package at its repository's root on a host that answers `https`. Finding
-the root of a package below it, `ssh://` and `[sources]` are K9's resolution,
-which `m1b-manifest.md` §MF3 puts at 5c.
+        NoSuchTag { repository, tag } ->
+          Report.create
+            title
+            Nothing
+            ( PP.verticalBlock
+                [ PP.words (context ++ ", but " ++ repository ++ " has no tag " ++ tag ++ ".")
+                , PP.empty
+                , PP.words
+                    """
+                    The version a dependency asks for is the lower bound of its range, and
+                    that version has to have been released: minimal version selection never
+                    looks for the next version up.
+                    """
+                ]
+            )
+
+        MovedTag { repository, tag, locked, found } ->
+          Report.create
+            title
+            Nothing
+            ( PP.verticalBlock
+                [ PP.words (context ++ ", but the tag " ++ tag ++ " in " ++ repository ++ " no longer names the commit geng.lock recorded:")
+                , PP.empty
+                , PP.verticalBlock
+                    [ PP.text ("geng.lock: " ++ locked)
+                    , PP.text ("the tag:   " ++ found)
+                    ]
+                    |> PP.indent
+                , PP.empty
+                , PP.words
+                    """
+                    A released version does not change, so a tag that has moved is refused rather
+                    than followed. If the move is one you trust, delete this package's entries
+                    from geng.lock and build again.
+                    """
+                ]
+            )
+
+        CacheError fsErr ->
+          Report.create
+            title
+            (Just (FileSystem.errorPath fsErr))
+            ( PP.verticalBlock
+                [ PP.words (context ++ ", but I could not use the package cache:")
+                , PP.empty
+                , PP.words (FileSystem.errorToString fsErr)
+                    |> PP.indent
+                ]
+            )
+
+
+-- RESOLUTION
+
+
+{-| What a git command needs: permissions, the cache, the `[sources]` that
+apply, and the environment to run git in.
+-}
+type alias Context =
+    { cpPermission : ChildProcess.Permission
+    , fsPermission : FileSystem.Permission
+    , cacheRoot : Compiler.Paths.CacheRoot
+    , sources : Dict String Outline.Source
+    , environment : Dict String String
+    }
+
+
+{-| A repository's tags, as tag name and the commit it names.
+-}
+type alias Refs =
+    Dict String String
+
+
+{-| A repository that answered: its root, the URL that answered, and its tags.
+-}
+type alias Remote =
+    { root : String
+    , url : String
+    , refs : Refs
+    }
+
+
+{-| The `[sources]` entry for an identifier: the longest key that is a prefix of
+it, with the key's trailing slash taken off.
+-}
+sourceFor : Dict String Outline.Source -> String -> Maybe { prefix : String, source : Outline.Source }
+sourceFor sources identifier =
+    Dict.foldl
+        (\key source best ->
+            let
+                prefix =
+                    if String.endsWith "/" key then
+                        String.dropLast 1 key
+
+                    else
+                        key
+
+                matches =
+                    identifier == prefix || String.startsWith (prefix ++ "/") identifier
+            in
+            if not matches then
+                best
+
+            else
+                when best is
+                    Just found ->
+                        if String.count prefix > String.count found.prefix then
+                            Just { prefix = prefix, source = source }
+
+                        else
+                            best
+
+                    Nothing ->
+                        Just { prefix = prefix, source = source }
+        )
+        Nothing
+        sources
+
+
+wellKnownHosts : Array String
+wellKnownHosts =
+    [ "github.com", "bitbucket.org", "codeberg.org", "sr.ht" ]
+
+
+{-| The repository root of an identifier, when it can be known without asking a
+server: a `[sources]` entry that names a repository, a path element ending in
+`.git`, or a well-known host. `Nothing` means probe.
+-}
+knownRoot : Dict String Outline.Source -> String -> Maybe String
+knownRoot sources identifier =
+    let
+        elements =
+            String.split "/" identifier
+
+        fromSources =
+            when sourceFor sources identifier is
+                Just { prefix, source = Outline.Repository _ } ->
+                    Just prefix
+
+                Just { prefix, source = Outline.Commit _ } ->
+                    Just prefix
+
+                _ ->
+                    Nothing
+
+        fromMarker =
+            Array.findFirst (\element -> String.endsWith ".git" element) (Array.dropFirst 1 elements)
+                |> Maybe.map (\{ index } -> String.join "/" (Array.takeFirst (index + 2) elements))
+
+        fromHost =
+            when Array.first elements is
+                Just host ->
+                    if Array.member host wellKnownHosts && Array.length elements >= 3 then
+                        Just (String.join "/" (Array.takeFirst 3 elements))
+
+                    else
+                        Nothing
+
+                Nothing ->
+                    Nothing
+    in
+    when fromSources is
+        Just root ->
+            Just root
+
+        Nothing ->
+            when fromMarker is
+                Just root ->
+                    Just root
+
+                Nothing ->
+                    fromHost
+
+
+{-| The URLs to try for a repository root, in order.
+-}
+urlsFor : Dict String Outline.Source -> String -> Array String
+urlsFor sources root =
+    when sourceFor sources root is
+        Just { prefix, source = Outline.Rewrite base } ->
+            if root == prefix then
+                [ String.dropLast 1 base ]
+
+            else
+                [ base ++ String.dropFirst (String.count prefix + 1) root ]
+
+        Just { prefix, source = Outline.Repository url } ->
+            if root == prefix then
+                [ url ]
+
+            else
+                defaultUrls root
+
+        Just { prefix, source = Outline.Commit { url } } ->
+            if root == prefix then
+                [ url ]
+
+            else
+                defaultUrls root
+
+        _ ->
+            defaultUrls root
+
+
+defaultUrls : String -> Array String
+defaultUrls root =
+    when String.split "/" root |> Array.popFirst is
+        Just { first = host, rest } ->
+            [ "https://" ++ root
+            , "ssh://git@" ++ host ++ "/" ++ String.join "/" rest
+            ]
+
+        Nothing ->
+            [ "https://" ++ root ]
+
+
+{-| Find where an identifier's repository ends by asking, shortest prefix first.
+The listing that answers is kept, since it holds the tags.
+-}
+probe : Context -> String -> Task Error Remote
+probe context identifier =
+    let
+        elements =
+            String.split "/" identifier
+
+        candidates =
+            Array.range 2 (Array.length elements)
+                |> Array.map (\count -> String.join "/" (Array.takeFirst count elements))
+
+        attempts =
+            Array.mapAndFlatten
+                (\root -> Array.map (\url -> { root = root, url = url }) (urlsFor context.sources root))
+                candidates
+    in
+    firstAnswer context identifier attempts
+
+
+{-| List a repository's tags, trying its URLs in order.
+-}
+listRefs : Context -> String -> Task Error Remote
+listRefs context root =
+    firstAnswer context
+        root
+        (Array.map (\url -> { root = root, url = url }) (urlsFor context.sources root))
+
+
+firstAnswer : Context -> String -> Array { root : String, url : String } -> Task Error Remote
+firstAnswer context identifier attempts =
+    let
+        tried =
+            Array.map .url attempts
+
+        go remaining =
+            when Array.popFirst remaining is
+                Nothing ->
+                    Task.fail (NoRepository { identifier = identifier, tried = tried })
+
+                Just { first, rest } ->
+                    runGit context [ "ls-remote", "--tags", first.url ] Nothing
+                        |> Task.map (\output -> Just { root = first.root, url = first.url, refs = parseRefs output })
+                        |> Task.onError (\_ -> Task.succeed Nothing)
+                        |> Task.andThen
+                            (\answer ->
+                                when answer is
+                                    Just remote ->
+                                        Task.succeed remote
+
+                                    Nothing ->
+                                        go rest
+                            )
+    in
+    go attempts
+
+
+{-| `<commit> TAB refs/tags/<name>` lines. An annotated tag has a second line,
+`refs/tags/<name>^{}`, naming the commit the tag object points at, and that is
+the commit that counts, whichever of the two lines comes first.
+-}
+parseRefs : String -> Refs
+parseRefs output =
+    String.lines output
+        |> Array.foldl
+            (\line acc ->
+                when String.split "\t" line is
+                    [ commit, ref ] ->
+                        if String.startsWith "refs/tags/" ref then
+                            let
+                                name =
+                                    String.dropFirst (String.count "refs/tags/") ref
+                            in
+                            if String.endsWith "^{}" name then
+                                Dict.set (String.dropLast 3 name) commit acc
+
+                            else if Dict.member name acc then
+                                acc
+
+                            else
+                                Dict.set name commit acc
+
+                        else
+                            acc
+
+                    _ ->
+                        acc
+            )
+            Dict.empty
+
+
+{-| The tag for a version of the package at a path within its repository: `v1.2.0`
+at the root, `path/v1.2.0` below it (K7).
+-}
+tagName : String -> SemanticVersion -> String
+tagName path version =
+    if path == "" then
+        "v" ++ SemanticVersion.toString version
+
+    else
+        path ++ "/v" ++ SemanticVersion.toString version
+
+
+{-| The versions a repository's tags give the package at a path, and the commit
+each names. A tag that is not a version for that path is not one.
+-}
+versions : String -> Refs -> Dict String { version : SemanticVersion, commit : String }
+versions path refs =
+    let
+        prefix =
+            if path == "" then
+                "v"
+
+            else
+                path ++ "/v"
+    in
+    Dict.foldl
+        (\tag commit acc ->
+            if String.startsWith prefix tag then
+                when SemanticVersion.fromString (String.dropFirst (String.count prefix) tag) is
+                    Just version ->
+                        if tagName path version == tag then
+                            Dict.set (SemanticVersion.toString version) { version = version, commit = commit } acc
+
+                        else
+                            acc
+
+                    Nothing ->
+                        acc
+
+            else
+                acc
+        )
+        Dict.empty
+        refs
+
+
+{-| A checkout of a repository at a tag, which has to name the commit given:
+from the package cache if it is there, and cloned into it if not. The answer is
+the checkout's directory.
+
+The clone is made beside where it will live and renamed into place when it is
+complete, so a checkout that exists is a whole one.
+-}
+checkout : Context -> { root : String, url : Maybe String, tag : String, commit : String } -> Task Error Path
+checkout context { root, url, tag, commit } =
+    let
+        final =
+            checkoutPath context.cacheRoot root commit
+    in
+    exists context final
+        |> Task.andThen
+            (\present ->
+                if present then
+                    Task.succeed final
+
+                else
+                    let
+                        cloneFrom candidate temporary =
+                            runGit context [ "clone", "--quiet", "--depth", "1", "--branch", tag, candidate, Path.toPosixString temporary ] Nothing
+                    in
+                    withTemporary context root
+                        (\temporary ->
+                            tryUrls context root url (\candidate -> cloneFrom candidate temporary)
+                                |> Task.andThen (\_ -> headOf context temporary)
+                                |> Task.andThen
+                                    (\found ->
+                                        if found == commit then
+                                            Task.succeed {}
+
+                                        else
+                                            Task.fail (MovedTag { repository = root, tag = tag, locked = commit, found = found })
+                                    )
+                        )
+                        final
+            )
+
+
+{-| A checkout of a repository at a commit no tag names, for a `[sources]` git
+entry. The answer is the checkout and the commit in full, since the entry may
+abbreviate it.
+-}
+checkoutRev : Context -> { root : String, rev : String } -> Task Error { path : Path, commit : String }
+checkoutRev context { root, rev } =
+    let
+        final =
+            checkoutPath context.cacheRoot root rev
+    in
+    if String.count rev == 40 then
+        exists context final
+            |> Task.andThen
+                (\present ->
+                    if present then
+                        Task.succeed { path = final, commit = rev }
+
+                    else
+                        cloneRev context root rev
+            )
+
+    else
+        cloneRev context root rev
+
+
+cloneRev : Context -> String -> String -> Task Error { path : Path, commit : String }
+cloneRev context root rev =
+    Random.generate (Random.int 0 999999999)
+        |> Task.andThen
+            (\n ->
+                let
+                    temporary =
+                        Path.append (Path.fromPosixString (".clone-" ++ String.fromInt n)) (repositoryCache context.cacheRoot root)
+                in
+                FileSystem.makeDirectory context.fsPermission { recursive = True } (repositoryCache context.cacheRoot root)
+                    |> Task.mapError CacheError
+                    |> Task.andThen (\_ -> tryUrls context root Nothing (\candidate -> runGit context [ "clone", "--quiet", candidate, Path.toPosixString temporary ] Nothing))
+                    |> Task.andThen (\_ -> runGit context [ "checkout", "--quiet", "--detach", rev ] (Just temporary))
+                    |> Task.andThen (\_ -> headOf context temporary)
+                    |> Task.andThen
+                        (\commit ->
+                            let
+                                final =
+                                    checkoutPath context.cacheRoot root commit
+                            in
+                            place context temporary final
+                                |> Task.map (\_ -> { path = final, commit = commit })
+                        )
+                    |> Task.onError
+                        (\err ->
+                            FileSystem.remove context.fsPermission { recursive = True } temporary
+                                |> Task.onError (\_ -> Task.succeed temporary)
+                                |> Task.andThen (\_ -> Task.fail err)
+                        )
+            )
+
+
+withTemporary : Context -> String -> (Path -> Task Error {}) -> Path -> Task Error Path
+withTemporary context root fill final =
+    Random.generate (Random.int 0 999999999)
+        |> Task.andThen
+            (\n ->
+                let
+                    temporary =
+                        Path.append (Path.fromPosixString (".clone-" ++ String.fromInt n)) (repositoryCache context.cacheRoot root)
+                in
+                FileSystem.makeDirectory context.fsPermission { recursive = True } (repositoryCache context.cacheRoot root)
+                    |> Task.mapError CacheError
+                    |> Task.andThen (\_ -> fill temporary)
+                    |> Task.andThen (\_ -> place context temporary final)
+                    |> Task.map (\_ -> final)
+                    |> Task.onError
+                        (\err ->
+                            FileSystem.remove context.fsPermission { recursive = True } temporary
+                                |> Task.onError (\_ -> Task.succeed temporary)
+                                |> Task.andThen (\_ -> Task.fail err)
+                        )
+            )
+
+
+{-| Rename a finished clone into place. When another build got there first, its
+checkout is the same commit, and this one is thrown away.
+-}
+place : Context -> Path -> Path -> Task Error {}
+place context temporary final =
+    exists context final
+        |> Task.andThen
+            (\present ->
+                if present then
+                    FileSystem.remove context.fsPermission { recursive = True } temporary
+                        |> Task.map (\_ -> {})
+                        |> Task.mapError CacheError
+
+                else
+                    FileSystem.move context.fsPermission final temporary
+                        |> Task.map (\_ -> {})
+                        |> Task.mapError CacheError
+                        |> Task.onError
+                            (\err ->
+                                exists context final
+                                    |> Task.andThen
+                                        (\nowPresent ->
+                                            if nowPresent then
+                                                FileSystem.remove context.fsPermission { recursive = True } temporary
+                                                    |> Task.map (\_ -> {})
+                                                    |> Task.onError (\_ -> Task.succeed {})
+
+                                            else
+                                                Task.fail err
+                                        )
+                            )
+            )
+
+
+tryUrls : Context -> String -> Maybe String -> (String -> Task Error String) -> Task Error {}
+tryUrls context root known action =
+    let
+        candidates =
+            when known is
+                Just url ->
+                    [ url ]
+
+                Nothing ->
+                    urlsFor context.sources root
+
+        go remaining lastError =
+            when Array.popFirst remaining is
+                Nothing ->
+                    Task.fail lastError
+
+                Just { first, rest } ->
+                    action first
+                        |> Task.map (\_ -> {})
+                        |> Task.onError (\err -> go rest err)
+    in
+    go candidates (NoRepository { identifier = root, tried = candidates })
+
+
+headOf : Context -> Path -> Task Error String
+headOf context directory =
+    runGit context [ "rev-parse", "HEAD" ] (Just directory)
+        |> Task.map String.trim
+
+
+exists : Context -> Path -> Task Error Bool
+exists context path =
+    FileSystem.checkAccess context.fsPermission [] path
+        |> Task.map (\_ -> True)
+        |> Task.onError (\_ -> Task.succeed False)
+
+
+repositoryCache : Compiler.Paths.CacheRoot -> String -> Path
+repositoryCache cacheRoot root =
+    Path.append
+        (Path.fromPosixString (PackageName.escapePath root))
+        (Compiler.Paths.packageSources cacheRoot)
+
+
+checkoutPath : Compiler.Paths.CacheRoot -> String -> String -> Path
+checkoutPath cacheRoot root commit =
+    Path.append (Path.fromPosixString commit) (repositoryCache cacheRoot root)
+
+
+runGit : Context -> Array String -> Maybe Path -> Task Error String
+runGit context args directory =
+    ChildProcess.run
+        context.cpPermission
+        "git"
+        args
+        { shell = ChildProcess.NoShell
+        , workingDirectory =
+            when directory is
+                Just path ->
+                    ChildProcess.SetWorkingDirectory (Path.toPosixString path)
+
+                Nothing ->
+                    ChildProcess.InheritWorkingDirectory
+        , environmentVariables = ChildProcess.MergeWithEnvironmentVariables context.environment
+        , maximumBytesWrittenToStreams = 64 * 1024 * 1024
+        , runDuration = ChildProcess.Milliseconds (10 * 60 * 1000)
+        }
+        |> Task.mapError (constructFailedCommand args)
+        |> Task.map (\result -> Maybe.withDefault "" (Bytes.toString result.stdout))
+
+
+-- GITHUB, FOR PUBLISHING
+
+
+{-| Where a published package's repository is: `https://` and its identifier,
+for a package at the root of a repository on a host that answers `https`.
 -}
 repositoryUrl : PackageName -> String
 repositoryUrl name =
@@ -116,7 +748,7 @@ clonePackage cpPerm repo name version =
         args =
             [ "clone"
             , "--branch"
-            , SemanticVersion.toString version
+            , tagName "" version
             , "--depth"
             , "1"
             , url
@@ -130,7 +762,7 @@ clonePackage cpPerm repo name version =
         { shell = ChildProcess.NoShell
         , workingDirectory = ChildProcess.InheritWorkingDirectory
         , environmentVariables = ChildProcess.InheritEnvironmentVariables
-        , maximumBytesWrittenToStreams = 4096
+        , maximumBytesWrittenToStreams = 1024 * 1024
         , runDuration = ChildProcess.Milliseconds 30000
         }
         |> Task.mapError
@@ -223,7 +855,7 @@ fetchVersions cpPerm name =
         { shell = ChildProcess.NoShell
         , workingDirectory = ChildProcess.InheritWorkingDirectory
         , environmentVariables = ChildProcess.InheritEnvironmentVariables
-        , maximumBytesWrittenToStreams = 4096
+        , maximumBytesWrittenToStreams = 1024 * 1024
         , runDuration = ChildProcess.Milliseconds 30000
         }
         |> Task.mapError
@@ -242,11 +874,9 @@ fetchVersions cpPerm name =
                         Task.fail NoVersions
 
                     Just tagList ->
-                        -- format: commit hash \t refs/tags/<tag>
-                        tagList
-                            |> String.split "\n"
-                            |> Array.map (String.split "/" >> Array.last >> Maybe.withDefault "")
-                            |> Array.mapAndKeepJust SemanticVersion.fromString
+                        versions "" (parseRefs tagList)
+                            |> Dict.values
+                            |> Array.map .version
                             |> Array.sortWith SemanticVersion.compare
                             |> (\vsns ->
                                 if Array.isEmpty vsns then
@@ -262,13 +892,13 @@ hasLocalTag : ChildProcess.Permission -> SemanticVersion -> Task Error {}
 hasLocalTag permission vsn =
     let
         args =
-            [ "show", "--name-only", SemanticVersion.toString vsn ]
+            [ "show", "--name-only", tagName "" vsn ]
     in
     ChildProcess.run permission "git" args
         { shell = ChildProcess.NoShell
         , workingDirectory = ChildProcess.InheritWorkingDirectory
         , environmentVariables = ChildProcess.InheritEnvironmentVariables
-        , maximumBytesWrittenToStreams = 4096
+        , maximumBytesWrittenToStreams = 1024 * 1024
         , runDuration = ChildProcess.Milliseconds 5000
         }
         |> Task.mapError (\details -> constructFailedCommand args details)
@@ -279,7 +909,7 @@ hasNoLocalChangesSinceTag : ChildProcess.Permission -> SemanticVersion -> Task E
 hasNoLocalChangesSinceTag permission vsn =
     let
         args =
-            [ "diff-index", "--quiet", SemanticVersion.toString vsn ]
+            [ "diff-index", "--quiet", tagName "" vsn ]
     in
     ChildProcess.run permission "git" args
         { shell = ChildProcess.NoShell

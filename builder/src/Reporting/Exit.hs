@@ -85,7 +85,7 @@ diffToReport diff =
       Help.report
         "DIFF WHAT?"
         Nothing
-        "I cannot find an gren.json so I am not sure what you want me to diff.\
+        "I cannot find a geng.toml so I am not sure what you want me to diff.\
         \ Normally you run `geng diff` from within a project!"
         [ D.reflow $ "If you are just curious to see a diff, try running this command:",
           D.indent 4 $ D.green $ "geng diff gren/http 1.0.0 2.0.0"
@@ -93,8 +93,8 @@ diffToReport diff =
     DiffApplication ->
       Help.report
         "CANNOT DIFF APPLICATIONS"
-        (Just "gren.json")
-        "Your gren.json says this project is an application, but `geng diff` only works\
+        (Just "geng.toml")
+        "Your geng.toml says this project is an application, but `geng diff` only works\
         \ with packages."
         [ D.reflow $ "If you are just curious to see a diff, try running this command:",
           D.indent 4 $ D.dullyellow $ "geng diff gren/json 1.0.0 1.1.2"
@@ -102,11 +102,11 @@ diffToReport diff =
     DiffNoExposed ->
       Help.report
         "NO EXPOSED MODULES"
-        (Just "gren.json")
-        "Your gren.json has no \"exposed-modules\" which means there is no public API at\
+        (Just "geng.toml")
+        "Your geng.toml exposes no modules, which means there is no public API at\
         \ all right now! What am I supposed to diff?"
         [ D.reflow $
-            "Try adding some modules back to the \"exposed-modules\" field."
+            "Try adding some modules back to `exposed` in the [modules] table."
         ]
     DiffUnpublished ->
       Help.report
@@ -176,27 +176,27 @@ bumpToReport bump =
       Help.report
         "BUMP WHAT?"
         Nothing
-        "I cannot find an gren.json so I am not sure what you want me to bump."
+        "I cannot find a geng.toml so I am not sure what you want me to bump."
         [ D.reflow $
-            "gren packages always have an gren.json that says current the version number. If\
-            \ you run this command from a directory with an gren.json file, I will try to bump\
+            "Geng packages always have a geng.toml that says the current version number. If\
+            \ you run this command from a directory with a geng.toml file, I will try to bump\
             \ the version in there based on the API changes."
         ]
     BumpApplication ->
       Help.report
         "CANNOT BUMP APPLICATIONS"
-        (Just "gren.json")
-        "Your gren.json says this is an application. That means it cannot be used\
+        (Just "geng.toml")
+        "Your geng.toml says this is an application. That means it cannot be used\
         \ installed as a dependency in another project. There's no need to handle\
         \ versioning of applications."
         []
     BumpUnexpectedVersion vsn versions ->
       Help.docReport
         "CANNOT BUMP"
-        (Just "gren.json")
+        (Just "geng.toml")
         ( D.fillSep
             [ "Your",
-              "gren.json",
+              "geng.toml",
               "says",
               "I",
               "should",
@@ -238,7 +238,7 @@ bumpToReport bump =
             ]
         )
         [ D.fillSep $
-            ["Try", "bumping", "again", "after", "changing", "the", D.dullyellow "\"version\"", "in", "gren.json"]
+            ["Try", "bumping", "again", "after", "changing", "the", D.dullyellow "version", "in", "geng.toml"]
               ++ if length versions == 1 then ["to:"] else ["to", "one", "of", "these:"],
           D.vcat $ map (D.green . D.fromVersion) versions
         ]
@@ -247,18 +247,18 @@ bumpToReport bump =
     BumpNoExposed ->
       Help.docReport
         "NO EXPOSED MODULES"
-        (Just "gren.json")
+        (Just "geng.toml")
         ( D.fillSep
             [ "To",
               "bump",
               "a",
               "package,",
               "the",
-              D.dullyellow "\"exposed-modules\"",
-              "field",
+              D.dullyellow "[modules]",
+              "table",
               "of",
               "your",
-              "gren.json",
+              "geng.toml",
               "must",
               "list",
               "at",
@@ -268,7 +268,7 @@ bumpToReport bump =
             ]
         )
         [ D.reflow
-            "Try adding some modules back to the \"exposed-modules\" field."
+            "Try adding some modules back to `exposed` in the [modules] table."
         ]
     BumpBadBuild problem ->
       toBuildProblemReport problem
@@ -292,17 +292,17 @@ docsToReport docs =
       Help.report
         "BUILD DOCS FOR WHAT?"
         Nothing
-        "I cannot find a gren.json file so I am not sure what you want me to generate docs for."
+        "I cannot find a geng.toml file so I am not sure what you want me to generate docs for."
         [ D.reflow
-            "gren packages always have a gren.json file that defines a project. If\
-            \ you run this command from a directory with an gren.json file, I will try to generate\
-            \ documentation for the modules listed in the exposed-modules field."
+            "Geng packages always have a geng.toml file that defines a project. If\
+            \ you run this command from a directory with a geng.toml file, I will try to generate\
+            \ documentation for the modules its [modules] table exposes."
         ]
     DocsApplication ->
       Help.report
         "CANNOT BUILD DOCS FOR APPLICATIONS"
-        (Just "gren.json")
-        "Your gren.json file says this is an application. Documentation is only generated\
+        (Just "geng.toml")
+        "Your geng.toml file says this is an application. Documentation is only generated\
         \ for packages."
         []
     DocsBadDetails details ->
@@ -310,7 +310,7 @@ docsToReport docs =
     DocsNoExposed ->
       Help.docReport
         "NO EXPOSED MODULES"
-        (Just "gren.json")
+        (Just "geng.toml")
         ( D.fillSep
             [ "To",
               "build",
@@ -319,11 +319,11 @@ docsToReport docs =
               "a",
               "package,",
               "the",
-              D.dullyellow "\"exposed-modules\"",
-              "field",
+              D.dullyellow "[modules]",
+              "table",
               "of",
               "your",
-              "gren.json",
+              "geng.toml",
               "must",
               "list",
               "at",
@@ -333,7 +333,7 @@ docsToReport docs =
             ]
         )
         [ D.reflow
-            "Try adding some modules back to the \"exposed-modules\" field."
+            "Try adding some modules back to `exposed` in the [modules] table."
         ]
     DocsBadBuild problem ->
       toBuildProblemReport problem
@@ -386,9 +386,9 @@ validateToReport validate =
       Help.report
         "VALIDATE WHAT?"
         Nothing
-        "I cannot find an gren.json so I am not sure what you want me to validate."
+        "I cannot find a geng.toml so I am not sure what you want me to validate."
         [ D.reflow $
-            "Gren packages always have an gren.json that states the version number,\
+            "Geng packages always have a geng.toml that states the version number,\
             \ dependencies, exposed modules, etc."
         ]
     ValidateBadDetails problem ->
@@ -433,10 +433,10 @@ validateToReport validate =
     ValidateInvalidBump statedVersion latestVersion ->
       Help.docReport
         "INVALID VERSION"
-        (Just "gren.json")
+        (Just "geng.toml")
         ( D.fillSep $
             [ "Your",
-              "gren.json",
+              "geng.toml",
               "says",
               "the",
               "next",
@@ -489,10 +489,10 @@ validateToReport validate =
     ValidateBadBump old new magnitude realNew realMagnitude ->
       Help.docReport
         "INVALID VERSION"
-        (Just "gren.json")
+        (Just "geng.toml")
         ( D.fillSep $
             [ "Your",
-              "gren.json",
+              "geng.toml",
               "says",
               "the",
               "next",
@@ -545,7 +545,7 @@ validateToReport validate =
     ValidateNoSummary ->
       Help.docReport
         "NO SUMMARY"
-        (Just "gren.json")
+        (Just "geng.toml")
         ( D.fillSep $
             [ "Every",
               "package,",
@@ -556,7 +556,7 @@ validateToReport validate =
               "field",
               "in",
               "the",
-              "gren.json",
+              "geng.toml",
               "file",
               "that",
               "gives",
@@ -575,14 +575,14 @@ validateToReport validate =
     ValidateNoExposed ->
       Help.docReport
         "NO EXPOSED MODULES"
-        (Just "gren.json")
+        (Just "geng.toml")
         ( D.fillSep $
             [ "The",
-              D.dullyellow "\"exposed-modules\"",
-              "field",
+              D.dullyellow "[modules]",
+              "table",
               "of",
               "your",
-              "gren.json",
+              "geng.toml",
               "must",
               "list",
               "at",
@@ -593,7 +593,7 @@ validateToReport validate =
         )
         [ D.reflow $
             "Which modules do you want users of the package to have access to? Add their\
-            \ names to the \"exposed-modules\" list."
+            \ names to `exposed` in the [modules] table."
         ]
     ValidateNoReadme ->
       toBadReadmeReport "NO README" $
@@ -613,7 +613,7 @@ validateToReport validate =
         [ D.reflow $
             "Once you pick an OSI approved license from <https://spdx.org/licenses/>,\
             \ you must share that choice in two places. First, the license\
-            \ identifier must appear in your gren.json file. Second, the full\
+            \ identifier must appear in your geng.toml file. Second, the full\
             \ license text must appear in the root of your project in a file\
             \ named LICENSE. Add that file and you will be all set!"
         ]
@@ -810,12 +810,7 @@ data PossibleFilePath otherError
 -- DETAILS
 
 data Details
-  = DetailsNoSolution
-  | DetailsBadGrenInPkg C.Constraint
-  | DetailsBadGrenInAppOutline V.Version
-  | DetailsBadDeps FilePath [DetailsBadDep]
-  | DetailsDuplicatedDep Pkg.Name
-  | DetailsMissingDeps [(Pkg.Name, V.Version)]
+  = DetailsBadDeps FilePath [DetailsBadDep]
 
 data DetailsBadDep
   = BD_BadBuild Pkg.Name V.Version (Map.Map Pkg.Name V.Version)
@@ -824,73 +819,6 @@ data DetailsBadDep
 toDetailsReport :: Details -> Help.Report
 toDetailsReport details =
   case details of
-    DetailsNoSolution ->
-      Help.report
-        "INCOMPATIBLE DEPENDENCIES"
-        (Just "gren.json")
-        "The dependencies in your gren.json are not compatible."
-        [ D.fillSep
-            [ "Did",
-              "you",
-              "change",
-              "them",
-              "by",
-              "hand?",
-              "Try",
-              "to",
-              "change",
-              "it",
-              "back!",
-              "It",
-              "is",
-              "much",
-              "more",
-              "reliable",
-              "to",
-              "add",
-              "dependencies",
-              "with",
-              D.green "geng package install" <> "."
-            ],
-          D.reflow $
-            "Please ask for help on the community forums if you try those paths and are still\
-            \ having problems!"
-        ]
-    DetailsBadGrenInPkg constraint ->
-      Help.report
-        "GREN VERSION MISMATCH"
-        (Just "gren.json")
-        "Your gren.json says this package needs a version of Gren in this range:"
-        [ D.indent 4 $ D.dullyellow $ D.fromChars $ C.toChars constraint,
-          D.fillSep
-            [ "But",
-              "you",
-              "are",
-              "using",
-              "Gren",
-              D.red (D.fromVersion V.compiler),
-              "right",
-              "now."
-            ]
-        ]
-    DetailsBadGrenInAppOutline version ->
-      Help.report
-        "GREN VERSION MISMATCH"
-        (Just "gren.json")
-        "Your gren.json says this application needs a different version of Gren."
-        [ D.fillSep
-            [ "It",
-              "requires",
-              D.green (D.fromVersion version) <> ",",
-              "but",
-              "you",
-              "are",
-              "using",
-              D.red (D.fromVersion V.compiler),
-              "right",
-              "now."
-            ]
-        ]
     DetailsBadDeps cacheDir deps ->
       case deps of
         [] ->
@@ -918,7 +846,7 @@ toDetailsReport details =
                 [ D.indent 4 $ D.red $ D.fromChars $ Pkg.toChars pkg ++ " " ++ V.toChars vsn,
                   D.reflow
                     "This probably means it has package constraints that are too wide. It may be\
-                    \ possible to tweak your gren.json to avoid the root problem as a stopgap. Head\
+                    \ possible to tweak your geng.toml to avoid the root problem as a stopgap. Head\
                     \ over to https://gren-lang.org/community to get help figuring out how to take\
                     \ this path!",
                   D.toSimpleNote
@@ -946,28 +874,6 @@ toDetailsReport details =
                   D.toSimpleNote $
                     "To help with the root problem, please report this to the package author."
                 ]
-    DetailsDuplicatedDep pkg ->
-      Help.report
-        "DUPLICATED DEPENDENCY"
-        (Just "gren.json")
-        (Pkg.toChars pkg ++ " is listed more than once as a dependency in the gren.json file.")
-        [ D.reflow
-            "A package can only listed once as a dependency. Remove the duplicated entry and try again."
-        ]
-    DetailsMissingDeps missing ->
-      Help.report
-        "MISSING INDIRECT DEPENDENCIES"
-        (Just "gren.json")
-        "I expected to find the following packages as indirect dependencies\
-        \ in your gren.json file:"
-        [ D.indent 4 $
-            D.green $
-              D.vcat $
-                map (\(pkg, vsn) -> D.fromChars $ Pkg.toChars pkg ++ " " ++ V.toChars vsn) missing,
-          D.reflow
-            "Try adding them to your gren.json file in the \"indirect\" dependencies object\
-            \ then try this operation again."
-        ]
 
 --
 
@@ -1039,7 +945,7 @@ makeToReport make =
   case make of
     MakeNoOutline ->
       Help.report
-        "NO gren.json FILE"
+        "NO geng.toml FILE"
         Nothing
         "It looks like you are starting a new Gren project. Very exciting! Try running:"
         [ D.indent 4 $ D.green $ "geng init",
@@ -1072,11 +978,11 @@ makeToReport make =
             "If you only wanted to verify that your package builds correctly, try to remove the `--output` flag\
             \ from your `geng make` command.",
           D.reflow $
-            "Your project is defined as `\"type\": \"package\"` in your `gren.json`. This means that your project\
+            "Your project is a `[package]` in your `geng.toml`. This means that your project\
             \ is meant to be used as a Gren package and cannot be compiled to any kind of output. Instead, it's \
             \ meant to be consumed in its source form by another package or application. If you want to test your \
             \ package with an application, simply create a separate project of type `application` and include this \
-            \ project in the \"source-directories\" property of the application's `gren.json`."
+            \ project in the `source-directories` of the application's `geng.toml`."
         ]
     MakeCannotOutputMainForPackage m ms ->
       Help.report
@@ -1109,11 +1015,11 @@ makeToReport make =
             "If you only wanted to verify that your package builds correctly, try to remove the output paths to\
             \ these modules from your `geng make` command or remove the main functions from the mentioned modules.",
           D.reflow $
-            "Your project is defined as `\"type\": \"package\"` in your `gren.json`. This means that your project\
+            "Your project is a `[package]` in your `geng.toml`. This means that your project\
             \ is meant to be used as a Gren package and cannot be compiled to any kind of output. Instead, it's \
             \ meant to be consumed in its source form by another package or application. If you want to test your\
             \ package with an application, simply create a separate project of type `application` and include this\
-            \ project in the \"source-directories\" property of the application's `gren.json`."
+            \ project in the `source-directories` of the application's `geng.toml`."
         ]
     MakeBadDetails detailsProblem ->
       toDetailsReport detailsProblem
@@ -1140,7 +1046,7 @@ makeToReport make =
               D.indent 4 $ D.green "geng make This That"
             ],
           D.reflow $
-            "You can also entries to the \"exposed-modules\" list in your gren.json file, and\
+            "You can also add modules to `exposed` in the [modules] table of your geng.toml, and\
             \ I will try to compile the relevant files."
         ]
     MakeMultipleFiles ->
@@ -1313,7 +1219,7 @@ makeToReport make =
         Nothing
         ("When producing a HTML file, I require that the project platform is `browser`.")
         [ D.reflow $
-            "Try changing the `target` value in `gren.json` to `browser`.\
+            "Try changing `runtime` in `geng.toml` to `browser`.\
             \ alternatively, pass a filename ending with `.js` to the compiler."
         ]
     MakeExeOnlyForNodePlatform ->
@@ -1322,7 +1228,7 @@ makeToReport make =
         Nothing
         ("When producing an executable, I require that the project platform is `node`.")
         [ D.reflow $
-            "Try changing the `target` value in `gren.json` to `node`.\
+            "Try changing `runtime` in `geng.toml` to `node`.\
             \ alternatively, pass a filename ending with `.js` to the compiler."
         ]
 
@@ -1381,8 +1287,8 @@ toProjectProblemReport projectProblem =
         "I am getting confused when I try to compile this file:"
         [ D.indent 4 $ D.red $ D.fromChars path,
           D.reflow $
-            "I always check if files appear in any of the \"source-directories\" listed in\
-            \ your gren.json to see if there might be some cached information about them. That\
+            "I always check if files appear in any of the `source-directories` listed in\
+            \ your geng.toml to see if there might be some cached information about them. That\
             \ can help me compile faster! But in this case, it looks like this file may be in\
             \ either of these directories:",
           D.indent 4 $ D.red $ D.vcat $ map D.fromChars [srcDir1, srcDir2],
@@ -1459,8 +1365,8 @@ toProjectProblemReport projectProblem =
         Import.NotFound ->
           Help.report
             "MISSING MODULE"
-            (Just "gren.json")
-            "The  \"exposed-modules\" of your gren.json lists the following module:"
+            (Just "geng.toml")
+            "The [modules] table of your geng.toml exposes the following module:"
             [ D.indent 4 $ D.red $ D.fromName name,
               D.reflow $
                 "But I cannot find it in your src/ directory. Is there a typo? Was it renamed?"
@@ -1468,8 +1374,8 @@ toProjectProblemReport projectProblem =
         Import.Ambiguous _ _ pkg _ ->
           Help.report
             "AMBIGUOUS MODULE NAME"
-            (Just "gren.json")
-            "The  \"exposed-modules\" of your gren.json lists the following module:"
+            (Just "geng.toml")
+            "The [modules] table of your geng.toml exposes the following module:"
             [ D.indent 4 $ D.red $ D.fromName name,
               D.reflow $
                 "But a module from "
@@ -1480,8 +1386,8 @@ toProjectProblemReport projectProblem =
         Import.AmbiguousLocal path1 path2 paths ->
           Help.report
             "AMBIGUOUS MODULE NAME"
-            (Just "gren.json")
-            "The  \"exposed-modules\" of your gren.json lists the following module:"
+            (Just "geng.toml")
+            "The [modules] table of your geng.toml exposes the following module:"
             [ D.indent 4 $ D.red $ D.fromName name,
               D.reflow $
                 "But I found multiple files with that name:",
@@ -1495,8 +1401,8 @@ toProjectProblemReport projectProblem =
         Import.AmbiguousForeign _ _ _ ->
           Help.report
             "MISSING MODULE"
-            (Just "gren.json")
-            "The  \"exposed-modules\" of your gren.json lists the following module:"
+            (Just "geng.toml")
+            "The [modules] table of your geng.toml exposes the following module:"
             [ D.indent 4 $ D.red $ D.fromName name,
               D.reflow $
                 "But I cannot find it in your src/ directory. Is there a typo? Was it renamed?",

@@ -98,7 +98,6 @@ run config { projectPath, outline } =
                                 , useColor = config.useColor
                                 , stdout = config.stdout
                                 , stdin = config.stdin
-                                , strictAppResolution = True
                                 }
                                 { projectPath = projectPath, outline = outline }
                                 |> Task.mapError InstallError
@@ -123,7 +122,7 @@ run config { projectPath, outline } =
                             |> Task.mapError (\_ -> PreviousPackageCorruption)
                             |> Task.andThen
                                 (\repoPath ->
-                                    Path.append (Path.fromPosixString "gren.json") repoPath
+                                    Path.append (Path.fromPosixString Outline.fileName) repoPath
                                         |> Terminal.PackageInstall.readOutline config.fsPermission
                                         |> Task.mapError (\_ -> PreviousPackageCorruption)
                                         |> Task.andThen
@@ -146,7 +145,6 @@ run config { projectPath, outline } =
                                                     , useColor = config.useColor
                                                     , stdout = config.stdout
                                                     , stdin = config.stdin
-                                                    , strictAppResolution = True
                                                     }
                                                     { projectPath = repoPath, outline = publishedOutline }
                                                     |> Task.mapError (\_ -> PreviousPackageCorruption)

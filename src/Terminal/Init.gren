@@ -58,7 +58,7 @@ run : Config -> Task Error {}
 run config =
     let
         grenJsonExists =
-            FileSystem.checkAccess config.fsPermission [] (Path.fromPosixString "gren.json")
+            FileSystem.checkAccess config.fsPermission [] (Path.fromPosixString Outline.fileName)
                 |> Task.andThen
                     (\_ ->
                         Task.succeed True
@@ -88,15 +88,15 @@ run config =
                         , question =
                             PP.verticalBlock
                                 [ PP.block
-                                    [ PP.words "Hello! Gren projects always start with a"
+                                    [ PP.words "Hello! Geng projects always start with a"
                                     , PP.text " "
-                                    , PP.color PP.Green (PP.text "gren.json")
+                                    , PP.color PP.Green (PP.text "geng.toml")
                                     , PP.text " "
                                     , PP.words "file."
                                     ]
                                 , PP.words "I can create one for you."
                                 , PP.empty
-                                , PP.words "Would you like me to create a gren.json file now?"
+                                , PP.words "Would you like me to create a geng.toml file now?"
                                 ]
                         , defaultValue = True
                         }
@@ -135,7 +135,7 @@ runNonInteractive config projectPath =
                         )
             )
         |> Task.concurrent
-        |> Task.andThen (generateGrenJson config projectPath)
+        |> Task.andThen (generateManifest config projectPath)
 
 
 {-| The packages a new project starts with. `core` is not one of them: every
@@ -154,9 +154,24 @@ dependenciesForPlatform platform =
         [ PackageName.node ]
 
 
-generateGrenJson : Config -> Path -> Array { name : PackageName, version : SemanticVersion } -> Task Error Outline
-generateGrenJson config projectPath deps =
+{-| Write a new `geng.toml`, once its dependencies are known to resolve. Each
+dependency is a range from its newest release to the next breaking one, since
+the lower bound is the version a build uses.
+-}
+generateManifest : Config -> Path -> Array { name : PackageName, version : SemanticVersion } -> Task Error Outline
+generateManifest config projectPath deps =
     let
+        dependencies =
+            Array.foldl
+                (\{ name, version } dict ->
+                    Dict.set (PackageName.toString name) (upToNextBreaking version) dict
+                )
+                Dict.empty
+                deps
+
+        compiler =
+            SemanticVersionRange.compatibleWith Meta.version
+
         outline =
             if config.package then
                 Outline.Pkg
@@ -166,34 +181,18 @@ generateGrenJson config projectPath deps =
                     , license = License.bsd3
                     , version = { major = 1, minor = 0, patch = 0 }
                     , exposedModules = Outline.ExposedArray []
-                    , grenVersion = SemanticVersionRange.compatibleWith Meta.version
-                    , dependencies =
-                        Array.foldl
-                            (\{ name, version } dict ->
-                                Dict.set
-                                    (PackageName.toString name)
-                                    (Outline.Version (SemanticVersionRange.compatibleWith version))
-                                    dict
-                            )
-                            Dict.empty
-                            deps
+                    , gengVersion = compiler
+                    , dependencies = dependencies
+                    , sources = Dict.empty
                     }
 
             else
                 Outline.App
                     { platform = config.platform
                     , sourceDirectories = [ Path.fromPosixString "src" ]
-                    , grenVersion = Meta.version
-                    , dependencies =
-                        { direct =
-                            Array.foldl
-                                (\{ name, version } dict ->
-                                    Dict.set (PackageName.toString name) (Outline.Version version) dict
-                                )
-                                Dict.empty
-                                deps
-                        , indirect = Dict.empty
-                        }
+                    , gengVersion = compiler
+                    , dependencies = dependencies
+                    , sources = Dict.empty
                     }
     in
     PackageInstall.run
@@ -205,53 +204,37 @@ generateGrenJson config projectPath deps =
         , corePath = config.corePath
         , interactive = config.interactive
         , useColor = config.useColor
-        , strictAppResolution = False
         }
         { projectPath = projectPath
         , outline = outline
         }
         |> Task.mapError InstallError
         |> Task.andThen
-            (\resolution ->
-                let
-                    newOutline =
-                        when outline is
-                            Outline.App appOutline ->
-                                let
-                                    originalDependencyNames =
-                                        Dict.keys appOutline.dependencies.direct
-
-                                    indirectDeps =
-                                        resolution.dependencies
-                                            |> Dict.keepIf (\name _ -> not <| Array.member name originalDependencyNames)
-                                            |> Dict.map (\_ package -> Outline.Version package.outline.version)
-                                in
-                                Outline.App
-                                    { appOutline
-                                        | dependencies =
-                                            { appOutline.dependencies
-                                                | indirect = indirectDeps
-                                            }
-                                    }
-
-                            Outline.Pkg _ ->
-                                outline
-
-                    encodedOutline =
-                        newOutline
-                            |> Outline.toJson
-                            |> Json.encode 4
-                in
-                Path.append (Path.fromPosixString "gren.json") projectPath
-                    |> FileSystem.writeFile config.fsPermission (Bytes.fromString encodedOutline)
+            (\_ ->
+                Path.append (Path.fromPosixString Outline.fileName) projectPath
+                    |> FileSystem.writeFile config.fsPermission (Bytes.fromString (Outline.toToml outline))
                     |> Task.andThen
                         (\_ ->
                             Path.append (Path.fromPosixString "src") projectPath
                                 |> FileSystem.makeDirectory config.fsPermission { recursive = False }
                         )
                     |> Task.mapError FileSystemFailure
-                    |> Task.map (\_ -> newOutline)
+                    |> Task.map (\_ -> outline)
             )
+
+
+upToNextBreaking : SemanticVersion -> SemanticVersionRange.SemanticVersionRange
+upToNextBreaking version =
+    let
+        upper =
+            if version.major == 0 then
+                { major = 0, minor = version.minor + 1, patch = 0 }
+
+            else
+                { major = version.major + 1, minor = 0, patch = 0 }
+    in
+    SemanticVersionRange.of version upper
+        |> Maybe.withDefault (SemanticVersionRange.fromExact version)
 
 
 prettifyError : Error -> Report
@@ -262,7 +245,7 @@ prettifyError err =
                 "EXISTING PROJECT"
                 Nothing
                 (PP.verticalBlock
-                    [ PP.words "You already have a gren.json file, so there's nothing for me to initialize!"
+                    [ PP.words "You already have a geng.toml file, so there's nothing for me to initialize!"
                     , PP.empty
                     , PP.block
                         [ PP.text "Maybe "

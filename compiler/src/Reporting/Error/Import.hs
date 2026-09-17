@@ -80,7 +80,7 @@ toReport source (Error region name unimportedModules problem) =
               "You are trying to import a `" ++ ModuleName.toChars name ++ "` module:",
             D.stack
               [ D.reflow $
-                  "I checked the \"dependencies\" and \"source-directories\" listed in your gren.json,\
+                  "I checked the \"dependencies\" and \"source-directories\" listed in your geng.toml,\
                   \ but I cannot find it! Maybe it is a typo for one of these names?",
                 D.dullyellow $
                   D.indent 4 $
@@ -90,7 +90,7 @@ toReport source (Error region name unimportedModules problem) =
                   Nothing ->
                     D.toSimpleHint $
                       "If it is not a typo, check the \"dependencies\" and \"source-directories\"\
-                      \ of your gren.json to make sure all the packages you need are listed there!"
+                      \ of your geng.toml to make sure all the packages you need are listed there!"
                   Just dependency ->
                     D.toFancyHint
                       [ "Maybe",

@@ -66,7 +66,7 @@ type alias Config =
 {-| Where the files come from, as one field rather than two, so that neither
 "both" nor "neither" is a state this module has to have an opinion about.
 
-`Project` needs a `gren.json` and `Paths` does not: formatting a file someone
+`Project` needs a `geng.toml` and `Paths` does not: formatting a file someone
 named is not a question about a project, and requiring one would put the
 formatter out of reach of every format-on-save hook, which runs on one file in
 whatever directory it happens to be in.
@@ -95,7 +95,7 @@ type Error
 
 {-| The files this run is about.
 
-With no path arguments that is the project, read out of `gren.json`'s source
+With no path arguments that is the project, read out of `geng.toml`'s source
 directories — the same list `geng make` compiles. With path arguments it is
 those paths: a named file whatever it is called, and a directory's Gren sources
 however deep they are.

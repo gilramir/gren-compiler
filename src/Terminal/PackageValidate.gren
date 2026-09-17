@@ -97,7 +97,7 @@ run config { projectPath, outline } =
             else if badSummary pkgOutline.summary then
                 Task.fail BadSummary
 
-            else if hasLocalDeps pkgOutline.dependencies then
+            else if hasLocalSources pkgOutline.sources then
                 Task.fail HasLocalDependencies
 
             else
@@ -116,7 +116,6 @@ run config { projectPath, outline } =
                         , useColor = config.useColor
                         , stdout = config.stdout
                         , stdin = config.stdin
-                        , strictAppResolution = True
                         }
                         { projectPath = projectPath, outline = outline }
                         |> Task.mapError PackageInstallError
@@ -153,7 +152,7 @@ run config { projectPath, outline } =
                                             |> Task.mapError (\_ -> PreviousPackageCorrupted)
                                             |> Task.andThen
                                                 (\repoPath ->
-                                                    Path.append (Path.fromPosixString "gren.json") repoPath
+                                                    Path.append (Path.fromPosixString Outline.fileName) repoPath
                                                         |> Terminal.PackageInstall.readOutline config.fsPermission
                                                         |> Task.mapError (\_ -> PreviousPackageCorrupted)
                                                         |> Task.andThen
@@ -176,7 +175,6 @@ run config { projectPath, outline } =
                                                                     , useColor = config.useColor
                                                                     , stdout = config.stdout
                                                                     , stdin = config.stdin
-                                                                    , strictAppResolution = True
                                                                     }
                                                                     { projectPath = repoPath, outline = previousOutline }
                                                                     |> Task.mapError (\_ -> PreviousPackageCorrupted)
@@ -217,18 +215,21 @@ noExposed exposed =
             Dict.all (\_ modules -> Array.isEmpty modules) chunks
 
 
-hasLocalDeps : Dict String (Outline.VersionConstraint SemanticVersionRange) -> Bool
-hasLocalDeps dependencies =
+{-| A package's own `[sources]` apply only when it is the project being built
+(K9), so a package that needs a local directory to build builds nowhere else.
+-}
+hasLocalSources : Dict String Outline.Source -> Bool
+hasLocalSources sources =
     Dict.any
-        (\_ cons ->
-            when cons is
+        (\_ source ->
+            when source is
                 Outline.LocalPath _ ->
                     True
 
-                Outline.Version _ ->
+                _ ->
                     False
         )
-        dependencies
+        sources
 
 
 verifyVersion : SemanticVersion -> Array SemanticVersion -> Task Error {}
@@ -280,12 +281,12 @@ prettifyError error =
         NoExposedModules ->
             Report.create
                 "NO EXPOSED MODULES"
-                (Just (Path.fromPosixString "gren.json"))
+                (Just (Path.fromPosixString Outline.fileName))
                 (PP.verticalBlock
                     [ PP.block
                         [ PP.text "The "
                         , PP.color PP.Yellow (PP.text "\"exposed-modules\" ")
-                        , PP.words "field of your gren.json must list at least one module."
+                        , PP.words "table of your geng.toml must list at least one module."
                         ]
                     , PP.empty
                     , PP.words
@@ -299,12 +300,12 @@ prettifyError error =
         BadSummary ->
             Report.create
                 "BAD SUMMARY"
-                (Just (Path.fromPosixString "gren.json"))
+                (Just (Path.fromPosixString Outline.fileName))
                 (PP.verticalBlock
                     [ PP.block
                         [ PP.words "Every package should have a"
                         , PP.color PP.Yellow (PP.text " \"summary\" ")
-                        , PP.words "field in the gren.json file that gives a consice overview of the project."
+                        , PP.words "key in the [package] table of geng.toml that gives a consice overview of the project."
                         ]
                     , PP.empty
                     , PP.words
@@ -319,7 +320,7 @@ prettifyError error =
         HasLocalDependencies ->
             Report.create
                 "FOUND LOCAL DEPENDENCIES"
-                (Just (Path.fromPosixString "gren.json"))
+                (Just (Path.fromPosixString Outline.fileName))
                 ( PP.verticalBlock
                     [ PP.words
                         """
@@ -330,7 +331,7 @@ prettifyError error =
                     , PP.empty
                     , PP.words
                         """
-                        Remove all local dependencies (those prefixed with local:) from your gren.json file.
+                        Remove the path entries from the [sources] table of your geng.toml, since they only apply when this package is the project being built.
                         """
                     ]
                 )
@@ -379,7 +380,7 @@ prettifyError error =
                         """
                         Once you pick an OSI approved license from <https://spdx.org/licenses/>,
                         you must share that choice in two places. First, the license identifier
-                        must appear in your gren.json file. Second, the full
+                        must appear in your geng.toml file. Second, the full
                         license text must appear in the root of your project in a file
                         named LICENSE. Add that file and you will be all set!
                         """
@@ -389,11 +390,11 @@ prettifyError error =
         NoPublishedVersionAndNot1 ->
             Report.create
                 "BAD VERSION"
-                (Just (Path.fromPosixString "gren.json"))
+                (Just (Path.fromPosixString Outline.fileName))
                 ( PP.words
                     """
                     I cannot find a previous published version of this package, but the
-                    version you've set in your gren.json file is not 1.0.0.
+                    version you've set in your geng.toml file is not 1.0.0.
                     """
                 )
 
@@ -405,7 +406,7 @@ prettifyError error =
                     [ PP.words
                         """
                         Packages must be tagged in git, but I cannot find a tag for the version
-                        specified in gren.json.
+                        specified in geng.toml.
                         """
                     , PP.empty
                     , PP.words

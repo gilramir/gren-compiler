@@ -118,7 +118,6 @@ runLocal config maybeVersion =
                                         , useColor = config.useColor
                                         , stdout = config.stdout
                                         , stdin = config.stdin
-                                        , strictAppResolution = True
                                         }
                                         { projectPath = projectPath, outline = outline }
                                         |> Task.mapError LocalInstallError
@@ -190,7 +189,7 @@ prettifyLocalError error =
 type InstallHiddenProjectError
     = HiddenProjectGitCloneError Git.Error
     | HiddenProjectReadOutlineError FileSystem.Error
-    | HiddenProjectOutlineDecodeError Decode.Error
+    | HiddenProjectOutlineDecodeError String
     | HiddenProjectInstallError Terminal.PackageInstall.PackageInstallError
 
 
@@ -206,7 +205,7 @@ installHiddenProject config projectPath packageName packageVersion =
         |> Task.mapError HiddenProjectGitCloneError
         |> Task.andThen
             (\repoPath ->
-                Path.append (Path.fromPosixString "gren.json") repoPath
+                Path.append (Path.fromPosixString Outline.fileName) repoPath
                     |> Terminal.PackageInstall.readOutline config.fsPermission
                     |> Task.mapError HiddenProjectReadOutlineError
                     |> Task.andThen
@@ -229,7 +228,6 @@ installHiddenProject config projectPath packageName packageVersion =
                                 , useColor = config.useColor
                                 , stdout = config.stdout
                                 , stdin = config.stdin
-                                , strictAppResolution = True
                                 }
                                 { projectPath = repoPath, outline = publishedOutline }
                                 |> Task.mapError HiddenProjectInstallError
@@ -251,7 +249,7 @@ prettifyHiddenProjectError error =
                 "FAILED TO READ OUTLINE"
                 Nothing
                 (PP.verticalBlock
-                    [ PP.words "An error occured when I attempted to read the gren.json of the requested package."
+                    [ PP.words "An error occured when I attempted to read the geng.toml of the requested package."
                     , PP.empty
                     , PP.words "The error is:"
                     , PP.empty
@@ -265,11 +263,11 @@ prettifyHiddenProjectError error =
                 "FAILED TO READ OUTLINE"
                 Nothing
                 (PP.verticalBlock
-                    [ PP.words "An error occured when I attempted to read the gren.json of the requested package."
+                    [ PP.words "An error occured when I attempted to read the geng.toml of the requested package."
                     , PP.empty
                     , PP.words "The error is:"
                     , PP.empty
-                    , PP.words (Decode.errorToString jsonError)
+                    , PP.words jsonError
                         |> PP.indent
                     ]
                 )

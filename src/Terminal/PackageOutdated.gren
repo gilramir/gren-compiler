@@ -9,26 +9,22 @@ import ChildProcess
 import Compiler.PackageName as PackageName exposing (PackageName)
 import Compiler.Paths
 import Compiler.Outline as Outline exposing (Outline)
-import Compiler.Dependencies
-import Git
 import Stream
 import Stream.Log
 import Task exposing (Task)
-import Dict exposing (Dict)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Bytes exposing (Bytes)
 import SemanticVersion exposing (SemanticVersion)
-import SemanticVersionRange exposing (SemanticVersionRange)
-import Json.Encode as Json
-import Json.Decode as Decode exposing (Decoder)
-import Cli.PrettyPrinter as PP
+import Terminal.PackageInstall as PackageInstall
 import Cli.Report as Report exposing (Report)
 
 
 type alias Config =
     { fsPermission : FileSystem.Permission
     , cpPermission : ChildProcess.Permission
+    , cacheRoot : Compiler.Paths.CacheRoot
+    , corePath : Path
     , interactive : Bool
     , useColor : Bool
     , stdout : Stream.Writable Bytes
@@ -43,97 +39,56 @@ type alias Options =
 
 
 type Error
-    = FailedToFetchVersions { package : PackageName, error : Git.Error }
+    = FailedToResolve PackageInstall.PackageInstallError
 
 
+{-| Say which of the dependencies `geng.toml` lists have a newer release than the
+version the project is built with.
+-}
 run : Config -> Options -> Task Error {}
-run config { projectPath, outline } =
-    let
-        grenJsonPath =
-            Path.append (Path.fromPosixString "gren.json") projectPath
-
-        deps =
-            when outline is
-                Outline.App appOutline ->
-                    Dict.union appOutline.dependencies.direct appOutline.dependencies.indirect
-                        |> Dict.mapAndKeepJust (\_ v -> extractVersion v)
-                        |> Dict.map (\_ v -> SemanticVersionRange.fromExact v)
-
-                Outline.Pkg pkgOutline ->
-                    pkgOutline.dependencies
-                        |> Dict.mapAndKeepJust (\_ v -> extractVersion v)
-
-        extractVersion cons =
-            when cons is
-                Outline.Version v ->
-                    Just v
-
-                Outline.LocalPath _ ->
-                    Nothing
-    in
-    deps
-        |> Dict.foldl
-            (\packageStr versionRange tasks ->
-                when PackageName.fromString packageStr is
-                    Nothing ->
-                        tasks
-
-                    Just packageName ->
-                        let
-                            task =
-                                Git.fetchVersions config.cpPermission packageName
-                                    |> Task.mapError
-                                        (\err ->
-                                            FailedToFetchVersions
-                                                { package = packageName
-                                                , error = err
-                                                }
-                                        )
-                                    |> Task.map (\vs -> Array.keepIf (\v -> SemanticVersion.compare v (SemanticVersionRange.lowerBound versionRange) == GT) vs)
-                                    |> Task.map (\vs -> { name = packageName, versions = vs })
-                        in
-                        Array.pushLast task tasks
-            )
-            []
-        |> Task.concurrent
-        |> Task.map
-            (\vs ->
-                Array.mapAndKeepJust
-                    (\p ->
-                        when Array.last p.versions is
-                            Just v ->
-                                Just
-                                    { name = p.name
-                                    , version = v
-                                    }
-
-                            Nothing ->
-                                Nothing
-                    )
-                    vs
-            )
+run config options =
+    PackageInstall.newerVersions
+        { fsPermission = config.fsPermission
+        , cpPermission = config.cpPermission
+        , cacheRoot = config.cacheRoot
+        , corePath = config.corePath
+        , interactive = config.interactive
+        , useColor = config.useColor
+        , stdout = config.stdout
+        , stdin = config.stdin
+        }
+        options
+        |> Task.mapError FailedToResolve
         |> Task.andThen
-            (\vs ->
-                if vs == [] then
+            (\newer ->
+                if newer == [] then
                     Stream.Log.line config.stdout "All dependencies are up to date."
 
                 else
                     let
                         plan =
                             "There are new versions of the following dependencies:\n\n"
-                                ++ (Array.foldl (\package acc -> acc ++ "  " ++ PackageName.toString package.name ++ " " ++ SemanticVersion.toString package.version ++ "\n") "" vs)
+                                ++ (Array.foldl
+                                        (\package acc ->
+                                            acc
+                                                ++ "  "
+                                                ++ PackageName.toString package.name
+                                                ++ " "
+                                                ++ SemanticVersion.toString package.current
+                                                ++ " -> "
+                                                ++ SemanticVersion.toString package.latest
+                                                ++ "\n"
+                                        )
+                                        ""
+                                        newer
+                                   )
                     in
                     Stream.Log.line config.stdout plan
             )
-            -- TODO: Might want to check if dependencies are compatible
-            -- TODO: Ask user to auto-update dependencies
 
 
 prettifyError : Error -> Report
 prettifyError error =
     when error is
-        FailedToFetchVersions { package, error = gitError } ->
-            Git.report
-                "FAILED TO FETCH VERSIONS FOR PACKAGE"
-                ("I was attempting to fetch available versions for " ++ PackageName.toString package)
-                gitError
+        FailedToResolve installError ->
+            PackageInstall.prettifyError installError

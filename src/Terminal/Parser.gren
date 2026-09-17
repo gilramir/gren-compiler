@@ -143,13 +143,13 @@ parser =
                         |> Cli.Parser.toggle "package" "Create a package (as opposed to an application)"
                         |> Cli.Parser.flag "platform" initPlatformParser "Which platform to target"
                 , commonDescription =
-                    Just "Start a Gren project. It creates a starter gren.json file."
+                    Just "Start a Geng project. It creates a starter geng.toml file."
                 , summary =
                     "The `init` command helps start Gren project:"
                 , example = 
                     PP.words
                         """
-                        It will ask permission to create a gren.json file, the one thing
+                        It will ask permission to create a geng.toml file, the one thing
                         common to all Gren project.
                         """
                 , builder =
@@ -457,7 +457,7 @@ packageCommands =
                     , PP.words
                         """
                         You can also call this command without any arguments to download all dependencies
-                        listed in gren.json. This can be helpful in Continous Integration setups where
+                        listed in geng.toml. This can be helpful in Continous Integration setups where
                         you want to cache dependencies between builds.
                         """
                     ]

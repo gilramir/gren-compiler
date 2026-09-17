@@ -111,7 +111,6 @@ makeProject config projectOutline =
                         , interactive = False
                         , stdout = nullStream |> Stream.writable
                         , stdin = nullStream |> Stream.readable
-                        , strictAppResolution = True
                         }
                         projectOutline
                             |> Task.mapError PackageInstallError
@@ -244,7 +243,7 @@ run config =
 getProjectOutline : FileSystem.Permission -> Path -> Task Error Outline
 getProjectOutline fsPermission path =
     path
-        |> Path.append (Path.fromPosixString "gren.json")
+        |> Path.append (Path.fromPosixString Outline.fileName)
         |> PackageInstall.readOutline fsPermission
         |> Task.mapError (PackageInstall.ReadProjectOutlineNoProject >> ReadProjectOutlineError)
         |> Task.andThen
@@ -253,8 +252,8 @@ getProjectOutline fsPermission path =
                     Ok outline ->
                         Task.succeed outline
                     Err err ->
-                        err
-                            |> PackageInstall.ReadProjectOutlineInvalidGrenJson
+                        { path = Path.append (Path.fromPosixString Outline.fileName) path, message = err }
+                            |> PackageInstall.ReadProjectOutlineInvalid
                             |> ReadProjectOutlineError
                             |> Task.fail
             )

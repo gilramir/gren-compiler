@@ -9,7 +9,7 @@ module Gren.Outline
     Exposed (..),
     SrcDir (..),
     PossibleFilePath (..),
-    write,
+    writeVersion,
     encode,
     decoder,
     defaultSummary,
@@ -123,9 +123,51 @@ dependencyConstraints outline =
 
 -- WRITE
 
-write :: FilePath -> Outline -> IO ()
-write root outline =
-  E.write (root </> "gren.json") (encode outline)
+-- | Set the version in a package's @geng.toml@: the @version@ key of its
+-- @[package]@ table, written on a line of its own, which is how @geng init@
+-- writes it and how every manifest in the tree has it. The rest of the file,
+-- comments included, is left as it was. 'False' means no such line was found and
+-- nothing was written.
+--
+-- The front end reads and edits the manifest with a TOML library, and this is
+-- the one write the backend makes (`geng package bump`), so it edits the one line
+-- rather than bringing a TOML library to Haskell (geng-lang @m1b-manifest.md@).
+writeVersion :: FilePath -> V.Version -> IO Bool
+writeVersion root version =
+  do
+    let path = root </> "geng.toml"
+    text <- readFile path
+    length text `seq` return ()
+    case setVersionLine version (lines text) of
+      Nothing ->
+        return False
+      Just newLines ->
+        do
+          writeFile path (unlines newLines)
+          return True
+
+setVersionLine :: V.Version -> [String] -> Maybe [String]
+setVersionLine version = go False
+  where
+    go _ [] = Nothing
+    go inPackage (line : rest) =
+      let trimmed = dropWhile (== ' ') line
+       in if take 1 trimmed == "["
+            then (line :) <$> go (takeWhile (/= ']') (drop 1 trimmed) == "package") rest
+            else
+              if inPackage && isVersionKey trimmed
+                then Just (versionLine line : rest)
+                else (line :) <$> go inPackage rest
+
+    isVersionKey trimmed =
+      case List.stripPrefix "version" trimmed of
+        Just after -> take 1 (dropWhile (== ' ') after) == "="
+        Nothing -> False
+
+    versionLine line =
+      let indent = takeWhile (== ' ') line
+          afterValue = dropWhile (/= '"') (drop 1 (dropWhile (/= '"') line))
+       in indent ++ "version = \"" ++ V.toChars version ++ "\"" ++ drop 1 afterValue
 
 -- JSON ENCODE
 

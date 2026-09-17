@@ -55,7 +55,7 @@ setupGlobalReplProject config =
             Compiler.Paths.repl config.cacheRoot
 
         replOutlinePath =
-            Path.append (Path.fromPosixString "gren.json") replProjectPath
+            Path.append (Path.fromPosixString Outline.fileName) replProjectPath
     in
     PackageInstall.readOutline config.fsPermission replOutlinePath
         |> Task.onError
@@ -124,7 +124,7 @@ prettifyError error =
                 "CANNOT READ REPL OUTLINE"
                 (Just replOutlinePath)
                 (PP.verticalBlock
-                    [ PP.words "I tried to use a default project to run the repl in, but something is not right about the gren.json file there."
+                    [ PP.words "I tried to use a default project to run the repl in, but something is not right about the geng.toml file there."
                     , PP.empty
                     , PP.words "You can try to fix this issue by deleting the repl project directory, then re-run this command."
                     ]
