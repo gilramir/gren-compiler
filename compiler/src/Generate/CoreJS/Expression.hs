@@ -467,7 +467,6 @@ call env pos fn args =
     Core.EGlobal q@(Core.QualName (ModuleName.Canonical pkg raw) name)
       | Just op <- primAt env q args -> Prim.prim op (map (jsExpr env) args)
       | pkg == Pkg.core && raw == Name.basics -> basicsCall env pos q name args
-      | pkg == Pkg.kernel -> kernelCall env pos q raw name (map (jsExpr env) args)
       | otherwise -> globalCall env pos q (map (jsExpr env) args)
     _ ->
       normalCall env pos (jsExpr env fn) (map (jsExpr env) args)
@@ -486,39 +485,6 @@ primAt env q args =
     Just op
       | Prim.inlines op && length args == CorePrim.primArity op -> Just op
     _ -> Nothing
-
--- | The one kernel primitive that is an operator rather than a function.
---
--- `Eq`'s five primitive instances are reference equality (D142,
--- @docs/m1b-classes.md@ §G40), and reference equality is @===@: routing it
--- through @A2@ and a kernel @F2@ would cost more than the comparison. Every
--- other kernel value is an ordinary global, so this is a saturated call to one
--- name and nothing else. It was two until a @Char@ became a code point.
---
--- @Utils.identical@ is @===@ at an @Int@, a @Float@, a @Bool@, a @String@ or a
--- @Char@, all five of which are a JavaScript primitive. @Char@ is the newest of
--- the five and used to be the exception: a @Char@ was a one-character string
--- that @Mode.Dev@ boxed in a @String@ object, so `core` reached @===@ through a
--- @Char.identical@ of its own that unwrapped both sides. A @Char@ is a code
--- point now (C8, `docs/m1b-str.md` §T12) and @Eq Char@ is @Utils.identical@
--- like the rest, so the second name and the mode split are both gone.
-kernelCall :: Env -> A.Position -> Core.QualName -> Name -> Name -> [JS.Expr] -> JS.Expr
-kernelCall env pos q home name args =
-  case (home, name, args) of
-    (_, "identical", [left, right])
-      | home == Name.utils -> identical left right
-    _ -> globalCall env pos q args
-
--- | @===@, and only that. Not 'strictEq', which collapses @x === 0@ to @!x@ and
--- @x === true@ to @x@: that is right for a constructor tag, whose values the
--- backend chose, and it is not right for an @Int@ that could hold a @NaN@ (D2,
--- @accept/int-remainder-by-zero@). Nothing reaches here with a literal operand
--- today — the only callers are `core`'s five instance bodies, whose arguments
--- are their parameters — and this is the line that keeps it true if something
--- ever inlines one.
-identical :: JS.Expr -> JS.Expr -> JS.Expr
-identical =
-  JS.Infix JS.OpEq
 
 -- | A call to a name whose arity is known and matched goes straight to the
 -- uncurried @name$@; anything else goes through @A2@ … @A9@.
