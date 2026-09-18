@@ -168,6 +168,20 @@ data ConvPrim
     -- @String.toFloat@. __Appended__ to 'allPrims' after every other group, so
     -- its code follows 'DebugLog''s and nothing before it moved.
     F64FromDecimal
+  | -- | D342's four narrow types (@arithmetic.md@ A12) are each stored as a
+    -- canonical @i32@, sign- or zero-extended from its width, so widening one
+    -- to @Int@ is the identity, as 'CharToI32' is. __Appended__ by D348
+    -- (@docs/m1b-narrow-int.md@ §NI3), after every other primitive.
+    I8ToI32
+  | U8ToI32
+  | I16ToI32
+  | U16ToI32
+  | -- | The low 8 or 16 bits, sign-extended for the signed two: D342's wrap,
+    -- and the only thing a narrow type has that @Int@ does not.
+    I32ToI8
+  | I32ToU8
+  | I32ToI16
+  | I32ToU16
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | @String@ is opaque with a codepoint API (D8). @length@ counts codepoints
@@ -380,6 +394,8 @@ allPrims =
     ++ map TaskOp [TaskMap2 .. maxBound]
     -- Appended by D345 (m1b-extern.md §H18.7).
     ++ [IntOp I32 IClz]
+    -- Appended by D348 (m1b-narrow-int.md §NI3).
+    ++ map ConvOp [I8ToI32 .. maxBound]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -474,6 +490,14 @@ convPrimName p =
     CharToI32 -> "char_to_i32"
     I32ToChar -> "i32_to_char"
     F64FromDecimal -> "f64_from_decimal"
+    I8ToI32 -> "i8_to_i32"
+    U8ToI32 -> "u8_to_i32"
+    I16ToI32 -> "i16_to_i32"
+    U16ToI32 -> "u16_to_i32"
+    I32ToI8 -> "i32_to_i8"
+    I32ToU8 -> "i32_to_u8"
+    I32ToI16 -> "i32_to_i16"
+    I32ToU16 -> "i32_to_u16"
 
 strPrimName :: StrPrim -> Text
 strPrimName p =

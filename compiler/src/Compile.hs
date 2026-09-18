@@ -400,6 +400,10 @@ range tipe =
       | name == Name.int64 -> Just (-9223372036854775808, 9223372036854775807)
       | name == Name.uint32 -> Just (0, 4294967295)
       | name == Name.uint64 -> Just (0, 18446744073709551615)
+      | name == Name.int8 -> Just (-128, 127)
+      | name == Name.uint8 -> Just (0, 255)
+      | name == Name.int16 -> Just (-32768, 32767)
+      | name == Name.uint16 -> Just (0, 65535)
     _ -> Nothing
 
 nitpick :: Can.Module -> Either E.Error ()

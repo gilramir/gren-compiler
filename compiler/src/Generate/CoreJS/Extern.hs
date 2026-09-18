@@ -109,6 +109,10 @@ function _Extern_number(extern, type, v) {
 }
 function _Extern_Int(extern, v) { return _Extern_number(extern, 'Int', v) | 0; }
 function _Extern_UInt32(extern, v) { return _Extern_number(extern, 'UInt32', v) >>> 0; }
+function _Extern_Int8(extern, v) { return _Extern_number(extern, 'Int8', v) << 24 >> 24; }
+function _Extern_UInt8(extern, v) { return _Extern_number(extern, 'UInt8', v) & 255; }
+function _Extern_Int16(extern, v) { return _Extern_number(extern, 'Int16', v) << 16 >> 16; }
+function _Extern_UInt16(extern, v) { return _Extern_number(extern, 'UInt16', v) & 65535; }
 function _Extern_Float(extern, v) { return _Extern_number(extern, 'Float', v); }
 function _Extern_Float32(extern, v) { return Math.fround(_Extern_number(extern, 'Float32', v)); }
 function _Extern_wide(extern, type, v) {
@@ -344,6 +348,10 @@ scalarName s =
   case s of
     Extern.Int -> "Int"
     Extern.UInt32 -> "UInt32"
+    Extern.Int8 -> "Int8"
+    Extern.UInt8 -> "UInt8"
+    Extern.Int16 -> "Int16"
+    Extern.UInt16 -> "UInt16"
     Extern.Int64 -> "Int64"
     Extern.UInt64 -> "UInt64"
     Extern.Float -> "Float"

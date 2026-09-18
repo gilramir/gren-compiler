@@ -75,6 +75,12 @@ data Scalar
   | UInt32
   | Int64
   | UInt64
+  | -- | D342's four, each masked to its width on the way in, as @Int@ and
+    -- @UInt32@ are (F3; @docs\/m1b-narrow-int.md@ §NI2.4).
+    Int8
+  | UInt8
+  | Int16
+  | UInt16
   | Float
   | Float32
   | Bool
@@ -194,7 +200,7 @@ value t =
 scalar :: ModuleName.Canonical -> Name -> Maybe Scalar
 scalar home name
   | home == ModuleName.basics =
-      lookup name [("Int", Int), ("UInt32", UInt32), ("Int64", Int64), ("UInt64", UInt64), ("Float", Float), ("Float32", Float32), ("Bool", Bool)]
+      lookup name [("Int", Int), ("UInt32", UInt32), ("Int64", Int64), ("UInt64", UInt64), ("Int8", Int8), ("UInt8", UInt8), ("Int16", Int16), ("UInt16", UInt16), ("Float", Float), ("Float32", Float32), ("Bool", Bool)]
   | home == ModuleName.char && name == "Char" = Just Char
   | home == ModuleName.string && name == "String" = Just String
   | home == ModuleName.bytes && name == "Bytes" = Just Bytes

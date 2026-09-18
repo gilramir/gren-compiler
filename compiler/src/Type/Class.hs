@@ -252,7 +252,8 @@ candidates =
 -- that list against this one. So the membership table, the unifier, §0's
 -- defaulting and `core`'s instances all read one list.
 --
--- All six numeric types are in as of §I8 step 4. The three integer classes hold
+-- All six numeric types are in as of §I8 step 4, and D342's four narrow ones
+-- as of @docs/m1b-narrow-int.md@ §NI8. The three integer classes hold
 -- exactly the same four types, which is A11 and A5 read together: every integer
 -- type divides, takes a remainder and does bitwise arithmetic, so @Integral@ and
 -- @Bits@ have one membership list and @Num@ is that list plus the two floats.
@@ -264,6 +265,10 @@ members c =
         (ModuleName.basics, Name.int64),
         (ModuleName.basics, Name.uint32),
         (ModuleName.basics, Name.uint64),
+        (ModuleName.basics, Name.int8),
+        (ModuleName.basics, Name.uint8),
+        (ModuleName.basics, Name.int16),
+        (ModuleName.basics, Name.uint16),
         (ModuleName.basics, Name.float),
         (ModuleName.basics, Name.float32)
       ]
@@ -271,7 +276,11 @@ members c =
       [ (ModuleName.basics, Name.int),
         (ModuleName.basics, Name.int64),
         (ModuleName.basics, Name.uint32),
-        (ModuleName.basics, Name.uint64)
+        (ModuleName.basics, Name.uint64),
+        (ModuleName.basics, Name.int8),
+        (ModuleName.basics, Name.uint8),
+        (ModuleName.basics, Name.int16),
+        (ModuleName.basics, Name.uint16)
       ]
     Fractional ->
       [ (ModuleName.basics, Name.float),
@@ -281,7 +290,11 @@ members c =
       [ (ModuleName.basics, Name.int),
         (ModuleName.basics, Name.int64),
         (ModuleName.basics, Name.uint32),
-        (ModuleName.basics, Name.uint64)
+        (ModuleName.basics, Name.uint64),
+        (ModuleName.basics, Name.int8),
+        (ModuleName.basics, Name.uint8),
+        (ModuleName.basics, Name.int16),
+        (ModuleName.basics, Name.uint16)
       ]
 
 -- | Whether a type with no arguments belongs to a class.

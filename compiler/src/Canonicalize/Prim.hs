@@ -165,6 +165,14 @@ convType p =
     CharToI32 -> Can.TLambda tChar tInt
     I32ToChar -> Can.TLambda tInt tChar
     F64FromDecimal -> Can.TLambda tString tFloat
+    I8ToI32 -> Can.TLambda tInt8 tInt
+    U8ToI32 -> Can.TLambda tUInt8 tInt
+    I16ToI32 -> Can.TLambda tInt16 tInt
+    U16ToI32 -> Can.TLambda tUInt16 tInt
+    I32ToI8 -> Can.TLambda tInt tInt8
+    I32ToU8 -> Can.TLambda tInt tUInt8
+    I32ToI16 -> Can.TLambda tInt tInt16
+    I32ToU16 -> Can.TLambda tInt tUInt16
 
 -- STRINGS
 
@@ -382,6 +390,20 @@ tUInt32 = Can.TType ModuleName.basics "UInt32" []
 
 tUInt64 :: Can.Type
 tUInt64 = Can.TType ModuleName.basics "UInt64" []
+
+-- | D342's four (@arithmetic.md@ A12), which no 'IntType' names: they have
+-- no operations of their own, only the conversions to and from @Int@.
+tInt8 :: Can.Type
+tInt8 = Can.TType ModuleName.basics "Int8" []
+
+tUInt8 :: Can.Type
+tUInt8 = Can.TType ModuleName.basics "UInt8" []
+
+tInt16 :: Can.Type
+tInt16 = Can.TType ModuleName.basics "Int16" []
+
+tUInt16 :: Can.Type
+tUInt16 = Can.TType ModuleName.basics "UInt16" []
 
 tFloat :: Can.Type
 tFloat = Can.TType ModuleName.basics "Float" []

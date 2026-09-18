@@ -46,9 +46,10 @@ where
 
 import Core.AST qualified as Core
 import Data.Char qualified as Char
-import Data.Int (Int32)
+import Data.Int (Int16, Int32, Int8)
 import Data.Name qualified as Name
 import Data.Utf8 qualified as Utf8
+import Data.Word (Word16, Word8)
 import Gren.Float qualified as EF
 import Gren.ModuleName qualified as ModuleName
 import Gren.String qualified as ES
@@ -117,6 +118,13 @@ float tipe number =
 -- 'Int32' wraps, and nothing out of range reaches this point: D63's check
 -- refuses such a literal in `Compile` (§I20), which is the phase that can
 -- report an error against a source region.
+--
+-- __D342's four narrow types are an 'Core.LInt' at their own type__, holding
+-- the canonical value: sign-extended from @Int8@ and @Int16@, zero-extended
+-- from @UInt8@ and @UInt16@ (@docs\/m1b-narrow-int.md@ §NI2.2). The narrowing
+-- here is not D63's business, which has already refused an out-of-range
+-- literal; it is 'converted''s, whose @fromInt 200@ at @Int8@ is @-56@, as the
+-- instance's wrap says.
 int :: Core.Type -> Integer -> Core.Literal
 int tipe n =
   case numericType tipe of
@@ -126,6 +134,10 @@ int tipe n =
       | name == Name.uint64 -> Core.LUInt64 (fromIntegral n)
       | name == Name.float -> Core.LFloat (fromInteger n)
       | name == Name.float32 -> Core.LFloat32 (fromInteger n)
+      | name == Name.int8 -> Core.LInt (fromIntegral (fromInteger n :: Int8))
+      | name == Name.uint8 -> Core.LInt (fromIntegral (fromInteger n :: Word8))
+      | name == Name.int16 -> Core.LInt (fromIntegral (fromInteger n :: Int16))
+      | name == Name.uint16 -> Core.LInt (fromIntegral (fromInteger n :: Word16))
     _ -> Core.LInt (fromInteger n)
 
 -- | @fromInt n@ or @fromFloat x@ at a type specialization has learned, as the

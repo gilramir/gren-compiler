@@ -59,11 +59,19 @@ toReport source err =
                     ++ show high
                     ++ ".",
                 D.toSimpleNote $
-                  "Arithmetic wraps at a type's width and a literal does not: writing a number\
-                  \ that cannot be one is a mistake, and wrapping it silently would hide which\
-                  \ mistake it was. If you meant the number, one of the wider types will hold\
-                  \ it -- `Int64`, `UInt32` and `UInt64` are there for that, and a literal can\
-                  \ say so with a suffix: 42i64, 42u32, 42u64."
+                  if isNarrow tipe
+                    then
+                      "Arithmetic wraps at a type's width and a literal does not: writing a number\
+                      \ that cannot be one is a mistake, and wrapping it silently would hide which\
+                      \ mistake it was. If you meant a bit pattern, write the value it has at this\
+                      \ width: 255u8 is the byte 0xFF, and -1i8 is the same eight bits read as\
+                      \ signed. If you meant the number, an `Int` holds it."
+                    else
+                      "Arithmetic wraps at a type's width and a literal does not: writing a number\
+                      \ that cannot be one is a mistake, and wrapping it silently would hide which\
+                      \ mistake it was. If you meant the number, one of the wider types will hold\
+                      \ it -- `Int64`, `UInt32` and `UInt64` are there for that, and a literal can\
+                      \ say so with a suffix: 42i64, 42u32, 42u64."
               ]
           )
     PatternAtVariable region value ->
@@ -117,3 +125,10 @@ article name =
   case name of
     'I' : _ -> "an"
     _ -> "a"
+
+-- | D342's four, whose out-of-range literal is more often a bit pattern written
+-- as its unsigned value than a number that needed a wider type
+-- (@docs\/m1b-narrow-int.md@ §NI8).
+isNarrow :: Name.Name -> Bool
+isNarrow tipe =
+  tipe `elem` [Name.int8, Name.uint8, Name.int16, Name.uint16]

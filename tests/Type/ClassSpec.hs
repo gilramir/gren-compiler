@@ -72,7 +72,7 @@ spec = do
       -- D146, and it reads backwards until you ask what a witness is. Every
       -- `Integral` type is a `Num` type, so `classes.md` §1.2 promised this
       -- for free under "closed classes pay no superclass cost" -- but at a
-      -- *rigid* variable there is no type to look up, and a `Num a` demand
+      -- \*rigid* variable there is no type to look up, and a `Num a` demand
       -- needs a `Num` witness that only a written `Num a` brings in. So
       -- `f : Integral a => a -> a` may not say `x + x`.
       entailedBy [Class.Integral] [Class.Num] `shouldBe` False
@@ -130,17 +130,18 @@ spec = do
       -- and nowhere else is a compile error in `Basics` rather than a
       -- `NO INSTANCE` at some unlucky call site.
       map (Name.toChars . snd) (Class.members Class.Num)
-        `shouldBe` ["Int", "Int64", "UInt32", "UInt64", "Float", "Float32"]
+        `shouldBe` ["Int", "Int64", "UInt32", "UInt64", "Int8", "UInt8", "Int16", "UInt16", "Float", "Float32"]
 
     it "the integer classes hold the integer types and the fractional one does not" $ do
-      -- All six are in as of §I8 step 4. `Integral` and `Bits` have one
+      -- All six are in as of §I8 step 4, and D342's four narrow integer
+      -- types as of m1b-narrow-int.md §NI8. `Integral` and `Bits` have one
       -- membership list, which is A11 and A5 read together -- every integer
       -- type divides, takes a remainder and does bitwise arithmetic -- and
       -- `Num` is that list plus the two floats.
       map (Name.toChars . snd) (Class.members Class.Integral)
-        `shouldBe` ["Int", "Int64", "UInt32", "UInt64"]
+        `shouldBe` ["Int", "Int64", "UInt32", "UInt64", "Int8", "UInt8", "Int16", "UInt16"]
       map (Name.toChars . snd) (Class.members Class.Bits)
-        `shouldBe` ["Int", "Int64", "UInt32", "UInt64"]
+        `shouldBe` ["Int", "Int64", "UInt32", "UInt64", "Int8", "UInt8", "Int16", "UInt16"]
       map (Name.toChars . snd) (Class.members Class.Fractional)
         `shouldBe` ["Float", "Float32"]
 

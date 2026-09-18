@@ -353,6 +353,17 @@ conversion p a =
     -- by `String.toFloat`) is what keeps JavaScript's wider number syntax --
     -- hex, whitespace, `Infinity` -- from ever reaching it (D210). `Number` is `+`.
     F64FromDecimal -> JS.Call (JS.Ref (JsName.fromLocalHumanReadable "Number")) [a]
+    -- D342'S NARROW TYPES (`docs/m1b-narrow-int.md` §NI3). Each is a number
+    -- already sign- or zero-extended from its width, so widening is the
+    -- identity, as `Char`'s is, and the wrap is a pair of shifts or a mask.
+    I8ToI32 -> a
+    U8ToI32 -> a
+    I16ToI32 -> a
+    U16ToI32 -> a
+    I32ToI8 -> JS.Infix JS.OpSpRShift (JS.Infix JS.OpLShift a (JS.Int 24)) (JS.Int 24)
+    I32ToU8 -> JS.Infix JS.OpBitwiseAnd a (JS.Int 255)
+    I32ToI16 -> JS.Infix JS.OpSpRShift (JS.Infix JS.OpLShift a (JS.Int 16)) (JS.Int 16)
+    I32ToU16 -> JS.Infix JS.OpBitwiseAnd a (JS.Int 65535)
 
 -- STRINGS
 

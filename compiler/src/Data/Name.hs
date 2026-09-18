@@ -30,6 +30,10 @@ module Data.Name
     int64,
     uint32,
     uint64,
+    int8,
+    uint8,
+    int16,
+    uint16,
     float,
     float32,
     bool,
@@ -388,6 +392,20 @@ uint64 = fromChars "UInt64"
 
 float32 :: Name
 float32 = fromChars "Float32"
+
+-- | D342's four narrow types (`arithmetic.md` A12, `docs/m1b-narrow-int.md`),
+-- declared in `Basics` for the same reason.
+int8 :: Name
+int8 = fromChars "Int8"
+
+uint8 :: Name
+uint8 = fromChars "UInt8"
+
+int16 :: Name
+int16 = fromChars "Int16"
+
+uint16 :: Name
+uint16 = fromChars "UInt16"
 
 -- | The `Eq` class's name, which implicit structural derivation looks up in
 -- `Basics` rather than in the module's environment (§G37).

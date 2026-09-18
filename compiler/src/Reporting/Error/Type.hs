@@ -1111,13 +1111,13 @@ isInt tipe =
     _ ->
       False
 
--- | One of the six numeric types, all of which `Basics` declares (D148).
+-- | One of the ten numeric types, all of which `Basics` declares (D148, D342).
 isNumeric :: T.Type -> Bool
 isNumeric tipe =
   case tipe of
     T.Type home name []
       | home == ModuleName.basics ->
-          name `elem` [Name.int, Name.float, Name.int64, Name.uint32, Name.uint64, Name.float32]
+          name `elem` [Name.int, Name.float, Name.int64, Name.uint32, Name.uint64, Name.float32, Name.int8, Name.uint8, Name.int16, Name.uint16]
     T.Alias _ _ _ real ->
       isNumeric real
     _ ->

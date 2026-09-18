@@ -38,8 +38,8 @@ isDecimalDigit word =
 -- | Read an optional suffix, and then insist the literal ends cleanly.
 --
 -- The suffix is the only place letters may appear inside a numeric literal, so
--- this is where 'isDirtyEnd' asks its question: after @i64@, @u32@, @u64@ or
--- @f32@ when one is there, and at the character that ended the digits when it
+-- this is where 'isDirtyEnd' asks its question: after a suffix when one is
+-- there, and at the character that ended the digits when it
 -- is not. Every exit from a number goes through here, which is what makes
 -- @1.5e10f32@ one token — 'chompExponentHelp' used to be the one exit with no
 -- end check at all, so the Haskell parser read it as an application and the
@@ -55,9 +55,19 @@ endOfNumber pos end ok =
         then Err newPos E.NumberEnd
         else ok newPos suffix
 
--- | The four suffixes, each three bytes wide.
+-- | The eight suffixes: D2's four and D342's @i16@ and @u16@ three bytes
+-- wide, and D342's @i8@ and @u8@ two.
+--
+-- No suffix is a prefix of another, so the order the two widths are tried in
+-- decides nothing (@docs\/m1b-narrow-int.md@ §NI2.5).
 chompSuffix :: Ptr Word8 -> Ptr Word8 -> Maybe (GN.Suffix, Ptr Word8)
 chompSuffix pos end =
+  case chompSuffix3 pos end of
+    Just found -> Just found
+    Nothing -> chompSuffix2 pos end
+
+chompSuffix3 :: Ptr Word8 -> Ptr Word8 -> Maybe (GN.Suffix, Ptr Word8)
+chompSuffix3 pos end =
   if plusPtr pos 3 > end
     then Nothing
     else
@@ -70,11 +80,26 @@ chompSuffix pos end =
             (0x75 {-u-}, 0x33 {-3-}, 0x32 {-2-}) -> Just (GN.U32, after)
             (0x75 {-u-}, 0x36 {-6-}, 0x34 {-4-}) -> Just (GN.U64, after)
             (0x66 {-f-}, 0x33 {-3-}, 0x32 {-2-}) -> Just (GN.F32, after)
+            (0x69 {-i-}, 0x31 {-1-}, 0x36 {-6-}) -> Just (GN.I16, after)
+            (0x75 {-u-}, 0x31 {-1-}, 0x36 {-6-}) -> Just (GN.U16, after)
+            _ -> Nothing
+
+chompSuffix2 :: Ptr Word8 -> Ptr Word8 -> Maybe (GN.Suffix, Ptr Word8)
+chompSuffix2 pos end =
+  if plusPtr pos 2 > end
+    then Nothing
+    else
+      let !a = P.unsafeIndex pos
+          !b = P.unsafeIndex (plusPtr pos 1)
+          !after = plusPtr pos 2
+       in case (a, b) of
+            (0x69 {-i-}, 0x38 {-8-}) -> Just (GN.I8, after)
+            (0x75 {-u-}, 0x38 {-8-}) -> Just (GN.U8, after)
             _ -> Nothing
 
 -- | Whether a hex literal's digits are followed by a suffix.
 --
--- Three of the four, because __@f32@ is not a hex suffix__: @f@, @3@ and @2@
+-- All but one, because __@f32@ is not a hex suffix__: @f@, @3@ and @2@
 -- are all hex digits, so @0xFFf32@ is the number @0xFFF32@ and there is no
 -- spelling that could mean otherwise. A @Float32@ built from a bit pattern is
 -- @f32_from_bits@\'s job (C13), not a literal\'s.
