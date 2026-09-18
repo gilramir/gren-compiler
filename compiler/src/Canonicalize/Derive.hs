@@ -287,7 +287,7 @@ branch ctx verb union ctor@(Can.Ctor _ index _ argTypes) =
               verb
               ctx
               [ compare_ (local ctx l) (local ctx r)
-              | (compare_, l, r) <- zip3 comparisons lefts rights
+              | (compare_, l, r) <- recursiveLast ctx verb (zip argTypes (zip3 comparisons lefts rights))
               ]
           earlier =
             [ Can.CaseBranch (anonymousPattern ctx union other) (_v_mismatch verb ctx LT)
@@ -339,12 +339,13 @@ field ctx verb path (index, tipe) =
       do
         comparisons <- traverse (\(name, t) -> field ctx verb (path ++ [name]) (index, t)) (Map.toList (Map.map fieldType fields))
         let names = Map.keys fields
+        let types = map fieldType (Map.elems fields)
         Result.ok $ \left right ->
           _v_combine
             verb
             ctx
             [ compare_ (access ctx left name) (access ctx right name)
-            | (compare_, name) <- zip comparisons names
+            | (compare_, name) <- recursiveLast ctx verb (zip types (zip comparisons names))
             ]
     Can.TRecord _ (Just _) ->
       -- An extensible record reaches here only through an alias, and its row
@@ -359,6 +360,42 @@ field ctx verb path (index, tipe) =
       -- @CANNOT DERIVE THIS YET@.
       Result.ok $ \left right ->
         at ctx (Can.Call (method ctx verb) [left, right])
+
+-- | @eq@'s components with the ones that mention the type being derived moved
+-- to the end, keeping their order otherwise (D333, @m1b-classes.md@ §G51).
+--
+-- 'conjunction' makes its last test the answer rather than a test, so the last
+-- component is compared by a call in tail position. When that call is the
+-- instance's own @eq@ the tail-call pass turns it into a loop, and a chain of
+-- @Link { rest : Chain, value : Int }@ is compared in constant stack — which it
+-- was not while @rest@ sorted before @value@ and the recursion sat under an
+-- @if@. @eq@ is a conjunction of pure tests, so the order they run in is not
+-- observable.
+--
+-- @compare@ keeps the order it was given, because that order is the answer:
+-- §2.2 orders by payload position and a record by its fields alphabetically,
+-- and moving a component would change which one decides.
+recursiveLast :: Ctx -> Verb -> [(Can.Type, a)] -> [a]
+recursiveLast ctx verb components
+  | distinguishesCtors verb = map snd components
+  | otherwise =
+      [c | (t, c) <- components, not (mentionsSelf ctx t)]
+        ++ [c | (t, c) <- components, mentionsSelf ctx t]
+
+-- | Whether a component's type names the type being derived anywhere in it.
+mentionsSelf :: Ctx -> Can.Type -> Bool
+mentionsSelf ctx tipe =
+  case tipe of
+    Can.TLambda a b -> mentionsSelf ctx a || mentionsSelf ctx b
+    Can.TVar _ -> False
+    Can.TType home name args ->
+      (home == _home ctx && name == _typeName ctx) || any (mentionsSelf ctx) args
+    Can.TRecord fields _ -> any (mentionsSelf ctx . fieldType) (Map.elems fields)
+    Can.TAlias _ _ args aliased ->
+      any (mentionsSelf ctx . snd) args
+        || case aliased of
+          Can.Holey t -> mentionsSelf ctx t
+          Can.Filled t -> mentionsSelf ctx t
 
 fieldType :: Can.FieldType -> Can.Type
 fieldType (Can.FieldType _ tipe) =
