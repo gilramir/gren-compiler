@@ -2,7 +2,7 @@
 {-# LANGUAGE NoPolyKinds #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Bytes to Core, against @schema/geng/core/v5.proto@.
+-- | Bytes to Core, against @schema/geng/core/v6.proto@.
 --
 -- __The reader enforces the canonical profile__ (§B7). C10 writes its seven
 -- rules as properties of the writer; making them properties of the reader too

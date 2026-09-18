@@ -57,7 +57,7 @@ errorAt at message =
 
 {-| The module a `.proto` file becomes, from its path below the proto path with
 the `.proto` taken off: each segment is mangled as a type name is, so
-`geng/core/v5` is `Geng.Core.V5`. The error names the segment that does not
+`geng/core/v6` is `Geng.Core.V6`. The error names the segment that does not
 become a module name.
 -}
 moduleName : Array String -> Result String String

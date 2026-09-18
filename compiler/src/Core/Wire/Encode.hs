@@ -2,7 +2,7 @@
 {-# LANGUAGE NoPolyKinds #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Core to bytes, against @schema/geng/core/v5.proto@.
+-- | Core to bytes, against @schema/geng/core/v6.proto@.
 --
 -- Read this beside the schema; each function below is one message, in the
 -- schema's order, and each field is one line in the schema's tag order. That
