@@ -125,9 +125,9 @@ run cores =
    in if Map.null gens
         then cores
         else
-          let keys = demand gens cores
+          let tys = bindingTypes cores
+              keys = demand gens tys cores
               names = assign keys
-              tys = bindingTypes cores
               added =
                 Map.fromListWith
                   (++)
@@ -179,8 +179,14 @@ bindingTypes cores =
 -- already in the set is not expanded twice, so a self-recursive definition
 -- terminates on the first repeat and only 'depthCap' stands between the pass
 -- and polymorphic recursion.
-demand :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map ModuleName.Canonical Core.Module -> Set Key
-demand gens cores =
+--
+-- A body is read 'instantiated', with its types fixed, and not merely
+-- 'substituted', because a record's witness is keyed by its type: read
+-- unfixed, @Eq { value : a }@ in one generic definition and in another is the
+-- same key whatever each copy's @a@ is, and both copies call whichever of the
+-- two got the name.
+demand :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Map ModuleName.Canonical Core.Module -> Set Key
+demand gens tys cores =
   go Set.empty (concatMap (sites gens) (concatMap exprsOf (Map.elems cores)))
   where
     go seen [] = seen
@@ -188,7 +194,7 @@ demand gens cores =
       | key `Set.member` seen = go seen rest
       | otherwise =
           let seen' = Set.insert key seen
-           in go seen' (sites gens (substituted gens key) ++ rest)
+           in go seen' (sites gens (instantiated gens tys key) ++ rest)
 
 -- | The keys one expression asks for, including the ones nested inside a
 -- witness: a witness for @Eq (Array Int)@ is the @Eq (Array a)@ table applied to
@@ -278,6 +284,15 @@ substituted gens (name, wits) =
   let (binders, body, _) = gens Map.! name
    in subst (Map.fromList (zip (map Core._binderName binders) (zipWith canonical binders wits))) body
 
+-- | 'substituted', with every type in the body given what the key fixed.
+--
+-- This is the body a copy is, and the body 'demand' reads for the keys a copy
+-- asks for: the two must agree, and they must be read after the types are
+-- fixed, since a record's witness (§G38) is keyed by its type.
+instantiated :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Key -> Core.Expr
+instantiated gens tys key =
+  retype (substituteT (fixed gens tys key)) (substituted gens key)
+
 -- | A witness, written back as the expression it was read from. The type and
 -- span are the parameter's, so a copy is a function of its key alone.
 canonical :: Core.Binder -> Wit -> Core.Expr
@@ -297,7 +312,7 @@ canonical binder = expand
 copy :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Map Key Name -> Key -> Core.Bind
 copy gens tys names key@(name, _) =
   let sub = fixed gens tys key
-      body = retype (substituteT sub) (rewrite gens names (substituted gens key))
+      body = rewrite gens names (instantiated gens tys key)
       (binders, _, declared) = gens Map.! name
       sp = maybe (Core.spanOf body) Core._binderSpan (Maybe.listToMaybe binders)
    in Core.Bind (Core.Binder (Core._qnName (nameOf names key)) (discharged sub declared) sp) body
