@@ -141,8 +141,34 @@ programCore details artifacts@(Build.Artifacts pkg _ _ _) =
 -- program — except for D91's out-of-range integer literal, which is the one
 -- thing a user can write that this refuses, and which says so.
 throughWire :: Map.Map ModuleName.Canonical Core.Module -> IO (Map.Map ModuleName.Canonical Core.Module)
-throughWire cores
-  | not Dump.wireRoundTrip && Maybe.isNothing Dump.wireDir = return cores
+throughWire =
+  roundTrip Dump.wireDir
+
+-- | "Core.Pass" over the program, and the wire again after it (X19).
+--
+-- Every backend reads what this returns, so it is where the post-pass Core is
+-- written when @GENG_DUMP_PASSED@ asks, and where @GENG_WIRE=1@ puts it through
+-- the bytes a second time. Before this the passes ran after the only round
+-- trip, so the Core a backend reads — join points, jumps, decision trees,
+-- specialized copies — had never been encoded by any gate, and C11's Geng port
+-- of the passes had nothing byte-level to be held to.
+passed :: Map.Map ModuleName.Canonical Core.Module -> IO (Map.Map ModuleName.Canonical Core.Module)
+passed cores =
+  do
+    let after = Pass.run cores
+    case Dump.passedDir of
+      Nothing -> return ()
+      Just dir ->
+        mapM_
+          (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder Pretty.defaultOptions core))
+          (Map.toAscList after)
+    roundTrip Dump.passedDir after
+
+-- | Encode every module, write the bytes to @dir@ if there is one, and decode
+-- them back if @GENG_WIRE=1@ asks.
+roundTrip :: Maybe FilePath -> Map.Map ModuleName.Canonical Core.Module -> IO (Map.Map ModuleName.Canonical Core.Module)
+roundTrip wireDir cores
+  | not Dump.wireRoundTrip && Maybe.isNothing wireDir = return cores
   | otherwise = Map.traverseWithKey oneModule cores
   where
     oneModule home core =
@@ -151,7 +177,7 @@ throughWire cores
           error (unlines (("Core.Wire: " ++ ModuleName.toChars (ModuleName._module home)) : problems))
         Right encoded ->
           do
-            case Dump.wireDir of
+            case wireDir of
               Nothing -> return ()
               Just dir -> Dump.writeWire dir home (B.byteString encoded)
             if not Dump.wireRoundTrip
@@ -234,7 +260,7 @@ linkCore :: Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Ta
 linkCore details artifacts kernels =
   Task.io $
     do
-      cores <- Program.chooseExterns Core.ExternJs Dump.externBodies . Pass.run <$> programCore details artifacts
+      cores <- Program.chooseExterns Core.ExternJs Dump.externBodies <$> (programCore details artifacts >>= passed)
       return (checked (Program.link (backendFor kernels cores) cores (coreRoots artifacts cores)))
 
 -- | @GENG_SPECIALIZE_STRICT=1@: the linked program carries no witness node.
@@ -359,7 +385,7 @@ spikeC details artifacts@(Build.Artifacts pkg _ _ _) =
     (Just file, Just (home, name)) ->
       Task.io $
         do
-          cores <- Program.chooseExterns Core.ExternC Dump.externBodies . Pass.run <$> programCore details artifacts
+          cores <- Program.chooseExterns Core.ExternC Dump.externBodies <$> (programCore details artifacts >>= passed)
           let root =
                 Core.QualName
                   (ModuleName.Canonical pkg (N.fromChars home))
@@ -433,7 +459,7 @@ linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels =
     checkReached Target.Js (Map.union own deps) (Map.keys own)
     Task.io $
       do
-        cores <- Program.chooseExterns Core.ExternJs Dump.externBodies . Pass.run <$> throughWire (Map.union own deps)
+        cores <- Program.chooseExterns Core.ExternJs Dump.externBodies <$> (throughWire (Map.union own deps) >>= passed)
         return (checked (Program.link (replBackend kernels cores home name) cores (replRoots home name)))
 
 replModuleCore :: Build.Module -> (ModuleName.Raw, Core.Module)

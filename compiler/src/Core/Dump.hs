@@ -11,6 +11,10 @@
 --   * @GENG_DUMP_PROGRAM_CORE@ is written by @Generate@, one file per module,
 --     for every module of a whole program at once — the project's and its
 --     dependencies'. It says what reached the backend.
+--   * @GENG_DUMP_PASSED@ is written by @Generate@ too, after "Core.Pass" has
+--     run: the Core a backend actually reads, printed and encoded side by side
+--     (X19). The first two are pre-pass Core by C11; this is the one a Geng
+--     port of the passes is held to.
 --
 -- The file names are the same in both, so the two directories can be compared
 -- directly, and equal directories are the property M1a's plumbing has to have:
@@ -27,6 +31,7 @@ module Core.Dump
     primsFile,
     wireRoundTrip,
     wireDir,
+    passedDir,
     linkEveryExport,
     corePasses,
     specializeStrict,
@@ -176,6 +181,10 @@ corePasses =
 -- on, @harness/run.py@'s @geng-hs-wire@ target runs the whole corpus through
 -- the bytes and fails on a program that computes a different answer, which no
 -- round-trip assertion can do.
+--
+-- Twice per build since X19: once as the frontend's Core is assembled, and
+-- once after "Core.Pass", so that what a backend reads has been through the
+-- bytes too.
 wireRoundTrip :: Bool
 wireRoundTrip =
   unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_WIRE")
@@ -190,6 +199,21 @@ wireDir :: Maybe FilePath
 wireDir =
   unsafePerformIO (dirFromEnv "GENG_DUMP_WIRE")
 {-# NOINLINE wireDir #-}
+
+-- | @GENG_DUMP_PASSED@: where the program's Core is written after the passes,
+-- each module twice, as @Pkg.Module.core@ and @Pkg.Module.corepb@.
+--
+-- The other dumps are pre-pass Core, because they are written where the
+-- frontend's output is assembled and C11 pins that. But the passes are what a
+-- backend reads, and C11 moves them to a Geng program at M2 whose output has to
+-- be byte-identical to "Core.Pass"'s; nothing held that output until this
+-- (@warts.md@ X19). Both forms, because @harness/core-golden.py@ pins the
+-- printed one and @harness/wire.py@ counts the nodes in the encoded one — the
+-- join points and jumps no pre-pass dump can contain.
+passedDir :: Maybe FilePath
+passedDir =
+  unsafePerformIO (dirFromEnv "GENG_DUMP_PASSED")
+{-# NOINLINE passedDir #-}
 
 -- | @GENG_SPIKE_C@: where the Core → C spike writes its C, if it is asked at
 -- all. Unset — which is every build but a spike run — and nothing happens.
