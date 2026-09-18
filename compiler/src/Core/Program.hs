@@ -49,17 +49,21 @@ module Core.Program
     kernelName,
     qualToChars,
     render,
+    renderPrims,
   )
 where
 
+import Canonicalize.Prim qualified as PrimType
 import Core.AST qualified as Core
 import Core.Order qualified as Order
-import Core.Refs (Refs (..), ctor, global, refsIn, strictIn)
+import Core.Prim qualified as Prim
+import Core.Refs (Refs (..), ctor, global, primsIn, refsIn, strictIn)
 import Data.ByteString.Builder qualified as B
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe qualified as Maybe
+import Data.Text qualified as Text
 import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.Set (Set)
@@ -514,6 +518,26 @@ render p =
         MissingKernel -> "kernel"
         MissingDebug -> "debug "
         MissingValue -> "value "
+
+-- | For @GENG_DUMP_PRIMS@: every __live__ primitive — one in @Core.Prim@'s
+-- table with a type, so not one of the retired codes — as reached by this
+-- program's bindings or not (D337). The table is the compiler's own, read when
+-- the file is written, so a primitive appended to it shows up as unreached here
+-- the day it is added, which is what @accept/prim-coverage@ is held to.
+renderPrims :: Program -> B.Builder
+renderPrims p =
+  let reached = foldMap (primsIn . Core._bindValue . snd) (_progBindings p)
+      live = [op | op <- Prim.allPrims, Maybe.isJust (PrimType.primType op)]
+      (hit, miss) = List.partition (\op -> Set.member (Prim.primCode op) reached) live
+      names ops = mconcat ["  " <> B.stringUtf8 (Text.unpack (Prim.primName op)) <> "\n" | op <- ops]
+      int = B.stringUtf8 . show
+   in mconcat
+        [ "live " <> int (length live) <> "\n",
+          "reached " <> int (length hit) <> "\n",
+          names hit,
+          "unreached " <> int (length miss) <> "\n",
+          names miss
+        ]
 
 -- | What a runtime does with @main@. There is one answer left (§SO19), and
 -- the line stays so that a later kind has somewhere to go.

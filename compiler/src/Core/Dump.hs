@@ -24,6 +24,7 @@ module Core.Dump
     moduleDir,
     programDir,
     linkFile,
+    primsFile,
     wireRoundTrip,
     wireDir,
     linkEveryExport,
@@ -94,6 +95,13 @@ linkFile :: Maybe FilePath
 linkFile =
   unsafePerformIO (Env.lookupEnv "GENG_DUMP_LINK")
 {-# NOINLINE linkFile #-}
+
+-- | @GENG_DUMP_PRIMS@: a file, like @GENG_DUMP_LINK@'s, listing which of the
+-- live primitives the linked program reaches and which it does not (D337).
+primsFile :: Maybe FilePath
+primsFile =
+  unsafePerformIO (Env.lookupEnv "GENG_DUMP_PRIMS")
+{-# NOINLINE primsFile #-}
 
 -- | @GENG_LINK_ROOTS=exports@: link from every module's exports rather than from
 -- the program's @main@.

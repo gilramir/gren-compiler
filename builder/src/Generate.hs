@@ -302,8 +302,8 @@ coreRoots (Build.Artifacts pkg _ roots _) cores =
         Build.Inside name -> name
         Build.Outside name _ _ -> name
 
--- | Write what @GENG_DUMP_PROGRAM_CORE@ and @GENG_DUMP_LINK@ ask for, if either
--- names a place to put it.
+-- | Write what @GENG_DUMP_PROGRAM_CORE@, @GENG_DUMP_LINK@ and @GENG_DUMP_PRIMS@
+-- ask for, if any names a place to put it.
 --
 -- The first is the program's Core, module by module, with the same file names as
 -- "Compile"'s per-module dump so that the two are comparable as directories. The
@@ -311,9 +311,9 @@ coreRoots (Build.Artifacts pkg _ roots _) cores =
 -- and what they refer to that Core cannot supply yet.
 dumpCore :: Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Task ()
 dumpCore details artifacts kernels =
-  case (Dump.programDir, Dump.linkFile) of
-    (Nothing, Nothing) -> return ()
-    (maybeDir, maybeFile) ->
+  case (Dump.programDir, Dump.linkFile, Dump.primsFile) of
+    (Nothing, Nothing, Nothing) -> return ()
+    (maybeDir, maybeFile, maybePrims) ->
       Task.io $
         do
           modules <- programCore details artifacts
@@ -324,14 +324,17 @@ dumpCore details artifacts kernels =
               mapM_
                 (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder Pretty.defaultOptions core))
                 (Map.toAscList modules)
+          let roots =
+                if Dump.linkEveryExport
+                  then concatMap Core._moduleExports (Map.elems cores)
+                  else coreRoots artifacts cores
+              linked = Program.link (backendFor kernels cores) cores roots
           case maybeFile of
             Nothing -> return ()
-            Just file ->
-              let roots =
-                    if Dump.linkEveryExport
-                      then concatMap Core._moduleExports (Map.elems cores)
-                      else coreRoots artifacts cores
-               in B.writeFile file (Program.render (Program.link (backendFor kernels cores) cores roots))
+            Just file -> B.writeFile file (Program.render linked)
+          case maybePrims of
+            Nothing -> return ()
+            Just file -> B.writeFile file (Program.renderPrims linked)
 
 -- | The Core → C spike (@docs/m1a-c-spike.md@), when @GENG_SPIKE_C@ asks for it.
 --

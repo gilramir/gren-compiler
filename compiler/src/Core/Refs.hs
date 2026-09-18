@@ -15,12 +15,14 @@ module Core.Refs
     ctor,
     refsIn,
     strictIn,
+    primsIn,
     freeLocals,
     patternBinders,
   )
 where
 
 import Core.AST qualified as Core
+import Core.Prim qualified as Prim
 import Data.Name (Name)
 import Data.Set (Set)
 import Data.Set qualified as Set
@@ -75,6 +77,35 @@ refsIn (Core.Expr value _ _) =
     Core.ETyApp body _ -> refsIn body
     Core.EWitLam _ body -> refsIn body
     Core.EWitApp body args -> foldMap refsIn (body : args)
+
+-- | The primitives an expression calls, by code (@Core.Prim.primCode@), for
+-- @GENG_DUMP_PRIMS@: what @accept/prim-coverage@ is held to (D337).
+primsIn :: Core.Expr -> Set Int
+primsIn (Core.Expr value _ _) =
+  case value of
+    Core.EVar _ -> Set.empty
+    Core.EGlobal _ -> Set.empty
+    Core.ELit _ -> Set.empty
+    Core.ECrash (Core.Todo _ message) -> primsIn message
+    Core.ECrash _ -> Set.empty
+    Core.ELam _ body -> primsIn body
+    Core.EApp fn args -> foldMap primsIn (fn : args)
+    Core.ELet binds body -> foldMap (primsIn . Core._bindValue) binds <> primsIn body
+    Core.ELetRec binds body -> foldMap (primsIn . Core._bindValue) binds <> primsIn body
+    Core.EJoin binds body -> foldMap (primsIn . Core._bindValue) binds <> primsIn body
+    Core.EJump _ args -> foldMap primsIn args
+    Core.ECase scrut alts fallback ->
+      primsIn scrut <> foldMap (primsIn . Core._altBody) alts <> foldMap primsIn fallback
+    Core.ECtor _ _ args -> foldMap primsIn args
+    Core.ERecord fields -> foldMap (primsIn . snd) fields
+    Core.EUpdate base fields -> primsIn base <> foldMap (primsIn . snd) fields
+    Core.EAccess base _ -> primsIn base
+    Core.EArray items -> foldMap primsIn items
+    Core.EPrim op args -> Set.insert (Prim.primCode op) (foldMap primsIn args)
+    Core.ETyLam _ body -> primsIn body
+    Core.ETyApp body _ -> primsIn body
+    Core.EWitLam _ body -> primsIn body
+    Core.EWitApp body args -> foldMap primsIn (body : args)
 
 -- | What evaluating an expression reads __immediately__: the globals it names
 -- outside any lambda.
