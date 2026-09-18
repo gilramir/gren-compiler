@@ -23,6 +23,7 @@ before the error.
 import Bytes
 import Bytes.Encode
 import Char
+import UInt8
 
 
 type Token
@@ -350,7 +351,7 @@ string chars quote state bytes =
 
         Just c ->
             if c == quote then
-                when Bytes.toString (Bytes.Encode.encode (Bytes.Encode.sequence (Array.map Bytes.Encode.unsignedInt8 bytes))) is
+                when Bytes.toString (Bytes.Encode.encode (Bytes.Encode.sequence (Array.map (\b -> Bytes.Encode.unsignedInt8 (UInt8.fromIntWrap b)) bytes))) is
                     Just value ->
                         Ok { value = value, state = advance 1 state }
 
