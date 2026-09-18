@@ -11,7 +11,9 @@
 --
 -- It reads Core's type rather than Canonical's because Core's is already the
 -- shape the wrapper needs: aliases expanded, and a function type collapsed to
--- one argument list (C3), which is the implementation's arity.
+-- one argument list (C3). How many parameters the implementation takes is not
+-- here: that is each language's calling convention, and JavaScript's is
+-- "Generate.CoreJS.Extern.implementationArity" (@warts.md@ X20, @ffi.md@ F1).
 module Core.Extern
   ( Signature (..),
     Arg (..),
@@ -20,7 +22,6 @@ module Core.Extern
     Outcome (..),
     Problem (..),
     classify,
-    arity,
     handle,
   )
 where
@@ -102,14 +103,6 @@ data Problem
   | -- | @Never@ anywhere but a @Task@'s error.
     NeverPosition
   deriving (Eq, Show)
-
--- | The implementation's JavaScript arity: the arguments, plus @succeed@ and
--- @fail@ for a @Task@ (D193).
-arity :: Signature -> Int
-arity (Signature args outcome) =
-  length args + case outcome of
-    Pure _ -> 0
-    Task _ _ -> 2
 
 handle :: Core.QualName
 handle =

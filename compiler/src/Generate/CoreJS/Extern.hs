@@ -187,6 +187,17 @@ arity e =
     Core.TFun params _ -> length params
     _ -> 0
 
+-- | The implementation's JavaScript arity: the arguments, plus @succeed@ and
+-- @fail@ for a @Task@ (D193). It was @Core.Extern.arity@, in the module the
+-- frontend and every backend share, and it is JavaScript's calling convention:
+-- a BEAM @Task@ extern need not be callback-shaped at all, so each backend
+-- counts its own (@warts.md@ X20, @ffi.md@ F1).
+implementationArity :: Extern.Signature -> Int
+implementationArity (Extern.Signature args outcome) =
+  length args + case outcome of
+    Extern.Pure _ -> 0
+    Extern.Task _ _ -> 2
+
 -- | The extern's binding: the arity check, then the Geng-side value.
 wrapper :: ModuleName.Canonical -> Core.Extern -> B.Builder
 wrapper home@(ModuleName.Canonical pkg raw) e =
@@ -231,7 +242,7 @@ wrapper home@(ModuleName.Canonical pkg raw) e =
               <> ", "
               <> quote (Name.toBuilder function)
               <> ", "
-              <> B.intDec (Extern.arity sig)
+              <> B.intDec (implementationArity sig)
               <> ", "
               <> impl
               <> ");\n"
