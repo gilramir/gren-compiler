@@ -265,7 +265,7 @@ literal env pos lit =
     -- types. `JS.TrackedFloat` is the node that carries a numeric token
     -- verbatim; there is no `TrackedBigInt`, and adding one would buy a name
     -- and nothing else, since every consumer treats the two the same way
-    -- ('isLiteral' below is the only one that looks).
+    -- (nothing looks).
     Core.LInt64 n -> JS.TrackedFloat (_home env) pos (B.string7 (show n ++ "n"))
     Core.LUInt64 n -> JS.TrackedFloat (_home env) pos (B.string7 (show n ++ "n"))
     -- A `UInt32` is an ordinary JavaScript number in `[0, 2^32)`.
@@ -526,8 +526,8 @@ normalCall env pos fn args =
 -- over @i32_shl@, @i32_shr@, @i32_ushr@ and @i32_rem@, so the JavaScript is
 -- "the primitive, and A4's clamp or A3's zero guard in Geng in front of it"
 -- rather than an entry here that knows neither. @fdiv@ and @idiv@ left this
--- table for the same reason, and what is left of it is `Bool`, comparison,
--- @++@ and the two application operators — nothing numeric at all.
+-- table for the same reason, and what is left of it is `Bool` and the two
+-- application operators — nothing numeric at all.
 --
 -- __Every row is an inlining, not an obligation__ (D344). Since X21 `not`,
 -- `xor` and `toFloat` are Geng or @\@prim@ in `Basics`, so a backend without
@@ -543,21 +543,21 @@ basicsCall env pos q name args =
             _ -> globalCall env pos q [arg]
     [leftE, rightE] ->
       case name of
-        "append" -> append env leftE rightE
         "apL" -> jsExpr env (apply leftE rightE)
         "apR" -> jsExpr env (apply rightE leftE)
         _ ->
           let left = jsExpr env leftE
               right = jsExpr env rightE
            in case name of
-                -- Neither `==` nor `/=` is here. `==` is `Eq`'s method and
-                -- reaches an instance; `/=` is `not (eq a b)`, and `not` is one
-                -- line above. What used to be here was `Basics.equal`, the
-                -- kernel's structural walker, and D142 deleted it (§G40).
-                "lt" -> cmp JS.OpLt JS.OpLt 0 left right
-                "gt" -> cmp JS.OpGt JS.OpGt 0 left right
-                "le" -> cmp JS.OpLe JS.OpLt 1 left right
-                "ge" -> cmp JS.OpGe JS.OpGt (-1) left right
+                -- No comparison is here, and neither is @++@. `==`, `<` and
+                -- the rest are `Eq`'s and `Ord`'s, so a call carries the witness
+                -- as its first argument and is never the two-argument shape this
+                -- matches: before the passes it has three, and after them it
+                -- is a specialized copy with another name. The `lt`, `gt`, `le`,
+                -- `ge` and `append` rows that were here wrote `_Utils_cmp` and
+                -- `_Utils_ap`, which D333 deleted, and nothing reached them
+                -- (@warts.md@ X6, checked against every post-pass golden
+                -- 2026-09-18).
                 -- `and` and `or` are not here since D344. `&&` and `||`
                 -- lower to a `case` (`Core.Lower.Expression.shortCircuit`),
                 -- so a call that reaches here is a call to the function,
@@ -574,43 +574,7 @@ apply fn value =
     Core.EApp f args -> fn {Core._exprValue = Core.EApp f (args ++ [value])}
     _ -> fn {Core._exprValue = Core.EApp fn [value]}
 
--- | A run of @++@ is flattened, so that a literal anywhere in it makes the whole
--- run a JavaScript @+@ rather than a chain of `_Utils_ap` calls.
-append :: Env -> Core.Expr -> Core.Expr -> JS.Expr
-append env left right =
-  let parts = jsExpr env left : flatten env right
-   in if any isStringLiteral parts
-        then foldr1 (JS.Infix JS.OpAdd) parts
-        else foldr1 (\a b -> JS.Call (JS.Ref (JsName.fromKernel Name.utils "ap")) [a, b]) parts
-
-flatten :: Env -> Core.Expr -> [JS.Expr]
-flatten env expr =
-  case Core._exprValue expr of
-    Core.EApp fn [left, right]
-      | Core.EGlobal (Core.QualName (ModuleName.Canonical pkg raw) "append") <- Core._exprValue fn,
-        pkg == Pkg.core,
-        raw == Name.basics ->
-          jsExpr env left : flatten env right
-    _ -> [jsExpr env expr]
-
-isStringLiteral :: JS.Expr -> Bool
-isStringLiteral expr =
-  case expr of
-    JS.String _ -> True
-    JS.TrackedString _ _ _ -> True
-    _ -> False
-
 -- COMPARISON
-
-cmp :: JS.InfixOp -> JS.InfixOp -> Int -> JS.Expr -> JS.Expr -> JS.Expr
-cmp idealOp backupOp backupInt left right =
-  if isLiteral left || isLiteral right
-    then JS.Infix idealOp left right
-    else
-      JS.Infix
-        backupOp
-        (JS.Call (JS.Ref (JsName.fromKernel Name.utils "cmp")) [left, right])
-        (JS.Int backupInt)
 
 strictEq :: JS.Expr -> JS.Expr -> JS.Expr
 strictEq left right =
@@ -622,19 +586,6 @@ strictEq left right =
         JS.Int 0 -> JS.Prefix JS.PrefixNot left
         JS.Bool b -> if b then left else JS.Prefix JS.PrefixNot left
         _ -> JS.Infix JS.OpEq left right
-
-isLiteral :: JS.Expr -> Bool
-isLiteral expr =
-  case expr of
-    JS.String _ -> True
-    JS.TrackedString _ _ _ -> True
-    JS.Float _ -> True
-    JS.TrackedFloat _ _ _ -> True
-    JS.Int _ -> True
-    JS.TrackedInt _ _ _ -> True
-    JS.Bool _ -> True
-    JS.TrackedBool _ _ _ -> True
-    _ -> False
 
 -- JOINS
 
