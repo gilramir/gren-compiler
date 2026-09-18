@@ -504,6 +504,10 @@ expr env (Can.Expr nid region value) =
               global home name = Core.Expr (Core.EGlobal (Core.QualName home name)) opType sp
               call2 fn = node (Core.EApp fn [expr env left, expr env right])
            in case target of
+                Can.OpValue home name
+                  | home == ModuleName.basics,
+                    Just decided <- shortCircuit name ->
+                      node (shortCircuitCase sp decided (expr env left) (expr env right))
                 Can.OpValue home name ->
                   call2 (applied env nid sp (global home name))
                 Can.OpMethod _ _ name ->
@@ -1073,6 +1077,41 @@ elementType tipe =
 -- than silently swapped branches.
 boolTag :: Bool -> Int
 boolTag b = if b then 0 else 1
+
+boolValue :: Core.Span -> Bool -> Core.Expr
+boolValue sp b =
+  Core.Expr
+    (Core.ECtor (Core.QualName ModuleName.basics (if b then Name.true else Name.false)) (boolTag b) [])
+    boolType
+    sp
+
+-- | Which of `Basics`'s operators short-circuit, and the answer each gives
+-- when its left operand decides: `&&` is decided by `False`, `||` by `True`.
+--
+-- An operator is otherwise a call to the function it names, which evaluates
+-- both operands first. These two are not calls (D344, @warts.md@ X21):
+-- @False && x@ does not evaluate @x@, which is the documented rule of `Basics`
+-- and stock Gren's behaviour. Until D344 the rule lived in the JavaScript
+-- backend, which printed a saturated call to @Basics.and@ as JavaScript's
+-- @&&@; Core said "call @and@", so any other backend would have evaluated both.
+shortCircuit :: Name -> Maybe Bool
+shortCircuit name
+  | name == Name.fromChars "and" = Just False
+  | name == Name.fromChars "or" = Just True
+  | otherwise = Nothing
+
+-- | @left && right@ as @when left is True -> right; False -> False@, and
+-- @left || right@ as its mirror. The alternatives are always in tag order,
+-- `True` first, as an `if`'s are.
+shortCircuitCase :: Core.Span -> Bool -> Core.Expr -> Core.Expr -> Core.Expr_
+shortCircuitCase sp decided left right =
+  let answer b = if b == decided then boolValue sp decided else right
+   in Core.ECase
+        left
+        [ Core.Alt (boolPattern True) (answer True),
+          Core.Alt (boolPattern False) (answer False)
+        ]
+        Nothing
 
 boolPattern :: Bool -> Core.Pattern
 boolPattern b =

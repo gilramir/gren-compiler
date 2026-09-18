@@ -528,6 +528,10 @@ normalCall env pos fn args =
 -- rather than an entry here that knows neither. @fdiv@ and @idiv@ left this
 -- table for the same reason, and what is left of it is `Bool`, comparison,
 -- @++@ and the two application operators — nothing numeric at all.
+--
+-- __Every row is an inlining, not an obligation__ (D344). Since X21 `not`,
+-- `xor` and `toFloat` are Geng or @\@prim@ in `Basics`, so a backend without
+-- this table calls them and gets the same answer; the rows say it faster.
 basicsCall :: Env -> A.Position -> Core.QualName -> Name -> [Core.Expr] -> JS.Expr
 basicsCall env pos q name args =
   case args of
@@ -554,8 +558,10 @@ basicsCall env pos q name args =
                 "gt" -> cmp JS.OpGt JS.OpGt 0 left right
                 "le" -> cmp JS.OpLe JS.OpLt 1 left right
                 "ge" -> cmp JS.OpGe JS.OpGt (-1) left right
-                "or" -> JS.Infix JS.OpOr left right
-                "and" -> JS.Infix JS.OpAnd left right
+                -- `and` and `or` are not here since D344. `&&` and `||`
+                -- lower to a `case` (`Core.Lower.Expression.shortCircuit`),
+                -- so a call that reaches here is a call to the function,
+                -- which evaluates both arguments; JavaScript's @&&@ would not.
                 "xor" -> JS.Infix JS.OpNe left right
                 _ -> globalCall env pos q [left, right]
     _ -> globalCall env pos q (map (jsExpr env) args)
