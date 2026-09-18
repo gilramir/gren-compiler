@@ -115,7 +115,18 @@ depth :: Wit -> Int
 depth w =
   case w of
     Wit _ args -> 1 + maximum (0 : map depth args)
-    Built _ _ -> 1
+    Built tipe _ -> typeDepth tipe
+
+-- | How deep a type is, which is how deep a record's witness is: it is built
+-- from one witness per field, and its type is what keys it.
+typeDepth :: Core.Type -> Int
+typeDepth tipe =
+  case tipe of
+    Core.TVar _ -> 1
+    Core.TCon _ args -> 1 + maximum (0 : map typeDepth args)
+    Core.TFun args result -> 1 + maximum (map typeDepth (result : args))
+    Core.TRecord fields _ -> 1 + maximum (0 : map (typeDepth . snd) fields)
+    Core.TForall _ _ body -> typeDepth body
 
 -- THE PASS
 
@@ -351,7 +362,17 @@ witType gens tys (Wit name args) =
                 | (binder, arg) <- zip binders args,
                   Just actual <- [witType gens tys arg]
                 ]
-        return (substituteT sub declared)
+        return (substituteT sub (unquantified declared))
+
+-- | A binding's type with its quantifier taken off, so that 'substituteT' can
+-- reach the variables the quantifier binds: an instance table applied to its
+-- context is @forall a. { eq : Array a -> Array a -> Bool }@ as declared, and
+-- substituting under the @forall@ would leave @a@ alone.
+unquantified :: Core.Type -> Core.Type
+unquantified tipe =
+  case tipe of
+    Core.TForall _ _ body -> body
+    _ -> tipe
 
 -- | The substitution that turns one type into another, where it can.
 --
