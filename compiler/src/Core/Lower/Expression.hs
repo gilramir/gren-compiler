@@ -43,10 +43,10 @@
 --     application is partial needs the callee's arity, which for an imported
 --     function is not in this module. It is a Core→Core pass, and C11 gives
 --     M1a no passes.
---   * __No 'Core.AST.EPrim' and no @'Core.AST.ECrash' 'Core.AST.Todo'.__ Both
---     wait on @core@ being rewritten with C13's @\@prim@ table at M1b.
---     @Debug.log@ and @Debug.todo@ lower as the ordinary @Debug@ functions
---     they still are.
+--   * __No @'Core.AST.EPrim'@ except a @\@prim@ body.__ @Debug.log@ lowers as
+--     the ordinary @Debug@ function it still is. @Debug.todo@ does not: it is
+--     'Core.AST.ECrash' 'Core.AST.Todo' wherever it is used (D335, §L4), which
+--     is why it is the one @Debug@ name 'todo' looks for.
 module Core.Lower.Expression
   ( Env (..),
     expr,
@@ -404,6 +404,9 @@ expr env (Can.Expr nid region value) =
    in case value of
         Can.VarLocal name ->
           applied env nid sp (node (Core.EVar name))
+        Can.VarTopLevel home name
+          | home == ModuleName.debug && name == todoName ->
+              todoValue tipe sp (todoPlace home region)
         Can.VarTopLevel home name ->
           applied env nid sp (node (Core.EGlobal (Core.QualName home name)))
         Can.VarForeign home name _ ->
@@ -441,6 +444,9 @@ expr env (Can.Expr nid region value) =
           -- Kernel references stop existing when `ffi.md` F7 retires the
           -- splicer at M1b.
           node (Core.EGlobal (Core.QualName (ModuleName.Canonical Pkg.kernel home) name))
+        Can.VarDebug home name _
+          | name == todoName ->
+              todoValue tipe sp (todoPlace home region)
         Can.VarDebug _ name _ ->
           -- The module on the node is the one doing the referring, not the one
           -- being referred to.
@@ -592,11 +598,74 @@ typeOfExpr env (Can.Expr nid _ _) = typeOf env nid
 call :: Env -> Can.Expr -> [Can.Expr] -> Core.Expr_
 call env func args =
   case func of
+    Can.Expr nid region (Can.VarDebug home name _)
+      | name == todoName,
+        message : rest <- args ->
+          todoCall env nid region home message rest
+    Can.Expr nid region (Can.VarTopLevel home name)
+      | home == ModuleName.debug && name == todoName,
+        message : rest <- args ->
+          todoCall env nid region home message rest
     Can.Expr nid _ (Can.VarCtor _ home name index _)
       | arity (typeOf env nid) == length args ->
           Core.ECtor (Core.QualName home name) (Index.toMachine index) (map (expr env) args)
     _ ->
       Core.EApp (expr env func) (map (expr env) args)
+
+-- DEBUG.TODO
+
+-- | @Debug.todo message@, and anything it is applied to after that: an
+-- 'Core.AST.ECrash' carrying where it was written and the message, which is
+-- evaluated first and then reported (D335, `m1a-lowering.md` §L4, C5).
+--
+-- It was a point-free alias of a two-argument kernel closure that stock's code
+-- generator filled in and this one did not, so it answered a JavaScript
+-- function at any type (`m1b-extern.md` §H18.4).
+todoCall :: Env -> Can.NodeId -> A.Region -> ModuleName.Canonical -> Can.Expr -> [Can.Expr] -> Core.Expr_
+todoCall env nid region home message rest =
+  let sp = span env region
+      crash = Core.Expr (Core.ECrash (Core.Todo (todoPlace home region) (expr env message))) (afterOne (typeOf env nid)) sp
+   in case rest of
+        [] -> Core._exprValue crash
+        _ -> Core.EApp crash (map (expr env) rest)
+
+-- | @Debug.todo@ as a value: @\m -> crash@, so that it crashes when it is
+-- given its message, as stock's does.
+todoValue :: Core.Type -> Core.Span -> Core.Text -> Core.Expr
+todoValue tipe sp place =
+  case tipe of
+    Core.TFun (argType : _) _ ->
+      let binder = Core.Binder (generated 0) argType sp
+          after = afterOne tipe
+          crash = Core.Expr (Core.ECrash (Core.Todo place (variable sp binder))) after sp
+       in Core.Expr (Core.ELam [binder] crash) (Core.TFun [argType] after) sp
+    _ ->
+      error "Core.Lower.Expression: Debug.todo is not a function here"
+
+-- | Stock's words for where a @Debug.todo@ is: @TODO in module `Main` on line
+-- 19@, from the module that wrote it and the reference's own region.
+todoPlace :: ModuleName.Canonical -> A.Region -> Core.Text
+todoPlace home (A.Region (A.Position startRow _) (A.Position endRow _)) =
+  Utf8.fromChars $
+    "TODO in module `"
+      ++ ModuleName.toChars (ModuleName._module home)
+      ++ "` "
+      ++ ( if startRow == endRow
+             then "on line " ++ show startRow
+             else "on lines " ++ show startRow ++ " through " ++ show endRow
+         )
+
+-- | A function type with its first argument taken.
+afterOne :: Core.Type -> Core.Type
+afterOne tipe =
+  case tipe of
+    Core.TFun [_] result -> result
+    Core.TFun (_ : more) result -> Core.TFun more result
+    _ -> tipe
+
+todoName :: Name
+todoName =
+  Name.fromChars "todo"
 
 -- | A primitive, which is only ever the whole body of a @\@prim@ declaration
 -- (`core.md` C13) and so is only ever a value.

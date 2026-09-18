@@ -760,7 +760,7 @@ fieldExprEnc (field, e) = text 1 field <> msg 2 (exprEnc e)
 crashEnc :: CrashKind -> Enc
 crashEnc kind =
   case kind of
-    Todo message -> enum_ 1 0 <> optText 2 (Just message)
+    Todo place message -> enum_ 1 0 <> optText 2 (Just place) <> msg 3 (exprEnc message)
     IncompleteMatch -> enum_ 1 1
     StackExhausted -> enum_ 1 2
     Unreachable -> enum_ 1 3

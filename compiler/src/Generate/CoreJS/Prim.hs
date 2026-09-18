@@ -41,6 +41,7 @@ module Generate.CoreJS.Prim
     isTask,
     exportHelpers,
     recordHelpers,
+    crashHelpers,
   )
 where
 
@@ -1187,6 +1188,18 @@ function _Record_update(oldRecord, updatedFields) {
   }
 
   return newRecord;
+}
+|]
+
+-- | @Debug.todo@ (D335, @m1a-lowering.md@ §L4). The lowering renders where it
+-- was written, in stock's words, and the message is the expression it was
+-- handed; this puts them together the way stock's @_Debug_crash@ did for its
+-- eighth identifier, and throws.
+crashHelpers :: B.Builder
+crashHelpers =
+  [r|
+function _Crash_todo(place, message) {
+  throw new Error(place + "\n\n" + message);
 }
 |]
 

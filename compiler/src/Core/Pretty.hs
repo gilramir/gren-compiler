@@ -243,6 +243,7 @@ expr opts depth e =
         EVar n -> name n
         EGlobal q -> qual q
         ELit l -> literal l
+        ECrash (Todo place message) -> crash (Todo place message) <> "\n" <> expr opts (depth + 1) message
         ECrash k -> crash k
         ELam binders inner ->
           "\\"
@@ -397,7 +398,7 @@ literal l =
 crash :: CrashKind -> B.Builder
 crash k =
   case k of
-    Todo msg -> "crash todo \"" <> B.stringUtf8 (Utf8.toChars msg) <> "\""
+    Todo place _ -> "crash todo \"" <> B.stringUtf8 (Utf8.toChars place) <> "\""
     IncompleteMatch -> "crash incomplete-match"
     StackExhausted -> "crash stack-exhausted"
     Unreachable -> "crash unreachable"

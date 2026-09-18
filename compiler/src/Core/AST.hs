@@ -427,12 +427,19 @@ data Literal
     LString !Text
   deriving (Eq, Ord, Show)
 
+-- | Why a program stops.
+--
+-- @Todo@ is @Debug.todo@: where it was written, as the text the lowering renders
+-- (@TODO in module `Main` on line 19@, stock's words), and the message it was
+-- handed, which is an expression because it need not be a literal (D335,
+-- @m1a-lowering.md@ §L4). The message is the one child a crash has, and it runs
+-- before the program stops.
 data CrashKind
-  = Todo !Text
+  = Todo !Text !Expr
   | IncompleteMatch
   | StackExhausted
   | Unreachable
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Show)
 
 -- HELPERS
 
@@ -458,6 +465,7 @@ isSpecialized (Expr e _ _) =
     EVar _ -> True
     EGlobal _ -> True
     ELit _ -> True
+    ECrash (Todo _ message) -> isSpecialized message
     ECrash _ -> True
     ELam _ body -> isSpecialized body
     EApp fn args -> all isSpecialized (fn : args)

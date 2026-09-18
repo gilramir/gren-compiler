@@ -55,6 +55,7 @@ refsIn (Core.Expr value _ _) =
     Core.EVar _ -> mempty
     Core.EGlobal q -> global q
     Core.ELit _ -> mempty
+    Core.ECrash (Core.Todo _ message) -> refsIn message
     Core.ECrash _ -> mempty
     Core.ELam _ body -> refsIn body
     Core.EApp fn args -> foldMap refsIn (fn : args)
@@ -100,6 +101,7 @@ strictIn (Core.Expr value _ _) =
     Core.EGlobal q -> Set.singleton q
     Core.EVar _ -> Set.empty
     Core.ELit _ -> Set.empty
+    Core.ECrash (Core.Todo _ message) -> strictIn message
     Core.ECrash _ -> Set.empty
     Core.EApp fn args -> foldMap strictIn (fn : args)
     Core.ELet binds body -> foldMap strictBind binds <> strictIn body
@@ -158,6 +160,7 @@ freeLocals (Core.Expr value _ _) =
     Core.EVar n -> Set.singleton n
     Core.EGlobal _ -> Set.empty
     Core.ELit _ -> Set.empty
+    Core.ECrash (Core.Todo _ message) -> freeLocals message
     Core.ECrash _ -> Set.empty
     Core.ELam binders body -> without binders (freeLocals body)
     Core.EApp fn args -> Set.unions (map freeLocals (fn : args))

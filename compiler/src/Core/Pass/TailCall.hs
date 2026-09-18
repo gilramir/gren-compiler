@@ -166,6 +166,7 @@ walk expr =
         Core.EVar _ -> pure expr
         Core.EGlobal _ -> pure expr
         Core.ELit _ -> pure expr
+        Core.ECrash (Core.Todo place message) -> node . Core.ECrash . Core.Todo place <$> walk message
         Core.ECrash _ -> pure expr
 
 local :: Core.Bind -> Fresh Core.Bind

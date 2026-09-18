@@ -1173,22 +1173,25 @@ tyAppP =
       args <- repType "args" 2
       pure (ETyApp fn args)
 
--- | The third well-formedness rule the schema cannot state: @todo@ is present
--- exactly when the kind is @CRASH_KIND_TODO@.
+-- | The third well-formedness rule the schema cannot state: @todo@, where the
+-- crash was written, and @message@, the expression it reports, are present
+-- exactly when the kind is @CRASH_KIND_TODO@ (D335).
 crashP :: P Expr_
 crashP =
-  message "Crash" 2 $
+  message "Crash" 3 $
     do
       here <- offset
       code <- defaulted "kind" 1 WVarint (0 :: Word64) varint
       todo <- optText "todo" 2
-      case (code, todo) of
-        (0, Just message_) -> pure (ECrash (Todo message_))
-        (0, Nothing) -> failAt here "a Debug.todo crash has no message"
-        (1, Nothing) -> pure (ECrash IncompleteMatch)
-        (2, Nothing) -> pure (ECrash StackExhausted)
-        (3, Nothing) -> pure (ECrash Unreachable)
-        (_, Just _) -> failAt here "only a Debug.todo crash may carry a message"
+      said <- optMsg "message" 3 exprP
+      case (code, todo, said) of
+        (0, Just place, Just message_) -> pure (ECrash (Todo place message_))
+        (0, _, Nothing) -> failAt here "a Debug.todo crash has no message"
+        (0, Nothing, Just _) -> failAt here "a Debug.todo crash does not say where it was written"
+        (1, Nothing, Nothing) -> pure (ECrash IncompleteMatch)
+        (2, Nothing, Nothing) -> pure (ECrash StackExhausted)
+        (3, Nothing, Nothing) -> pure (ECrash Unreachable)
+        (c, _, _) | c <= 3 -> failAt here "only a Debug.todo crash may carry a message"
         _ -> failAt here ("no such crash kind: " ++ show code)
 
 binderP :: P Binder

@@ -9,7 +9,8 @@
 -- because D81 keeps @\@prim@ out of M1a; the four specialization nodes, because
 -- R1 is M1b's; @EJoin@ and @EJump@, because C11 dumps __pre-pass__ Core and
 -- C15's join points have no producer before the decision-tree pass runs;
--- @ECrash@, because no corpus program writes @Debug.todo@; and five of the nine
+-- @ECrash@'s other three kinds, which nothing produces (D335 made @Debug.todo@
+-- one, and @accept/debug-todo@ builds it); and five of the nine
 -- literals, because D2's sized integers and @Float32@ arrive at M1b.
 --
 -- So this file builds them by hand. Every constructor of 'Expr_', 'Pattern',
@@ -386,7 +387,9 @@ somePrim =
     Nothing -> error "Core.Prim.allPrims is empty"
 
 everyCrash :: [CrashKind]
-everyCrash = [Todo (utf8 "not done"), Todo (utf8 ""), IncompleteMatch, StackExhausted, Unreachable]
+-- | A @Todo@ carries an expression since D335: a literal message, and one
+-- computed from a variable, which is what made the message a child.
+everyCrash = [Todo (utf8 "not done") (lit (LString (utf8 "why"))), Todo (utf8 "") var, IncompleteMatch, StackExhausted, Unreachable]
 
 -- | One extern in each of D77's languages and one pure one, with names that
 -- need the string table.

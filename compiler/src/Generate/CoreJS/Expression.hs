@@ -209,8 +209,15 @@ generate env (Core.Expr value _ sp) =
           JsExpr (JS.TrackedArray (_home env) (region sp) (map (jsExpr env) items))
         Core.EPrim op args ->
           JsExpr (Prim.prim op (map (jsExpr env) args))
+        Core.ECrash (Core.Todo place message) ->
+          -- D335: `_Crash_todo` throws stock's `Error`, so a `Debug.todo`
+          -- stops the program the way any uncaught crash does (D257).
+          JsExpr $
+            JS.Call
+              (JS.Ref (JsName.fromLocalHumanReadable "_Crash_todo"))
+              [JS.String (text_ (Utf8.toChars place)), jsExpr env message]
         Core.ECrash _ ->
-          error "Generate.CoreJS: ECrash — the lowering does not produce one yet (docs/m1a-lowering.md §L4)"
+          error "Generate.CoreJS: ECrash — only Debug.todo's is produced (docs/m1a-lowering.md §L4)"
         Core.ETyLam _ _ ->
           error "Generate.CoreJS: ETyLam — specialization is M1b (docs/m1a-lowering.md §L2)"
         Core.ETyApp _ _ ->

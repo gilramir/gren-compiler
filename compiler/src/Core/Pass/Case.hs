@@ -118,6 +118,7 @@ expr tbl (Core.Expr value ty sp) =
         Core.EVar _ -> pure (node value)
         Core.EGlobal _ -> pure (node value)
         Core.ELit _ -> pure (node value)
+        Core.ECrash (Core.Todo place message) -> node . Core.ECrash . Core.Todo place <$> expr tbl message
         Core.ECrash _ -> pure (node value)
         Core.ELam bs body -> node . Core.ELam bs <$> expr tbl body
         Core.EApp fn args -> node <$> (Core.EApp <$> expr tbl fn <*> traverse (expr tbl) args)

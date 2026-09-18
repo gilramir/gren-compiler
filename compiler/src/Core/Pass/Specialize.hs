@@ -622,6 +622,7 @@ childrenA f (Core.Expr value tipe sp) = rebuild <$> go value
         Core.EVar _ -> pure v
         Core.EGlobal _ -> pure v
         Core.ELit _ -> pure v
+        Core.ECrash (Core.Todo place message) -> Core.ECrash . Core.Todo place <$> f message
         Core.ECrash _ -> pure v
         Core.ELam bs body -> Core.ELam bs <$> f body
         Core.EApp fn args -> Core.EApp <$> f fn <*> traverse f args

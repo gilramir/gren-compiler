@@ -1020,7 +1020,9 @@ lowerExpr_ ty expr =
 crashText :: Core.CrashKind -> String
 crashText kind =
   case kind of
-    Core.Todo t -> Utf8.toChars t
+    -- The spike has no @String@ (@m1a-c-spike.md@), so a @Debug.todo@ reports
+    -- where it was and not its message, and the message is not evaluated.
+    Core.Todo place _ -> Utf8.toChars place
     Core.IncompleteMatch -> "incomplete match"
     Core.StackExhausted -> "stack exhausted"
     Core.Unreachable -> "unreachable"
