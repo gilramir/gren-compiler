@@ -19,7 +19,7 @@ spec = do
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
       -- someone noticing.
-      length allPrims `shouldBe` 170
+      length allPrims `shouldBe` 171
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -30,6 +30,12 @@ spec = do
         primCode (StrOp SIndexOf)
       )
         `shouldBe` (157, 158, 165, 117)
+
+    it "appends D345's primitive after every code that existed" $
+      -- `i32_clz` is the last code, and `i64_add` is where it would have gone
+      -- had the int group's comprehension taken it (m1b-extern.md §H18.7).
+      (primCode (IntOp I32 IClz), primCode (IntOp I64 IAdd), primName (IntOp I32 IClz))
+        `shouldBe` (170, 15, "i32_clz")
 
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved

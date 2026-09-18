@@ -127,6 +127,9 @@ int32 p args =
     (IShl, [a, b]) -> JS.Infix JS.OpLShift a b
     (IShr, [a, b]) -> JS.Infix JS.OpSpRShift a b
     (IUshr, [a, b]) -> coerce (JS.Infix JS.OpZfRShift a b)
+    -- An `Int` is already a 32-bit integer here, and `Math.clz32` reads its
+    -- two's complement bits, so a negative answers 0 as it should.
+    (IClz, [a]) -> JS.Call (global "Math" "clz32") [a]
     _ -> arityError (IntOp I32 p) args
 
 -- | A @UInt32@ is a JavaScript number in @[0, 2^32)@, and @>>> 0@ is the

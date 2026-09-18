@@ -92,6 +92,11 @@ data IntPrim
   | -- | Arithmetic right shift. Signed types only.
     IShr
   | IUshr
+  | -- | The number of leading zero bits, the width at zero. @i32@ only, and
+    -- __appended__ to 'allPrims' by D345 rather than given a code at every
+    -- width, because @Bitwise.countLeadingZeros@ at @Int@ is the one caller:
+    -- it was the last name in @Bitwise.js@ (@warts.md@ X21).
+    IClz
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | IEEE correctly rounded, which is exactly the set IEEE 754 requires to be
@@ -354,7 +359,7 @@ allPrims :: [PrimOp]
 allPrims =
   [ IntOp t p
   | t <- [minBound .. maxBound],
-    p <- [minBound .. maxBound],
+    p <- [minBound .. IUshr],
     p /= IShr || isSignedInt t
   ]
     ++ [FloatOp t p | t <- [minBound .. maxBound], p <- [minBound .. maxBound]]
@@ -373,6 +378,8 @@ allPrims =
     ++ [BytesOp BtSetBytes]
     -- Appended by D282 and D283 (m1b-source.md §SO22.9).
     ++ map TaskOp [TaskMap2 .. maxBound]
+    -- Appended by D345 (m1b-extern.md §H18.7).
+    ++ [IntOp I32 IClz]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -421,6 +428,7 @@ intPrimName p =
     IShl -> "shl"
     IShr -> "shr"
     IUshr -> "ushr"
+    IClz -> "clz"
 
 floatPrimName :: FloatPrim -> Text
 floatPrimName p =
@@ -586,6 +594,7 @@ primArity op =
       case p of
         INeg -> 1
         INot -> 1
+        IClz -> 1
         _ -> 2
     FloatOp _ p ->
       case p of

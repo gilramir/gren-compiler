@@ -112,6 +112,7 @@ intType w p =
     IShl -> shift w
     IShr -> shift w
     IUshr -> shift w
+    IClz -> unary w
 
 -- FLOATS
 
