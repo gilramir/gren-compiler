@@ -60,10 +60,10 @@ dev target details sources artifacts =
   do
     checkTarget target details artifacts
     kernels <- kernelChunks details
-    dumpCore details artifacts kernels
+    dumpCore target details artifacts kernels
     spikeC details artifacts
-    program <- linkCore details artifacts kernels
-    exts <- externFiles sources program
+    program <- linkCore target details artifacts kernels
+    exts <- externFiles target sources program
     return $ CoreJS.generate Mode.Dev program kernels exts
 
 -- | An @--optimize@ build: 'dev', with the field table filled in and @Debug@
@@ -74,9 +74,9 @@ prod target details sources artifacts =
     checkTarget target details artifacts
     checkForDebugUses artifacts
     kernels <- kernelChunks details
-    dumpCore details artifacts kernels
-    program <- linkCore details artifacts kernels
-    exts <- externFiles sources program
+    dumpCore target details artifacts kernels
+    program <- linkCore target details artifacts kernels
+    exts <- externFiles target sources program
     let mode = Mode.Prod (CoreJS.shortenFieldNames (Program._progFields program))
     return $ CoreJS.generate mode program kernels exts
 
@@ -257,11 +257,11 @@ kernelInfo chunks =
 -- This is the whole of what the emitter is handed besides the kernel chunks: one
 -- call to `Core.Program.link`, with the roots 'coreRoots' names and the kernel
 -- information 'kernelInfo' reads off those same chunks.
-linkCore :: Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Task Program.Program
-linkCore details artifacts kernels =
+linkCore :: Target.Target -> Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Task Program.Program
+linkCore target details artifacts kernels =
   Task.io $
     do
-      cores <- Program.chooseExterns Core.ExternJs Dump.externBodies <$> (programCore details artifacts >>= passed)
+      cores <- Program.chooseExterns (Target.language target) Dump.externBodies <$> (programCore details artifacts >>= passed)
       let program = Program.link (backendFor kernels cores) cores (coreRoots artifacts cores)
       reported program
       return (checked program)
@@ -347,15 +347,15 @@ coreRoots (Build.Artifacts pkg _ roots _) cores =
 -- "Compile"'s per-module dump so that the two are comparable as directories. The
 -- second is 'Core.Program.link''s summary: what the roots reach, in what order,
 -- and what they refer to that Core cannot supply yet.
-dumpCore :: Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Task ()
-dumpCore details artifacts kernels =
+dumpCore :: Target.Target -> Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Task ()
+dumpCore target details artifacts kernels =
   case (Dump.programDir, Dump.linkFile, Dump.primsFile) of
     (Nothing, Nothing, Nothing) -> return ()
     (maybeDir, maybeFile, maybePrims) ->
       Task.io $
         do
           modules <- programCore details artifacts
-          let cores = Program.chooseExterns Core.ExternJs Dump.externBodies modules
+          let cores = Program.chooseExterns (Target.language target) Dump.externBodies modules
           case maybeDir of
             Nothing -> return ()
             Just dir ->
@@ -450,7 +450,7 @@ repl details sources ansi artifacts@(Build.ReplArtifacts home _ localizer annota
   do
     kernels <- kernelChunks details
     program <- linkReplCore details artifacts name kernels
-    exts <- externFiles sources program
+    exts <- externFiles Target.Js sources program
     return $ CoreJS.generateForRepl ansi localizer program kernels exts home name (annotations ! name)
 
 -- | 'linkCore' for a REPL entry, which differs from a program in its roots.
@@ -471,7 +471,7 @@ linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels =
     checkReached Target.Js (Map.union own deps) (Map.keys own)
     Task.io $
       do
-        cores <- Program.chooseExterns Core.ExternJs Dump.externBodies <$> (throughWire (Map.union own deps) >>= passed)
+        cores <- Program.chooseExterns (Target.language Target.Js) Dump.externBodies <$> (throughWire (Map.union own deps) >>= passed)
         return (checked (Program.link (replBackend kernels cores home name) cores (replRoots home name)))
 
 replModuleCore :: Build.Module -> (ModuleName.Raw, Core.Module)
@@ -554,12 +554,17 @@ extSources outline sources deps =
 -- at all never gets here: 'checkTarget' has refused its module.
 -- A file that is there but lacks the function, or has it at another arity, is
 -- the load-time check F1's table gives JavaScript.
-externFiles :: ExtSources -> Program.Program -> Task (Map.Map (Pkg.Name, N.Name) BS.ByteString)
-externFiles sources program =
+--
+-- The rows are the target's language ('Target.language'), but the file is
+-- still JavaScript's, since @js@ is the only target 'checkReached' lets
+-- through; it moves behind the JavaScript backend with the rest (@m2-seam.md@
+-- §DS5).
+externFiles :: Target.Target -> ExtSources -> Program.Program -> Task (Map.Map (Pkg.Name, N.Name) BS.ByteString)
+externFiles target sources program =
   let wanted =
         [ ( home,
             Core._binderName (Core._externBinder e),
-            [modul | Core.ExternImpl Core.ExternJs (modul : _) <- Core._externImpls e]
+            [modul | Core.ExternImpl language (modul : _) <- Core._externImpls e, language == Target.language target]
           )
         | (home, e) <- Program._progExterns program
         ]

@@ -16,6 +16,7 @@ module Core.Target
     fromChars,
     everything,
     served,
+    language,
     declarationTargets,
     moduleTargets,
     packageTargets,
@@ -68,11 +69,22 @@ everything =
 -- | D77's table. @js@ serves @wasm@ as well, because a WasmGC module reaches
 -- its host through a JavaScript import object, which is the @src/Ext@ file.
 served :: Core.ExternLanguage -> Set Target
-served language =
-  case language of
+served lang =
+  case lang of
     Core.ExternJs -> Set.fromList [Js, Wasm]
     Core.ExternErlang -> Set.singleton Beam
     Core.ExternC -> Set.singleton Native
+
+-- | The language a target's backend reads externs in: the other way round from
+-- 'served', and a function because each target has one (@m2-seam.md@ §DS5).
+-- @wasm@ reads @js@ rows for the reason 'served' gives.
+language :: Target -> Core.ExternLanguage
+language target =
+  case target of
+    Beam -> Core.ExternErlang
+    Js -> Core.ExternJs
+    Native -> Core.ExternC
+    Wasm -> Core.ExternJs
 
 declarationTargets :: Core.Extern -> Set Target
 declarationTargets e
