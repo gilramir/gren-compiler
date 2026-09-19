@@ -115,18 +115,7 @@ depth :: Wit -> Int
 depth w =
   case w of
     Wit _ args -> 1 + maximum (0 : map depth args)
-    Built tipe _ -> typeDepth tipe
-
--- | How deep a type is, which is how deep a record's witness is: it is built
--- from one witness per field, and its type is what keys it.
-typeDepth :: Core.Type -> Int
-typeDepth tipe =
-  case tipe of
-    Core.TVar _ -> 1
-    Core.TCon _ args -> 1 + maximum (0 : map typeDepth args)
-    Core.TFun args result -> 1 + maximum (map typeDepth (result : args))
-    Core.TRecord fields _ -> 1 + maximum (0 : map (typeDepth . snd) fields)
-    Core.TForall _ _ body -> typeDepth body
+    Built _ _ -> 1
 
 -- THE PASS
 
@@ -247,11 +236,16 @@ witOf e =
         Core.EGlobal name -> Wit name <$> traverse witOf args
         _ -> Nothing
     Core.ERecord _
-      | Set.null (Refs.freeLocals e) ->
+      | Set.null (Refs.freeLocals e),
+        Set.null (typeVariables (Core.typeOf e)) ->
           -- A record's witness (§G38), built rather than named. Closed is the
           -- same test as for the other shapes and is asked the same way: a
           -- built witness whose own fields' witnesses are parameters mentions
           -- them, and then this waits for its caller like an 'Core.EVar'.
+          --
+          -- And its type has no variable in it (§G54.4, D355), since the type
+          -- is its key: a variable nothing fixed is one a callee's own
+          -- substitution can capture, and each capture is a new key.
           Just (Built (Core.typeOf e) e)
     _ -> Nothing
 
@@ -363,6 +357,17 @@ witType gens tys (Wit name args) =
                   Just actual <- [witType gens tys arg]
                 ]
         return (substituteT sub (unquantified declared))
+
+-- | The type variables a type mentions and does not bind, row variables
+-- included.
+typeVariables :: Core.Type -> Set Name
+typeVariables tipe =
+  case tipe of
+    Core.TVar n -> Set.singleton n
+    Core.TCon _ args -> Set.unions (map typeVariables args)
+    Core.TFun args result -> Set.unions (map typeVariables (result : args))
+    Core.TRecord fields row -> Set.unions (maybe Set.empty Set.singleton row : map (typeVariables . snd) fields)
+    Core.TForall vars _ body -> foldr Set.delete (typeVariables body) vars
 
 -- | A binding's type with its quantifier taken off, so that 'substituteT' can
 -- reach the variables the quantifier binds: an instance table applied to its
