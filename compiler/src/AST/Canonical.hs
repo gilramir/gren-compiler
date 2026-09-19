@@ -87,7 +87,6 @@ import Data.Name (Name)
 import Data.Name qualified as Name
 import Gren.Float qualified as EF
 import Gren.ModuleName qualified as ModuleName
-import Gren.Number qualified as GN
 import Gren.String qualified as ES
 import Reporting.Annotation qualified as A
 
@@ -180,8 +179,8 @@ data Expr_
   | VarOperator Name ModuleName.Canonical Name Annotation -- CACHE real name for optimization
   | Chr ES.String
   | Str ES.String
-  | Int Integer (Maybe GN.Suffix)
-  | Float EF.Float (Maybe GN.Suffix)
+  | Int Integer
+  | Float EF.Float
   | Array [Expr]
   | Negate Expr
   | -- | @(e : T)@ (D358, @docs\/expr-annotation.md@ §EA8). The annotation's
@@ -249,7 +248,7 @@ data Pattern_
   | PBool Union Bool
   | PChr ES.String
   | PStr ES.String
-  | PInt Integer (Maybe GN.Suffix)
+  | PInt Integer
   | PCtor
       { _p_home :: ModuleName.Canonical,
         _p_type :: Name,

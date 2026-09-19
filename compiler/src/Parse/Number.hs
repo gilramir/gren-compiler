@@ -33,30 +33,33 @@ isDecimalDigit :: Word8 -> Bool
 isDecimalDigit word =
   word <= 0x39 {-9-} && word >= 0x30 {-0-}
 
--- SUFFIXES
+-- RETIRED SUFFIXES
 
--- | Read an optional suffix, and then insist the literal ends cleanly.
+-- | Insist the literal ends cleanly, and name the annotation when what ends it
+-- is one of the retired suffixes.
 --
--- The suffix is the only place letters may appear inside a numeric literal, so
--- this is where 'isDirtyEnd' asks its question: after a suffix when one is
--- there, and at the character that ended the digits when it
--- is not. Every exit from a number goes through here, which is what makes
--- @1.5e10f32@ one token — 'chompExponentHelp' used to be the one exit with no
--- end check at all, so the Haskell parser read it as an application and the
--- second parser refused the file (@docs\/m1b-int.md@ §I17.1, D86).
-endOfNumber :: Ptr Word8 -> Ptr Word8 -> (Ptr Word8 -> Maybe GN.Suffix -> Outcome) -> Outcome
+-- A number takes its type from context or from @(42 : Int64)@ (D358), and the
+-- suffix that did the same job is gone (D359, @docs\/expr-annotation.md@
+-- §EA12). A letter after the digits was always refused by 'isDirtyEnd', so
+-- @42i64@ needs no rule to be an error; it is recognized here only so that the
+-- error can say what to write instead. Anything after the suffix, as in
+-- @42i640@, is the ordinary weird number, since that was never a suffix.
+-- Every exit from a number goes through here (§I17.1, D86).
+endOfNumber :: Ptr Word8 -> Ptr Word8 -> (Ptr Word8 -> Outcome) -> Outcome
 endOfNumber pos end ok =
   case chompSuffix pos end of
-    Just (suffix, suffixEnd) -> cleanly suffixEnd (Just suffix)
-    Nothing -> cleanly pos Nothing
+    Just (suffix, suffixEnd)
+      | not (dirty suffixEnd) -> Suffixed pos suffix
+      | otherwise -> Err suffixEnd E.NumberEnd
+    Nothing
+      | dirty pos -> Err pos E.NumberEnd
+      | otherwise -> ok pos
   where
-    cleanly newPos suffix =
-      if newPos < end && isDirtyEnd newPos end (P.unsafeIndex newPos)
-        then Err newPos E.NumberEnd
-        else ok newPos suffix
+    dirty p =
+      p < end && isDirtyEnd p end (P.unsafeIndex p)
 
--- | The eight suffixes: D2's four and D342's @i16@ and @u16@ three bytes
--- wide, and D342's @i8@ and @u8@ two.
+-- | The eight retired suffixes: D2's four and D342's @i16@ and @u16@ three
+-- bytes wide, and D342's @i8@ and @u8@ two.
 --
 -- No suffix is a prefix of another, so the order the two widths are tried in
 -- decides nothing (@docs\/m1b-narrow-int.md@ §NI2.5).
@@ -97,12 +100,11 @@ chompSuffix2 pos end =
             (0x75 {-u-}, 0x38 {-8-}) -> Just (GN.U8, after)
             _ -> Nothing
 
--- | Whether a hex literal's digits are followed by a suffix.
+-- | Whether a hex literal's digits are followed by a retired suffix, so that
+-- @0xFFu8@ is refused by naming @(0xFF : UInt8)@ rather than as a bad digit.
 --
--- All but one, because __@f32@ is not a hex suffix__: @f@, @3@ and @2@
--- are all hex digits, so @0xFFf32@ is the number @0xFFF32@ and there is no
--- spelling that could mean otherwise. A @Float32@ built from a bit pattern is
--- @f32_from_bits@\'s job (C13), not a literal\'s.
+-- All but one, because __@f32@ was never a hex suffix__: @f@, @3@ and @2@
+-- are all hex digits, so @0xFFf32@ is the number @0xFFF32@.
 isHexSuffix :: Ptr Word8 -> Ptr Word8 -> Bool
 isHexSuffix pos end =
   case chompSuffix pos end of
@@ -113,8 +115,8 @@ isHexSuffix pos end =
 -- NUMBERS
 
 data Number
-  = Int Integer GI.IntFormat (Maybe GN.Suffix)
-  | Float EF.Float (Maybe GN.Suffix)
+  = Int Integer GI.IntFormat
+  | Float EF.Float
 
 number :: (Row -> Col -> x) -> (E.Number -> Row -> Col -> x) -> Parser x Number
 number toExpectation toError =
@@ -134,15 +136,19 @@ number toExpectation toError =
                       Err newPos problem ->
                         let !newCol = col + fromIntegral (minusPtr newPos pos)
                          in cerr row newCol (toError problem)
-                      OkInt newPos intFormat suffix n ->
+                      Suffixed suffixPos suffix ->
+                        let !newCol = col + fromIntegral (minusPtr suffixPos pos)
+                            !written = map (toEnum . fromIntegral . P.unsafeIndex . plusPtr pos) [0 .. minusPtr suffixPos pos - 1]
+                         in cerr row newCol (toError (E.NumberSuffix suffix written))
+                      OkInt newPos intFormat n ->
                         let !newCol = col + fromIntegral (minusPtr newPos pos)
-                            !integer = Int n intFormat suffix
+                            !integer = Int n intFormat
                             !newState = P.State src newPos end indent row newCol
                          in cok integer newState
-                      OkFloat newPos digitsEnd suffix ->
+                      OkFloat newPos ->
                         let !newCol = col + fromIntegral (minusPtr newPos pos)
-                            !copy = EF.fromPtr pos digitsEnd
-                            !float = Float copy suffix
+                            !copy = EF.fromPtr pos newPos
+                            !float = Float copy
                             !newState = P.State src newPos end indent row newCol
                          in cok float newState
 
@@ -151,20 +157,21 @@ number toExpectation toError =
 -- first Int is newPos
 --
 
--- | @OkFloat@ carries two positions: where the /digits/ stopped and where the
--- literal did. "Gren.Float" holds the digits as written and must not see the
--- suffix, so @1.5f32@ answers the text @1.5@ and 'GN.F32'.
+-- | @Suffixed@ is a refusal, like @Err@, that carries where the suffix starts
+-- rather than a finished problem: the problem quotes the digits in front of
+-- the suffix, and only 'number' knows where they began.
 data Outcome
   = Err (Ptr Word8) E.Number
-  | OkInt (Ptr Word8) GI.IntFormat (Maybe GN.Suffix) Integer
-  | OkFloat (Ptr Word8) (Ptr Word8) (Maybe GN.Suffix)
+  | Suffixed (Ptr Word8) GN.Suffix
+  | OkInt (Ptr Word8) GI.IntFormat Integer
+  | OkFloat (Ptr Word8)
 
 -- CHOMP INT
 
 chompInt :: Ptr Word8 -> Ptr Word8 -> Integer -> Outcome
 chompInt !pos end !n =
   if pos >= end
-    then OkInt pos GI.DecimalInt Nothing n
+    then OkInt pos GI.DecimalInt n
     else
       let !word = P.unsafeIndex pos
        in if isDecimalDigit word
@@ -175,7 +182,7 @@ chompInt !pos end !n =
                 else
                   if word == 0x65 {-e-} || word == 0x45 {-E-}
                     then chompExponent (plusPtr pos 1) end
-                    else endOfNumber pos end (\newPos suffix -> OkInt newPos GI.DecimalInt suffix n)
+                    else endOfNumber pos end (\newPos -> OkInt newPos GI.DecimalInt n)
 
 -- CHOMP FRACTION
 
@@ -192,7 +199,7 @@ chompFraction pos end n =
 chompFractionHelp :: Ptr Word8 -> Ptr Word8 -> Outcome
 chompFractionHelp pos end =
   if pos >= end
-    then OkFloat pos pos Nothing
+    then OkFloat pos
     else
       let !word = P.unsafeIndex pos
        in if isDecimalDigit word
@@ -200,7 +207,7 @@ chompFractionHelp pos end =
             else
               if word == 0x65 {-e-} || word == 0x45 {-E-}
                 then chompExponent (plusPtr pos 1) end
-                else endOfNumber pos end (\newPos suffix -> OkFloat newPos pos suffix)
+                else endOfNumber pos end OkFloat
 
 -- CHOMP EXPONENT
 
@@ -224,18 +231,18 @@ chompExponent pos end =
 chompExponentHelp :: Ptr Word8 -> Ptr Word8 -> Outcome
 chompExponentHelp pos end =
   if pos >= end
-    then OkFloat pos pos Nothing
+    then OkFloat pos
     else
       if isDecimalDigit (P.unsafeIndex pos)
         then chompExponentHelp (plusPtr pos 1) end
-        else endOfNumber pos end (\newPos suffix -> OkFloat newPos pos suffix)
+        else endOfNumber pos end OkFloat
 
 -- CHOMP ZERO
 
 chompZero :: Ptr Word8 -> Ptr Word8 -> Outcome
 chompZero pos end =
   if pos >= end
-    then OkInt pos GI.DecimalInt Nothing 0
+    then OkInt pos GI.DecimalInt 0
     else
       let !word = P.unsafeIndex pos
        in if word == 0x78 {-x-}
@@ -246,14 +253,14 @@ chompZero pos end =
                 else
                   if isDecimalDigit word
                     then Err pos E.NumberNoLeadingZero
-                    else endOfNumber pos end (\newPos suffix -> OkInt newPos GI.DecimalInt suffix 0)
+                    else endOfNumber pos end (\newPos -> OkInt newPos GI.DecimalInt 0)
 
 chompHexInt :: Ptr Word8 -> Ptr Word8 -> Outcome
 chompHexInt pos end =
   let (# newPos, answer #) = chompHex pos end
    in if answer < 0
         then Err newPos E.NumberHexDigit
-        else endOfNumber newPos end (\afterSuffix suffix -> OkInt afterSuffix GI.HexInt suffix answer)
+        else endOfNumber newPos end (\afterDigits -> OkInt afterDigits GI.HexInt answer)
 
 -- CHOMP HEX
 

@@ -163,7 +163,7 @@ flatten pathPattern@(path, A.At region pattern) otherPathPatterns =
       pathPattern : otherPathPatterns
     Can.PStr _ ->
       pathPattern : otherPathPatterns
-    Can.PInt _ _ ->
+    Can.PInt _ ->
       pathPattern : otherPathPatterns
     Can.PBool _ _ ->
       pathPattern : otherPathPatterns
@@ -250,7 +250,7 @@ testAtPath selectedPath (Branch _ pathPatterns) =
           Nothing
         Can.PAnything ->
           Nothing
-        Can.PInt int _ ->
+        Can.PInt int ->
           Just (IsInt int)
         Can.PStr str ->
           Just (IsStr str)
@@ -314,7 +314,7 @@ toRelevantBranch test path branch@(Branch goal pathPatterns) =
                   Just (Branch goal (start ++ end))
             _ ->
               Nothing
-        Can.PInt int _ ->
+        Can.PInt int ->
           case test of
             IsInt testInt
               | int == testInt ->
@@ -375,7 +375,7 @@ needsTests (A.At _ pattern) =
     Can.PRecord _ -> True
     Can.PChr _ -> True
     Can.PStr _ -> True
-    Can.PInt _ _ -> True
+    Can.PInt _ -> True
     Can.PBool _ _ -> True
     Can.PAlias _ _ ->
       error "aliases should never reach 'isIrrelevantTo' function"

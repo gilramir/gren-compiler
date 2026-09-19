@@ -8,6 +8,7 @@ import Gren.Int qualified as GI
 import Gren.Number qualified as GN
 import Parse.Number qualified as Number
 import Parse.Primitives qualified as P
+import Reporting.Error.Syntax qualified as E
 import Test.Hspec (Spec, describe, it, shouldBe)
 
 -- | What a numeric literal is carried as.
@@ -21,70 +22,61 @@ spec :: Spec
 spec = do
   describe "an integer literal" $ do
     it "is exact at the largest machine Int, which is where the old carrier stopped" $
-      lit "9223372036854775807" `shouldBe` Right (I 9223372036854775807 GI.DecimalInt Nothing)
+      lit "9223372036854775807" `shouldBe` Right (I 9223372036854775807 GI.DecimalInt)
 
     it "is exact one past it, which the old carrier could not represent at all" $
-      lit "9223372036854775808" `shouldBe` Right (I 9223372036854775808 GI.DecimalInt Nothing)
+      lit "9223372036854775808" `shouldBe` Right (I 9223372036854775808 GI.DecimalInt)
 
     it "reaches UInt64.maxValue" $
-      lit "18446744073709551615" `shouldBe` Right (I 18446744073709551615 GI.DecimalInt Nothing)
+      lit "18446744073709551615" `shouldBe` Right (I 18446744073709551615 GI.DecimalInt)
 
     it "does not stop there, because the range check is the frontend's job and not the parser's" $
-      lit "99999999999999999999999999" `shouldBe` Right (I 99999999999999999999999999 GI.DecimalInt Nothing)
+      lit "99999999999999999999999999" `shouldBe` Right (I 99999999999999999999999999 GI.DecimalInt)
 
     it "is still exact at the small values everything else is made of" $
-      lit "42" `shouldBe` Right (I 42 GI.DecimalInt Nothing)
+      lit "42" `shouldBe` Right (I 42 GI.DecimalInt)
 
     it "is zero when it is zero" $
-      lit "0" `shouldBe` Right (I 0 GI.DecimalInt Nothing)
+      lit "0" `shouldBe` Right (I 0 GI.DecimalInt)
 
   describe "a hex literal" $ do
     it "reaches UInt64.maxValue, which is 16 digits of f" $
-      lit "0xFFFFFFFFFFFFFFFF" `shouldBe` Right (I 18446744073709551615 GI.HexInt Nothing)
+      lit "0xFFFFFFFFFFFFFFFF" `shouldBe` Right (I 18446744073709551615 GI.HexInt)
 
     it "is exact at 2^63, the value a signed 64-bit accumulator overflows on" $
-      lit "0x8000000000000000" `shouldBe` Right (I 9223372036854775808 GI.HexInt Nothing)
+      lit "0x8000000000000000" `shouldBe` Right (I 9223372036854775808 GI.HexInt)
 
     it "reads the same number from either case of digit" $
       lit "0xabcdef" `shouldBe` lit "0xABCDEF"
 
   describe "a float literal" $ do
     it "is carried as its text, which is why no widening was needed on this side" $
-      lit "9223372036854775808.0" `shouldBe` Right (F "9223372036854775808.0" Nothing)
+      lit "9223372036854775808.0" `shouldBe` Right (F "9223372036854775808.0")
 
     it "keeps an exponent as written" $
-      lit "1.5e300" `shouldBe` Right (F "1.5e300" Nothing)
+      lit "1.5e300" `shouldBe` Right (F "1.5e300")
 
-  describe "a suffix" $ do
-    it "pins a decimal integer's width" $
-      lit "42i64" `shouldBe` Right (I 42 GI.DecimalInt (Just GN.I64))
+  -- D359 retired the suffix for `(42 : Int64)` (docs/expr-annotation.md
+  -- §EA12). The parser still recognizes one, so the error can name the
+  -- annotation to write instead, and these pin which problem it reports.
+  describe "a retired suffix" $ do
+    it "is refused, naming the digits written in front of it" $
+      lit "42i64" `shouldBe` Left (Suffix GN.I64 "42")
 
-    it "is read at each of the three integer widths" $ do
-      lit "42u32" `shouldBe` Right (I 42 GI.DecimalInt (Just GN.U32))
-      lit "42u64" `shouldBe` Right (I 42 GI.DecimalInt (Just GN.U64))
+    it "is refused at each of the eight widths" $
+      map (fmap (const ()) . lit) ["42u32", "42u64", "1.5f32", "42i8", "42u8", "42i16", "42u16"]
+        `shouldBe` map Left [Suffix GN.U32 "42", Suffix GN.U64 "42", Suffix GN.F32 "1.5", Suffix GN.I8 "42", Suffix GN.U8 "42", Suffix GN.I16 "42", Suffix GN.U16 "42"]
 
-    it "attaches to a hex literal, because a hex literal is a bit pattern" $
-      lit "0xFFu32" `shouldBe` Right (I 255 GI.HexInt (Just GN.U32))
+    it "is refused on a hex literal, quoting the hex digits" $
+      lit "0xFFu32" `shouldBe` Left (Suffix GN.U32 "0xFF")
 
-    it "attaches to a zero" $
-      lit "0u64" `shouldBe` Right (I 0 GI.DecimalInt (Just GN.U64))
+    it "is refused after an exponent, which used to be read as an application" $
+      lit "1.5e10f32" `shouldBe` Left (Suffix GN.F32 "1.5e10")
 
-    it "attaches to a float and is kept out of its digits" $
-      lit "1.5f32" `shouldBe` Right (F "1.5" (Just GN.F32))
+    it "is only the weird number when something follows it, since that was never a suffix" $
+      lit "42i640" `shouldBe` Left Weird
 
-    it "attaches to an integer literal, which is how `42 : Float` has always typed" $
-      lit "42f32" `shouldBe` Right (I 42 GI.DecimalInt (Just GN.F32))
-
-    it "does not have to agree with the literal's shape, because the type checker says that" $
-      lit "1.5i64" `shouldBe` Right (F "1.5" (Just GN.I64))
-
-    -- The row §I17.1 measured: `chompExponentHelp` was the one exit with no
-    -- end-of-number check, so this used to be `1.5e10` applied to a variable
-    -- named `f32` while the second parser refused the file (D86).
-    it "attaches after an exponent, which used to be read as an application" $
-      lit "1.5e10f32" `shouldBe` Right (F "1.5e10" (Just GN.F32))
-
-    it "is not `f32` on a hex literal, because f, 3 and 2 are hex digits" $
+    it "was never `f32` on a hex literal, because f, 3 and 2 are hex digits" $
       lit "0xFFf32" `shouldBe` lit "0xFFF32"
 
   describe "what is not a number" $ do
@@ -94,11 +86,8 @@ spec = do
     it "rejects a leading zero" $
       isError (lit "01") `shouldBe` True
 
-    it "rejects a suffix that is not one of the four" $
-      isError (lit "42i32") `shouldBe` True
-
-    it "rejects anything after a suffix" $
-      isError (lit "42i64x") `shouldBe` True
+    it "rejects a suffix that was never one of the eight" $
+      lit "42i32" `shouldBe` Left Weird
 
     it "rejects a letter after an exponent, which it did not before" $
       isError (lit "1.5e10x") `shouldBe` True
@@ -108,34 +97,49 @@ spec = do
 -- 'Number.Number' has no `Eq`, and the value half of it is what these tests are
 -- about, so it is unpacked here rather than given an orphan instance.
 data Lit
-  = I Integer GI.IntFormat (Maybe GN.Suffix)
-  | F String (Maybe GN.Suffix)
+  = I Integer GI.IntFormat
+  | F String
   deriving (Show)
 
 instance Eq Lit where
-  I a fa sa == I b fb sb = a == b && sameFormat fa fb && sa == sb
-  F a sa == F b sb = a == b && sa == sb
+  I a fa == I b fb = a == b && sameFormat fa fb
+  F a == F b = a == b
   _ == _ = False
+
+-- | Which problem a refused literal reported: the retired suffix, with the
+-- digits the hint quotes, or anything else.
+data Refusal
+  = Suffix GN.Suffix String
+  | Weird
+  | Other
+  deriving (Eq, Show)
+
+refusal :: E.Number -> Refusal
+refusal problem =
+  case problem of
+    E.NumberSuffix suffix written -> Suffix suffix written
+    E.NumberEnd -> Weird
+    _ -> Other
 
 sameFormat :: GI.IntFormat -> GI.IntFormat -> Bool
 sameFormat a b = show a == show b
 
-isError :: Either e a -> Bool
+isError :: Either Refusal a -> Bool
 isError result =
   case result of
     Left _ -> True
     Right _ -> False
 
-lit :: String -> Either (P.Row, P.Col) Lit
+lit :: String -> Either Refusal Lit
 lit str =
   case P.fromByteString
-    (Number.number (\row col -> (row, col)) (\_ row col -> (row, col)))
-    (\row col -> (row, col))
+    (Number.number (\_ _ -> Other) (\problem _ _ -> refusal problem))
+    (\_ _ -> Other)
     (Utf8.fromString str) of
     Left err ->
       Left err
     Right number ->
       Right $
         case number of
-          Number.Int value format suffix -> I value format suffix
-          Number.Float text suffix -> F (DUtf8.toChars text) suffix
+          Number.Int value format -> I value format
+          Number.Float text -> F (DUtf8.toChars text)

@@ -63,7 +63,7 @@ simplify (A.At _ pattern) =
       Array $ map simplify entries
     Can.PAlias subPattern _ ->
       simplify subPattern
-    Can.PInt int _ ->
+    Can.PInt int ->
       Literal (Int int)
     Can.PStr str ->
       Literal (Str str)
@@ -156,9 +156,9 @@ checkExpr (Can.Expr _ region expression) errors =
       errors
     Can.Str _ ->
       errors
-    Can.Int _ _ ->
+    Can.Int _ ->
       errors
-    Can.Float _ _ ->
+    Can.Float _ ->
       errors
     Can.Array entries ->
       foldr checkExpr errors entries

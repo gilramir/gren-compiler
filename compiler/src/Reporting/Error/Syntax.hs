@@ -51,6 +51,7 @@ import Data.Char qualified as Char
 import Data.Name qualified as Name
 import Data.Word (Word16)
 import Gren.ModuleName qualified as ModuleName
+import Gren.Number qualified as GN
 import Numeric (showHex)
 import Parse.Primitives (Col, Row)
 import Parse.Symbol (BadOperator (..))
@@ -510,6 +511,8 @@ data Number
   | NumberDot Integer
   | NumberHexDigit
   | NumberNoLeadingZero
+  | -- | @42i64@: a retired suffix (D359), and the digits written in front of it.
+    NumberSuffix GN.Suffix [Char.Char]
   deriving (Show)
 
 data WildCard
@@ -3207,6 +3210,25 @@ toNumberReport source number row col =
                       "Valid hexidecimal digits include 0123456789abcdefABCDEF, so I can\
                       \ only recognize things like this:",
                     D.indent 4 $ D.vcat ["0x2B", "0x002B", "0x00ffb3"]
+                  ]
+              )
+        NumberSuffix suffix written ->
+          Report.Report "NUMBER SUFFIX" region [] $
+            Code.toSnippet
+              source
+              region
+              Nothing
+              ( D.reflow $
+                  "A number does not say its type with a suffix any more:",
+                D.stack
+                  [ D.reflow $
+                      "Write the type as an annotation on the number instead:",
+                    D.indent 4 $
+                      D.green $
+                        D.fromChars ("(" ++ written ++ " : " ++ Name.toChars (GN.typeName suffix) ++ ")"),
+                    D.reflow $
+                      "In a pattern, leave the suffix off: a literal pattern takes its type\
+                      \ from the value it is matched against."
                   ]
               )
         NumberNoLeadingZero ->

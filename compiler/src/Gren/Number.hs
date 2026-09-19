@@ -1,18 +1,12 @@
 {-# OPTIONS_GHC -Wall #-}
 
--- | The suffix a numeric literal may carry (@syntax.md@ S5, D63).
+-- | The suffixes a numeric literal used to carry, which the parser now
+-- recognizes only to refuse (D359, @docs\/expr-annotation.md@ §EA12).
 --
--- @42i64@, @42u32@, @42u64@ and @1.5f32@ are D2's four spellings, and
--- @42i8@, @42u8@, @42i16@ and @42u16@ are D342's. The suffix is
--- a __type ascription written on the literal__ (D154): it says which of D2's
--- types the literal has, and it is accepted wherever the corresponding
--- annotation would be. So @42f32@ is a @Float32@ for the same reason
--- @42 : Float@ has always typed, and @1.5i64@ parses and is then the ordinary
--- TYPE MISMATCH that @1.5 : Int64@ is — the /grammar/ does not distinguish
--- them, which is what keeps D86's two parsers describing one language.
---
--- @Int@ and @Float@ have no suffix: S5 says their literals stay bare, so there
--- is no @i32@ and no @f64@.
+-- @42i64@, @42u32@, @42u64@ and @1.5f32@ were D2's four spellings, and
+-- @42i8@, @42u8@, @42i16@ and @42u16@ D342's. Each was a type ascription
+-- written on the literal (D154), and @(42 : Int64)@ (D358) says the same thing
+-- anywhere, so what is left of them is the error that names the annotation.
 module Gren.Number
   ( Suffix (..),
     toChars,

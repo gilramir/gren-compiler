@@ -59,8 +59,8 @@ number start =
     nmbr <- Number.number E.Start E.Number
     addEnd start $
       case nmbr of
-        Number.Int int intFormat suffix -> Src.Int int intFormat suffix
-        Number.Float float suffix -> Src.Float float suffix
+        Number.Int int intFormat -> Src.Int int intFormat
+        Number.Float float -> Src.Float float
 
 parenthesizedExpr :: A.Position -> Parser E.Expr Src.Expr
 parenthesizedExpr start@(A.Position row col) =

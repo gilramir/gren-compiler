@@ -65,9 +65,9 @@ termHelp start =
         number <- Number.number E.PStart E.PNumber
         end <- getPosition
         case number of
-          Number.Int int intFormat suffix ->
-            return (A.at start end (Src.PInt int intFormat suffix))
-          Number.Float float _ ->
+          Number.Int int intFormat ->
+            return (A.at start end (Src.PInt int intFormat))
+          Number.Float float ->
             P.Parser $ \(P.State _ _ _ _ row col) _ _ cerr _ ->
               let width = fromIntegral (Utf8.size float)
                in cerr row (col - width) (E.PFloat width),

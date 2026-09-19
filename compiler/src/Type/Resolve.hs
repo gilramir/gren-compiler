@@ -859,12 +859,12 @@ expr env tops scope (Can.Expr nid region value) =
                 methodUse env scope nid region cls param name annotation actual
             go left
             go right
-        Can.Int _ _ ->
+        Can.Int _ ->
           literal env scope nid region Name.num Name.fromInt Name.int (typeOf env nid)
-        Can.Float _ _ ->
+        Can.Float _ ->
           literal env scope nid region Name.fractional Name.fromFloat Name.float (typeOf env nid)
         Can.Array items -> mapM_ go items
-        Can.Negate (Can.Expr _ _ (Can.Int _ _))
+        Can.Negate (Can.Expr _ _ (Can.Int _))
           | isVariable (typeOf env nid) ->
               -- `-1` is one literal (`Core.Lower.Expression` folds it, §I20),
               -- so at a variable it is one `fromInt` of a negative number and

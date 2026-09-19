@@ -88,8 +88,8 @@ recordDefType nid tipe constraint =
 foldNegation :: Can.Expr -> Can.Expr
 foldNegation expr =
   case expr of
-    Can.Expr nid litRegion (Can.Int value suffix) ->
-      Can.Expr nid litRegion (Can.Int (negate value) suffix)
+    Can.Expr nid litRegion (Can.Int value) ->
+      Can.Expr nid litRegion (Can.Int (negate value))
     _ ->
       expr
 
@@ -139,16 +139,11 @@ constrainHelp rtv _nid region expression expected =
       return $ CEqual region String Type.string expected
     Can.Chr _ ->
       return $ CEqual region Char Type.char expected
-    Can.Int value (Just suffix) ->
-      let tipe = Type.suffixed suffix
-       in return $ CAnd [CEqual region E.Number tipe expected, CLiteral InExpression region value tipe]
-    Can.Int value Nothing ->
+    Can.Int value ->
       do
         var <- mkFlexNumber
         return $ exists [var] $ CAnd [CEqual region E.Number (VarN var) expected, CLiteral InExpression region value (VarN var)]
-    Can.Float _ (Just suffix) ->
-      return $ CEqual region Float (Type.suffixed suffix) expected
-    Can.Float _ Nothing ->
+    Can.Float _ ->
       do
         var <- mkFlexFractional
         return $ exists [var] $ CEqual region Float (VarN var) expected

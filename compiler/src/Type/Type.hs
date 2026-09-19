@@ -18,7 +18,6 @@ module Type.Type
     (==>),
     int,
     float,
-    suffixed,
     numericName,
     char,
     string,
@@ -48,7 +47,6 @@ import Data.Map.Strict qualified as Map
 import Data.Name qualified as Name
 import Data.Word (Word32)
 import Gren.ModuleName qualified as ModuleName
-import Gren.Number qualified as GN
 import Reporting.Annotation qualified as A
 import Reporting.Error.Type qualified as E
 import Type.Class qualified as Class
@@ -221,15 +219,6 @@ numericName tipe =
           Alias _ _ _ real -> numericName (VarN real)
           _ -> return Nothing
     _ -> return Nothing
-
--- | The type a literal's suffix names (@syntax.md@ S5, D154).
---
--- A suffixed literal is monomorphic: it constrains against this type outright
--- where a bare one makes a @Num@ or @Fractional@ variable. @classes.md@ §0's
--- "exempt from defaulting" needs no code because of that — 'Type.Solve' defaults
--- a /variable/ carrying classes, and there is no variable here to default.
-suffixed :: GN.Suffix -> Type
-suffixed suffix = AppN ModuleName.basics (GN.typeName suffix) []
 
 char :: Type
 char = AppN ModuleName.char "Char" []
