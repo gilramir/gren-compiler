@@ -35,6 +35,7 @@ module Core.Dump
     linkEveryExport,
     corePasses,
     specializeStrict,
+    specializeReport,
     externBodies,
     spikeFile,
     spikeRoot,
@@ -132,6 +133,19 @@ specializeStrict :: Bool
 specializeStrict =
   unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_SPECIALIZE_STRICT")
 {-# NOINLINE specializeStrict #-}
+
+-- | @GENG_SPECIALIZE_REPORT@: a file, like @GENG_DUMP_LINK@'s, where @Generate@
+-- writes the reachable bindings that still carry a witness or type-abstraction
+-- node, one per line and sorted, and then builds as usual.
+--
+-- It is 'specializeStrict' as a measurement rather than a refusal, for a
+-- program that has to run whatever the answer is: @harness/suites.py@ holds
+-- each suite's list to the one recorded for it (§G54.6, D356), where strict
+-- mode would refuse a suite the pass gives up on for a registered reason.
+specializeReport :: Maybe FilePath
+specializeReport =
+  unsafePerformIO (Env.lookupEnv "GENG_SPECIALIZE_REPORT")
+{-# NOINLINE specializeReport #-}
 
 -- | @GENG_EXTERN_BODIES=1@: every extern with a Geng body is compiled as its
 -- body, even where the backend has an implementation for it (D225,

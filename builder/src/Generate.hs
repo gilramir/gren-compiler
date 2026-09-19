@@ -19,6 +19,7 @@ import Core.Target qualified as Target
 import Core.Wire qualified as Wire
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as B
+import Data.List qualified as List
 import Data.Map ((!))
 import Data.Map qualified as Map
 import Data.Maybe qualified as Maybe
@@ -261,7 +262,18 @@ linkCore details artifacts kernels =
   Task.io $
     do
       cores <- Program.chooseExterns Core.ExternJs Dump.externBodies <$> (programCore details artifacts >>= passed)
-      return (checked (Program.link (backendFor kernels cores) cores (coreRoots artifacts cores)))
+      let program = Program.link (backendFor kernels cores) cores (coreRoots artifacts cores)
+      reported program
+      return (checked program)
+
+-- | @GENG_SPECIALIZE_REPORT@: the same question 'checked' asks, written down
+-- instead of refused.
+reported :: Program.Program -> IO ()
+reported program =
+  case Dump.specializeReport of
+    Nothing -> return ()
+    Just file ->
+      writeFile file (unlines (List.sort (map Program.qualToChars (Program.unspecialized program))))
 
 -- | @GENG_SPECIALIZE_STRICT=1@: the linked program carries no witness node.
 --
