@@ -272,7 +272,7 @@ parser =
                             }
                         )
                         |> Cli.Parser.toggle "describe" "Print what each file declares, with every type name resolved, one declaration a line, and generate nothing."
-                        |> Cli.Parser.flag "proto-path" Cli.Parser.pathParser "The directory each file's module name is taken from, as protoc's --proto_path is: schema/geng/core/v6.proto below schema is the module Geng.Core.V6. The current directory when it is not given."
+                        |> Cli.Parser.flag "proto-path" Cli.Parser.pathParser "The directory each file's module name is taken from, as protoc's --proto_path is: schema/geng/core/v7.proto below schema is the module Geng.Core.V7. The current directory when it is not given."
                         |> Cli.Parser.flag "output" Cli.Parser.pathParser "The directory to write the modules into, each at the path its module name gives it."
                 , commonDescription = Nothing
                 , summary =

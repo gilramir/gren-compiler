@@ -136,6 +136,7 @@ Library common
         Core.Pretty
         Core.Refs
         Core.Target
+        Core.Whole
         Core.Wire
         Core.Wire.Decode
         Core.Wire.Encode

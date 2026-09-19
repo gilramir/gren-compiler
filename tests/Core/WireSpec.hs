@@ -26,6 +26,8 @@ module Core.WireSpec where
 
 import Core.AST
 import Core.Prim qualified as Prim
+import Core.Target qualified as Target
+import Core.Whole qualified as Whole
 import Core.Wire qualified as Wire
 import Data.ByteString qualified as BS
 import Data.List qualified as List
@@ -40,12 +42,33 @@ import Test.Hspec
 spec :: Spec
 spec = do
   describe "the file" $ do
-    it "starts with the magic and the schema version" $
-      -- The literal 6 is deliberate (D336). A version bump is meant to be a visible
-      -- event, and this failing is what one looks like.
+    it "starts with the magic, the schema version and the kind" $
+      -- The literals 7 and 0 are deliberate (D336, D379). A version bump is meant
+      -- to be a visible event, and this failing is what one looks like; the kind
+      -- says the file holds a module.
       case Wire.encode (moduleWith []) of
         Left problems -> expectationFailure (unwords problems)
-        Right bytes -> BS.take 9 bytes `shouldBe` Wire.magic <> BS.singleton 6
+        Right bytes -> BS.take 10 bytes `shouldBe` Wire.magic <> BS.pack [7, 0]
+
+    it "says a program file holds a program" $
+      case Wire.encodeProgram someProgram of
+        Left problems -> expectationFailure (unwords problems)
+        Right bytes -> BS.take 10 bytes `shouldBe` Wire.magic <> BS.pack [7, 1]
+
+    it "round-trips a program (D378)" $
+      case Wire.encodeProgram someProgram of
+        Left problems -> expectationFailure (unwords problems)
+        Right bytes -> Wire.decodeProgram bytes `shouldBe` Right someProgram
+
+    it "refuses a module file to a reader that wants a program" $
+      case Wire.encode (moduleWith []) of
+        Left problems -> expectationFailure (unwords problems)
+        Right bytes -> isLeft (Wire.decodeProgram bytes) `shouldBe` True
+
+    it "refuses a program file to a reader that wants a module" $
+      case Wire.encodeProgram someProgram of
+        Left problems -> expectationFailure (unwords problems)
+        Right bytes -> isLeft (Wire.decode bytes) `shouldBe` True
 
     it "refuses a file that is not Core" $
       isLeft (Wire.decode "not core at all, not even close") `shouldBe` True
@@ -300,6 +323,19 @@ var = expr (EVar "x")
 bindOf :: Expr -> Bind
 bindOf e = Bind (binder "b") e
 
+-- | A program for the file tests: two roots, so their order is visible, and a
+-- target, mode and runtime that are not the enums' zero codes, so the fields
+-- are actually on the wire.
+someProgram :: Whole.Program
+someProgram =
+  Whole.Program
+    [ Whole.Root (ModuleName.Canonical Pkg.application (Name.fromChars "Main")) (Name.fromChars "main"),
+      Whole.Root (ModuleName.Canonical Pkg.core (Name.fromChars "Basics")) (Name.fromChars "add")
+    ]
+    Target.Js
+    Whole.Prod
+    Whole.Node
+
 moduleWith :: [Bind] -> Module
 moduleWith defs =
   Module
@@ -387,6 +423,7 @@ somePrim =
     Nothing -> error "Core.Prim.allPrims is empty"
 
 everyCrash :: [CrashKind]
+
 -- | A @Todo@ carries an expression since D335: a literal message, and one
 -- computed from a variable, which is what made the message a child.
 everyCrash = [Todo (utf8 "not done") (lit (LString (utf8 "why"))), Todo (utf8 "") var, IncompleteMatch, StackExhausted, Unreachable]

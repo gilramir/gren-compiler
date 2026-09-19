@@ -64,6 +64,10 @@ main =
 -- authored malformed files needs something to feed them to. It prints the
 -- module's text form on success and the error on failure, and it exits before
 -- anything else runs, because it needs no project.
+--
+-- A program file (D378) is read by the same hook: the file says which message
+-- it holds (D379), and what is printed for a program is 'show' of it, since
+-- "Core.Pretty" writes modules.
 readWireFile :: IO ()
 readWireFile =
   do
@@ -73,12 +77,17 @@ readWireFile =
       Just path ->
         do
           input <- Data.ByteString.readFile path
-          case Wire.decode input of
+          let reported :: Either Wire.Error B.Builder
+              reported =
+                case Wire.kindOfFile input of
+                  Right Wire.KindProgram -> B.stringUtf8 . show <$> Wire.decodeProgram input
+                  _ -> Pretty.moduleToBuilder Pretty.defaultOptions <$> Wire.decode input
+          case reported of
             Left err ->
               do
                 IO.hPutStrLn IO.stderr (Wire.renderError err)
                 Exit.exitWith (Exit.ExitFailure 1)
-            Right core ->
+            Right text ->
               do
-                B.hPutBuilder IO.stdout (Pretty.moduleToBuilder Pretty.defaultOptions core)
+                B.hPutBuilder IO.stdout text
                 Exit.exitSuccess

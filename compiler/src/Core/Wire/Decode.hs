@@ -2,7 +2,7 @@
 {-# LANGUAGE NoPolyKinds #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Bytes to Core, against @schema/geng/core/v6.proto@.
+-- | Bytes to Core, against @schema/geng/core/v7.proto@.
 --
 -- __The reader enforces the canonical profile__ (§B7). C10 writes its seven
 -- rules as properties of the writer; making them properties of the reader too
@@ -32,12 +32,15 @@ module Core.Wire.Decode
   ( P,
     runP,
     moduleP,
+    programP,
   )
 where
 
 import Control.Monad (unless, when)
 import Core.AST
 import Core.Prim qualified as Prim
+import Core.Target qualified as Target
+import Core.Whole qualified as Whole
 import Core.Wire.Protobuf
 import Data.Bits (shiftL, testBit, (.&.), (.|.))
 import Data.ByteString qualified as BS
@@ -45,8 +48,8 @@ import Data.ByteString.Unsafe qualified as BS
 import Data.Coerce qualified as Coerce
 import Data.Int (Int32, Int64)
 import Data.Map qualified as Map
-import Data.Set qualified as Set
 import Data.Name qualified as Name
+import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
 import Data.Word (Word32, Word64, Word8)
 import GHC.Float (castWord32ToFloat, castWord64ToDouble)
@@ -359,6 +362,20 @@ resolve i =
 -- is rule 5's violation.
 text :: String -> Word32 -> P (Utf8.Utf8 t)
 text name tag = resolve =<< defaulted name tag WVarint (0 :: Word64) varint
+
+-- | A @string@ written out rather than interned, implicit presence: absent is
+-- the empty string, and an empty one written out is rule 5's violation. Only
+-- @Program@ has such fields, since it carries no table to index into.
+plainText :: String -> Word32 -> P (Utf8.Utf8 t)
+plainText name tag =
+  do
+    here <- offset
+    got <- next name tag WBytes utf8
+    case got of
+      Nothing -> pure (Utf8.fromByteString BS.empty)
+      Just s
+        | Utf8.size s == 0 -> failAt here ("field " ++ show tag ++ " is present holding its default \"\"")
+        | otherwise -> pure (unStr s)
 
 -- | A @oneof@ member of string type: always written, so index 0 is legitimate.
 indexText :: P (Utf8.Utf8 t)
@@ -970,6 +987,47 @@ moduleBodyP =
           _moduleMain = main_,
           _moduleExterns = externs
         }
+
+-- THE PROGRAM
+
+-- | The whole-program message (D378). It indexes into no table, so it is
+-- parsed outside the three 'withTable' scopes 'moduleP' sets up.
+programP :: P Whole.Program
+programP =
+  message "Program" 4 $
+    do
+      roots <- rep "roots" 1 rootP
+      target <- enum_ "target" 2 targetOf
+      mode <- enum_ "mode" 3 modeOf
+      runtime <- enum_ "runtime" 4 runtimeOf
+      pure (Whole.Program roots target mode runtime)
+
+rootP :: P Whole.Root
+rootP =
+  message "Root" 3 $
+    do
+      package <- plainText "package" 1
+      modul <- plainText "module" 2
+      name <- plainText "name" 3
+      pure (Whole.Root (ModuleName.Canonical (Pkg.fromUtf8 (package :: Str)) modul) name)
+
+targetOf :: Word32 -> Maybe Target.Target
+targetOf 0 = Just Target.Beam
+targetOf 1 = Just Target.Js
+targetOf 2 = Just Target.Native
+targetOf 3 = Just Target.Wasm
+targetOf _ = Nothing
+
+modeOf :: Word32 -> Maybe Whole.Mode
+modeOf 0 = Just Whole.Dev
+modeOf 1 = Just Whole.Prod
+modeOf _ = Nothing
+
+runtimeOf :: Word32 -> Maybe Whole.Runtime
+runtimeOf 0 = Just Whole.Common
+runtimeOf 1 = Just Whole.Browser
+runtimeOf 2 = Just Whole.Node
+runtimeOf _ = Nothing
 
 -- | D196, and three rules the schema cannot state: an extern has at least one
 -- implementation, its implementations are in strictly ascending language order

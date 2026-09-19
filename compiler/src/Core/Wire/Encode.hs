@@ -2,7 +2,7 @@
 {-# LANGUAGE NoPolyKinds #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- | Core to bytes, against @schema/geng/core/v6.proto@.
+-- | Core to bytes, against @schema/geng/core/v7.proto@.
 --
 -- Read this beside the schema; each function below is one message, in the
 -- schema's order, and each field is one line in the schema's tag order. That
@@ -32,11 +32,14 @@ module Core.Wire.Encode
   ( Enc,
     run,
     moduleEnc,
+    programEnc,
   )
 where
 
 import Core.AST
 import Core.Prim qualified as Prim
+import Core.Target qualified as Target
+import Core.Whole qualified as Whole
 import Core.Wire.Protobuf
 import Data.Bits (shiftR, (.&.))
 import Data.ByteString.Builder qualified as B
@@ -443,6 +446,17 @@ repType tag ts = go ts mempty
     go [] acc = key tag WBytes <> packedRun acc
     go (t : rest) acc = withType t (\i -> go rest (acc <> varint (fromIntegral i)))
 
+-- | A @string@ written out rather than interned, implicit presence: the empty
+-- string is omitted. Only @Program@ has such fields — every string in a
+-- @Module@ is an index into its table (D92) — so this is the version-1 shape
+-- of a string field, kept for a message that has no table.
+plainText :: Word32 -> Utf8.Utf8 t -> Enc
+plainText tag s
+  | Utf8.size s == 0 = mempty
+  | otherwise =
+      let n = Utf8.size s
+       in key tag WBytes <> varint (fromIntegral n) <> bytes n (Utf8.toBuilder s)
+
 -- | A string field, implicit presence: index 0 is omitted, exactly as an empty
 -- string was in version 1.
 text :: Word32 -> Utf8.Utf8 t -> Enc
@@ -687,6 +701,48 @@ moduleEnc m =
 
 recGroupEnc :: [QualName] -> Enc
 recGroupEnc names = repQual 1 names
+
+-- THE PROGRAM
+
+-- | The whole-program message (D378). It indexes into no table, so 'run' emits
+-- the three tables empty — which is three absent repeated fields and no bytes.
+programEnc :: Whole.Program -> Enc
+programEnc (Whole.Program roots target mode runtime) =
+  rep 1 rootEnc roots
+    <> enum_ 2 (targetCode target)
+    <> enum_ 3 (modeCode mode)
+    <> enum_ 4 (runtimeCode runtime)
+
+rootEnc :: Whole.Root -> Enc
+rootEnc (Whole.Root (ModuleName.Canonical package modul) name) =
+  plainText 1 (Pkg.toUtf8 package :: Str)
+    <> plainText 2 modul
+    <> plainText 3 name
+
+-- | The schema's @Target@ codes. Written out rather than taken from
+-- 'fromEnum', which is what 'externImplEnc' does for a language: the codes are
+-- an append-only table in the schema, and a constructor reordered in
+-- "Core.Target" must not reinterpret a file.
+targetCode :: Target.Target -> Word32
+targetCode target =
+  case target of
+    Target.Beam -> 0
+    Target.Js -> 1
+    Target.Native -> 2
+    Target.Wasm -> 3
+
+modeCode :: Whole.Mode -> Word32
+modeCode mode =
+  case mode of
+    Whole.Dev -> 0
+    Whole.Prod -> 1
+
+runtimeCode :: Whole.Runtime -> Word32
+runtimeCode runtime =
+  case runtime of
+    Whole.Common -> 0
+    Whole.Browser -> 1
+    Whole.Node -> 2
 
 mainEnc :: Main -> Enc
 mainEnc main_ =
