@@ -71,11 +71,24 @@ data Shape
   | NodeScript ModuleName.Raw
   | HtmlPage ModuleName.Raw
 
+-- | The Core a build has made by the time a backend is asked, each stage run
+-- once (@m2-seam.md@ §DS5 item 3).
+--
+-- §DS3 hands a backend the /passed/ Core, before 'Program.chooseExterns' and
+-- 'Program.link', which are the backend's own. The front end's is here for the
+-- dumps: @GENG_DUMP_LINK@ and @GENG_DUMP_PRIMS@ report the link as it is
+-- before the passes, and @harness\/core-golden\/link@ pins that, so the
+-- refactor keeps it rather than quietly re-recording it.
+data Cores = Cores
+  { _coresFront :: Map.Map ModuleName.Canonical Core.Module,
+    _coresPassed :: Map.Map ModuleName.Canonical Core.Module
+  }
+
 -- | A code generator, and what it makes of a build that has passed the target
 -- gate (@m2-seam.md@ §DS5 item 2). The language it reads externs in is the
 -- target's, 'Target.language'.
 newtype Backend = Backend
-  { _backendEmit :: Target.Target -> Details.Details -> ExtSources -> Build.Artifacts -> Request -> Task B.Builder
+  { _backendEmit :: Target.Target -> Details.Details -> ExtSources -> Build.Artifacts -> Cores -> Request -> Task B.Builder
   }
 
 -- | The backend for each target. There is one: @js@'s.
@@ -87,8 +100,13 @@ backendFor target =
     Target.Native -> Nothing
     Target.Wasm -> Nothing
 
--- | A build: the target gate, @--optimize@'s refusal of @Debug@, and then the
--- target's backend.
+-- | A build, as stages (§DS5 item 3): the target gate, @--optimize@'s refusal
+-- of @Debug@, the front end's Core through the wire, the passes, the C spike
+-- when a dev build asks for it, and then the target's backend.
+--
+-- Each stage runs once. 'programCore' and 'passed' used to be called again by
+-- 'dumpCore', by 'spikeC' and by the link, so a dev build with dumps set put
+-- the program through the wire three times and ran "Core.Pass" twice over.
 make :: Target.Target -> Details.Details -> ExtSources -> Build.Artifacts -> Request -> Task B.Builder
 make target details sources artifacts request =
   do
@@ -96,7 +114,14 @@ make target details sources artifacts request =
     case _requestMode request of
       Dev -> return ()
       Prod -> checkForDebugUses artifacts
-    _backendEmit backend target details sources artifacts request
+    front <- Task.io (programCore details artifacts)
+    dumpProgramCore front
+    passedCores <- Task.io (passed front)
+    let cores = Cores front passedCores
+    case _requestMode request of
+      Dev -> spikeC artifacts cores
+      Prod -> return ()
+    _backendEmit backend target details sources artifacts cores request
 
 -- JAVASCRIPT
 
@@ -112,14 +137,11 @@ make target details sources artifacts request =
 -- An @--optimize@ build fills in the field table and skips the C spike.
 javaScript :: Backend
 javaScript =
-  Backend $ \target details sources artifacts (Request mode shape maybeSources) ->
+  Backend $ \target details sources artifacts cores (Request mode shape maybeSources) ->
     do
       kernels <- kernelChunks details
-      dumpCore target details artifacts kernels
-      case mode of
-        Dev -> spikeC details artifacts
-        Prod -> return ()
-      program <- linkCore target details artifacts kernels
+      dumpLink target artifacts kernels (_coresFront cores)
+      program <- linkCore target artifacts kernels (_coresPassed cores)
       exts <- externFiles target sources program
       let jsMode =
             case mode of
@@ -313,11 +335,11 @@ kernelInfo chunks =
 -- This is the whole of what the emitter is handed besides the kernel chunks: one
 -- call to `Core.Program.link`, with the roots 'coreRoots' names and the kernel
 -- information 'kernelInfo' reads off those same chunks.
-linkCore :: Target.Target -> Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Task Program.Program
-linkCore target details artifacts kernels =
+linkCore :: Target.Target -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Map.Map ModuleName.Canonical Core.Module -> Task Program.Program
+linkCore target artifacts kernels passedCores =
   Task.io $
     do
-      cores <- Program.chooseExterns (Target.language target) Dump.externBodies <$> (programCore details artifacts >>= passed)
+      let cores = Program.chooseExterns (Target.language target) Dump.externBodies passedCores
       let program = Program.link (kernelBackend kernels cores) cores (coreRoots artifacts cores)
       reported program
       return (checked program)
@@ -396,29 +418,44 @@ coreRoots (Build.Artifacts pkg _ roots _) cores =
         Build.Inside name -> name
         Build.Outside name _ _ -> name
 
--- | Write what @GENG_DUMP_PROGRAM_CORE@, @GENG_DUMP_LINK@ and @GENG_DUMP_PRIMS@
--- ask for, if any names a place to put it.
+-- | @GENG_DUMP_PROGRAM_CORE@: the program's Core, module by module, with the
+-- same file names as "Compile"'s per-module dump so that the two are comparable
+-- as directories.
 --
--- The first is the program's Core, module by module, with the same file names as
--- "Compile"'s per-module dump so that the two are comparable as directories. The
--- second is 'Core.Program.link''s summary: what the roots reach, in what order,
--- and what they refer to that Core cannot supply yet.
-dumpCore :: Target.Target -> Details.Details -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Task ()
-dumpCore target details artifacts kernels =
-  case (Dump.programDir, Dump.linkFile, Dump.primsFile) of
-    (Nothing, Nothing, Nothing) -> return ()
-    (maybeDir, maybeFile, maybePrims) ->
+-- The front end's Core, before the passes, which is what the directory has
+-- always held; @GENG_DUMP_PASSED@ is the other one (D343). It is a stage of the
+-- build rather than a backend's business, so it is written here.
+dumpProgramCore :: Map.Map ModuleName.Canonical Core.Module -> Task ()
+dumpProgramCore modules =
+  case Dump.programDir of
+    Nothing -> return ()
+    Just dir ->
+      Task.io $
+        mapM_
+          (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder Pretty.defaultOptions core))
+          (Map.toAscList modules)
+
+-- | @GENG_DUMP_LINK@ and @GENG_DUMP_PRIMS@: 'Core.Program.link''s summary —
+-- what the roots reach, in what order, and what they refer to that Core cannot
+-- supply yet — and the primitive table that link reads.
+--
+-- __The link reported is the front end's__, not the one the backend emits: the
+-- passes do not run before it. That is how it has always been, and
+-- @harness\/core-golden\/link@ pins it, so the stages keep it. Whether the
+-- report should describe the link a build actually performs is an open item,
+-- not something for a refactor to change quietly.
+--
+-- @GENG_LINK_ROOTS=exports@ links every export instead of the program's roots,
+-- which is a measurement rather than a mode ('Dump.linkEveryExport').
+dumpLink :: Target.Target -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Map.Map ModuleName.Canonical Core.Module -> Task ()
+dumpLink target artifacts kernels modules =
+  case (Dump.linkFile, Dump.primsFile) of
+    (Nothing, Nothing) -> return ()
+    (maybeFile, maybePrims) ->
       Task.io $
         do
-          modules <- programCore details artifacts
           let cores = Program.chooseExterns (Target.language target) Dump.externBodies modules
-          case maybeDir of
-            Nothing -> return ()
-            Just dir ->
-              mapM_
-                (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder Pretty.defaultOptions core))
-                (Map.toAscList modules)
-          let roots =
+              roots =
                 if Dump.linkEveryExport
                   then concatMap Core._moduleExports (Map.elems cores)
                   else coreRoots artifacts cores
@@ -447,13 +484,13 @@ dumpCore target details artifacts kernels =
 -- Two files: the C, and the finding. §X9 makes the spike\'s criterion a written
 -- list of everything @Low@ had to compute that Core does not carry, and
 -- "Core.Low" produces it as it goes rather than leaving it to be remembered.
-spikeC :: Details.Details -> Build.Artifacts -> Task ()
-spikeC details artifacts@(Build.Artifacts pkg _ _ _) =
+spikeC :: Build.Artifacts -> Cores -> Task ()
+spikeC (Build.Artifacts pkg _ _ _) cores0 =
   case (Dump.spikeFile, Dump.spikeRoot) of
     (Just file, Just (home, name)) ->
       Task.io $
         do
-          cores <- Program.chooseExterns Core.ExternC Dump.externBodies <$> (programCore details artifacts >>= passed)
+          let cores = Program.chooseExterns Core.ExternC Dump.externBodies (_coresPassed cores0)
           let root =
                 Core.QualName
                   (ModuleName.Canonical pkg (N.fromChars home))
