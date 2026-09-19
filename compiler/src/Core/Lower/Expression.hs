@@ -166,7 +166,20 @@ witness sp w =
 recordWitness :: Core.Span -> Can.Class -> [(Name, Resolve.Witness)] -> Core.Type -> Core.Type -> Core.Expr
 recordWitness sp cls@(Can.Class _ className) fields subject tipe
   | className == Name.ordClass = Core.Expr (Core.ERecord [(nameCompare, ordMethod sp cls fields subject)]) tipe sp
-  | className == Name.inspectClass = Core.Expr (Core.ERecord [(nameInspect, inspectMethod sp cls fields subject)]) tipe sp
+  | className == Name.inspectClass =
+      -- D360: a record has no width, so it is never the type an array is
+      -- annotated with, the answer 'Canonicalize.Derive' writes for a derived
+      -- instance. The second field mentions no field's witness: this record is
+      -- written out at every use, so a field that did would double the
+      -- witness at every level of nesting.
+      Core.Expr
+        ( Core.ERecord
+            [ (nameInspect, inspectMethod sp cls fields subject),
+              (nameInspectAnnotation, noAnnotation sp subject)
+            ]
+        )
+        tipe
+        sp
   | otherwise = Core.Expr (Core.ERecord [(nameEq, eqMethod sp cls fields subject)]) tipe sp
 
 -- | @\$el $er -> $el.a == $er.a && …@, and 'True' for the empty record.
@@ -228,6 +241,21 @@ inspectMethod sp cls fields subject =
    in Core.Expr
         (Core.ELam [Core.Binder witLeft subject sp] called)
         (Core.TFun [subject] stringType)
+        sp
+
+-- | @\$p -> Inspect.none@: 'Inspect.inspectAnnotation' for a type that has no
+-- width (D360). @none@ is named rather than built, as it is in a derived
+-- instance, so the lowering does not construct a @Maybe@ itself.
+noAnnotation :: Core.Span -> Core.Type -> Core.Expr
+noAnnotation sp subject =
+  let proxy = Core.TCon (Core.QualName ModuleName.inspect nameProxy) [subject]
+      maybeString = Core.TCon (Core.QualName ModuleName.maybe Name.maybe) [stringType]
+   in Core.Expr
+        ( Core.ELam
+            [Core.Binder witLeft proxy sp]
+            (Core.Expr (Core.EGlobal (Core.QualName ModuleName.inspect nameNone)) maybeString sp)
+        )
+        (Core.TFun [proxy] maybeString)
         sp
 
 witLeft :: Name
@@ -350,6 +378,15 @@ nameCompare = Name.fromChars "compare"
 
 nameInspect :: Name
 nameInspect = Name.fromChars "inspect"
+
+nameInspectAnnotation :: Name
+nameInspectAnnotation = Name.fromChars "inspectAnnotation"
+
+nameProxy :: Name
+nameProxy = Name.fromChars "Proxy"
+
+nameNone :: Name
+nameNone = Name.fromChars "none"
 
 nameRecord :: Name
 nameRecord = Name.fromChars "record"

@@ -117,9 +117,11 @@ derive home boolDecl orderDecl region typeName union cls@(Can.Class classHome cl
             Result.ok (Can.Instance head_ Can.Derived (Map.singleton name method_))
         Just Rendering ->
           do
-            let name = nameInspect
-            method_ <- methodDef ctx head_ published name (inspectBody ctx union)
-            Result.ok (Can.Instance head_ Can.Derived (Map.singleton name method_))
+            inspect_ <- methodDef ctx head_ published nameInspect (inspectBody ctx union)
+            annotation_ <- methodDef ctx head_ published nameInspectAnnotation (annotationBody ctx)
+            Result.ok $
+              Can.Instance head_ Can.Derived $
+                Map.fromList [(nameInspect, inspect_), (nameInspectAnnotation, annotation_)]
 
 -- THE TWO VERBS
 
@@ -440,6 +442,18 @@ inspectBranch ctx union ctor@(Can.Ctor name _ _ argTypes) =
             [str ctx (ES.fromChars (Name.toChars name)), at ctx (Can.Array rendered)]
         )
 
+-- | @inspectAnnotation _ = Inspect.none@: a derived type is never the type an
+-- array is annotated with (D360). @none@ is @core@\'s @Nothing@ at
+-- @Maybe String@, named rather than built, so the generator needs no
+-- declaration of @Maybe@ to hand, as 'bool' needs one of @Bool@.
+annotationBody :: Ctx -> [Name.Name] -> Result i w Can.Expr
+annotationBody ctx args =
+  case args of
+    [_] ->
+      Result.ok (foreign_ ctx nameNone maybeStringType)
+    _ ->
+      Result.throw (Error.DeriveMethodShape (_region ctx) (_typeName ctx) nameInspectAnnotation)
+
 -- | How one component is rendered.
 --
 -- The same three answers 'field' gives, for the same reasons: a function
@@ -542,6 +556,19 @@ call ctx fn args =
 nameInspect :: Name.Name
 nameInspect =
   Name.fromChars "inspect"
+
+nameInspectAnnotation :: Name.Name
+nameInspectAnnotation =
+  Name.fromChars "inspectAnnotation"
+
+nameNone :: Name.Name
+nameNone =
+  Name.fromChars "none"
+
+-- | @Maybe String@, what @Inspect.none@ is.
+maybeStringType :: Can.Type
+maybeStringType =
+  Can.TType ModuleName.maybe Name.maybe [stringType]
 
 nameCtor :: Name.Name
 nameCtor =
