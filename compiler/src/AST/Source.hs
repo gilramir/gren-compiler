@@ -88,6 +88,11 @@ data Expr_
   | Update Expr [RecordField] SC.UpdateComments
   | Record [RecordField]
   | Parens [Comment] Expr [Comment]
+  | -- | @(e : T)@, an annotation on a parenthesized expression (D358,
+    -- @docs\/expr-annotation.md@ §EA8). It only ever appears as the expression
+    -- inside a 'Parens', which is what gives it a closing bracket. The
+    -- comments are those before and after the colon.
+    Annotated Expr [Comment] [Comment] Type
   | -- | The body a @\@prim("i32_add")@ declaration stands for (@core.md@ C13).
     --
     -- No expression syntax produces one: a primitive declaration is an

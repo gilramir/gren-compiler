@@ -92,6 +92,7 @@ childNodes e =
   case e of
     Can.Array items -> concatMap exprNodes items
     Can.Negate inner -> exprNodes inner
+    Can.Annotated inner _ -> exprNodes inner
     Can.Binop _ _ _ left right -> exprNodes left ++ exprNodes right
     Can.Lambda _ body -> exprNodes body
     Can.Call func args -> concatMap exprNodes (func : args)
@@ -187,6 +188,8 @@ expr_ e =
       Can.Array <$> traverse expr items
     Can.Negate inner ->
       Can.Negate <$> expr inner
+    Can.Annotated inner annotation ->
+      (`Can.Annotated` annotation) <$> expr inner
     Can.Binop op target annotation left right ->
       Can.Binop op target annotation <$> expr left <*> expr right
     Can.Lambda args body ->

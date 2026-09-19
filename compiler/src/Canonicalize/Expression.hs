@@ -46,6 +46,26 @@ data Uses = Uses
 
 -- CANONICALIZE
 
+
+-- | @-(e : T)@ as @(-e : T)@.
+--
+-- A negative literal is one literal only when the @Negate@ is directly on it
+-- (S5, @docs\/m1b-int.md@ §I20), and three passes fold it by matching that
+-- shape: the range check in 'Type.Constrain.Expression', 'Type.Resolve' and the
+-- Core lowering. Moving the sign inside the annotation keeps
+-- @-(128 : Int8)@ the one literal @(-128 : Int8)@ is, so none of the three
+-- has to learn about 'Can.Annotated' (@docs\/expr-annotation.md@ §EA3). The
+-- two mean the same thing: negation does not change a type.
+negateInto :: Can.Expr -> Can.Expr_
+negateInto inner =
+  case inner of
+    Can.Expr _ _ (Can.Annotated annotated annotation) ->
+      Can.Annotated (Can.at (exprRegion annotated) (Can.Negate annotated)) annotation
+    _ ->
+      Can.Negate inner
+  where
+    exprRegion (Can.Expr _ region _) = region
+
 canonicalize :: Env.Env -> Src.Expr -> Result FreeLocals [W.Warning] Can.Expr
 canonicalize env (A.At region expression) =
   Can.at region
@@ -82,7 +102,7 @@ canonicalize env (A.At region expression) =
               -- (D138, §G35).
               Can.VarMethod cls param name annotation
       Src.Negate expr ->
-        Can.Negate <$> canonicalize env expr
+        negateInto <$> canonicalize env expr
       Src.Binops ops final ->
         Can.exprValue <$> canonicalizeBinops region env ops final
       Src.Lambda srcArgs body _ ->
@@ -131,6 +151,10 @@ canonicalize env (A.At region expression) =
           Can.Record <$> traverse (canonicalize env) fieldDict
       Src.Parens _ expr _ ->
         Can.exprValue <$> canonicalize env expr
+      Src.Annotated expr _ _ tipe ->
+        Can.Annotated
+          <$> canonicalize env expr
+          <*> Type.toAnnotation env Nothing tipe
       Src.Prim primName ->
         canonicalizePrim env primName
       Src.Extern _ _ ->

@@ -61,6 +61,8 @@ data Context
   | RecordUpdateKeys (Map.Map Name.Name Can.FieldUpdate)
   | RecordUpdateValue Name.Name
   | Destructure
+  | -- | The expression inside @(e : T)@, checked against @T@ (D358).
+    Annotation
 
 data SubContext
   = TypedIfBranch Index.ZeroBased
@@ -89,6 +91,8 @@ data Category
   | Effects
   | Local Name.Name
   | Foreign Name.Name
+  | -- | @(e : T)@ as a whole, whose type is the annotation's (D358).
+    Annotated
 
 -- PATTERN EXPECTATIONS
 
@@ -314,6 +318,7 @@ addCategory thisIs category =
     Lambda -> thisIs <> " an anonymous function of type:"
     Record -> thisIs <> " a record of type:"
     Effects -> thisIs <> " a thing for CORE LIBRARIES ONLY."
+    Annotated -> "This annotated expression has type:"
     CallResult maybeName ->
       case maybeName of
         NoName -> thisIs <> ":"
@@ -925,6 +930,14 @@ toExprReport source localizer exprRegion category tipe expected =
                   "This definition is causing issues:",
                   "You are defining",
                   "But then trying to destructure it as:",
+                  []
+                )
+            Annotation ->
+              mismatch
+                ( Just exprRegion,
+                  "This expression does not match the type annotation on it:",
+                  "The expression is",
+                  "But the annotation says it is:",
                   []
                 )
 

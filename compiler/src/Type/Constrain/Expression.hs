@@ -154,6 +154,8 @@ constrainHelp rtv _nid region expression expected =
         return $ exists [var] $ CEqual region Float (VarN var) expected
     Can.Array elements ->
       constrainList rtv region elements expected
+    Can.Annotated inner (Can.Forall freeVars srcType) ->
+      constrainAnnotated rtv region inner freeVars srcType expected
     Can.Negate expr ->
       do
         numberVar <- mkFlexNumber
@@ -211,6 +213,48 @@ constrainHelp rtv _nid region expression expected =
       constrainUpdate rtv region expr fields expected
     Can.Record fields ->
       constrainRecord rtv region fields expected
+
+-- CONSTRAIN ANNOTATED
+
+-- | @(e : T)@ (D358, @docs\/expr-annotation.md@ §EA3).
+--
+-- The annotation's variables are scoped as a @let@ signature's are
+-- ('constrainDef''s 'Can.TypedDef' case): a name the enclosing signatures
+-- bound is that rigid variable, so @(x : a)@ inside @f : a -> …@ is @f@\'s @a@,
+-- and a name they did not bind is a rigid variable of the annotation's own.
+--
+-- With no variable of its own the annotation is two equalities: the expression
+-- at the annotated type, and that type at the one expected here. With some,
+-- the expression is checked against them rigidly in a 'CLet' of its own, which
+-- is what makes @(1 : a)@ the error it is in a @let@, and the expected type is
+-- then equated with a fresh instance of the annotation, as a use of a @let@
+-- would be. There is no binding to put in the 'CLet'\'s header, so it has
+-- none: the instance is made here directly rather than through a 'CLocal' to
+-- a name nobody wrote.
+constrainAnnotated :: RTV -> A.Region -> Can.Expr -> Can.FreeVars -> Can.Type -> Expected Type -> IO Constraint
+constrainAnnotated rtv region inner freeVars srcType expected =
+  do
+    let newNames = Map.difference freeVars rtv
+    newRigids <- Map.traverseWithKey nameToRigid newNames
+    let newRtv = Map.union rtv (Map.map VarN newRigids)
+    tipe <- Instantiate.fromSrcType newRtv srcType
+    innerCon <- constrain newRtv inner (FromContext region E.Annotation tipe)
+    if Map.null newRigids
+      then return $ CAnd [innerCon, CEqual region E.Annotated tipe expected]
+      else do
+        newFlexes <- Map.traverseWithKey nameToFlex newNames
+        instanceType <- Instantiate.fromSrcType (Map.union rtv (Map.map VarN newFlexes)) srcType
+        return $
+          CAnd
+            [ CLet
+                { _rigidVars = Map.elems newRigids,
+                  _flexVars = [],
+                  _header = Map.empty,
+                  _headerCon = innerCon,
+                  _bodyCon = CTrue
+                },
+              exists (Map.elems newFlexes) (CEqual region E.Annotated instanceType expected)
+            ]
 
 -- CONSTRAIN LAMBDA
 

@@ -164,6 +164,8 @@ checkExpr (Can.Expr _ region expression) errors =
       foldr checkExpr errors entries
     Can.Negate expr ->
       checkExpr expr errors
+    Can.Annotated expr _ ->
+      checkExpr expr errors
     Can.Binop _ _ _ left right ->
       checkExpr left $
         checkExpr right errors

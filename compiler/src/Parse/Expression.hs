@@ -88,17 +88,49 @@ parenthesizedExpr start@(A.Position row col) =
                             let expr = A.at exprStart end (Src.Negate negatedExpr)
                             chompExprEnd exprStart (State [] expr [] end commentsAfterTerm)
                       Space.checkIndent end E.ParenthesizedIndentEnd
-                      word1 0x29 {-)-} E.ParenthesizedOperatorClose
-                      addEnd start (Src.Parens comments1 expr commentsAfter)
+                      closeParenthesized start comments1 (A.Position row (col + 2)) expr commentsAfter E.ParenthesizedOperatorClose
                   ]
               else do
                 word1 0x29 {-)-} E.ParenthesizedOperatorClose
                 addEnd start (Src.Op op),
           do
-            ((expr, commentsAfter), _) <- specialize E.ParenthesizedExpr expression
-            word1 0x29 {-)-} E.ParenthesizedEnd
-            addEnd start (Src.Parens comments1 expr commentsAfter)
+            exprStart <- getPosition
+            ((expr, commentsAfter), _) <- specialize E.ParenthesizedExpr expressionOpen
+            closeParenthesized start comments1 exprStart expr commentsAfter E.ParenthesizedEnd
         ]
+
+-- | The end of a parenthesized expression: @)@, or an annotation and then @)@.
+--
+-- @(e : T)@ is D358 (@docs\/expr-annotation.md@ §EA8). The expression before
+-- the colon was parsed by 'expressionOpen', which stops in front of a lone
+-- @:@, and the type is 'Type.expression' rather than 'Type.annotation': a
+-- class context on an expression would have no definition to bind a witness
+-- to (§EA6 Q3). Both of 'parenthesizedExpr'\'s ways of reading an expression
+-- end here, which is what lets @(-1 : Int64)@ through the branch that reads a
+-- leading @-@.
+closeParenthesized ::
+  A.Position ->
+  [Src.Comment] ->
+  A.Position ->
+  Src.Expr ->
+  [Src.Comment] ->
+  (Row -> Col -> E.Parenthesized) ->
+  Parser E.Parenthesized Src.Expr
+closeParenthesized start commentsBefore exprStart expr commentsAfter closeError =
+  oneOf
+    closeError
+    [ do
+        word1 0x29 {-)-} closeError
+        addEnd start (Src.Parens commentsBefore expr commentsAfter),
+      do
+        word1 0x3A {-:-} closeError
+        commentsAfterColon <- Space.chompAndCheckIndent E.ParenthesizedSpace E.ParenthesizedIndentEnd
+        ((tipe, commentsAfterType), typeEnd) <- specialize E.ParenthesizedType Type.expression
+        Space.checkIndent typeEnd E.ParenthesizedIndentEnd
+        word1 0x29 {-)-} E.ParenthesizedEnd
+        let annotated = A.at exprStart typeEnd (Src.Annotated expr commentsAfter commentsAfterColon tipe)
+        addEnd start (Src.Parens commentsBefore annotated commentsAfterType)
+    ]
 
 accessor :: A.Position -> Parser E.Expr Src.Expr
 accessor start =
@@ -243,8 +275,33 @@ chompField commentsBefore =
 
 -- EXPRESSIONS
 
+-- | An expression that nothing may follow with a lone @:@.
+--
+-- A lone @:@ ends an expression ('Symbol.hasTypeEnds'), so that the
+-- parentheses around it can read an annotation (D358). Where no annotation can
+-- follow, which is everywhere an expression is delimited by something other
+-- than a closing parenthesis, the colon is refused here with the error it has
+-- always had: 'BadHasType', in the context of the definition being parsed, so
+-- a signature indented into the definition above it is still reported as
+-- that.
 expression :: Space.Parser E.Expr (Src.Expr, [Src.Comment])
 expression =
+  do
+    result <- expressionOpen
+    Symbol.refuseHasType E.OperatorReserved
+    return result
+
+-- | An expression that may be followed by a lone @:@, which is left for
+-- whatever encloses it.
+--
+-- The bodies that run to the end of whatever holds them use this: a lambda's,
+-- an @else@ branch, a @when@ branch and a @let@'s @in@. In
+-- @(\x -> x : Int -> Int)@ the colon ends the lambda's body and then the
+-- lambda, and the annotation is on the lambda, as it is in Haskell. Where the
+-- enclosing expression is itself delimited, 'expression' refuses the colon one
+-- level up.
+expressionOpen :: Space.Parser E.Expr (Src.Expr, [Src.Comment])
+expressionOpen =
   do
     start <- getPosition
     oneOf
@@ -281,6 +338,7 @@ chompExprEnd start (State ops expr args end commentsBefore) =
       -- operator
       do
         Space.checkIndent end E.Start
+        Symbol.hasTypeEnds E.Start
         op@(A.At (A.Region opStart opEnd) opName) <- addLocation (Symbol.operator E.Start E.OperatorReserved)
         commentsAfterOp <- Space.chompAndCheckIndent E.Space (E.IndentOperatorRight opName)
         newStart <- getPosition
@@ -379,7 +437,7 @@ chompIfEnd start@(A.Position _ indent) branches commentsBefore =
           Keyword.if_ E.IfElseBranchStart
           chompIfEnd start newBranches commentsAfterElseKeyword,
         do
-          ((elseBranch, commentsAfterExpr), elseEnd) <- specialize E.IfElseBranch expression
+          ((elseBranch, commentsAfterExpr), elseEnd) <- specialize E.IfElseBranch expressionOpen
           let (commentsAfterElseBody, commentsAfter) = List.span (A.isIndentedMoreThan indent) commentsAfterExpr
           let ifComments = SC.IfComments commentsAfterElseKeyword commentsAfterElseBody
           let ifExpr = Src.If (reverse newBranches) elseBranch ifComments
@@ -397,7 +455,7 @@ function start =
       commentsAfterFirstArg <- Space.chompAndCheckIndent E.FuncSpace E.FuncIndentArrow
       (revArgs, commentsAfterArgs) <- chompArgs [(commentsBeforeFirstArg, arg)] commentsAfterFirstArg
       commentsAfterArrow <- Space.chompAndCheckIndent E.FuncSpace E.FuncIndentBody
-      ((body, commentsAfterBody), end) <- specialize E.FuncBody expression
+      ((body, commentsAfterBody), end) <- specialize E.FuncBody expressionOpen
       let comments = SC.LambdaComments commentsAfterArgs commentsAfterArrow
       let funcExpr = Src.Lambda (reverse revArgs) body comments
       return ((A.at start end funcExpr, commentsAfterBody), end)
@@ -444,7 +502,7 @@ chompBranch commentsBeforeBranch =
     Space.checkIndent patternEnd E.CaseIndentArrow
     word2 0x2D 0x3E {-->-} E.CaseArrow
     commentsAfterArrow <- Space.chompAndCheckIndent E.CaseSpace E.CaseIndentBranch
-    ((branchExpr, commentsAfterBranchExpr), end) <- specialize E.CaseBranch expression
+    ((branchExpr, commentsAfterBranchExpr), end) <- specialize E.CaseBranch expressionOpen
     let (commentsAfterBranchBody, commentsAfterBranch) = List.span (A.isIndentedMoreThan indent) commentsAfterBranchExpr
     let branchComments = SC.CaseBranchComments commentsBeforeBranch commentsAfterPattern commentsAfterArrow commentsAfterBranchBody
     let branch = (pattern, branchExpr, branchComments)
@@ -478,7 +536,7 @@ let_ start =
       Space.checkIndent defsEnd E.LetIndentIn
       Keyword.in_ E.LetIn
       commentsAfterIn <- Space.chompAndCheckIndent E.LetSpace E.LetIndentBody
-      ((body, commentsAfter), end) <- specialize E.LetBody expression
+      ((body, commentsAfter), end) <- specialize E.LetBody expressionOpen
       let comments = SC.LetComments commentsBeforeIn commentsAfterIn
       return
         ( (A.at start end (Src.Let defs body comments), commentsAfter),

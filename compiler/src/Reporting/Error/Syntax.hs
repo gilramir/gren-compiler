@@ -360,6 +360,7 @@ data Parenthesized
   = ParenthesizedOpen Row Col
   | ParenthesizedEnd Row Col
   | ParenthesizedExpr Expr Row Col
+  | ParenthesizedType Type Row Col
   | ParenthesizedOperatorReserved BadOperator Row Col
   | ParenthesizedOperatorClose Row Col
   | ParenthesizedSpace Space Row Col
@@ -3331,11 +3332,14 @@ toOperatorReport source context operator row col =
                   "I was not expecting to run into the \"has type\" symbol here:",
                 case getDefName context of
                   Nothing ->
-                    D.fillSep
-                      [D.toSimpleNote "The single colon is reserved for type annotation and record types."]
+                    D.stack
+                      [ D.toSimpleNote "The single colon is reserved for type annotation and record types.",
+                        expressionAnnotationNote
+                      ]
                   Just name ->
                     D.stack
-                      [ D.toSimpleNote $
+                      [ expressionAnnotationNote,
+                        D.toSimpleNote $
                           "The single colon is reserved for type annotations and record types, but I think\
                           \ I am parsing the definition of `"
                             ++ Name.toChars name
@@ -3350,6 +3354,14 @@ toOperatorReport source context operator row col =
                                \ this new definition is indented a bit too much."
                       ]
               )
+
+
+-- | D358: where an expression may be annotated, and how.
+expressionAnnotationNote :: D.Doc
+expressionAnnotationNote =
+  D.toSimpleNote
+    "If you meant to give an expression a type, put the expression and its type\
+    \ in parentheses: (x : Int64)."
 
 -- CASE
 
@@ -4755,6 +4767,8 @@ toParenthesizedReport source context parenthesized startRow startCol =
   case parenthesized of
     ParenthesizedExpr expr row col ->
       toExprReport source (InNode NParens startRow startCol context) expr row col
+    ParenthesizedType tipe row col ->
+      toTypeReport source TC_ExpressionAnnotation tipe row col
     ParenthesizedSpace space row col ->
       toSpaceReport source space row col
     ParenthesizedOpen row col ->
@@ -5902,6 +5916,7 @@ toPParenthesizedReport source context parenthesizedPattern startRow startCol =
 
 data TContext
   = TC_Annotation Name.Name
+  | TC_ExpressionAnnotation
   | TC_CustomType
   | TC_TypeAlias
   | TC_InstanceHead
@@ -5938,6 +5953,7 @@ toTypeReport source context tipe startRow startCol =
               thing =
                 case context of
                   TC_Annotation _ -> "type annotation"
+                  TC_ExpressionAnnotation -> "type annotation"
                   TC_CustomType -> "custom type"
                   TC_TypeAlias -> "type alias"
                   TC_InstanceHead -> "instance"
@@ -5945,6 +5961,7 @@ toTypeReport source context tipe startRow startCol =
               something =
                 case context of
                   TC_Annotation name -> "the `" ++ Name.toChars name ++ "` type annotation"
+                  TC_ExpressionAnnotation -> "the type annotation on this expression"
                   TC_CustomType -> "a custom type"
                   TC_TypeAlias -> "a type alias"
                   TC_InstanceHead -> "an instance declaration"
@@ -5982,6 +5999,7 @@ toTypeReport source context tipe startRow startCol =
           thing =
             case context of
               TC_Annotation _ -> "type annotation"
+              TC_ExpressionAnnotation -> "type annotation"
               TC_CustomType -> "custom type"
               TC_TypeAlias -> "type alias"
               TC_InstanceHead -> "instance"

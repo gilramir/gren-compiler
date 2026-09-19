@@ -76,6 +76,7 @@ expr (Can.Expr _ region value) =
     Can.VarOperator _ home name _ -> [(region, home, name)]
     Can.Array items -> concatMap expr items
     Can.Negate inner -> expr inner
+    Can.Annotated inner _ -> expr inner
     Can.Binop _ target _ left right ->
       ( case target of
           Can.OpValue home name -> [(region, home, name)]

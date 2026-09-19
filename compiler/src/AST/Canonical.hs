@@ -184,6 +184,12 @@ data Expr_
   | Float EF.Float (Maybe GN.Suffix)
   | Array [Expr]
   | Negate Expr
+  | -- | @(e : T)@ (D358, @docs\/expr-annotation.md@ §EA8). The annotation's
+    -- variables are scoped as a @let@ signature's are: one the enclosing
+    -- signature binds is that variable, and any other is the annotation's own.
+    -- Nothing after the type checker has a use for the node: 'Type.Resolve'
+    -- and the Core lowering look straight through it.
+    Annotated Expr Annotation
   | -- | A use of an infix operator, with what its declaration named
     -- ('OpTarget') and the signature that name published.
     Binop Name OpTarget Annotation Expr Expr

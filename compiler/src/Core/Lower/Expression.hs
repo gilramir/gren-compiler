@@ -467,6 +467,10 @@ expr env (Can.Expr nid region value) =
           literal env nid sp tipe Name.float (Literal.float tipe f)
         Can.Array items ->
           node (Core.EArray (map (expr env) items))
+        Can.Annotated inner _ ->
+          -- D358: the annotation has done its work in the type checker, and
+          -- the node's type is the one its expression was checked against.
+          expr env inner
         -- A negative literal is one literal (`syntax.md` S5,
         -- `docs/m1b-int.md` §I20). Gren parses `-1` as `Negate (Int 1)`, so
         -- without this the Core for every negative number is a call, and

@@ -64,14 +64,14 @@ toReport source err =
                       "Arithmetic wraps at a type's width and a literal does not: writing a number\
                       \ that cannot be one is a mistake, and wrapping it silently would hide which\
                       \ mistake it was. If you meant a bit pattern, write the value it has at this\
-                      \ width: 255u8 is the byte 0xFF, and -1i8 is the same eight bits read as\
-                      \ signed. If you meant the number, an `Int` holds it."
+                      \ width: (255 : UInt8) is the byte 0xFF, and (-1 : Int8) is the same eight\
+                      \ bits read as signed. If you meant the number, an `Int` holds it."
                     else
                       "Arithmetic wraps at a type's width and a literal does not: writing a number\
                       \ that cannot be one is a mistake, and wrapping it silently would hide which\
                       \ mistake it was. If you meant the number, one of the wider types will hold\
                       \ it -- `Int64`, `UInt32` and `UInt64` are there for that, and a literal can\
-                      \ say so with a suffix: 42i64, 42u32, 42u64."
+                      \ say so with an annotation: (42 : Int64), (42 : UInt32), (42 : UInt64)."
               ]
           )
     PatternAtVariable region value ->

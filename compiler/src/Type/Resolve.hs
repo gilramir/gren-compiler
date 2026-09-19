@@ -875,6 +875,7 @@ expr env tops scope (Can.Expr nid region value) =
           do
             negation env scope nid region (typeOf env (nodeIdOf inner)) (typeOf env nid)
             go inner
+        Can.Annotated inner _ -> go inner
         Can.Lambda args body -> expr env tops (bindPatterns args scope) body
         Can.Call func args -> mapM_ go (func : args)
         Can.If branches final ->
