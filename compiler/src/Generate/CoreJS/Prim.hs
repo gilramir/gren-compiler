@@ -1011,6 +1011,13 @@ function _TaskPrim_kill(proc) {
 function _TaskPrim_rawKill(proc) {
   var steps = [];
 
+  // Answered by a source and not yet stepped: the event was never read, so it
+  // goes back rather than out with the process (D377). Only a `Source` answer
+  // carries `giveBack`; see `_SourcePrim_answer`.
+  if (proc.root && proc.root.giveBack && !proc.wait) {
+    proc.root.giveBack();
+  }
+
   // A process that is waiting stops waiting here, whether or not the wait can
   // be cancelled: clearing `wait` is what makes the operation's callback do
   // nothing when it comes, and most operations have no cancel function.
@@ -1090,6 +1097,12 @@ function _TaskPrim_step(proc) {
   stepping: while (proc.root) {
     var rootTag = proc.root.$;
     if (rootTag === 0 || rootTag === 1) {
+      // A `Source` answer is read from here on, so a kill from inside the
+      // continuation below, which a race's reader reaches by winning, must not
+      // give it back as well (D377).
+      if (proc.root.giveBack) {
+        proc.root.giveBack = null;
+      }
       while (proc.stack && proc.stack.$ !== rootTag) {
         // A release frame matches neither tag, so it is reached on both, which
         // is the whole of what `bracket` promises about success and failure.
@@ -1278,7 +1291,7 @@ var _SourcePrim_new = _TaskPrim_binding(function (callback) {
 function _SourcePrim_next(source) {
   return _TaskPrim_binding(function (callback) {
     if (source.queue.length > 0) {
-      callback(_TaskPrim_succeed([source.queue.shift()]));
+      callback(_SourcePrim_answer(source, source.queue.shift()));
       return;
     }
     if (source.closed) {
@@ -1314,10 +1327,31 @@ function _SourcePrim_emit(source, value) {
   var waiting = source.waiting;
   if (waiting) {
     source.waiting = null;
-    waiting(_TaskPrim_succeed([value]));
+    waiting(_SourcePrim_answer(source, value));
   } else {
     source.queue.push(value);
   }
+}
+
+// What a reader is answered with: a SUCCEED node that can hand its event back.
+// A reader answered but not yet stepped has not read the event, and a kill
+// then (a race settled by a sibling in the same batch) would drop it, so
+// `_TaskPrim_rawKill` calls `giveBack` on a root it finds still holding one
+// (D377, geng-lang m2-beam.md §BM16). The event goes back to the front of the
+// queue, or to a reader parked since, and it was emitted before any close, so
+// a closed source still delivers it before answering nothing.
+function _SourcePrim_answer(source, value) {
+  var node = _TaskPrim_succeed([value]);
+  node.giveBack = function () {
+    var waiting = source.waiting;
+    if (waiting) {
+      source.waiting = null;
+      waiting(_SourcePrim_answer(source, value));
+    } else {
+      source.queue.unshift(value);
+    }
+  };
+  return node;
 }
 |]
 
