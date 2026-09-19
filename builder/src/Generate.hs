@@ -1,6 +1,8 @@
 module Generate
-  ( dev,
-    prod,
+  ( Mode (..),
+    Shape (..),
+    Request (..),
+    make,
     repl,
     ExtSources,
     extSources,
@@ -28,8 +30,11 @@ import Data.NonEmptyList qualified as NE
 import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
 import Generate.CoreJS qualified as CoreJS
+import Generate.Html qualified as Html
 import Generate.LowC qualified as LowC
 import Generate.Mode qualified as Mode
+import Generate.Node qualified as Node
+import Generate.SourceMap qualified as SourceMap
 import Gren.Details qualified as Details
 import Gren.Kernel qualified as K
 import Gren.ModuleName qualified as ModuleName
@@ -47,38 +52,89 @@ import Prelude hiding (cycle, print)
 type Task a =
   Task.Task Exit.Generate a
 
--- | A development build: the linked Core program, emitted by
--- "Generate.CoreJS".
---
--- There is one backend. Until §J18 there were two, and this chose between them
--- on @GENG_JS_NATIVE@ — the switch that let the corpus run every case through
--- each, which is what made the Core path a measured claim rather than a stated
--- one (@docs\/m1a-js-on-core.md@ §J3 items 6 and 7). It stopped being useful
--- when the old path stopped being an independent answer.
-dev :: Target.Target -> Details.Details -> ExtSources -> Build.Artifacts -> Task CoreJS.GeneratedResult
-dev target details sources artifacts =
-  do
-    checkTarget target details artifacts
-    kernels <- kernelChunks details
-    dumpCore target details artifacts kernels
-    spikeC details artifacts
-    program <- linkCore target details artifacts kernels
-    exts <- externFiles target sources program
-    return $ CoreJS.generate Mode.Dev program kernels exts
+-- | What "Make" asks of a build besides the program: whether it is
+-- @--optimize@d, the file it is to be, and the modules' source text when it
+-- wants a source map.
+data Request = Request
+  { _requestMode :: Mode,
+    _requestShape :: Shape,
+    _requestSources :: Maybe (Map.Map ModuleName.Canonical String)
+  }
 
--- | An @--optimize@ build: 'dev', with the field table filled in and @Debug@
--- refused.
-prod :: Target.Target -> Details.Details -> ExtSources -> Build.Artifacts -> Task CoreJS.GeneratedResult
-prod target details sources artifacts =
+data Mode = Dev | Prod
+
+-- | The file a build writes, as "Make" chose it from the platform and the
+-- output: the program on its own, or wrapped to be run by @node@ or loaded in a
+-- page, with the one @main@ the wrapper starts.
+data Shape
+  = Bare
+  | NodeScript ModuleName.Raw
+  | HtmlPage ModuleName.Raw
+
+-- | A code generator, and what it makes of a build that has passed the target
+-- gate (@m2-seam.md@ §DS5 item 2). The language it reads externs in is the
+-- target's, 'Target.language'.
+newtype Backend = Backend
+  { _backendEmit :: Target.Target -> Details.Details -> ExtSources -> Build.Artifacts -> Request -> Task B.Builder
+  }
+
+-- | The backend for each target. There is one: @js@'s.
+backendFor :: Target.Target -> Maybe Backend
+backendFor target =
+  case target of
+    Target.Js -> Just javaScript
+    Target.Beam -> Nothing
+    Target.Native -> Nothing
+    Target.Wasm -> Nothing
+
+-- | A build: the target gate, @--optimize@'s refusal of @Debug@, and then the
+-- target's backend.
+make :: Target.Target -> Details.Details -> ExtSources -> Build.Artifacts -> Request -> Task B.Builder
+make target details sources artifacts request =
   do
-    checkTarget target details artifacts
-    checkForDebugUses artifacts
-    kernels <- kernelChunks details
-    dumpCore target details artifacts kernels
-    program <- linkCore target details artifacts kernels
-    exts <- externFiles target sources program
-    let mode = Mode.Prod (CoreJS.shortenFieldNames (Program._progFields program))
-    return $ CoreJS.generate mode program kernels exts
+    backend <- checkTarget target details artifacts
+    case _requestMode request of
+      Dev -> return ()
+      Prod -> checkForDebugUses artifacts
+    _backendEmit backend target details sources artifacts request
+
+-- JAVASCRIPT
+
+-- | The linked Core program, emitted by "Generate.CoreJS" and wrapped as the
+-- request's 'Shape' says.
+--
+-- There is one JavaScript emitter. Until §J18 there were two, and this chose
+-- between them on @GENG_JS_NATIVE@ — the switch that let the corpus run every
+-- case through each, which is what made the Core path a measured claim rather
+-- than a stated one (@docs\/m1a-js-on-core.md@ §J3 items 6 and 7). It stopped
+-- being useful when the old path stopped being an independent answer.
+--
+-- An @--optimize@ build fills in the field table and skips the C spike.
+javaScript :: Backend
+javaScript =
+  Backend $ \target details sources artifacts (Request mode shape maybeSources) ->
+    do
+      kernels <- kernelChunks details
+      dumpCore target details artifacts kernels
+      case mode of
+        Dev -> spikeC details artifacts
+        Prod -> return ()
+      program <- linkCore target details artifacts kernels
+      exts <- externFiles target sources program
+      let jsMode =
+            case mode of
+              Dev -> Mode.Dev
+              Prod -> Mode.Prod (CoreJS.shortenFieldNames (Program._progFields program))
+          CoreJS.GeneratedResult source sourceMap = CoreJS.generate jsMode program kernels exts
+          mapped leadingLines js =
+            case maybeSources of
+              Nothing -> js
+              Just moduleSources -> SourceMap.generateOnto leadingLines moduleSources sourceMap js
+      return $
+        case shape of
+          Bare -> mapped 0 source
+          NodeScript name -> mapped Node.leadingLines (Node.sandwich name source)
+          HtmlPage name -> Html.sandwich name (mapped Html.leadingLines source)
 
 -- TARGET
 
@@ -90,18 +146,18 @@ prod target details sources artifacts =
 -- in the program calls, as F1 says a build that imports it is. That is what
 -- leaves 'externFiles' only a missing file to find: an extern with no @js@ row
 -- and no body can no longer reach it.
-checkTarget :: Target.Target -> Details.Details -> Build.Artifacts -> Task ()
+checkTarget :: Target.Target -> Details.Details -> Build.Artifacts -> Task Backend
 checkTarget target details artifacts@(Build.Artifacts pkg _ _ _) =
   let own = Map.mapKeys (ModuleName.Canonical pkg) (ownCore artifacts)
    in checkReached target (Map.union own (Details.loadCores details)) (Map.keys own)
 
-checkReached :: Target.Target -> Map.Map ModuleName.Canonical Core.Module -> [ModuleName.Canonical] -> Task ()
+checkReached :: Target.Target -> Map.Map ModuleName.Canonical Core.Module -> [ModuleName.Canonical] -> Task Backend
 checkReached target cores starts =
   case Target.refusals target (Target.reached cores starts) of
     [] ->
-      if target == Target.Js
-        then return ()
-        else Task.throw (Exit.GenerateNoBackend target)
+      case backendFor target of
+        Just backend -> return backend
+        Nothing -> Task.throw (Exit.GenerateNoBackend target)
     refusals ->
       Task.throw (Exit.GenerateTargetRefused target refusals)
 
@@ -230,8 +286,8 @@ ownCore (Build.Artifacts _ _ roots modules) =
 -- The graph's own field census is not the answer to the second half: it is the
 -- whole program's, kernel and Gren at once, where the linker wants each kernel
 -- module's share attributed to it so that an unreached one contributes nothing.
-backendFor :: Map.Map N.Name [K.Chunk] -> Map.Map ModuleName.Canonical Core.Module -> Program.Backend
-backendFor kernels _ =
+kernelBackend :: Map.Map N.Name [K.Chunk] -> Map.Map ModuleName.Canonical Core.Module -> Program.Backend
+kernelBackend kernels _ =
   Program.Backend
     { Program._backendKernels = Map.map kernelInfo kernels,
       Program._backendEdges = Map.empty
@@ -262,7 +318,7 @@ linkCore target details artifacts kernels =
   Task.io $
     do
       cores <- Program.chooseExterns (Target.language target) Dump.externBodies <$> (programCore details artifacts >>= passed)
-      let program = Program.link (backendFor kernels cores) cores (coreRoots artifacts cores)
+      let program = Program.link (kernelBackend kernels cores) cores (coreRoots artifacts cores)
       reported program
       return (checked program)
 
@@ -366,7 +422,7 @@ dumpCore target details artifacts kernels =
                 if Dump.linkEveryExport
                   then concatMap Core._moduleExports (Map.elems cores)
                   else coreRoots artifacts cores
-              linked = Program.link (backendFor kernels cores) cores roots
+              linked = Program.link (kernelBackend kernels cores) cores roots
           case maybeFile of
             Nothing -> return ()
             Just file -> B.writeFile file (Program.render linked)
@@ -444,7 +500,7 @@ spikeBackend =
       Program._backendEdges = Map.empty
     }
 
--- | One REPL entry, generated the way @dev@ is (§J17).
+-- | One REPL entry, generated the way 'javaScript' generates a development build (§J17).
 repl :: Details.Details -> ExtSources -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
 repl details sources ansi artifacts@(Build.ReplArtifacts home _ localizer annotations) name =
   do
@@ -468,7 +524,7 @@ linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels =
             [ (ModuleName.Canonical (ModuleName._package home) raw, core)
             | (raw, core) <- map replModuleCore modules
             ]
-    checkReached Target.Js (Map.union own deps) (Map.keys own)
+    _ <- checkReached Target.Js (Map.union own deps) (Map.keys own)
     Task.io $
       do
         cores <- Program.chooseExterns (Target.language Target.Js) Dump.externBodies <$> (throughWire (Map.union own deps) >>= passed)
@@ -513,7 +569,7 @@ replBackend ::
   N.Name ->
   Program.Backend
 replBackend kernels cores home name =
-  let backend = backendFor kernels cores
+  let backend = kernelBackend kernels cores
    in backend
         { Program._backendEdges =
             Map.insertWith

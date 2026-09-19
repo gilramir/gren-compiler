@@ -16,11 +16,6 @@ import Data.Maybe qualified as Maybe
 import Data.NonEmptyList qualified as NE
 import File qualified
 import Generate qualified
-import Generate.CoreJS qualified as CoreJS
-import Generate.Html qualified as Html
-import Generate.Node qualified as Node
-import Generate.SourceMap (SourceMap)
-import Generate.SourceMap qualified as SourceMap
 import Gren.Details qualified as Details
 import Gren.ModuleName qualified as ModuleName
 import Gren.Outline (Outline)
@@ -85,6 +80,10 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
           do
             artifacts <- buildPaths style root details sources (NE.List p ps)
             let mains = getMains artifacts
+                generate shape =
+                  Task.mapError Exit.MakeBadGenerate $
+                    Generate.make (targetOf outline) details (Generate.extSources outline sources deps) artifacts $
+                      Generate.Request desiredMode shape (if withSourceMaps then Just (gatherSources flags) else Nothing)
             case maybeOutput of
               Nothing ->
                 case (platform, mains) of
@@ -92,18 +91,15 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                     return ()
                   (Platform.Browser, [name]) ->
                     do
-                      (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
-                      let bundle = prepareOutput withSourceMaps flags Html.leadingLines sourceMap source
-                      writeToDisk style "index.html" (Html.sandwich name bundle) (NE.List name [])
+                      bundle <- generate (Generate.HtmlPage name)
+                      writeToDisk style "index.html" bundle (NE.List name [])
                   (Platform.Node, [name]) ->
                     do
-                      (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
-                      let bundle = prepareOutput withSourceMaps flags Node.leadingLines sourceMap (Node.sandwich name source)
+                      bundle <- generate (Generate.NodeScript name)
                       writeToDisk style "app" bundle (NE.List name [])
                   (_, name : names) ->
                     do
-                      (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
-                      let bundle = prepareOutput withSourceMaps flags 0 sourceMap source
+                      bundle <- generate Generate.Bare
                       writeToDisk style "index.js" bundle (NE.List name names)
               Just DevStdOut ->
                 case getMains artifacts of
@@ -111,8 +107,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                     return ()
                   _ ->
                     do
-                      (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
-                      let bundle = prepareOutput withSourceMaps flags 0 sourceMap source
+                      bundle <- generate Generate.Bare
                       Task.io $ B.hPutBuilder IO.stdout bundle
               Just DevNull ->
                 return ()
@@ -120,16 +115,14 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                 case platform of
                   Platform.Node -> do
                     name <- hasOneMain artifacts
-                    (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
-                    let bundle = prepareOutput withSourceMaps flags Node.leadingLines sourceMap (Node.sandwich name source)
+                    bundle <- generate (Generate.NodeScript name)
                     writeToDisk style target bundle (NE.List name [])
                   _ -> do
                     Task.throw Exit.MakeExeOnlyForNodePlatform
               Just (JS target) ->
                 case getNoMains artifacts of
                   [] -> do
-                    (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
-                    let bundle = prepareOutput withSourceMaps flags 0 sourceMap source
+                    bundle <- generate Generate.Bare
                     writeToDisk style target bundle (Build.getRootNames artifacts)
                   name : names ->
                     Task.throw (Exit.MakeNonMainFilesIntoJavaScript name names)
@@ -137,9 +130,8 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                 case platform of
                   Platform.Browser -> do
                     name <- hasOneMain artifacts
-                    (CoreJS.GeneratedResult source sourceMap) <- generate (targetOf outline) details (Generate.extSources outline sources deps) desiredMode artifacts
-                    let bundle = prepareOutput withSourceMaps flags Html.leadingLines sourceMap source
-                    writeToDisk style target (Html.sandwich name bundle) (NE.List name [])
+                    bundle <- generate (Generate.HtmlPage name)
+                    writeToDisk style target bundle (NE.List name [])
                   _ -> do
                     Task.throw Exit.MakeHtmlOnlyForBrowserPlatform
 
@@ -152,9 +144,9 @@ getStyle maybeOutput report =
     (_, False) -> Reporting.terminal
     (_, True) -> return Reporting.json
 
-getMode :: Bool -> Task DesiredMode
+getMode :: Bool -> Task Generate.Mode
 getMode optimize =
-  return (if optimize then Prod else Dev)
+  return (if optimize then Generate.Prod else Generate.Dev)
 
 getExposed :: Details.Details -> Task (NE.List ModuleName.Raw)
 getExposed (Details.Details _ validOutline _ _ _ _) =
@@ -257,14 +249,6 @@ getNoMain modules root =
 
 -- WRITE TO DISK
 
-prepareOutput :: Bool -> Flags -> Int -> SourceMap -> B.Builder -> B.Builder
-prepareOutput enabled flags leadingLines sourceMap source =
-  if enabled
-    then
-      let moduleSources = gatherSources flags
-       in SourceMap.generateOnto leadingLines moduleSources sourceMap source
-    else source
-
 gatherSources :: Flags -> Map ModuleName.Canonical String
 gatherSources (Flags _ _ _ _ _ _ outline sources deps) =
   let mappedSources =
@@ -303,12 +287,3 @@ targetOf outline =
   case outline of
     Outline.App app -> Outline._app_target app
     Outline.Pkg _ -> Target.Js
-
-data DesiredMode = Dev | Prod
-
-generate :: Target.Target -> Details.Details -> Generate.ExtSources -> DesiredMode -> Build.Artifacts -> Task CoreJS.GeneratedResult
-generate target details sources desiredMode artifacts =
-  Task.mapError Exit.MakeBadGenerate $
-    case desiredMode of
-      Dev -> Generate.dev target details sources artifacts
-      Prod -> Generate.prod target details sources artifacts
