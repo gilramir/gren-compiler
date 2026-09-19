@@ -105,6 +105,35 @@ spec = do
           backward = pass [same, use "b" (witnessOf "eqStr"), use "a" (witnessOf "eqInt")]
        in globalsOf (valueOf forward "a") `shouldBe` globalsOf (valueOf backward "a")
 
+  describe "a local constrained definition (§G55, D357)" $ do
+    it "gets a copy per witness row, bound in its own let, and is dropped" $
+      let body = letE [localSame] (call (globalE "both") [witApp (var "loc") [witnessOf "eqInt"], witApp (var "loc") [witnessOf "eqStr"]])
+          out = pass [def "user" body]
+       in letNames (valueOf out "user") `shouldBe` ["loc$s0", "loc$s1"]
+
+    it "rewrites each application to its copy, which reads the method itself" $
+      let body = letE [localSame] (witApp (var "loc") [witnessOf "eqInt"])
+          out = pass [def "user" body]
+       in (letBody (valueOf out "user"), globalsOf (letValue (valueOf out "user") "loc$s0"))
+            `shouldBe` (var "loc$s0", ["intEq"])
+
+    it "keeps a local whose row is a parameter, for its caller" $
+      let body = witLam ["$w0"] (letE [localSame] (witApp (var "loc") [var "$w0"]))
+          out = pass [Core.Bind (Core.Binder "onward" witFunT span0) body]
+       in letNames (valueOf out "onward") `shouldBe` ["loc"]
+
+    it "specializes it in a copy of its enclosing definition" $
+      let body = witLam ["$w0"] (letE [localSame] (witApp (var "loc") [var "$w0"]))
+          out = pass [Core.Bind (Core.Binder "onward" witFunT span0) body, useOf "onward" "callInt" (witnessOf "eqInt")]
+       in letNames (valueOf out "onward$s0") `shouldBe` ["loc$s0"]
+
+    it "gives a recursive local one copy, which calls itself" $
+      let self = Core.Bind (Core.Binder "loop" witFunT span0) (witLam ["$w1"] (witApp (var "loop") [var "$w1"]))
+          body = letRecE [self] (witApp (var "loop") [witnessOf "eqInt"])
+          out = pass [def "user" body]
+       in (letNames (valueOf out "user"), letValue (valueOf out "user") "loop$s0")
+            `shouldBe` (["loop$s0"], var "loop$s0")
+
 -- RUNNING THE PASS
 
 pass :: [Core.Bind] -> Core.Module
@@ -175,6 +204,35 @@ globalsOf = List.sort . go
       Core.ERecord fields -> concatMap (go . snd) fields
       Core.ELet binds body -> concatMap (go . Core._bindValue) binds ++ go body
       _ -> []
+
+-- | The names the outermost @let@ or @letrec@ of an expression binds, under
+-- any witness lambda, sorted.
+letNames :: Core.Expr -> [Name]
+letNames e =
+  case Core._exprValue e of
+    Core.EWitLam _ body -> letNames body
+    Core.ELet binds _ -> List.sort (map (Core._binderName . Core._bindBinder) binds)
+    Core.ELetRec binds _ -> List.sort (map (Core._binderName . Core._bindBinder) binds)
+    _ -> []
+
+letBody :: Core.Expr -> Core.Expr
+letBody e =
+  case Core._exprValue e of
+    Core.ELet _ body -> body
+    Core.ELetRec _ body -> body
+    _ -> error "not a let"
+
+letValue :: Core.Expr -> Name -> Core.Expr
+letValue e wanted =
+  case Core._exprValue e of
+    Core.ELet binds _ -> pick binds
+    Core.ELetRec binds _ -> pick binds
+    _ -> error "not a let"
+  where
+    pick binds =
+      case [v | Core.Bind b v <- binds, Core._binderName b == wanted] of
+        v : _ -> v
+        [] -> error ("no local named " ++ show wanted)
 
 -- BUILDING CORE
 
@@ -272,6 +330,19 @@ generic2 =
         (Core.TFun [Core.TVar "a"] (Core.TVar "b"))
         span0
     )
+
+letE :: [Core.Bind] -> Core.Expr -> Core.Expr
+letE binds body = node (Core.ELet binds body)
+
+letRecE :: [Core.Bind] -> Core.Expr -> Core.Expr
+letRecE binds body = node (Core.ELetRec binds body)
+
+-- | @same@, bound in a @let@ as @loc@.
+localSame :: Core.Bind
+localSame =
+  Core.Bind
+    (Core.Binder "loc" witFunT span0)
+    (witLam ["$w1"] (access (var "$w1") "eq"))
 
 -- | A use of a named generic at one witness.
 useOf :: Name -> Name -> Core.Expr -> Core.Bind

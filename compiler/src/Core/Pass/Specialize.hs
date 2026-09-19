@@ -120,25 +120,31 @@ depth w =
 -- THE PASS
 
 run :: Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
-run cores =
-  let gens = generics cores
-   in if Map.null gens
-        then cores
-        else
-          let tys = bindingTypes cores
-              keys = demand gens tys cores
-              names = assign keys
-              added =
-                Map.fromListWith
-                  (++)
-                  [ (Core._qnHome name, [copy gens tys names key])
-                  | key@(name, _) <- Set.toAscList keys
-                  ]
-              collapsed = Map.mapWithKey (module_ gens names added) cores
-              tbl = tables collapsed
-           in if Map.null tbl
-                then collapsed
-                else Map.map (onExprs (project tbl)) collapsed
+run given =
+  -- Local definitions first (§G55): what their copies call is what 'demand'
+  -- has to find, and a copy of a top-level definition specializes its own
+  -- locals again in 'instantiated', where their witnesses become closed.
+  let tys = bindingTypes given
+      cores = Map.map (onExprs (localize (generics given) tys)) given
+      gens = generics cores
+      collapsed
+        | Map.null gens = cores
+        | otherwise =
+            let keys = demand gens tys cores
+                names = assign keys
+                added =
+                  Map.fromListWith
+                    (++)
+                    [ (Core._qnHome name, [copy gens tys names key])
+                    | key@(name, _) <- Set.toAscList keys
+                    ]
+             in Map.mapWithKey (module_ gens names added) cores
+      -- A local's copy reads its method out of a known table too, so the fold
+      -- runs whether or not anything at the top level was copied.
+      tbl = tables collapsed
+   in if Map.null tbl
+        then collapsed
+        else Map.map (onExprs (project tbl)) collapsed
 
 -- | Every top-level binding that takes witnesses, by name.
 --
@@ -220,11 +226,16 @@ keyOf :: Map Core.QualName a -> Core.Expr -> [Core.Expr] -> Maybe Key
 keyOf gens fn args =
   case Core._exprValue fn of
     Core.EGlobal name
-      | Map.member name gens ->
-          do
-            wits <- traverse witOf args
-            if any ((> depthCap) . depth) wits then Nothing else Just (name, wits)
+      | Map.member name gens -> (,) name <$> closedRow args
     _ -> Nothing
+
+-- | A row of witness arguments read as a key's, when every one is closed and
+-- none is past 'depthCap'.
+closedRow :: [Core.Expr] -> Maybe [Wit]
+closedRow args =
+  do
+    wits <- traverse witOf args
+    if any ((> depthCap) . depth) wits then Nothing else Just wits
 
 -- | Read a witness expression, or fail because it is a parameter.
 witOf :: Core.Expr -> Maybe Wit
@@ -296,7 +307,7 @@ substituted gens (name, wits) =
 -- fixed, since a record's witness (§G38) is keyed by its type.
 instantiated :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Key -> Core.Expr
 instantiated gens tys key =
-  retype (substituteT (fixed gens tys key)) (substituted gens key)
+  localize gens tys (retype (substituteT (fixed gens tys key)) (substituted gens key))
 
 -- | A witness, written back as the expression it was read from. The type and
 -- span are the parameter's, so a copy is a function of its key alone.
@@ -332,11 +343,16 @@ copy gens tys names key@(name, _) =
 fixed :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Key -> Map Name Core.Type
 fixed gens tys (name, wits) =
   let (binders, _, _) = gens Map.! name
-   in Map.unions
-        [ matchT (Core._binderType binder) actual
-        | (binder, wit) <- zip binders wits,
-          Just actual <- [witType gens tys wit]
-        ]
+   in fixedBy gens tys binders wits
+
+-- | 'fixed' for any row of witness parameters, a local definition's included.
+fixedBy :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> [Core.Binder] -> [Wit] -> Map Name Core.Type
+fixedBy gens tys binders wits =
+  Map.unions
+    [ matchT (Core._binderType binder) actual
+    | (binder, wit) <- zip binders wits,
+      Just actual <- [witType gens tys wit]
+    ]
 
 -- | The type of a witness expression: the instance table's own type, with the
 -- context it was applied to substituted in.
@@ -462,6 +478,174 @@ retype f = go
         Core.PArray ps tl -> Core.PArray (map pattern_ ps) (fmap binder tl)
         Core.PAs b q -> Core.PAs (binder b) (pattern_ q)
         other -> other
+
+-- LOCAL DEFINITIONS
+
+-- | A local constrained definition applied to a full row of witnesses: the
+-- local's name, which is unique in its scope because Gren refuses shadowing,
+-- and the row.
+type LocalKey = (Name, [Wit])
+
+-- | Specialize every constrained definition an expression binds in a @let@
+-- (§G55, D357).
+--
+-- It is the top-level pass again at the size of one scope. A local bound to an
+-- 'Core.AST.EWitLam' gets one copy per closed row of witnesses it is applied
+-- to, read to a fixed point so that a local calling itself or a sibling is
+-- reached; each copy is bound in the same group as the local, so what the
+-- local captured is in scope for its copies; each application becomes the
+-- copy's name; and the local itself is dropped once nothing refers to it. A
+-- row that is not closed is left for the caller: inside a generic definition,
+-- 'instantiated' calls this again once the definition's own witnesses are
+-- fixed.
+--
+-- A copy's body is localized too, since substituting its witnesses is what
+-- closes the rows of any local nested in it, and it is what 'demand' reads for
+-- the global definitions the copy calls.
+localize :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Core.Expr -> Core.Expr
+localize gens tys = go
+  where
+    go e =
+      case Core._exprValue e of
+        Core.ELet binds body -> scope False binds body e
+        Core.ELetRec binds body -> scope True binds body e
+        _ -> runIdentity (childrenA (Identity . go) e)
+
+    scope recursive givenBinds givenBody e =
+      let binds = [Core.Bind b (go v) | Core.Bind b v <- givenBinds]
+          body = go givenBody
+          locals =
+            Map.fromList
+              [ (Core._binderName b, (params, inner, b))
+              | Core.Bind b v <- binds,
+                Core.EWitLam params inner <- [Core._exprValue v]
+              ]
+          rebuild bs b =
+            Core.Expr ((if recursive then Core.ELetRec else Core.ELet) bs b) (Core.typeOf e) (Core.spanOf e)
+       in if Map.null locals
+            then rebuild binds body
+            else
+              let live = Map.keysSet locals
+                  instance_ (name, wits) =
+                    let (params, inner, _) = locals Map.! name
+                        env = Map.fromList (zip (map Core._binderName params) (zipWith canonical params wits))
+                     in go (retype (substituteT (fixedBy gens tys params wits)) (subst env inner))
+                  close acc [] = acc
+                  close acc (key : rest)
+                    | Map.member key acc = close acc rest
+                    | otherwise =
+                        let copyBody = instance_ key
+                         in close (Map.insert key copyBody acc) (localSites live copyBody ++ rest)
+                  seeds = concatMap (localSites live) (body : map Core._bindValue binds)
+                  found = close Map.empty seeds
+                  names = localNames (Map.keysSet found)
+                  rw = rewriteLocal live names
+                  copiesOf name =
+                    [ let (params, _, b) = locals Map.! name
+                          sub = fixedBy gens tys params wits
+                       in Core.Bind
+                            (Core.Binder (names Map.! key) (discharged sub (Core._binderType b)) (Core._binderSpan b))
+                            (rw copyBody)
+                    | (key@(owner, wits), copyBody) <- Map.toAscList found,
+                      owner == name
+                    ]
+                  body' = rw body
+                  rewritten = [Core.Bind b (rw v) | Core.Bind b v <- binds]
+                  copies = concatMap (copiesOf . Core._binderName . Core._bindBinder) binds
+                  -- A local is kept while something kept refers to it: the body,
+                  -- an ordinary binding, a copy, or another kept local.
+                  plain = [bd | bd <- rewritten, not (Map.member (Core._binderName (Core._bindBinder bd)) locals)]
+                  generic = [bd | bd <- rewritten, Map.member (Core._binderName (Core._bindBinder bd)) locals]
+                  used held =
+                    Set.unions (map Refs.freeLocals (body' : map Core._bindValue (plain ++ copies ++ held)))
+                  keep held =
+                    let held' = [bd | bd <- generic, Set.member (Core._binderName (Core._bindBinder bd)) (used held)]
+                     in if length held' == length held then held else keep held'
+                  kept = Set.fromList (map (Core._binderName . Core._bindBinder) (keep []))
+                  ordered =
+                    concat
+                      [ if Map.member name locals
+                          then [bd | Set.member name kept] ++ copiesOf name
+                          else [bd]
+                      | bd <- rewritten,
+                        let name = Core._binderName (Core._bindBinder bd)
+                      ]
+               in rebuild ordered body'
+
+-- | One name per local instantiation, as 'assign' names the top-level ones:
+-- @$s@ and a position in the sorted keys, which no source name can collide
+-- with.
+localNames :: Set LocalKey -> Map LocalKey Name
+localNames keys =
+  Map.fromList
+    [ (key, Name.fromChars (Name.toChars name ++ "$s" ++ show i))
+    | (name, group) <- Map.toAscList grouped,
+      (i, key) <- zip [0 :: Int ..] group
+    ]
+  where
+    grouped =
+      Map.map List.sort (Map.fromListWith (++) [(name, [key]) | key@(name, _) <- Set.toList keys])
+
+-- | The closed applications of the given locals in an expression, where those
+-- names still mean those locals.
+localSites :: Set Name -> Core.Expr -> [LocalKey]
+localSites = collect
+  where
+    collect live e
+      | Set.null live = []
+      | otherwise =
+          case Core._exprValue e of
+            Core.EWitApp fn args
+              | Core.EVar name <- Core._exprValue fn,
+                Set.member name live,
+                Just wits <- closedRow args ->
+                  [(name, wits)]
+            _ -> getConst (scopedChildren (\inner child -> Const (collect inner child)) live e)
+
+-- | Each closed application of a local that has a copy becomes the copy.
+rewriteLocal :: Set Name -> Map LocalKey Name -> Core.Expr -> Core.Expr
+rewriteLocal liveAtTop names = go liveAtTop
+  where
+    go live e
+      | Set.null live = e
+      | otherwise =
+          case Core._exprValue e of
+            Core.EWitApp fn args
+              | Core.EVar name <- Core._exprValue fn,
+                Set.member name live,
+                Just wits <- closedRow args,
+                Just copyName <- Map.lookup (name, wits) names ->
+                  Core.Expr (Core.EVar copyName) (Core.typeOf e) (Core.spanOf e)
+            _ -> runIdentity (scopedChildren (\inner child -> Identity (go inner child)) live e)
+
+-- | 'childrenA', told which of the names still mean what they meant outside:
+-- a name a child binds again is taken out of the set for that child. Gren
+-- refuses shadowing, so this is for the binders the lowering invents.
+scopedChildren :: (Applicative f) => (Set Name -> Core.Expr -> f Core.Expr) -> Set Name -> Core.Expr -> f Core.Expr
+scopedChildren f live e@(Core.Expr value tipe sp) =
+  case value of
+    Core.ELam bs body -> rebuild . Core.ELam bs <$> f (minus bs) body
+    Core.ELet binds body ->
+      rebuild <$> (Core.ELet <$> sequential live binds <*> f (minus (map Core._bindBinder binds)) body)
+    Core.ELetRec binds body ->
+      let inner = minus (map Core._bindBinder binds)
+       in rebuild <$> (Core.ELetRec <$> traverse (bindWith inner) binds <*> f inner body)
+    Core.ECase scrut alts fallback ->
+      rebuild
+        <$> ( Core.ECase
+                <$> f live scrut
+                <*> traverse (\(Core.Alt p b) -> Core.Alt p <$> f (Set.difference live (Refs.patternBinders p)) b) alts
+                <*> traverse (f live) fallback
+            )
+    Core.EWitLam bs body -> rebuild . Core.EWitLam bs <$> f (minus bs) body
+    _ -> childrenA (f live) e
+  where
+    rebuild v = Core.Expr v tipe sp
+    minus bs = Set.difference live (Set.fromList (map Core._binderName bs))
+    bindWith inner (Core.Bind b v) = Core.Bind b <$> f inner v
+    sequential _ [] = pure []
+    sequential now (bd@(Core.Bind b _) : rest) =
+      (:) <$> bindWith now bd <*> sequential (Set.delete (Core._binderName b) now) rest
 
 -- REWRITING
 
