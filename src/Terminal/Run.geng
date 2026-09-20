@@ -15,6 +15,7 @@ import Compiler.Paths
 import Bytes exposing (Bytes)
 import ChildProcess
 import Compiler.Backend
+import Dict
 import Compiler.Outline as Outline exposing (Outline)
 import Compiler.Runtime as Runtime
 import Compiler.Platform as Platform
@@ -142,6 +143,7 @@ makeProject config projectOutline =
                         { useColor = config.useColor
                         , compilerPath = config.compilerPath
                         , pathToString = config.pathToString
+                        , environment = Dict.empty
                         }
                         |> Task.mapError SpawnError
                         |> Task.map

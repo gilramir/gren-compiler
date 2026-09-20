@@ -1,0 +1,273 @@
+module Terminal.Beam exposing
+    ( Plan
+    , plan
+    , stageEnvironment
+    , prepare
+    , emit
+    )
+
+{-| The BEAM half of `geng make`, for a project whose outline says
+`target = "beam"`.
+
+The backend for that target is not in the compiler binary: it is
+`packages/beam`, a Geng package this front end imports (D382). So a `beam`
+build is this process running the binary with `GENG_STAGE_WRITE=passed:dir`,
+which stops it after the passes with the program's Core in a directory, and
+then linking and emitting that directory here — one command for the person who
+typed it, and the seam `m2-seam.md` §DS5 built underneath (geng-lang
+`m2-beam.md` §BM23).
+
+**What a build leaves.** `--output` names the file a person runs, `app` by
+default, as it does for the Node platform; the Erlang goes in a directory
+beside it named after it, because a BEAM program is a set of modules and OTP
+interop, a release and `erl -pa` all want the directory rather than the one
+file. `erlc` and the escript are not here yet, so what this writes is the
+`.erl`.
+
+-}
+
+import Cli.PrettyPrinter as PP
+import Cli.Report as Report exposing (Report)
+import Bytes exposing (Bytes)
+import Compiler.Backend
+import Dict exposing (Dict)
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Geng.Beam.Build as Build
+import Geng.Core as Core
+import Stream
+import Stream.Log
+import Task exposing (Task)
+
+
+{-| Where a BEAM build's three things go.
+-}
+type alias Plan =
+    { escript : Path
+    , ebin : Path
+    , stage : Path
+    }
+
+
+{-| The plan for an `--output`, or why there is none.
+
+`/dev/null` asks for no output at all, and answers `Nothing`: the compiler
+serves it by never reaching a backend, so such a build is the ordinary one and
+nothing here runs. The three that are refused are refused because they name a
+JavaScript artifact — a BEAM program is neither a stream of text nor a page.
+-}
+plan : (String -> Path) -> Maybe Compiler.Backend.MakeOutput -> Result Report (Maybe Plan)
+plan fromString output =
+    let
+        refuse what instead =
+            Err <|
+                Report.create
+                    "THAT OUTPUT IS NOT A BEAM PROGRAM"
+                    Nothing
+                    (PP.verticalBlock
+                        [ PP.words
+                            ("You have asked for " ++ what ++ ", but this project's target is beam.")
+                        , PP.empty
+                        , PP.words instead
+                        ]
+                    )
+    in
+    when output is
+        Nothing ->
+            Ok (Just (paths (fromString "app")))
+
+        Just (Compiler.Backend.Exe path) ->
+            Ok (Just (paths (fromString path)))
+
+        Just Compiler.Backend.StdOut ->
+            refuse
+                "the program on standard output"
+                "A BEAM program is a set of compiled modules and an escript around them, so there is nothing to print. Give me a file name instead."
+
+        Just (Compiler.Backend.Js path) ->
+            refuse
+                ("JavaScript at " ++ path)
+                "Drop the .js from --output and I will write a BEAM program there."
+
+        Just (Compiler.Backend.Html path) ->
+            refuse
+                ("an HTML page at " ++ path)
+                "A page needs the js target and the browser platform."
+
+        Just Compiler.Backend.DevNull ->
+            Ok Nothing
+
+
+paths : Path -> Plan
+paths escript =
+    let
+        ebin =
+            Path.append
+                (Path.fromPosixString (Path.filenameWithExtension escript ++ ".ebin"))
+                (Path.parentPath escript |> Maybe.withDefault Path.empty)
+    in
+    { escript = escript
+    , ebin = ebin
+    , stage = Path.append (Path.fromPosixString "geng-stage") ebin
+    }
+
+
+{-| What the compiler binary is run with, so that it stops after the passes and
+leaves this process the Core.
+
+**A build refuses to start when either switch is already set**, rather than
+overriding it: `GENG_STAGE_WRITE` is a developer's switch as much as this
+build's (`Core.Stage`), and silently taking it over would make a staged run of
+a `beam` project write somewhere the person did not ask for.
+-}
+stageEnvironment : (Path -> String) -> Dict String String -> Plan -> Result Report (Dict String String)
+stageEnvironment toString envVars thePlan =
+    let
+        taken name =
+            Err <|
+                Report.create
+                    "THE STAGE IS ALREADY SET"
+                    Nothing
+                    (PP.verticalBlock
+                        [ PP.words
+                            (name ++ " is set in this environment, and a build for the beam target sets GENG_STAGE_WRITE itself: the backend is not in the compiler binary, so the build stops at the passed Core and finishes here.")
+                        , PP.empty
+                        , PP.words "Unset it, or build this project for the js target."
+                        ]
+                    )
+    in
+    if Dict.member "GENG_STAGE_WRITE" envVars then
+        taken "GENG_STAGE_WRITE"
+
+    else if Dict.member "GENG_STAGE_READ" envVars then
+        taken "GENG_STAGE_READ"
+
+    else
+        Ok (Dict.singleton "GENG_STAGE_WRITE" ("passed:" ++ toString thePlan.stage))
+
+
+{-| The output directory, made and emptied of what an earlier build left.
+
+A program's modules are the program's, and a module left behind from a
+different one would be compiled into this one's directory and, once there is an
+escript, into the archive. The `geng-stage` directory inside it is the
+compiler's to overwrite and is left alone here.
+-}
+prepare : FileSystem.Permission -> Plan -> Task Report {}
+prepare fs thePlan =
+    FileSystem.makeDirectory fs { recursive = True } thePlan.ebin
+        |> Task.mapError (failure "I cannot make the output directory")
+        |> Task.andThen (\_ -> clear fs thePlan.ebin)
+
+
+clear : FileSystem.Permission -> Path -> Task Report {}
+clear fs directory =
+    FileSystem.listDirectory fs directory
+        |> Task.mapError (failure "I cannot read the output directory")
+        |> Task.andThen
+            (\entries ->
+                entries
+                    |> Array.map (\entry -> Path.filenameWithExtension entry.path)
+                    |> Array.keepIf (\name -> String.endsWith ".erl" name || String.endsWith ".beam" name)
+                    |> Array.map
+                        (\name ->
+                            FileSystem.remove fs
+                                { recursive = False }
+                                (Path.append (Path.fromPosixString name) directory)
+                                |> Task.mapError (failure "I cannot clear the output directory")
+                        )
+                    |> Task.sequence
+            )
+        |> Task.map (\_ -> {})
+
+
+{-| The stage directory, linked and written out as Erlang, and the status that
+answers.
+
+**A build that wrote no stage wrote no program**, and that is not an error: a
+project with no `main` compiles and generates nothing, exactly as it does for
+the js target. So a missing directory is a silent 0.
+
+**A shape the backend has no Erlang for is written verbatim**, on `stderr`, and
+not as one of the compiler's reports. It is not a problem with the program: it
+is this backend being unfinished, it names bindings whose specialized names are
+longer than a line, and reflowing that list would make it unreadable and
+unparseable both (`m2-beam.md` §BM20.3's item 7 is the list of shapes that are
+left). It goes when the list does.
+-}
+emit : FileSystem.Permission -> Stream.Writable Bytes -> Plan -> Task Report Int
+emit fs stderr thePlan =
+    FileSystem.checkAccess fs [] thePlan.stage
+        |> Task.map (\_ -> True)
+        |> Task.onError (\_ -> Task.succeed False)
+        |> Task.andThen
+            (\staged ->
+                if staged then
+                    emitStage fs stderr thePlan
+
+                else
+                    Task.succeed 0
+            )
+
+
+emitStage : FileSystem.Permission -> Stream.Writable Bytes -> Plan -> Task Report Int
+emitStage fs stderr thePlan =
+    read fs thePlan.stage
+        |> Task.andThen
+            (\files ->
+                when Result.andThen Build.emit (Build.link Core.ExternErlang files) is
+                    Err why ->
+                        Stream.Log.string stderr why
+                            |> Task.onError (\_ -> Task.succeed {})
+                            |> Task.map (\_ -> 1)
+
+                    Ok written ->
+                        written
+                            |> Array.map
+                                (\file ->
+                                    FileSystem.writeFile fs
+                                        (Bytes.fromString file.text)
+                                        (Path.append (Path.fromPosixString (file.name ++ ".erl")) thePlan.ebin)
+                                        |> Task.mapError (failure "I cannot write the Erlang")
+                                )
+                            |> Task.sequence
+                            |> Task.andThen
+                                (\_ ->
+                                    FileSystem.remove fs { recursive = True } thePlan.stage
+                                        |> Task.mapError (failure "I cannot remove the stage directory")
+                                )
+                            |> Task.map (\_ -> 0)
+            )
+
+
+read : FileSystem.Permission -> Path -> Task Report (Array Build.File)
+read fs directory =
+    FileSystem.listDirectory fs directory
+        |> Task.mapError (failure "I cannot read the stage directory")
+        |> Task.andThen
+            (\entries ->
+                entries
+                    |> Array.map (\entry -> Path.filenameWithExtension entry.path)
+                    |> Array.keepIf Build.isCore
+                    |> Array.sort
+                    |> Array.map
+                        (\name ->
+                            FileSystem.readFile fs (Path.append (Path.fromPosixString name) directory)
+                                |> Task.mapError (failure "I cannot read the stage directory")
+                                |> Task.map (\data -> { name = name, data = data })
+                        )
+                    |> Task.sequence
+            )
+
+
+failure : String -> FileSystem.Error -> Report
+failure what error =
+    Report.create
+        "CANNOT BUILD FOR THE BEAM"
+        Nothing
+        (PP.verticalBlock
+            [ PP.words (what ++ ":")
+            , PP.empty
+            , PP.words (FileSystem.errorToString error)
+            ]
+        )

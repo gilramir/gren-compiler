@@ -12,6 +12,7 @@ import Terminal.PackageDiff
 import Terminal.PackageValidate
 import Terminal.Paths
 import Terminal.Init
+import Terminal.Beam
 import Terminal.Run
 import Terminal.Help
 import Terminal.Repl
@@ -63,6 +64,8 @@ type alias Context =
     , fsPermission : FileSystem.Permission
     , cpPermission : ChildProcess.Permission
     , pathToString : Path -> String
+    , pathFromString : String -> Path
+    , envVars : Dict String String
     }
 
 
@@ -114,6 +117,12 @@ start env =
                         Path.toWin32String
                     else
                         Path.toPosixString
+                , pathFromString =
+                    if env.platform == Node.Win32 then
+                        Path.fromWin32String
+                    else
+                        Path.fromPosixString
+                , envVars = envVars
                 }
         in
         FileSystem.checkAccess fsPermission [] backendPath
@@ -215,7 +224,7 @@ parseUserArgs context compilerPath =
         Cli.Parser.Success parsedCommand ->
             let
                 backend backendCommand =
-                    startBackend context compilerPath
+                    startBackend context compilerPath Dict.empty
                         |> Task.andThen
                             (talkToBackend context
                                 { headless = False
@@ -321,18 +330,31 @@ parseUserArgs context compilerPath =
                         |> Task.andThen (verifyMakeFlags context.fsPermission flags.entryPoints flags.output)
                         |> Task.andThen
                             (\resolved ->
-                                backend <|
-                                    Compiler.Backend.Make
-                                        { optimize = flags.optimize
-                                        , sourcemaps = flags.sourcemaps
-                                        , output = flags.output
-                                        , report = flags.report
-                                        , projectPath = resolved.projectPath
-                                        , entryPoints = flags.entryPoints
-                                        , outline = resolved.outline
-                                        , rootSources = resolved.rootSources
-                                        , dependencies = resolved.dependencies
-                                        }
+                                let
+                                    command =
+                                        Compiler.Backend.Make
+                                            { optimize = flags.optimize
+                                            , sourcemaps = flags.sourcemaps
+                                            , output = flags.output
+                                            , report = flags.report
+                                            , projectPath = resolved.projectPath
+                                            , entryPoints = flags.entryPoints
+                                            , outline = resolved.outline
+                                            , rootSources = resolved.rootSources
+                                            , dependencies = resolved.dependencies
+                                            }
+                                in
+                                -- A `beam` build finishes in this process, because
+                                -- the backend for that target is a Geng package
+                                -- here rather than code in the binary (D382,
+                                -- `m2-beam.md` §BM23). With no entry points there
+                                -- is nothing to generate for any target, so that
+                                -- build is the ordinary one.
+                                if beamTarget resolved.outline && Array.length flags.entryPoints /= 0 then
+                                    beamMake context compilerPath flags.output command (backend command)
+
+                                else
+                                    backend command
                             )
                         |> Task.onError (endWithErrorReport reportType)
 
@@ -657,13 +679,82 @@ parseUserArgs context compilerPath =
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
 
 
-startBackend : Context -> Path -> Task Report ChildProcess.Child
-startBackend context compilerPath =
+{-| Whether this project is built for the `beam` target.
+
+A package has no target of its own to build for -- its `[platform] target` is
+what its externs serve, which is a different question (D318) -- and `geng make`
+in one generates nothing anyway.
+-}
+beamTarget : Outline -> Bool
+beamTarget outline =
+    when outline is
+        Outline.App app ->
+            app.target == "beam"
+
+        Outline.Pkg _ ->
+            False
+
+
+{-| A `beam` build: the compiler binary stopped after the passes, and then the
+BEAM backend over the Core it left (`Terminal.Beam`).
+
+`ordinary` is the build every other target does, and it is what `/dev/null`
+gets: it asks for no output, the binary answers that by never reaching a
+backend, and there is nothing for this to do.
+-}
+beamMake : Context -> Path -> Maybe Compiler.Backend.MakeOutput -> Compiler.Backend.Command -> Task Report Int -> Task Report Int
+beamMake context compilerPath output command ordinary =
+    when Terminal.Beam.plan context.pathFromString output is
+        Err report ->
+            Task.fail report
+
+        Ok Nothing ->
+            ordinary
+
+        Ok (Just thePlan) ->
+            when Terminal.Beam.stageEnvironment context.pathToString context.envVars thePlan is
+                Err report ->
+                    Task.fail report
+
+                Ok environment ->
+                    Terminal.Beam.prepare context.fsPermission thePlan
+                        |> Task.andThen (\_ -> startBackend context compilerPath environment)
+                        |> Task.andThen
+                            (talkToBackend context
+                                { headless = False
+                                , encodedCommand =
+                                    Compiler.Backend.encodeCommand
+                                        { interactiveSession = context.interactive
+                                        , pathToString = context.pathToString
+                                        }
+                                        command
+                                }
+                            )
+                        |> Task.andThen
+                            (\exitCode ->
+                                if exitCode /= 0 then
+                                    Task.succeed exitCode
+
+                                else
+                                    Terminal.Beam.emit context.fsPermission context.stderr thePlan
+                            )
+
+
+{-| The backend, started, with `environment` set in it on top of ours.
+
+Everything but a `beam` build passes nothing: the backend takes its work from
+the JSON command. A `beam` build passes `GENG_STAGE_WRITE`, because the backend
+it would otherwise look for is not in that binary and the build stops at the
+passed Core instead (D382, `m2-beam.md` §BM23).
+-}
+startBackend : Context -> Path -> Dict String String -> Task Report ChildProcess.Child
+startBackend context compilerPath environment =
     Compiler.Backend.run
         context.cpPermission
         { useColor = context.useColor
         , compilerPath = compilerPath
         , pathToString = context.pathToString
+        , environment = environment
         }
         |> Task.mapError
             (\err ->

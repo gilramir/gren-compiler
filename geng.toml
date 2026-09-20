@@ -3,6 +3,8 @@ geng = "0.6.0 <= v < 0.7.0"
 runtime = "node"
 
 [dependencies]
+"github.com/geng-language/beam" = "0.1.0 <= v < 0.2.0"
+"github.com/geng-language/core-wire" = "0.1.0 <= v < 0.2.0"
 "github.com/geng-language/stream" = "0.1.0 <= v < 0.2.0"
 "github.com/geng-language/node" = "6.1.3 <= v < 7.0.0"
 "github.com/geng-language/compiler-node" = "5.0.0 <= v < 6.0.0"
@@ -10,6 +12,9 @@ runtime = "node"
 "github.com/gilramir/gren-format-lib" = "1.1.1 <= v < 2.0.0"
 
 [sources]
+"github.com/geng-language/beam" = { path = "../../../packages/beam" }
+"github.com/geng-language/core-wire" = { path = "../../../packages/core-wire" }
+"github.com/geng-language/protobuf" = { path = "../../../packages/protobuf" }
 "github.com/geng-language/stream" = { path = "../../../packages/stream" }
 "github.com/geng-language/node" = { path = "../../gren-lang/node" }
 "github.com/geng-language/compiler-node" = { path = "../../gren-lang/compiler-node" }
