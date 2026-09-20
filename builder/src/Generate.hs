@@ -159,7 +159,7 @@ make target details sources artifacts request =
             _ -> afterFront backend details sources artifacts whole front request
 
 -- | The passes, and then either a stop or the rest of the build.
-afterFront :: Backend -> Details.Details -> ExtSources -> Build.Artifacts -> Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> Request -> Task (Maybe B.Builder)
+afterFront :: Maybe Backend -> Details.Details -> ExtSources -> Build.Artifacts -> Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> Request -> Task (Maybe B.Builder)
 afterFront backend details sources artifacts whole front request =
   do
     passedCores <- Task.io (passed front)
@@ -168,13 +168,23 @@ afterFront backend details sources artifacts whole front request =
       _ -> emit backend details sources artifacts whole (Cores front passedCores) request
 
 -- | The C spike on a dev build, and then the backend.
-emit :: Backend -> Details.Details -> ExtSources -> Build.Artifacts -> Whole.Program -> Cores -> Request -> Task (Maybe B.Builder)
-emit backend details sources artifacts whole cores request =
-  do
-    case _requestMode request of
-      Dev -> spikeC artifacts cores
-      Prod -> return ()
-    Just <$> _backendEmit backend details sources whole cores request
+--
+-- __This is where a target with no backend is refused__, and not where the gate
+-- runs, because a build that stops at a stage never reaches a backend and has
+-- no business asking for one (@m2-seam.md@ §DS5, D382). The BEAM backend is a
+-- Geng package outside this binary, and it is handed the directory
+-- @GENG_STAGE_WRITE=passed:@ leaves; the gate above still runs in that process,
+-- so D320 is asked of a @beam@ build exactly as it is of a @js@ one.
+emit :: Maybe Backend -> Details.Details -> ExtSources -> Build.Artifacts -> Whole.Program -> Cores -> Request -> Task (Maybe B.Builder)
+emit maybeBackend details sources artifacts whole cores request =
+  case maybeBackend of
+    Nothing -> Task.throw (Exit.GenerateNoBackend (Whole._programTarget whole))
+    Just backend ->
+      do
+        case _requestMode request of
+          Dev -> spikeC artifacts cores
+          Prod -> return ()
+        Just <$> _backendEmit backend details sources whole cores request
 
 -- | A stage read back from files, and the check that it is this build's
 -- (@m2-seam.md@ §DS5 item 4).
@@ -292,20 +302,16 @@ javaScript =
 -- in the program calls, as F1 says a build that imports it is. That is what
 -- leaves 'externFiles' only a missing file to find: an extern with no @js@ row
 -- and no body can no longer reach it.
-checkTarget :: Target.Target -> Details.Details -> Build.Artifacts -> Task Backend
+checkTarget :: Target.Target -> Details.Details -> Build.Artifacts -> Task (Maybe Backend)
 checkTarget target details artifacts@(Build.Artifacts pkg _ _ _) =
   let own = Map.mapKeys (ModuleName.Canonical pkg) (ownCore artifacts)
    in checkReached target (Map.union own (Details.loadCores details)) (Map.keys own)
 
-checkReached :: Target.Target -> Map.Map ModuleName.Canonical Core.Module -> [ModuleName.Canonical] -> Task Backend
+checkReached :: Target.Target -> Map.Map ModuleName.Canonical Core.Module -> [ModuleName.Canonical] -> Task (Maybe Backend)
 checkReached target cores starts =
   case Target.refusals target (Target.reached cores starts) of
-    [] ->
-      case backendFor target of
-        Just backend -> return backend
-        Nothing -> Task.throw (Exit.GenerateNoBackend target)
-    refusals ->
-      Task.throw (Exit.GenerateTargetRefused target refusals)
+    [] -> return (backendFor target)
+    refusals -> Task.throw (Exit.GenerateTargetRefused target refusals)
 
 -- PROGRAM CORE
 
