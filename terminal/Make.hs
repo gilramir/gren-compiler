@@ -80,58 +80,60 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
           do
             artifacts <- buildPaths style root details sources (NE.List p ps)
             let mains = getMains artifacts
+                -- 'Nothing' is a build that stopped after a stage and wrote
+                -- its Core (@GENG_STAGE_WRITE@, Core.Stage): there is no
+                -- bundle, and so there is nothing to write out.
                 generate shape =
                   Task.mapError Exit.MakeBadGenerate $
                     Generate.make (targetOf outline) details (Generate.extSources outline sources deps) artifacts $
                       Generate.Request desiredMode shape (if withSourceMaps then Just (gatherSources flags) else Nothing)
+                build shape path names =
+                  do
+                    result <- generate shape
+                    case result of
+                      Nothing -> return ()
+                      Just bundle -> writeToDisk style path bundle names
             case maybeOutput of
               Nothing ->
                 case (platform, mains) of
                   (_, []) ->
                     return ()
                   (Platform.Browser, [name]) ->
-                    do
-                      bundle <- generate (Generate.HtmlPage name)
-                      writeToDisk style "index.html" bundle (NE.List name [])
+                    build (Generate.HtmlPage name) "index.html" (NE.List name [])
                   (Platform.Node, [name]) ->
-                    do
-                      bundle <- generate (Generate.NodeScript name)
-                      writeToDisk style "app" bundle (NE.List name [])
+                    build (Generate.NodeScript name) "app" (NE.List name [])
                   (_, name : names) ->
-                    do
-                      bundle <- generate Generate.Bare
-                      writeToDisk style "index.js" bundle (NE.List name names)
+                    build Generate.Bare "index.js" (NE.List name names)
               Just DevStdOut ->
                 case getMains artifacts of
                   [] ->
                     return ()
                   _ ->
                     do
-                      bundle <- generate Generate.Bare
-                      Task.io $ B.hPutBuilder IO.stdout bundle
+                      result <- generate Generate.Bare
+                      case result of
+                        Nothing -> return ()
+                        Just bundle -> Task.io $ B.hPutBuilder IO.stdout bundle
               Just DevNull ->
                 return ()
               Just (Exe target) ->
                 case platform of
                   Platform.Node -> do
                     name <- hasOneMain artifacts
-                    bundle <- generate (Generate.NodeScript name)
-                    writeToDisk style target bundle (NE.List name [])
+                    build (Generate.NodeScript name) target (NE.List name [])
                   _ -> do
                     Task.throw Exit.MakeExeOnlyForNodePlatform
               Just (JS target) ->
                 case getNoMains artifacts of
-                  [] -> do
-                    bundle <- generate Generate.Bare
-                    writeToDisk style target bundle (Build.getRootNames artifacts)
+                  [] ->
+                    build Generate.Bare target (Build.getRootNames artifacts)
                   name : names ->
                     Task.throw (Exit.MakeNonMainFilesIntoJavaScript name names)
               Just (Html target) ->
                 case platform of
                   Platform.Browser -> do
                     name <- hasOneMain artifacts
-                    bundle <- generate (Generate.HtmlPage name)
-                    writeToDisk style target bundle (NE.List name [])
+                    build (Generate.HtmlPage name) target (NE.List name [])
                   _ -> do
                     Task.throw Exit.MakeHtmlOnlyForBrowserPlatform
 

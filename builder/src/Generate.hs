@@ -17,7 +17,9 @@ import Core.Pass qualified as Pass
 import Core.Pretty qualified as Pretty
 import Core.Program qualified as Program
 import Core.Refs qualified as Refs
+import Core.Stage qualified as Stage
 import Core.Target qualified as Target
+import Core.Whole qualified as Whole
 import Core.Wire qualified as Wire
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as B
@@ -40,6 +42,7 @@ import Gren.Kernel qualified as K
 import Gren.ModuleName qualified as ModuleName
 import Gren.Outline qualified as Outline
 import Gren.Package qualified as Pkg
+import Gren.Platform qualified as Platform
 import Nitpick.Debug qualified as Nitpick
 import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
@@ -76,9 +79,13 @@ data Shape
 --
 -- §DS3 hands a backend the /passed/ Core, before 'Program.chooseExterns' and
 -- 'Program.link', which are the backend's own. The front end's is here for the
--- dumps: @GENG_DUMP_LINK@ and @GENG_DUMP_PRIMS@ report the link as it is
--- before the passes, and @harness\/core-golden\/link@ pins that, so the
--- refactor keeps it rather than quietly re-recording it.
+-- reports: @GENG_DUMP_LINK@ and @GENG_DUMP_PRIMS@ describe both links, the one
+-- before the passes and the one the build emits, so that what a pass did to a
+-- program is visible in the diff (D380, §DS6.5).
+--
+-- A build resumed from a @passed:dir@ stage was handed one Core and has the
+-- same map in both fields: it did not run the passes, and has nothing from
+-- before them to report ("Core.Stage", §DS6.6).
 data Cores = Cores
   { _coresFront :: Map.Map ModuleName.Canonical Core.Module,
     _coresPassed :: Map.Map ModuleName.Canonical Core.Module
@@ -87,8 +94,15 @@ data Cores = Cores
 -- | A code generator, and what it makes of a build that has passed the target
 -- gate (@m2-seam.md@ §DS5 item 2). The language it reads externs in is the
 -- target's, 'Target.language'.
+--
+-- __What a backend is handed is a 'Whole.Program' and a 'Cores'__, which is
+-- §DS3's list and is exactly what a @.corepb@ stage directory holds: the
+-- modules, and the roots, target, mode and runtime that D378 put on the wire.
+-- It was the 'Build.Artifacts' before, and the roots were recomputed from them
+-- at each of the three link sites; a backend that reads its program from files
+-- has no artifacts to recompute from.
 newtype Backend = Backend
-  { _backendEmit :: Target.Target -> Details.Details -> ExtSources -> Build.Artifacts -> Cores -> Request -> Task B.Builder
+  { _backendEmit :: Details.Details -> ExtSources -> Whole.Program -> Cores -> Request -> Task B.Builder
   }
 
 -- | The backend for each target. There is one: @js@'s.
@@ -107,21 +121,130 @@ backendFor target =
 -- Each stage runs once. 'programCore' and 'passed' used to be called again by
 -- 'dumpCore', by 'spikeC' and by the link, so a dev build with dumps set put
 -- the program through the wire three times and ran "Core.Pass" twice over.
-make :: Target.Target -> Details.Details -> ExtSources -> Build.Artifacts -> Request -> Task B.Builder
+--
+-- __The stages can now be separate processes__ (§DS5 item 4). "Core.Stage"'s
+-- two switches cut the line: @GENG_STAGE_WRITE@ stops the build after a stage
+-- and writes its Core and its 'Whole.Program' to a directory, and
+-- @GENG_STAGE_READ@ takes them from one instead of running the stages before
+-- it. A stopped build has no output, which is what the 'Maybe' says, and
+-- "Make" writes nothing for it.
+--
+-- The gate and @--optimize@'s check run in every process, resumed or not: they
+-- are the driver's questions about the project, put to the modules this build
+-- was given, and §DS3 keeps them out of the seam.
+make :: Target.Target -> Details.Details -> ExtSources -> Build.Artifacts -> Request -> Task (Maybe B.Builder)
 make target details sources artifacts request =
   do
+    Task.io Stage.checkPlan
     backend <- checkTarget target details artifacts
     case _requestMode request of
       Dev -> return ()
       Prod -> checkForDebugUses artifacts
-    front <- Task.io (programCore details artifacts)
-    dumpProgramCore front
+    case Stage.readFrom of
+      Just (Stage.Passed, dir) ->
+        do
+          (whole, passedCores) <- resumed target details artifacts request dir
+          emit backend details sources artifacts whole (Cores passedCores passedCores) request
+      Just (Stage.Front, dir) ->
+        do
+          (whole, front) <- resumed target details artifacts request dir
+          afterFront backend details sources artifacts whole front request
+      Nothing ->
+        do
+          front <- Task.io (programCore details artifacts)
+          dumpProgramCore front
+          let whole = wholeProgram target details artifacts request front
+          case Stage.writeTo of
+            Just (Stage.Front, dir) -> Task.io (Stage.write dir whole front) >> return Nothing
+            _ -> afterFront backend details sources artifacts whole front request
+
+-- | The passes, and then either a stop or the rest of the build.
+afterFront :: Backend -> Details.Details -> ExtSources -> Build.Artifacts -> Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> Request -> Task (Maybe B.Builder)
+afterFront backend details sources artifacts whole front request =
+  do
     passedCores <- Task.io (passed front)
-    let cores = Cores front passedCores
+    case Stage.writeTo of
+      Just (Stage.Passed, dir) -> Task.io (Stage.write dir whole passedCores) >> return Nothing
+      _ -> emit backend details sources artifacts whole (Cores front passedCores) request
+
+-- | The C spike on a dev build, and then the backend.
+emit :: Backend -> Details.Details -> ExtSources -> Build.Artifacts -> Whole.Program -> Cores -> Request -> Task (Maybe B.Builder)
+emit backend details sources artifacts whole cores request =
+  do
     case _requestMode request of
       Dev -> spikeC artifacts cores
       Prod -> return ()
-    _backendEmit backend target details sources artifacts cores request
+    Just <$> _backendEmit backend details sources whole cores request
+
+-- | A stage read back from files, and the check that it is this build's
+-- (@m2-seam.md@ §DS5 item 4).
+--
+-- __The program file is checked, not obeyed.__ The driver has just built the
+-- project, so it knows what the roots, target, mode and runtime are; what it
+-- does not know is whether the directory it was pointed at came from a build
+-- that agreed. A stage 3 run with @--optimize@ that resumes a stage 2 run
+-- without it is the mistake a staged harness target will make, and an equality
+-- on four small fields is what turns it from a silently wrong program into a
+-- message. The Core itself is taken from the files: that is the seam.
+--
+-- __A resumed build reports one link twice.__ 'Cores' carries the front end's
+-- Core and the passes', and a process resumed at 'Stage.Passed' was handed only
+-- the second; @GENG_DUMP_LINK@'s @== before the passes@ section is then the
+-- emitted link as well. That is true rather than convenient — the stage did not
+-- run the passes and has nothing to report from before them.
+resumed :: Target.Target -> Details.Details -> Build.Artifacts -> Request -> FilePath -> Task (Whole.Program, Map.Map ModuleName.Canonical Core.Module)
+resumed target details artifacts request dir =
+  Task.io $
+    do
+      (whole, modules) <- Stage.read dir
+      let asked = wholeProgram target details artifacts request modules
+      if whole == asked
+        then return (whole, modules)
+        else
+          error $
+            "GENG_STAGE_READ: "
+              ++ dir
+              ++ " holds a program this build is not:\n  the files say "
+              ++ show whole
+              ++ "\n  this build is "
+              ++ show asked
+
+-- | What the build is, besides its modules (D378): the roots in the order the
+-- build names them, the target, whether it is @--optimize@d, and the runtime
+-- the project declares.
+--
+-- The runtime comes off the outline's platform, which is the build system's
+-- vocabulary; 'Whole.Runtime' is Core's, and this is the one place the two
+-- meet.
+wholeProgram :: Target.Target -> Details.Details -> Build.Artifacts -> Request -> Map.Map ModuleName.Canonical Core.Module -> Whole.Program
+wholeProgram target details artifacts request cores =
+  Whole.Program
+    { Whole._programRoots =
+        [Whole.Root home name | Core.QualName home name <- coreRoots artifacts cores],
+      Whole._programTarget = target,
+      Whole._programMode =
+        case _requestMode request of
+          Dev -> Whole.Dev
+          Prod -> Whole.Prod,
+      Whole._programRuntime = runtimeOf details
+    }
+
+runtimeOf :: Details.Details -> Whole.Runtime
+runtimeOf (Details.Details _ validOutline _ _ _ _) =
+  case platform of
+    Platform.Common -> Whole.Common
+    Platform.Browser -> Whole.Browser
+    Platform.Node -> Whole.Node
+  where
+    platform =
+      case validOutline of
+        Details.ValidApp p _ -> p
+        Details.ValidPkg p _ _ _ -> p
+
+-- | The roots a backend links from, as Core names.
+wholeRoots :: Whole.Program -> [Core.QualName]
+wholeRoots whole =
+  [Core.QualName home name | Whole.Root home name <- Whole._programRoots whole]
 
 -- JAVASCRIPT
 
@@ -137,11 +260,12 @@ make target details sources artifacts request =
 -- An @--optimize@ build fills in the field table and skips the C spike.
 javaScript :: Backend
 javaScript =
-  Backend $ \target details sources artifacts cores (Request mode shape maybeSources) ->
+  Backend $ \details sources whole cores (Request mode shape maybeSources) ->
     do
+      let target = Whole._programTarget whole
       kernels <- kernelChunks details
-      dumpLink target artifacts kernels cores
-      program <- linkCore target artifacts kernels (_coresPassed cores)
+      dumpLink whole kernels cores
+      program <- linkCore whole kernels (_coresPassed cores)
       exts <- externFiles target sources program
       let jsMode =
             case mode of
@@ -335,12 +459,13 @@ kernelInfo chunks =
 -- This is the whole of what the emitter is handed besides the kernel chunks: one
 -- call to `Core.Program.link`, with the roots 'coreRoots' names and the kernel
 -- information 'kernelInfo' reads off those same chunks.
-linkCore :: Target.Target -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Map.Map ModuleName.Canonical Core.Module -> Task Program.Program
-linkCore target artifacts kernels passedCores =
+linkCore :: Whole.Program -> Map.Map N.Name [K.Chunk] -> Map.Map ModuleName.Canonical Core.Module -> Task Program.Program
+linkCore whole kernels passedCores =
   Task.io $
     do
-      let cores = Program.chooseExterns (Target.language target) Dump.externBodies passedCores
-      let program = Program.link (kernelBackend kernels cores) cores (coreRoots artifacts cores)
+      let language = Target.language (Whole._programTarget whole)
+      let cores = Program.chooseExterns language Dump.externBodies passedCores
+      let program = Program.link (kernelBackend kernels cores) cores (wholeRoots whole)
       reported program
       return (checked program)
 
@@ -454,19 +579,20 @@ dumpProgramCore modules =
 --
 -- @GENG_LINK_ROOTS=exports@ links every export instead of the program's roots,
 -- which is a measurement rather than a mode ('Dump.linkEveryExport').
-dumpLink :: Target.Target -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Cores -> Task ()
-dumpLink target artifacts kernels cores =
+dumpLink :: Whole.Program -> Map.Map N.Name [K.Chunk] -> Cores -> Task ()
+dumpLink whole kernels cores =
   case (Dump.linkFile, Dump.primsFile) of
     (Nothing, Nothing) -> return ()
     (maybeFile, maybePrims) ->
       Task.io $
         do
-          let linked modules =
-                let chosen = Program.chooseExterns (Target.language target) Dump.externBodies modules
+          let language = Target.language (Whole._programTarget whole)
+              linked modules =
+                let chosen = Program.chooseExterns language Dump.externBodies modules
                     roots =
                       if Dump.linkEveryExport
                         then concatMap Core._moduleExports (Map.elems chosen)
-                        else coreRoots artifacts chosen
+                        else wholeRoots whole
                  in Program.link (kernelBackend kernels chosen) chosen roots
               before = linked (_coresFront cores)
               emitted = linked (_coresPassed cores)

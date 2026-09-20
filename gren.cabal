@@ -135,6 +135,7 @@ Library common
         Core.Program
         Core.Pretty
         Core.Refs
+        Core.Stage
         Core.Target
         Core.Whole
         Core.Wire
