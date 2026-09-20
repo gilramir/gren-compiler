@@ -140,7 +140,7 @@ javaScript =
   Backend $ \target details sources artifacts cores (Request mode shape maybeSources) ->
     do
       kernels <- kernelChunks details
-      dumpLink target artifacts kernels (_coresFront cores)
+      dumpLink target artifacts kernels cores
       program <- linkCore target artifacts kernels (_coresPassed cores)
       exts <- externFiles target sources program
       let jsMode =
@@ -439,33 +439,48 @@ dumpProgramCore modules =
 -- what the roots reach, in what order, and what they refer to that Core cannot
 -- supply yet — and the primitive table that link reads.
 --
--- __The link reported is the front end's__, not the one the backend emits: the
--- passes do not run before it. That is how it has always been, and
--- @harness\/core-golden\/link@ pins it, so the stages keep it. Whether the
--- report should describe the link a build actually performs is an open item,
--- not something for a refactor to change quietly.
+-- __Both reports describe two links__ (D380): the front end's, and the one the
+-- build emits, in that order, under the markers @== before the passes@ and
+-- @== as emitted@. They differ on 122 of the corpus's 131 cases, which is what
+-- made reporting only the first a measurement of the wrong program: on 16 of
+-- them the passes empty a @missing@ list that §X5 reads as the C kernel's
+-- budget, and specialization moves @bindings@ by as much as 35. Two sections in
+-- one file rather than two files, so a reviewer sees what the passes did to a
+-- program in the diff itself.
+--
+-- The emitted half is the one 'Core.Prim' coverage is asked of (D337, and the
+-- prims report's second section), since a primitive no backend is handed is
+-- one nothing has to implement.
 --
 -- @GENG_LINK_ROOTS=exports@ links every export instead of the program's roots,
 -- which is a measurement rather than a mode ('Dump.linkEveryExport').
-dumpLink :: Target.Target -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Map.Map ModuleName.Canonical Core.Module -> Task ()
-dumpLink target artifacts kernels modules =
+dumpLink :: Target.Target -> Build.Artifacts -> Map.Map N.Name [K.Chunk] -> Cores -> Task ()
+dumpLink target artifacts kernels cores =
   case (Dump.linkFile, Dump.primsFile) of
     (Nothing, Nothing) -> return ()
     (maybeFile, maybePrims) ->
       Task.io $
         do
-          let cores = Program.chooseExterns (Target.language target) Dump.externBodies modules
-              roots =
-                if Dump.linkEveryExport
-                  then concatMap Core._moduleExports (Map.elems cores)
-                  else coreRoots artifacts cores
-              linked = Program.link (kernelBackend kernels cores) cores roots
+          let linked modules =
+                let chosen = Program.chooseExterns (Target.language target) Dump.externBodies modules
+                    roots =
+                      if Dump.linkEveryExport
+                        then concatMap Core._moduleExports (Map.elems chosen)
+                        else coreRoots artifacts chosen
+                 in Program.link (kernelBackend kernels chosen) chosen roots
+              before = linked (_coresFront cores)
+              emitted = linked (_coresPassed cores)
+              report render =
+                B.stringUtf8 "== before the passes\n"
+                  <> render before
+                  <> B.stringUtf8 "\n== as emitted\n"
+                  <> render emitted
           case maybeFile of
             Nothing -> return ()
-            Just file -> B.writeFile file (Program.render linked)
+            Just file -> B.writeFile file (report Program.render)
           case maybePrims of
             Nothing -> return ()
-            Just file -> B.writeFile file (Program.renderPrims linked)
+            Just file -> B.writeFile file (report Program.renderPrims)
 
 -- | The Core → C spike (@docs/m1a-c-spike.md@), when @GENG_SPIKE_C@ asks for it.
 --
