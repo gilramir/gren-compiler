@@ -190,7 +190,7 @@ generateManifest config projectPath deps =
 
             else
                 Outline.App
-                    { platform = config.platform
+                    { runtime = Runtime.fromPlatform config.platform
                     , target = "js"
                     , sourceDirectories = [ Path.fromPosixString "src" ]
                     , gengVersion = compiler

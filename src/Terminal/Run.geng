@@ -253,7 +253,7 @@ runForPlatform config =
                         Runtime.toPlatform outline_.runtime
                             |> Maybe.withDefault Platform.Common
                     Outline.App outline_ ->
-                        outline_.platform
+                        Outline.appPlatform outline_
 
             path =
                 config.pathToString config.path
@@ -310,7 +310,7 @@ getOutputPath projectOutline =
                     Runtime.toPlatform outline.runtime
                         |> Maybe.withDefault Platform.Common
                 Outline.App outline ->
-                    outline.platform
+                    Outline.appPlatform outline
 
         getPath outputType fileName =
             { outputType =

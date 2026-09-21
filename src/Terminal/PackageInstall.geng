@@ -823,7 +823,7 @@ finish env { projectPath, outline } isCore state =
         { rootRuntime, rootCompiler } =
             when outline is
                 Outline.App appOutline ->
-                    { rootRuntime = Runtime.fromPlatform appOutline.platform
+                    { rootRuntime = appOutline.runtime
                     , rootCompiler = appOutline.gengVersion
                     }
 
