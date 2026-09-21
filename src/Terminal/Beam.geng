@@ -8,6 +8,8 @@ module Terminal.Beam exposing
     , stageEnvironment
     , prepare
     , build
+    , forgetProgram
+    , requireProgram
     )
 
 {-| The BEAM half of `geng make`, for a project whose outline says
@@ -25,6 +27,10 @@ seam `m2-seam.md` §DS5 built underneath (geng-lang `m2-beam.md` §BM23, §BM24)
       app.ebin/geng_rt.erl, ...     the runtime, which this compiler carries
       app.ebin/*.beam               erlc, over those and each package's Ext
       app                           the escript, which is what a person runs
+
+A build of modules none of which has a `main` is a library, and stops at
+`app.ebin/`: its roots are the modules' exposed values, for Erlang to call
+(D399, `m2-interop.md` §EI13).
 
 **What a build leaves.** `--output` names the file a person runs, `app` by
 default, as it does for the Node platform; the modules go in a directory beside
@@ -249,6 +255,48 @@ clear fs directory =
         |> Task.map (\_ -> {})
 
 
+{-| `geng run`'s escript removed before it builds, so that what it runs
+afterwards is this build's or nothing.
+
+`geng run` runs whatever is at its output path, and a module with no `main`
+builds as a library and writes no escript there (D399, `m2-interop.md`
+§EI13), so without this a library build would run the program an earlier
+`geng run` left. The path is `.gren/`'s and the compiler's own, which is why
+this may remove it where a library build given `--output` does not.
+-}
+forgetProgram : FileSystem.Permission -> Path -> Task Report {}
+forgetProgram fs path =
+    FileSystem.remove fs { recursive = False } path
+        |> Task.map (\_ -> {})
+        |> Task.onError (\_ -> Task.succeed {})
+
+
+{-| That a `geng run` build left a program to run, or `NO MAIN`.
+
+Before D399 the compiler refused a module with no `main` itself; now that is
+a library, and a library is a build `geng make` makes and nothing runs.
+-}
+requireProgram : FileSystem.Permission -> String -> Path -> Task Report {}
+requireProgram fs moduleName path =
+    FileSystem.checkAccess fs [] path
+        |> Task.map (\_ -> {})
+        |> Task.onError
+            (\_ ->
+                Task.fail <|
+                    Report.create
+                        "NO MAIN"
+                        Nothing
+                        (PP.verticalBlock
+                            [ PP.words
+                                ("geng run runs a program, and " ++ moduleName ++ " has no `main`, so for the beam target it builds as a library: its exposed values, for Erlang to call.")
+                            , PP.empty
+                            , PP.words
+                                ("To build the library, use geng make " ++ moduleName ++ ". To run it, give it a `main`, which is a `Task Never {}`.")
+                            ]
+                        )
+            )
+
+
 {-| What a build needs that is not in its `Plan`.
 
 `packages` is every root a package of this build has — the project's own, and
@@ -269,9 +317,14 @@ type alias Config =
 {-| The stage directory turned into the two artifacts D384 asks for, and the
 status that answers.
 
-**A build that wrote no stage wrote no program**, and that is not an error: a
-project with no `main` compiles and generates nothing, exactly as it does for
-the js target. So a missing directory is a silent 0.
+**A build that wrote no stage wrote no program**, and that is not an error:
+`--output=/dev/null` asks for none. So a missing directory is a silent 0.
+
+**A program with no `main` is a library** (D399, `m2-interop.md` §EI13): the
+modules its roots reach and the runtime, compiled into the `.ebin` directory
+for an Erlang program to load, and no escript, since there is nothing to run.
+The escript's path is left alone rather than cleared, because a library's
+`--output` names nothing it writes there.
 
 **A shape the backend has no Erlang for is written verbatim** on `stderr`, and
 not as one of the compiler's reports. It is not a problem with the program: it
@@ -300,17 +353,27 @@ buildStage config thePlan =
     read config.fs thePlan.stage
         |> Task.andThen
             (\files ->
-                when Result.andThen Build.emit (Build.link Core.ExternErlang files) is
+                when
+                    Build.link Core.ExternErlang files
+                        |> Result.andThen (\program -> Result.map (\emitted -> { program = program, emitted = emitted }) (Build.emit program))
+                is
                     Err why ->
                         Stream.Log.string config.stderr why
                             |> Task.onError (\_ -> Task.succeed {})
                             |> Task.map (\_ -> 1)
 
-                    Ok emitted ->
-                        write config.fs thePlan.ebin (emitted ++ Runtime.sources)
+                    Ok built ->
+                        write config.fs thePlan.ebin (built.emitted ++ Runtime.sources)
                             |> Task.andThen (\_ -> externSources config)
                             |> Task.andThen (erlc config thePlan)
-                            |> Task.andThen (\_ -> escript config thePlan)
+                            |> Task.andThen
+                                (\_ ->
+                                    if Array.length built.program.mains == 0 then
+                                        Task.succeed {}
+
+                                    else
+                                        escript config thePlan
+                                )
                             |> Task.andThen
                                 (\_ ->
                                     FileSystem.remove config.fs { recursive = True } thePlan.work

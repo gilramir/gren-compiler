@@ -94,6 +94,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                       Nothing -> return ()
                       Just bundle -> writeToDisk style path bundle names
             case maybeOutput of
+              _ | Target.Beam <- targetOf outline -> beamBuild artifacts mains maybeOutput (generate Generate.Bare)
               Nothing ->
                 case (platform, mains) of
                   (_, []) ->
@@ -136,6 +137,68 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                     build (Generate.HtmlPage name) target (NE.List name [])
                   _ -> do
                     Task.throw Exit.MakeHtmlOnlyForBrowserPlatform
+
+-- | A build for the @beam@ target, which is never written here: 'generate'
+-- stops at the passed Core (@GENG_STAGE_WRITE@) and the front end runs the BEAM
+-- backend over it (D382). So all that is decided here is whether there is a
+-- program to stage.
+--
+-- __A build with no @main@ is a library__ (D399, @m2-interop.md@ §EI13). Its
+-- roots are the named modules' exposed values ('Generate.coreRoots'), and the
+-- backend writes their modules with no @geng_main@ and no escript. So no
+-- @main@ is not an error here, and two are, since a BEAM program has one entry
+-- point. A build that exposes nothing and has no @main@ would be an empty
+-- directory, and is refused rather than written.
+--
+-- The shape is 'Generate.Bare' whatever the output: the shapes are JavaScript
+-- wrappers, and nothing past the stage reads one.
+beamBuild :: Build.Artifacts -> [ModuleName.Raw] -> Maybe Output -> Task (Maybe B.Builder) -> Task ()
+beamBuild artifacts mains maybeOutput generate =
+  case maybeOutput of
+    Just DevNull -> return ()
+    _ ->
+      case mains of
+        first : second : more -> Task.throw (Exit.MakeBeamManyMains first second more)
+        _ ->
+          case getNothingToCall artifacts of
+            name : names
+              | length (name : names) == length (NE.toList (Build.getRootNames artifacts)) ->
+                  Task.throw (Exit.MakeBeamNothingToCall name names)
+            _ -> () <$ generate
+
+-- | The root modules that have neither a @main@ nor an exposed value, which a
+-- @beam@ build has no root in.
+getNothingToCall :: Build.Artifacts -> [ModuleName.Raw]
+getNothingToCall (Build.Artifacts _ _ roots modules) =
+  [ name
+  | root <- NE.toList roots,
+    let name = rootName root,
+    Just core <- [rootCore modules root],
+    null (Core._moduleExports core),
+    Maybe.isNothing (Core._moduleMain core)
+  ]
+  where
+    rootName root =
+      case root of
+        Build.Inside name -> name
+        Build.Outside name _ _ -> name
+
+rootCore :: [Build.Module] -> Build.Root -> Maybe Core.Module
+rootCore modules root =
+  case root of
+    Build.Outside _ _ core -> Just core
+    Build.Inside name ->
+      Maybe.listToMaybe
+        [ core
+        | modul <- modules,
+          (found, core) <- [moduleCore modul],
+          found == name
+        ]
+  where
+    moduleCore modul =
+      case modul of
+        Build.Fresh found _ core -> (found, core)
+        Build.Cached found _ core -> (found, core)
 
 -- GET INFORMATION
 

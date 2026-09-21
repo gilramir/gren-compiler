@@ -404,16 +404,31 @@ parseUserArgs context compilerPath =
 
                                     built =
                                         if compiling.beam then
-                                            beamMake context
-                                                compilerPath
-                                                { encodedCommand = compiling.encodedCommand
-                                                , headless = True
-                                                , output = Just compiling.output
-                                                , erlc = opts.erlc
-                                                , escript = opts.escript
-                                                }
-                                                compiling.resolution
-                                                ordinary
+                                            Terminal.Beam.forgetProgram context.fsPermission compiling.outputPath
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        beamMake context
+                                                            compilerPath
+                                                            { encodedCommand = compiling.encodedCommand
+                                                            , headless = True
+                                                            , output = Just compiling.output
+                                                            , erlc = opts.erlc
+                                                            , escript = opts.escript
+                                                            }
+                                                            compiling.resolution
+                                                            ordinary
+                                                    )
+                                                |> Task.andThen
+                                                    (\exitCode ->
+                                                        if exitCode == 0 then
+                                                            Terminal.Beam.requireProgram context.fsPermission
+                                                                (ModuleName.toString opts.moduleName)
+                                                                compiling.outputPath
+                                                                |> Task.map (\_ -> exitCode)
+
+                                                        else
+                                                            Task.succeed exitCode
+                                                    )
 
                                         else
                                             ordinary

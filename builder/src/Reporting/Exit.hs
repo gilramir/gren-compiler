@@ -1028,6 +1028,8 @@ data Make
   | MakeBadGenerate Generate
   | MakeHtmlOnlyForBrowserPlatform
   | MakeExeOnlyForNodePlatform
+  | MakeBeamManyMains ModuleName.Raw ModuleName.Raw [ModuleName.Raw]
+  | MakeBeamNothingToCall ModuleName.Raw [ModuleName.Raw]
 
 makeToReport :: Make -> Help.Report
 makeToReport make =
@@ -1137,6 +1139,29 @@ makeToReport make =
           D.reflow $
             "You can also add modules to `exposed` in the [modules] table of your geng.toml, and\
             \ I will try to compile the relevant files."
+        ]
+    MakeBeamManyMains m1 m2 ms ->
+      Help.report
+        "TOO MANY MAINS"
+        Nothing
+        "A BEAM program has one entry point, and these modules each have a `main`:"
+        [ D.indent 4 $ D.red $ D.vcat $ map D.fromName (m1 : m2 : ms),
+          D.reflow
+            "Name one of them, and the others' exposed values can be built beside it: a\
+            \ module with no `main` is a library, whose exposed values are exported for Erlang\
+            \ to call (m2-interop.md D399)."
+        ]
+    MakeBeamNothingToCall m ms ->
+      Help.report
+        "NOTHING TO BUILD"
+        Nothing
+        "A build for the beam target starts from the modules it is given: a `main`, and\
+        \ every value they expose, which is what Erlang may call. These have neither:"
+        [ D.indent 4 $ D.red $ D.vcat $ map D.fromName (m : ms),
+          D.reflow
+            "Add the values Erlang is to call to the module's `exposing`, or a `main`, or\
+            \ switch to --output=/dev/null to check that it compiles without building\
+            \ anything (m2-interop.md D399)."
         ]
     MakeMultipleFiles ->
       Help.report
@@ -1536,6 +1561,7 @@ data Generate
   | GenerateExternUnimplemented [(ModuleName.Raw, N.Name, FilePath)]
   | GenerateTargetRefused Target.Target [Target.Refusal]
   | GenerateNoBackend Target.Target
+  | GenerateConstrainedRoots [(ModuleName.Raw, N.Name, [N.Name])]
 
 toGenerateReport :: Generate -> Help.Report
 toGenerateReport problem =
@@ -1580,6 +1606,28 @@ toGenerateReport problem =
             ++ " target, and this compiler has no backend for it."
         )
         [ D.reflow "It has one backend, which writes JavaScript for the js target."
+        ]
+    GenerateConstrainedRoots problems ->
+      Help.report
+        "CONSTRAINED VALUE FOR ERLANG"
+        Nothing
+        "A build for the beam target exports every value the modules it builds expose, so that Erlang can call it by its name, and these have a constraint:"
+        [ D.indent 4 $
+            D.vcat
+              [ D.fromChars $
+                  ModuleName.toChars m
+                    ++ "."
+                    ++ N.toChars name
+                    ++ ", constrained by "
+                    ++ List.intercalate ", " (map N.toChars classes)
+              | (m, name, classes) <- List.sort problems
+              ],
+          D.reflow
+            "A constrained value is not one Erlang function. Each type the program uses it at\
+            \ is a copy of its own, and the value itself wants the class's methods handed to\
+            \ it, which nothing outside Geng can build. Expose a wrapper at one type instead,\
+            \ such as `sumInts : Array Int -> Int` for `sumAll : Num a => Array a -> a`, and\
+            \ leave the constrained value out of the module's `exposing` (m2-interop.md D400)."
         ]
     GenerateCannotOptimizeDebugValues m ms ->
       Help.report

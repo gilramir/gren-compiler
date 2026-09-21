@@ -154,6 +154,7 @@ make target details sources artifacts request =
           front <- Task.io (programCore details artifacts)
           dumpProgramCore front
           let whole = wholeProgram target details artifacts request front
+          checkRoots whole front
           case Stage.writeTo of
             Just (Stage.Front, dir) -> Task.io (Stage.write dir whole front) >> return Nothing
             _ -> afterFront backend details sources artifacts whole front request
@@ -230,7 +231,7 @@ wholeProgram :: Target.Target -> Details.Details -> Build.Artifacts -> Request -
 wholeProgram target details artifacts request cores =
   Whole.Program
     { Whole._programRoots =
-        [Whole.Root home name | Core.QualName home name <- coreRoots artifacts cores],
+        [Whole.Root home name | Core.QualName home name <- coreRoots target artifacts cores],
       Whole._programTarget = target,
       Whole._programMode =
         case _requestMode request of
@@ -536,18 +537,70 @@ kernelChunks details =
 -- it is emitted, so a port's @var@ could still land above the chunk it
 -- registers itself in. They were edges instead, and are now helpers the backend
 -- emits ahead of everything (§SO24).
-coreRoots :: Build.Artifacts -> Map.Map ModuleName.Canonical Core.Module -> [Core.QualName]
-coreRoots (Build.Artifacts pkg _ roots _) cores =
-  [ Core.QualName home N._main
+--
+-- __On the @beam@ target a root module's exposed values are roots too__
+-- (D399, @m2-interop.md@ §EI13). A BEAM program is a set of modules another
+-- Erlang program loads and calls, so what a module exposes is what an Erlang
+-- caller may name, and a build of modules none of which has a @main@ is a
+-- library: the backend writes the modules and no entry point. The order is the
+-- same, module by module and then by name, with @main@ among the exposed
+-- names wherever it sorts. JavaScript keeps @main@ alone, since
+-- @MakeNonMainFilesIntoJavaScript@ already refuses a JavaScript build of
+-- modules with no @main@.
+coreRoots :: Target.Target -> Build.Artifacts -> Map.Map ModuleName.Canonical Core.Module -> [Core.QualName]
+coreRoots target (Build.Artifacts pkg _ roots _) cores =
+  [ Core.QualName home name
   | home <- Set.toAscList (Set.fromList (map (ModuleName.Canonical pkg . rootName) (NE.toList roots))),
     Just modul <- [Map.lookup home cores],
-    Maybe.isJust (Core._moduleMain modul)
+    name <- rootsOf modul
   ]
   where
+    rootsOf modul =
+      Set.toAscList . Set.fromList $
+        [N._main | Maybe.isJust (Core._moduleMain modul)]
+          ++ case target of
+            Target.Beam -> [name | Core.QualName _ name <- Core._moduleExports modul]
+            _ -> []
     rootName root =
       case root of
         Build.Inside name -> name
         Build.Outside name _ _ -> name
+
+-- | Every root has one name to be exported under, or the build is refused
+-- (D400, @m2-interop.md@ §EI13).
+--
+-- A constrained root has none. R1 specializes a constrained binding at each
+-- type the program uses it at, into copies named by the order it met the uses
+-- (@sumAll$s0@, @sumAll$s1@), and what is left under the binding's own name
+-- takes a witness record as its first argument, which nothing outside Geng
+-- can build. So a root that carries a constraint is refused by name, and the
+-- report says to expose a wrapper at one type. Only 'coreRoots''s @beam@ roots
+-- can be constrained: a @main@ is a @Task Never {}@ (C19).
+--
+-- It is asked of the front end's Core, which is the Core the declared types
+-- are in. A build resumed from a stage was checked by the process that wrote
+-- the stage, and 'resumed' holds the roots it read to the roots it would have.
+checkRoots :: Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> Task ()
+checkRoots whole cores =
+  case [problem | Core.QualName home name <- wholeRoots whole, Just problem <- [constrained home name]] of
+    [] -> return ()
+    problems -> Task.throw (Exit.GenerateConstrainedRoots problems)
+  where
+    constrained home name =
+      do
+        modul <- Map.lookup home cores
+        binder <-
+          List.find ((== name) . Core._binderName) $
+            map Core._bindBinder (Core._moduleDefs modul)
+              ++ map Core._externBinder (Core._moduleExterns modul)
+        case Core._binderType binder of
+          Core.TForall _ constraints@(_ : _) _ ->
+            Just
+              ( ModuleName._module home,
+                name,
+                List.nub [className | Core.CClass (Core.QualName _ className) _ <- constraints]
+              )
+          _ -> Nothing
 
 -- | @GENG_DUMP_PROGRAM_CORE@: the program's Core, module by module, with the
 -- same file names as "Compile"'s per-module dump so that the two are comparable
