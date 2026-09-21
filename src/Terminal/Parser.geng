@@ -53,6 +53,8 @@ type alias MakeFlags =
     , sourcemaps : Bool
     , output : Maybe Compiler.Backend.MakeOutput
     , report : Maybe {}
+    , erlc : Maybe String
+    , escript : Maybe String
     , entryPoints : Array ModuleName
     }
 
@@ -306,21 +308,25 @@ parser =
                     Cli.Parser.zeroOrMoreArgs moduleNameParser
                 , flags =
                     Cli.Parser.initFlags 
-                        (\optimize sourcemaps output report ->
+                        (\optimize sourcemaps output report erlc escript ->
                             { optimize = optimize
                             , sourcemaps = sourcemaps
                             , output = output
                             , report = report
+                            , erlc = erlc
+                            , escript = escript
                             }
                         )
                         |> Cli.Parser.toggle "optimize" "Turn on optimizations to make code smaller and faster. For example, the compiler renames record fields to be as short as possible and unboxes values to reduce allocation."
                         |> Cli.Parser.toggle "sourcemaps" "Add sourcemaps to the resulting JS file. This let's you debug Gren code in a JS debugger, at the cost of longer compile times and a bigger JS file."
-                        |> Cli.Parser.flag "output" outputParser "Specify the name of the resulting JS file. For example --output=assets/gren.js to generate the JS at assets/gren.js. You can also use --output=/dev/stdout to output the JS to the terminal, or --output=/dev/null to generate no output at all!"
+                        |> Cli.Parser.flag "output" outputParser "Specify the name of the file to write. For example --output=assets/gren.js to generate the JS at assets/gren.js. You can also use --output=/dev/stdout to output the JS to the terminal, or --output=/dev/null to generate no output at all! For a project built for the beam target this names the program you run, and the modules go in a directory beside it named after it."
                         |> Cli.Parser.flag "report" reportParser "You can say --report=json to get error messages as JSON. This is only really useful if you are an editor plugin. Humans should avoid it!"
+                        |> Cli.Parser.flag "erlc" programParser "The Erlang compiler a beam build runs. Without this I look for GENG_ERLC, and then for erlc on your PATH."
+                        |> Cli.Parser.flag "escript" programParser "The escript runner a beam build writes its program with. Without this I look for GENG_ESCRIPT, and then for escript on your PATH."
                 , commonDescription =
                     Nothing
                 , summary =
-                    "The `make` command compiles Gren code into JS or HTML:"
+                    "The `make` command compiles Geng code into JS, HTML or a BEAM program:"
                 , example = 
                     PP.verticalBlock
                         [ PP.words "For example:"
@@ -342,6 +348,8 @@ parser =
                             , sourcemaps = flags.sourcemaps
                             , output = flags.output
                             , report = flags.report
+                            , erlc = flags.erlc
+                            , escript = flags.escript
                             , entryPoints = args
                             }
                 }
@@ -685,6 +693,25 @@ interpreterParser =
         [ "node"
         , "deno"
         , "bun"
+        ]
+    }
+
+
+{-| A program to run: a name this build looks for on `PATH`, or a path to one.
+
+`erlc` and `escript` are what a `beam` build needs and the compiler does not
+carry (`m2-beam.md` §BM24, D390). A name with no separator in it is resolved on
+`PATH`, which is what makes the bare default work, and either form is accepted
+here so that `--erlc=erlc-27` is as good as an absolute path.
+-}
+programParser : Cli.Parser.ValueParser String
+programParser =
+    { singular = "program"
+    , plural = "programs"
+    , fn = Just
+    , examples =
+        [ "erlc"
+        , "/usr/lib/erlang/bin/erlc"
         ]
     }
 

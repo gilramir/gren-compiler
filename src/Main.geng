@@ -351,7 +351,7 @@ parseUserArgs context compilerPath =
                                 -- is nothing to generate for any target, so that
                                 -- build is the ordinary one.
                                 if beamTarget resolved.outline && Array.length flags.entryPoints /= 0 then
-                                    beamMake context compilerPath flags.output command (backend command)
+                                    beamMake context compilerPath flags resolved command (backend command)
 
                                 else
                                     backend command
@@ -696,15 +696,15 @@ beamTarget outline =
 
 
 {-| A `beam` build: the compiler binary stopped after the passes, and then the
-BEAM backend over the Core it left (`Terminal.Beam`).
+BEAM backend over the Core it left, `erlc`, and the escript (`Terminal.Beam`).
 
 `ordinary` is the build every other target does, and it is what `/dev/null`
 gets: it asks for no output, the binary answers that by never reaching a
 backend, and there is nothing for this to do.
 -}
-beamMake : Context -> Path -> Maybe Compiler.Backend.MakeOutput -> Compiler.Backend.Command -> Task Report Int -> Task Report Int
-beamMake context compilerPath output command ordinary =
-    when Terminal.Beam.plan context.pathFromString output is
+beamMake : Context -> Path -> CliParser.MakeFlags -> Terminal.PackageInstall.PackageResolution -> Compiler.Backend.Command -> Task Report Int -> Task Report Int
+beamMake context compilerPath flags resolved command ordinary =
+    when Terminal.Beam.plan context.pathFromString flags.output is
         Err report ->
             Task.fail report
 
@@ -736,8 +736,31 @@ beamMake context compilerPath output command ordinary =
                                     Task.succeed exitCode
 
                                 else
-                                    Terminal.Beam.emit context.fsPermission context.stderr thePlan
+                                    Terminal.Beam.build
+                                        { fs = context.fsPermission
+                                        , cp = context.cpPermission
+                                        , stderr = context.stderr
+                                        , toString = context.pathToString
+                                        , tools =
+                                            Terminal.Beam.toolchain context.envVars
+                                                { erlc = flags.erlc, escript = flags.escript }
+                                        , packages = beamPackages context resolved
+                                        }
+                                        thePlan
                             )
+
+
+{-| Every package root this build is made of, for the `src/Ext/*.erl` each may
+have (`ffi.md` F1).
+
+`core` is here by name because no manifest lists it (D297) and so it is in no
+dependency table; the project's own root is here because an application may
+declare an extern as readily as a package may.
+-}
+beamPackages : Context -> Terminal.PackageInstall.PackageResolution -> Array Path
+beamPackages context resolved =
+    [ resolved.projectPath, context.corePath ]
+        ++ Array.map .path (Dict.values resolved.dependencies)
 
 
 {-| The backend, started, with `environment` set in it on top of ours.

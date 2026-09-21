@@ -1,9 +1,12 @@
 module Terminal.Beam exposing
     ( Plan
+    , Toolchain
+    , Config
     , plan
+    , toolchain
     , stageEnvironment
     , prepare
-    , emit
+    , build
     )
 
 {-| The BEAM half of `geng make`, for a project whose outline says
@@ -13,39 +16,55 @@ The backend for that target is not in the compiler binary: it is
 `packages/beam`, a Geng package this front end imports (D382). So a `beam`
 build is this process running the binary with `GENG_STAGE_WRITE=passed:dir`,
 which stops it after the passes with the program's Core in a directory, and
-then linking and emitting that directory here — one command for the person who
-typed it, and the seam `m2-seam.md` §DS5 built underneath (geng-lang
-`m2-beam.md` §BM23).
+then everything else here — one command for the person who typed it, and the
+seam `m2-seam.md` §DS5 built underneath (geng-lang `m2-beam.md` §BM23, §BM24).
+
+    geng make Main                  the binary, and then
+      app.ebin/*.erl                linked and emitted
+      app.ebin/geng_rt.erl, ...     the runtime, which this compiler carries
+      app.ebin/*.beam               erlc, over those and each package's Ext
+      app                           the escript, which is what a person runs
 
 **What a build leaves.** `--output` names the file a person runs, `app` by
-default, as it does for the Node platform; the Erlang goes in a directory
-beside it named after it, because a BEAM program is a set of modules and OTP
-interop, a release and `erl -pa` all want the directory rather than the one
-file. `erlc` and the escript are not here yet, so what this writes is the
-`.erl`.
+default, as it does for the Node platform; the modules go in a directory beside
+it named after it, because a BEAM program is a set of modules and OTP interop,
+a release and `erl -pa` all want the directory rather than the one file (D384,
+D388). `<output>.ebin/geng-build/` is the build's own scratch — the passed Core
+and the escript writer — and it goes when the build succeeds.
 
 -}
 
+import Bytes exposing (Bytes)
+import ChildProcess
 import Cli.PrettyPrinter as PP
 import Cli.Report as Report exposing (Report)
-import Bytes exposing (Bytes)
 import Compiler.Backend
 import Dict exposing (Dict)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Geng.Beam.Build as Build
+import Geng.Beam.Runtime as Runtime
 import Geng.Core as Core
 import Stream
 import Stream.Log
 import Task exposing (Task)
 
 
-{-| Where a BEAM build's three things go.
+{-| Where a BEAM build's things go.
 -}
 type alias Plan =
     { escript : Path
     , ebin : Path
+    , work : Path
     , stage : Path
+    }
+
+
+{-| The two programs a BEAM build runs and this compiler does not carry.
+-}
+type alias Toolchain =
+    { erlc : String
+    , escript : String
     }
 
 
@@ -99,17 +118,47 @@ plan fromString output =
 
 
 paths : Path -> Plan
-paths escript =
+paths escriptPath =
     let
         ebin =
             Path.append
-                (Path.fromPosixString (Path.filenameWithExtension escript ++ ".ebin"))
-                (Path.parentPath escript |> Maybe.withDefault Path.empty)
+                (Path.fromPosixString (Path.filenameWithExtension escriptPath ++ ".ebin"))
+                (Path.parentPath escriptPath |> Maybe.withDefault Path.empty)
+
+        work =
+            Path.append (Path.fromPosixString "geng-build") ebin
     in
-    { escript = escript
+    { escript = escriptPath
     , ebin = ebin
-    , stage = Path.append (Path.fromPosixString "geng-stage") ebin
+    , work = work
+    , stage = Path.append (Path.fromPosixString "stage") work
     }
+
+
+{-| Where `erlc` and `escript` come from: **the flag, then the environment,
+then the bare name on `PATH`** (D390).
+
+A name with no separator in it is what a spawn resolves on `PATH`, so the
+default needs no lookup of its own. The environment layer is there because a
+toolchain is a property of the machine and not of the project — which is also
+why there is no `geng.toml` key for it, a committed file being the wrong place
+for one machine's paths — and `GENG_BIN` is the precedent.
+-}
+toolchain : Dict String String -> { erlc : Maybe String, escript : Maybe String } -> Toolchain
+toolchain envVars flags =
+    { erlc = chosen flags.erlc (Dict.get "GENG_ERLC" envVars) "erlc"
+    , escript = chosen flags.escript (Dict.get "GENG_ESCRIPT" envVars) "escript"
+    }
+
+
+chosen : Maybe String -> Maybe String -> String -> String
+chosen flag fromEnv fallback =
+    when flag is
+        Just given ->
+            given
+
+        Nothing ->
+            Maybe.withDefault fallback fromEnv
 
 
 {-| What the compiler binary is run with, so that it stops after the passes and
@@ -149,13 +198,13 @@ stageEnvironment toString envVars thePlan =
 {-| The output directory, made and emptied of what an earlier build left.
 
 A program's modules are the program's, and a module left behind from a
-different one would be compiled into this one's directory and, once there is an
-escript, into the archive. The `geng-stage` directory inside it is the
-compiler's to overwrite and is left alone here.
+different one would be compiled into this one's directory and shipped in its
+archive. The `geng-build` directory inside it is the compiler's own and is left
+alone here, since the binary is about to write into it.
 -}
 prepare : FileSystem.Permission -> Plan -> Task Report {}
 prepare fs thePlan =
-    FileSystem.makeDirectory fs { recursive = True } thePlan.ebin
+    FileSystem.makeDirectory fs { recursive = True } thePlan.work
         |> Task.mapError (failure "I cannot make the output directory")
         |> Task.andThen (\_ -> clear fs thePlan.ebin)
 
@@ -181,62 +230,256 @@ clear fs directory =
         |> Task.map (\_ -> {})
 
 
-{-| The stage directory, linked and written out as Erlang, and the status that
-answers.
+{-| What a build needs that is not in its `Plan`.
+
+`packages` is every root a package of this build has — the project's own, and
+every dependency's, `core` among them — because an `erlang` extern's
+implementation is `src/Ext/<module>.erl` in the package that declares it
+(`ffi.md` F1), and `erlc` has to be given all of them.
+-}
+type alias Config =
+    { fs : FileSystem.Permission
+    , cp : ChildProcess.Permission
+    , stderr : Stream.Writable Bytes
+    , toString : Path -> String
+    , tools : Toolchain
+    , packages : Array Path
+    }
+
+
+{-| The stage directory turned into the two artifacts D384 asks for, and the
+status that answers.
 
 **A build that wrote no stage wrote no program**, and that is not an error: a
 project with no `main` compiles and generates nothing, exactly as it does for
 the js target. So a missing directory is a silent 0.
 
-**A shape the backend has no Erlang for is written verbatim**, on `stderr`, and
+**A shape the backend has no Erlang for is written verbatim** on `stderr`, and
 not as one of the compiler's reports. It is not a problem with the program: it
 is this backend being unfinished, it names bindings whose specialized names are
 longer than a line, and reflowing that list would make it unreadable and
 unparseable both (`m2-beam.md` §BM20.3's item 7 is the list of shapes that are
 left). It goes when the list does.
 -}
-emit : FileSystem.Permission -> Stream.Writable Bytes -> Plan -> Task Report Int
-emit fs stderr thePlan =
-    FileSystem.checkAccess fs [] thePlan.stage
+build : Config -> Plan -> Task Report Int
+build config thePlan =
+    FileSystem.checkAccess config.fs [] thePlan.stage
         |> Task.map (\_ -> True)
         |> Task.onError (\_ -> Task.succeed False)
         |> Task.andThen
             (\staged ->
                 if staged then
-                    emitStage fs stderr thePlan
+                    buildStage config thePlan
 
                 else
                     Task.succeed 0
             )
 
 
-emitStage : FileSystem.Permission -> Stream.Writable Bytes -> Plan -> Task Report Int
-emitStage fs stderr thePlan =
-    read fs thePlan.stage
+buildStage : Config -> Plan -> Task Report Int
+buildStage config thePlan =
+    read config.fs thePlan.stage
         |> Task.andThen
             (\files ->
                 when Result.andThen Build.emit (Build.link Core.ExternErlang files) is
                     Err why ->
-                        Stream.Log.string stderr why
+                        Stream.Log.string config.stderr why
                             |> Task.onError (\_ -> Task.succeed {})
                             |> Task.map (\_ -> 1)
 
-                    Ok written ->
-                        written
-                            |> Array.map
-                                (\file ->
-                                    FileSystem.writeFile fs
-                                        (Bytes.fromString file.text)
-                                        (Path.append (Path.fromPosixString (file.name ++ ".erl")) thePlan.ebin)
-                                        |> Task.mapError (failure "I cannot write the Erlang")
-                                )
-                            |> Task.sequence
+                    Ok emitted ->
+                        write config.fs thePlan.ebin (emitted ++ Runtime.sources)
+                            |> Task.andThen (\_ -> externSources config)
+                            |> Task.andThen (erlc config thePlan)
+                            |> Task.andThen (\_ -> escript config thePlan)
                             |> Task.andThen
                                 (\_ ->
-                                    FileSystem.remove fs { recursive = True } thePlan.stage
-                                        |> Task.mapError (failure "I cannot remove the stage directory")
+                                    FileSystem.remove config.fs { recursive = True } thePlan.work
+                                        |> Task.mapError (failure "I cannot remove the build directory")
                                 )
                             |> Task.map (\_ -> 0)
+            )
+
+
+write : FileSystem.Permission -> Path -> Array { name : String, text : String } -> Task Report {}
+write fs directory files =
+    files
+        |> Array.map
+            (\file ->
+                FileSystem.writeFile fs
+                    (Bytes.fromString file.text)
+                    (Path.append (Path.fromPosixString (erlName file.name)) directory)
+                    |> Task.mapError (failure "I cannot write the Erlang")
+            )
+        |> Task.sequence
+        |> Task.map (\_ -> {})
+
+
+{-| An emitted module is named without an extension and the runtime's carry
+their own, the runtime's names being file names in `packages/beam/runtime`.
+-}
+erlName : String -> String
+erlName name =
+    if String.endsWith ".erl" name then
+        name
+
+    else
+        name ++ ".erl"
+
+
+{-| Every `src/Ext/*.erl` a package of this build has (`ffi.md` F1).
+
+A package with no `src/Ext` contributes nothing and is not an error, which is
+almost every package: the directory is absent far more often than it is empty.
+-}
+externSources : Config -> Task Report (Array Path)
+externSources config =
+    config.packages
+        |> Array.map
+            (\root ->
+                let
+                    directory =
+                        Path.append (Path.fromPosixString "Ext")
+                            (Path.append (Path.fromPosixString "src") root)
+                in
+                FileSystem.listDirectory config.fs directory
+                    |> Task.map
+                        (\entries ->
+                            entries
+                                |> Array.map (\entry -> Path.filenameWithExtension entry.path)
+                                |> Array.keepIf (String.endsWith ".erl")
+                                |> Array.sort
+                                |> Array.map (\name -> Path.append (Path.fromPosixString name) directory)
+                        )
+                    |> Task.onError (\_ -> Task.succeed [])
+            )
+        |> Task.sequence
+        |> Task.map Array.flatten
+
+
+{-| `erlc` over the Erlang in the output directory and each package's.
+
+**No `+debug_info`**, which is measured and not assumed: over
+`accept/prim-coverage`'s 42 modules it is 725,988 bytes of `.beam` against
+379,880 without, so it doubles what a user ships for something no one reads
+yet. `harness/beam.py` keeps it for the runtime it compiles, because D386's
+`dialyzer` will want it there; a build that wants it here can have a flag when
+there is something to point at the result.
+-}
+erlc : Config -> Plan -> Array Path -> Task Report {}
+erlc config thePlan externs =
+    FileSystem.listDirectory config.fs thePlan.ebin
+        |> Task.mapError (failure "I cannot read the output directory")
+        |> Task.andThen
+            (\entries ->
+                let
+                    sources =
+                        entries
+                            |> Array.map (\entry -> Path.filenameWithExtension entry.path)
+                            |> Array.keepIf (String.endsWith ".erl")
+                            |> Array.sort
+                            |> Array.map (\name -> Path.append (Path.fromPosixString name) thePlan.ebin)
+                in
+                spawn config
+                    config.tools.erlc
+                    "GENG_ERLC"
+                    "--erlc"
+                    ([ "-o", config.toString thePlan.ebin ]
+                        ++ Array.map config.toString (sources ++ externs)
+                    )
+            )
+
+
+{-| D384's escript, written by `packages/beam/build/geng_escript.erl`, which
+this compiler carries beside the runtime and writes out to run.
+
+`escript` runs an `.erl` source directly, so there is nothing to compile first;
+the file goes in the build's own directory rather than the output one, because
+a build tool is not part of the program it builds.
+-}
+escript : Config -> Plan -> Task Report {}
+escript config thePlan =
+    let
+        writer =
+            Path.append (Path.fromPosixString Runtime.escriptWriter.name) thePlan.work
+    in
+    FileSystem.writeFile config.fs
+        (Bytes.fromString Runtime.escriptWriter.text)
+        writer
+        |> Task.mapError (failure "I cannot write the escript builder")
+        |> Task.andThen
+            (\_ ->
+                spawn config
+                    config.tools.escript
+                    "GENG_ESCRIPT"
+                    "--escript"
+                    [ config.toString writer
+                    , config.toString thePlan.escript
+                    , config.toString thePlan.ebin
+                    ]
+            )
+
+
+{-| One of the two programs, run with our own streams, and what to say when it
+is not there.
+
+The streams are ours because `erlc`'s diagnostics are the ones worth reading
+when the backend emits Erlang it should not have — §BM21's `-file` attribute
+makes them name a Geng line — and swallowing them to print them again would
+only lose the colours.
+
+**No shell**, which is what makes a missing program reach the message below.
+Under one it is the shell that runs and exits 127, so a `geng make` on a
+machine with no Erlang would report a defect in the backend instead of a
+toolchain that is not installed — which is what it did until this was measured.
+-}
+spawn : Config -> String -> String -> String -> Array String -> Task Report {}
+spawn config program envName flagName args =
+    { (ChildProcess.defaultSpawnOptions ChildProcess.Integrated)
+        | shell = ChildProcess.NoShell
+    }
+        |> ChildProcess.spawn config.cp program args
+        |> Task.mapError
+            (\err ->
+                Report.create
+                    "I CANNOT RUN THE BEAM TOOLCHAIN"
+                    Nothing
+                    (PP.verticalBlock
+                        [ PP.words
+                            ("A build for the beam target runs " ++ program ++ ", and I could not start it: " ++ err.errorCode ++ ".")
+                        , PP.empty
+                        , PP.words
+                            ("Erlang is not part of this compiler. Put it on your PATH, or tell me where it is with "
+                                ++ flagName
+                                ++ "=PATH or the "
+                                ++ envName
+                                ++ " environment variable."
+                            )
+                        ]
+                    )
+            )
+        |> Task.andThen ChildProcess.waitForExit
+        |> Task.andThen
+            (\exitCode ->
+                if exitCode == 0 then
+                    Task.succeed {}
+
+                else
+                    Task.fail <|
+                        Report.create
+                            "THE BEAM TOOLCHAIN REFUSED THIS PROGRAM"
+                            Nothing
+                            (PP.verticalBlock
+                                [ PP.words
+                                    (program
+                                        ++ " exited with status "
+                                        ++ String.fromInt exitCode
+                                        ++ ", and what it printed is above."
+                                    )
+                                , PP.empty
+                                , PP.words "A build reaches this only once the backend has emitted every binding of your program, so what is left for it to refuse is either an `erlang` extern row naming something Erlang will not take, or a defect in the backend."
+                                ]
+                            )
             )
 
 
