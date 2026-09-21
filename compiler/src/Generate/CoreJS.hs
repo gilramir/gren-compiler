@@ -356,7 +356,8 @@ stringHelpers env
         _ -> False
 
 -- | The float bits helpers, when the program reaches @f64_bits@,
--- @f64_from_bits@, @f32_bits@ or @f32_from_bits@ (@docs/m1b-bytes-prim.md@ §BY3).
+-- @f64_from_bits@, @f32_bits@, @f32_from_bits@ or one of D391's three word
+-- primitives (@docs/m1b-bytes-prim.md@ §BY3).
 floatBitsHelpers :: Expr.Env -> B.Builder
 floatBitsHelpers env
   | any JsPrim.isFloatBits (Map.elems (Expr._prims env)) = JsPrim.bitsHelpers

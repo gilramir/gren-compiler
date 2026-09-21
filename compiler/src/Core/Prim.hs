@@ -182,6 +182,16 @@ data ConvPrim
   | I32ToU8
   | I32ToI16
   | I32ToU16
+  | -- | A double's high and low 32 bits as an @Int@ each, and the double two
+    -- such words make: fdlibm's @__HI@, @__LO@ and the pair written back
+    -- (@arithmetic.md@ A9, D391, geng-lang @m2-fdlibm.md@ §FD3). The same bits
+    -- 'F64Bits' reads, without the @UInt64@, which is a @BigInt@ on JavaScript
+    -- and doubled what a word costs the port there. @f64_from_words@ is the
+    -- one conversion with two arguments, the high word first. __Appended__
+    -- after every other primitive.
+    F64HighWord
+  | F64LowWord
+  | F64FromWords
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | @String@ is opaque with a codepoint API (D8). @length@ counts codepoints
@@ -395,7 +405,9 @@ allPrims =
     -- Appended by D345 (m1b-extern.md §H18.7).
     ++ [IntOp I32 IClz]
     -- Appended by D348 (m1b-narrow-int.md §NI3).
-    ++ map ConvOp [I8ToI32 .. maxBound]
+    ++ map ConvOp [I8ToI32 .. I32ToU16]
+    -- Appended by D391 (m2-fdlibm.md §FD9).
+    ++ map ConvOp [F64HighWord .. maxBound]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -498,6 +510,9 @@ convPrimName p =
     I32ToU8 -> "i32_to_u8"
     I32ToI16 -> "i32_to_i16"
     I32ToU16 -> "i32_to_u16"
+    F64HighWord -> "f64_high_word"
+    F64LowWord -> "f64_low_word"
+    F64FromWords -> "f64_from_words"
 
 strPrimName :: StrPrim -> Text
 strPrimName p =
@@ -631,6 +646,7 @@ primArity op =
         FIsNan -> 1
         FIsInf -> 1
         _ -> 2
+    ConvOp F64FromWords -> 2
     ConvOp _ -> 1
     StrOp p ->
       case p of

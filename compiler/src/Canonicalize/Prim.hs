@@ -136,8 +136,8 @@ floatType w p =
 
 -- CONVERSIONS
 
--- | Every conversion is one argument and one result, and the two are read off
--- the name. @f64_bits@ and @f32_bits@ are unsigned, which is the width Ryu's
+-- | Every conversion but @f64_from_words@ is one argument and one result, and
+-- the two are read off the name. @f64_bits@ and @f32_bits@ are unsigned, which is the width Ryu's
 -- reference implementation uses and what @docs/m1b-ryu.md@ §Y7 ports.
 convType :: ConvPrim -> Can.Type
 convType p =
@@ -173,6 +173,9 @@ convType p =
     I32ToU8 -> Can.TLambda tInt tUInt8
     I32ToI16 -> Can.TLambda tInt tInt16
     I32ToU16 -> Can.TLambda tInt tUInt16
+    F64HighWord -> Can.TLambda tFloat tInt
+    F64LowWord -> Can.TLambda tFloat tInt
+    F64FromWords -> Can.TLambda tInt (Can.TLambda tInt tFloat)
 
 -- STRINGS
 

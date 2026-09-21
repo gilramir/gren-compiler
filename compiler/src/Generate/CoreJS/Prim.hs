@@ -80,6 +80,8 @@ prim op args =
     (IntOp I64 p, _) -> bigint Signed p args
     (IntOp U64 p, _) -> bigint Unsigned p args
     (FloatOp w p, _) -> float w p args
+    (ConvOp F64FromWords, [h, l]) ->
+      JS.Call (JS.Ref (JsName.fromLocalHumanReadable "_Float_fromWords")) [h, l]
     (ConvOp p, [a]) -> conversion p a
     (StrOp p, _) -> string p args
     (BytesOp p, _) -> bytes p args
@@ -364,6 +366,13 @@ conversion p a =
     I32ToU8 -> JS.Infix JS.OpBitwiseAnd a (JS.Int 255)
     I32ToI16 -> JS.Infix JS.OpSpRShift (JS.Infix JS.OpLShift a (JS.Int 16)) (JS.Int 16)
     I32ToU16 -> JS.Infix JS.OpBitwiseAnd a (JS.Int 65535)
+    -- A DOUBLE'S WORDS (D391, geng-lang `m2-fdlibm.md` §FD3): the same shared
+    -- buffer as the bits, read through an `Int32Array`, so a word is an `Int`
+    -- with no `BigInt` on the way. `f64_from_words` is in 'prim', being the
+    -- one conversion with two arguments.
+    F64HighWord -> bitsCall "_Float_highWord" a
+    F64LowWord -> bitsCall "_Float_lowWord" a
+    F64FromWords -> error "Generate.CoreJS.Prim: f64_from_words takes two arguments"
 
 -- STRINGS
 
@@ -1484,7 +1493,7 @@ arityError op args =
       ++ " arguments, not "
       ++ show (Prim.primArity op)
 
--- | Whether a primitive is one of the four that go through 'bitsHelpers'.
+-- | Whether a primitive is one of the seven that go through 'bitsHelpers'.
 isFloatBits :: PrimOp -> Bool
 isFloatBits op =
   case op of
@@ -1492,10 +1501,13 @@ isFloatBits op =
     ConvOp F64FromBits -> True
     ConvOp F32Bits -> True
     ConvOp F32FromBits -> True
+    ConvOp F64HighWord -> True
+    ConvOp F64LowWord -> True
+    ConvOp F64FromWords -> True
     _ -> False
 
 -- | The float bits helpers, which 'Generate.CoreJS' emits once when a program
--- reaches any of the four (@docs/m1b-bytes-prim.md@ §BY3).
+-- reaches any of the seven (@docs/m1b-bytes-prim.md@ §BY3, D391).
 bitsHelpers :: B.Builder
 bitsHelpers =
   [r|
@@ -1510,4 +1522,11 @@ function _Float_bits64(x) { _Float_f64[0] = x; return _Float_u64[0]; }
 function _Float_fromBits64(x) { _Float_u64[0] = x; return _Float_f64[0]; }
 function _Float_bits32(x) { _Float_f32[0] = x; return _Float_u32[0]; }
 function _Float_fromBits32(x) { _Float_u32[0] = x; return _Float_f32[0]; }
+// A double's two words (D391). Which half of the buffer is the high word is
+// the machine's byte order, so it is asked rather than assumed.
+var _Float_i32 = new Int32Array(_Float_f64.buffer);
+var _Float_hi = new Uint8Array(new Uint16Array([1]).buffer)[0];
+function _Float_highWord(x) { _Float_f64[0] = x; return _Float_i32[_Float_hi]; }
+function _Float_lowWord(x) { _Float_f64[0] = x; return _Float_i32[1 - _Float_hi]; }
+function _Float_fromWords(h, l) { _Float_i32[_Float_hi] = h; _Float_i32[1 - _Float_hi] = l; return _Float_f64[0]; }
 |]

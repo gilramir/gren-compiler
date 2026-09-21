@@ -19,7 +19,7 @@ spec = do
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
       -- someone noticing.
-      length allPrims `shouldBe` 179
+      length allPrims `shouldBe` 182
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -46,6 +46,18 @@ spec = do
         primCode (IntOp I32 IClz)
       )
         `shouldBe` (171, 178, "i32_to_i8", 170)
+
+    it "appends D391's primitives after every code that existed" $
+      -- A double's two words and the double two words make, after D348's
+      -- wraps (m2-fdlibm.md §FD9). `f64_from_words` is the one conversion
+      -- with two arguments.
+      ( primCode (ConvOp F64HighWord),
+        primCode (ConvOp F64FromWords),
+        primName (ConvOp F64LowWord),
+        primArity (ConvOp F64FromWords),
+        primCode (ConvOp I32ToU16)
+      )
+        `shouldBe` (179, 181, "f64_low_word", 2, 178)
 
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved
