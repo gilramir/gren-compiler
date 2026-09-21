@@ -16,7 +16,7 @@ module Terminal.Beam exposing
 `target = "beam"`.
 
 The backend for that target is not in the compiler binary: it is
-`packages/beam`, a Geng package this front end imports (D382). So a `beam`
+`packages/beam-backend`, a Geng package this front end imports (D382). So a `beam`
 build is this process running the binary with `GENG_STAGE_WRITE=passed:dir`,
 which stops it after the passes with the program's Core in a directory, and
 then everything else here — one command for the person who typed it, and the
@@ -398,7 +398,7 @@ write fs directory files =
 
 
 {-| An emitted module is named without an extension and the runtime's carry
-their own, the runtime's names being file names in `packages/beam/runtime`.
+their own, the runtime's names being file names in `packages/beam-backend/runtime`.
 -}
 erlName : String -> String
 erlName name =
@@ -472,7 +472,7 @@ erlc config thePlan externs =
             )
 
 
-{-| D384's escript, written by `packages/beam/build/geng_escript.erl`, which
+{-| D384's escript, written by `packages/beam-backend/build/geng_escript.erl`, which
 this compiler carries beside the runtime and writes out to run.
 
 `escript` runs an `.erl` source directly, so there is nothing to compile first;
