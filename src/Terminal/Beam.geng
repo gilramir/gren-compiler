@@ -2,6 +2,7 @@ module Terminal.Beam exposing
     ( Plan
     , Toolchain
     , Config
+    , isTarget
     , plan
     , toolchain
     , stageEnvironment
@@ -39,6 +40,7 @@ import ChildProcess
 import Cli.PrettyPrinter as PP
 import Cli.Report as Report exposing (Report)
 import Compiler.Backend
+import Compiler.Outline as Outline exposing (Outline)
 import Dict exposing (Dict)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
@@ -48,6 +50,23 @@ import Geng.Core as Core
 import Stream
 import Stream.Log
 import Task exposing (Task)
+
+
+{-| Whether this project is built for the `beam` target, which is what sends
+a `geng make` or a `geng run` through this module.
+
+A package has no target of its own to build for — its `[platform] target` is
+what its externs serve, which is a different question (D318) — and `geng make`
+in one generates nothing anyway.
+-}
+isTarget : Outline -> Bool
+isTarget outline =
+    when outline is
+        Outline.App app ->
+            app.target == "beam"
+
+        Outline.Pkg _ ->
+            False
 
 
 {-| Where a BEAM build's things go.

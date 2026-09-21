@@ -15,7 +15,6 @@ import Compiler.Paths
 import Bytes exposing (Bytes)
 import ChildProcess
 import Compiler.Backend
-import Dict
 import Compiler.Outline as Outline exposing (Outline)
 import Compiler.Runtime as Runtime
 import Compiler.Platform as Platform
@@ -28,6 +27,7 @@ import Node
 import Stream
 import Task exposing (Task)
 import Terminal.PackageInstall as PackageInstall exposing (PackageResolution)
+import Terminal.Beam
 import Terminal.Help as Help
 import Cli.Report as Report exposing (Report)
 
@@ -45,20 +45,29 @@ type alias MakeConfig =
     , corePath : Path
     , cpPermission : ChildProcess.Permission
     , useColor : Bool
-    , compilerPath : Path
     , pathToString : Path -> String
     , moduleName : ModuleName
     , package : Maybe PackageName
     }
 
 
-{-| The backend, started, with the command to hand it and where it will write
-the program.
+{-| The command to hand the backend, where the build will write the program,
+and what `Main` needs to finish a build this process cannot.
+
+**A `beam` build is not over when the backend exits**: the backend for that
+target is not in the compiler binary, so that process stops at the passed Core
+and `Terminal.Beam` makes the program out of it (D382, `m2-beam.md` §BM23).
+That is why this answers the resolution rather than swallowing it — the
+`src/Ext/*.erl` `erlc` compiles belong to the packages in it — and why the
+backend is started by the caller, which is the one place that knows to set
+`GENG_STAGE_WRITE` in its environment.
 -}
 type alias Compiling =
-    { backend : ChildProcess.Child
-    , encodedCommand : Bytes
+    { encodedCommand : Bytes
+    , output : Compiler.Backend.MakeOutput
     , outputPath : Path
+    , resolution : PackageResolution
+    , beam : Bool
     }
 
 
@@ -67,6 +76,7 @@ type alias RunConfig =
     , fsPermission : FileSystem.Permission
     , pathToString : Path -> String
     , path : Path
+    , escript : Maybe String
     }
 
 
@@ -136,28 +146,18 @@ makeProject config projectOutline =
                             }
                         )
 
-                compile : Bytes -> Task Error Compiling
-                compile encodedCommand =
-                    Compiler.Backend.run
-                        config.cpPermission
-                        { useColor = config.useColor
-                        , compilerPath = config.compilerPath
-                        , pathToString = config.pathToString
-                        , environment = Dict.empty
-                        }
-                        |> Task.mapError SpawnError
-                        |> Task.map
-                            (\child ->
-                                { backend = child
-                                , encodedCommand = encodedCommand
-                                , outputPath = outputPath
-                                }
-                            )
+                compiling : PackageResolution -> Compiling
+                compiling packageResolution =
+                    { encodedCommand = backendCommand packageResolution
+                    , output = output
+                    , outputPath = outputPath
+                    , resolution = packageResolution
+                    , beam = Terminal.Beam.isTarget projectOutline.outline
+                    }
             in
             Help.getNullStream
                 |> Task.andThen installPackages
-                |> Task.map backendCommand
-                |> Task.andThen compile
+                |> Task.map compiling
 
 
 clonePackage : MakeConfig -> PackageName -> Task Error ProjectOutline
@@ -193,9 +193,48 @@ clonePackage config packageName =
 
 
 {-| Run the program `make` built, and answer its exit status.
+
+A `beam` build names the program that runs its escript, because its toolchain
+is resolved where it was built. Everything else is read back off disk: a
+JavaScript program is run by its project's platform, and the outline that says
+which is found from the path.
 -}
 run : RunConfig -> Task Error Int
 run config =
+    when config.escript is
+        Just escriptProgram ->
+            runEscript config escriptProgram
+
+        Nothing ->
+            runForPlatform config
+
+
+{-| D384's escript, run by the `escript` this build resolved (D390).
+
+**Not `./app` by its shebang**, which is how a person runs it and how
+`harness/run.py` does. The shebang is `/usr/bin/env escript`, so it finds
+whatever is on `PATH` and ignores the `--escript=` and `GENG_ESCRIPT` that
+built the program moments ago — on a machine where Erlang is not on `PATH`
+that is a build that succeeds and a run that cannot start. `escript FILE`
+reads the same header, `-escript main geng_main` and all, so the program that
+runs is the same one.
+
+**No shell**, for §BM24's reason: under one a missing `escript` arrives as the
+shell's 127 rather than as a spawn that failed to start, and the message that
+names the program is the useful one.
+-}
+runEscript : RunConfig -> String -> Task Error Int
+runEscript config escriptProgram =
+    { (ChildProcess.defaultSpawnOptions ChildProcess.Integrated)
+        | shell = ChildProcess.NoShell
+    }
+        |> ChildProcess.spawn config.cpPermission escriptProgram [ config.pathToString config.path ]
+        |> Task.mapError SpawnError
+        |> Task.andThen ChildProcess.waitForExit
+
+
+runForPlatform : RunConfig -> Task Error Int
+runForPlatform config =
     let
         getOutline =
             config.path

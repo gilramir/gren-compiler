@@ -223,17 +223,19 @@ parseUserArgs context compilerPath =
     
         Cli.Parser.Success parsedCommand ->
             let
+                encodeFor backendCommand =
+                    Compiler.Backend.encodeCommand
+                        { interactiveSession = context.interactive
+                        , pathToString = context.pathToString
+                        }
+                        backendCommand
+
                 backend backendCommand =
                     startBackend context compilerPath Dict.empty
                         |> Task.andThen
                             (talkToBackend context
                                 { headless = False
-                                , encodedCommand =
-                                    Compiler.Backend.encodeCommand
-                                        { interactiveSession = context.interactive
-                                        , pathToString = context.pathToString
-                                        }
-                                        backendCommand
+                                , encodedCommand = encodeFor backendCommand
                                 }
                             )
             in
@@ -350,8 +352,17 @@ parseUserArgs context compilerPath =
                                 -- `m2-beam.md` §BM23). With no entry points there
                                 -- is nothing to generate for any target, so that
                                 -- build is the ordinary one.
-                                if beamTarget resolved.outline && Array.length flags.entryPoints /= 0 then
-                                    beamMake context compilerPath flags resolved command (backend command)
+                                if Terminal.Beam.isTarget resolved.outline && Array.length flags.entryPoints /= 0 then
+                                    beamMake context
+                                        compilerPath
+                                        { encodedCommand = encodeFor command
+                                        , headless = False
+                                        , output = flags.output
+                                        , erlc = flags.erlc
+                                        , escript = flags.escript
+                                        }
+                                        resolved
+                                        (backend command)
 
                                 else
                                     backend command
@@ -359,24 +370,55 @@ parseUserArgs context compilerPath =
                         |> Task.onError (endWithErrorReport reportType)
 
                 CliParser.Run opts ->
+                    -- `geng run` on a `beam` project is `geng make` and then
+                    -- the escript, for the same reason the Make branch above
+                    -- finishes in this process: the backend for that target
+                    -- is a Geng package here and not code in the binary
+                    -- (D382, `m2-beam.md` §BM25).
                     Terminal.Run.make
                         { fsPermission = context.fsPermission
                         , cpPermission = context.cpPermission
                         , cacheRoot = context.cacheRoot
                         , corePath = context.corePath
                         , useColor = context.useColor
-                        , compilerPath = compilerPath
                         , pathToString = context.pathToString
                         , moduleName = opts.moduleName
                         , package = opts.package
                         }
+                        |> Task.mapError Terminal.Run.prettifyError
                         |> Task.andThen
                             (\compiling ->
-                                talkToBackend context
-                                    { headless = True
-                                    , encodedCommand = compiling.encodedCommand
-                                    }
-                                    compiling.backend
+                                let
+                                    tools =
+                                        Terminal.Beam.toolchain context.envVars
+                                            { erlc = opts.erlc, escript = opts.escript }
+
+                                    ordinary =
+                                        startBackend context compilerPath Dict.empty
+                                            |> Task.andThen
+                                                (talkToBackend context
+                                                    { headless = True
+                                                    , encodedCommand = compiling.encodedCommand
+                                                    }
+                                                )
+
+                                    built =
+                                        if compiling.beam then
+                                            beamMake context
+                                                compilerPath
+                                                { encodedCommand = compiling.encodedCommand
+                                                , headless = True
+                                                , output = Just compiling.output
+                                                , erlc = opts.erlc
+                                                , escript = opts.escript
+                                                }
+                                                compiling.resolution
+                                                ordinary
+
+                                        else
+                                            ordinary
+                                in
+                                built
                                     |> Task.andThen
                                         (\exitCode ->
                                             if exitCode == 0 then
@@ -385,13 +427,19 @@ parseUserArgs context compilerPath =
                                                     , fsPermission = context.fsPermission
                                                     , pathToString = context.pathToString
                                                     , path = compiling.outputPath
+                                                    , escript =
+                                                        if compiling.beam then
+                                                            Just tools.escript
+
+                                                        else
+                                                            Nothing
                                                     }
+                                                    |> Task.mapError Terminal.Run.prettifyError
 
                                             else
                                                 Task.succeed exitCode
                                         )
                             )
-                        |> Task.mapError Terminal.Run.prettifyError
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
 
                 CliParser.Docs flags ->
@@ -679,31 +727,32 @@ parseUserArgs context compilerPath =
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
 
 
-{-| Whether this project is built for the `beam` target.
-
-A package has no target of its own to build for -- its `[platform] target` is
-what its externs serve, which is a different question (D318) -- and `geng make`
-in one generates nothing anyway.
--}
-beamTarget : Outline -> Bool
-beamTarget outline =
-    when outline is
-        Outline.App app ->
-            app.target == "beam"
-
-        Outline.Pkg _ ->
-            False
-
-
 {-| A `beam` build: the compiler binary stopped after the passes, and then the
 BEAM backend over the Core it left, `erlc`, and the escript (`Terminal.Beam`).
+
+`geng make` and `geng run` are both here, which is what makes them the same
+build (§BM25). They differ in `headless` — `geng run`'s compile is not the
+output the person asked for — and in where `output` came from, a flag for one
+and the platform's default path for the other.
 
 `ordinary` is the build every other target does, and it is what `/dev/null`
 gets: it asks for no output, the binary answers that by never reaching a
 backend, and there is nothing for this to do.
 -}
-beamMake : Context -> Path -> CliParser.MakeFlags -> Terminal.PackageInstall.PackageResolution -> Compiler.Backend.Command -> Task Report Int -> Task Report Int
-beamMake context compilerPath flags resolved command ordinary =
+beamMake :
+    Context
+    -> Path
+    ->
+        { encodedCommand : Bytes
+        , headless : Bool
+        , output : Maybe Compiler.Backend.MakeOutput
+        , erlc : Maybe String
+        , escript : Maybe String
+        }
+    -> Terminal.PackageInstall.PackageResolution
+    -> Task Report Int
+    -> Task Report Int
+beamMake context compilerPath flags resolved ordinary =
     when Terminal.Beam.plan context.pathFromString flags.output is
         Err report ->
             Task.fail report
@@ -721,13 +770,8 @@ beamMake context compilerPath flags resolved command ordinary =
                         |> Task.andThen (\_ -> startBackend context compilerPath environment)
                         |> Task.andThen
                             (talkToBackend context
-                                { headless = False
-                                , encodedCommand =
-                                    Compiler.Backend.encodeCommand
-                                        { interactiveSession = context.interactive
-                                        , pathToString = context.pathToString
-                                        }
-                                        command
+                                { headless = flags.headless
+                                , encodedCommand = flags.encodedCommand
                                 }
                             )
                         |> Task.andThen

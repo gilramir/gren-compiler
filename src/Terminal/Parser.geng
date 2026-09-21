@@ -82,6 +82,8 @@ type alias DocsFlags =
 type alias RunOptions =
     { moduleName : ModuleName
     , package : Maybe PackageName
+    , erlc : Maybe String
+    , escript : Maybe String
     }
 
 
@@ -359,15 +361,19 @@ parser =
                     Cli.Parser.oneArg moduleNameParser
                 , flags =
                     Cli.Parser.initFlags 
-                        (\package ->
+                        (\package erlc escript ->
                             { package = package
+                            , erlc = erlc
+                            , escript = escript
                             }
                         )
                         |> Cli.Parser.flag "package" Cli.Parser.packageNameParser "Run a module in a particular package."
+                        |> Cli.Parser.flag "erlc" programParser "The Erlang compiler a beam build runs. Without this I look for GENG_ERLC, and then for erlc on your PATH."
+                        |> Cli.Parser.flag "escript" programParser "The escript runner a beam build writes its program with, and runs it with. Without this I look for GENG_ESCRIPT, and then for escript on your PATH."
                 , commonDescription =
                     Nothing
                 , summary =
-                    "The `run` command compiles and runs a Gren module:"
+                    "The `run` command compiles a Geng module and runs it:"
                 , example = 
                     PP.verticalBlock
                         [ PP.words "For example:"
@@ -378,8 +384,8 @@ parser =
                         , PP.empty
                         , PP.words
                             """
-                            This tries to compile a Geng file named src/Main.geng.
-                            The file must have a `main` function that returns a Node or Browser program.
+                            This tries to compile a Geng file named src/Main.geng, and then runs what it built.
+                            The file must have a `main`. For a project built for the beam target this builds the program the way geng make does, and what runs is the escript.
                             """
                         ]
                 , builder =
@@ -387,6 +393,8 @@ parser =
                         Run
                             { moduleName = arg
                             , package = flags.package
+                            , erlc = flags.erlc
+                            , escript = flags.escript
                             }
                     )
                 }
