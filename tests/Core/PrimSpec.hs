@@ -19,7 +19,7 @@ spec = do
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
       -- someone noticing.
-      length allPrims `shouldBe` 182
+      length allPrims `shouldBe` 183
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -58,6 +58,17 @@ spec = do
         primCode (ConvOp I32ToU16)
       )
         `shouldBe` (179, 181, "f64_low_word", 2, 178)
+
+    it "appends D398's primitive after every code that existed" $
+      -- `Task.parallel` (D373), after D391's words (m2-beam.md §BM29), and
+      -- the task group's own appended run did not move.
+      ( primCode (TaskOp TaskParallel),
+        primName (TaskOp TaskParallel),
+        primArity (TaskOp TaskParallel),
+        primCode (TaskOp TaskKill),
+        primCode (ConvOp F64FromWords)
+      )
+        `shouldBe` (182, "task_parallel", 1, 169, 181)
 
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved

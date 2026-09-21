@@ -147,7 +147,7 @@ spec = do
           arr e = Can.TType ModuleName.array "Array" [e]
           never = Can.TType ModuleName.basics "Never" []
           pid = Can.TType ModuleName.process "Id" []
-       in map typeOf ["task_succeed", "task_fail", "task_and_then", "task_on_error", "task_concurrent", "task_race", "task_bracket", "task_map2", "task_spawn", "task_kill"]
+       in map typeOf ["task_succeed", "task_fail", "task_and_then", "task_on_error", "task_concurrent", "task_race", "task_bracket", "task_map2", "task_spawn", "task_kill", "task_parallel"]
             `shouldBe` [ Just (fn [v "a"] (t (v "x") (v "a"))),
                          Just (fn [v "x"] (t (v "x") (v "a"))),
                          Just (fn [fn [v "a"] (t (v "x") (v "b")), t (v "x") (v "a")] (t (v "x") (v "b"))),
@@ -157,7 +157,8 @@ spec = do
                          Just (fn [t (v "x") (v "r"), fn [v "r"] (t never tUnit), fn [v "r"] (t (v "x") (v "a"))] (t (v "x") (v "a"))),
                          Just (fn [fn [v "a", v "b"] (v "c"), t (v "x") (v "a"), t (v "x") (v "b")] (t (v "x") (v "c"))),
                          Just (fn [t (v "x") (v "a")] (t (v "y") pid)),
-                         Just (fn [pid] (t (v "x") tUnit))
+                         Just (fn [pid] (t (v "x") tUnit)),
+                         Just (fn [arr (t (v "x") (v "a"))] (t (v "x") (arr (v "a"))))
                        ]
 
     it "`task_finally` is retired and has no type (D282)" $

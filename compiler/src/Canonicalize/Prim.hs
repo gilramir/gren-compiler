@@ -297,6 +297,7 @@ taskType p =
     TaskMap2 -> Just (fn [fn [a, b] c, tTask x a, tTask x b] (tTask x c))
     TaskSpawn -> Just (fn [tTask x a] (tTask y tProcessId))
     TaskKill -> Just (fn [tProcessId] (tTask x tUnit))
+    TaskParallel -> Just (fn [tArray (tTask x a)] (tTask x (tArray a)))
     _ -> sourceType p
   where
     a = Can.TVar "a"

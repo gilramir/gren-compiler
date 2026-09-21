@@ -630,6 +630,8 @@ task p args =
     (TaskMap2, [_, _, _]) -> helper "_TaskPrim_map2" args
     (TaskSpawn, [_]) -> helper "_TaskPrim_spawn" args
     (TaskKill, [_]) -> helper "_TaskPrim_kill" args
+    -- D373: JavaScript has one core to give, so a parallel is a concurrent.
+    (TaskParallel, [_]) -> helper "_TaskPrim_concurrent" args
     (TaskFinally, _) -> arityError (TaskOp p) args
     _ -> source p args
   where

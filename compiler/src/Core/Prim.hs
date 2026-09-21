@@ -331,6 +331,12 @@ data TransientPrim
 -- and its one array, and @Process.spawn@ and @kill@ are the scheduler's until
 -- D56's package replaces them. 'TaskFinally' is retired by D282, since @finally@
 -- is Geng over @bracket@ (D103), and keeps its code with no type.
+--
+-- 'TaskParallel' is D373's, __appended__ after every other primitive by D398
+-- (geng-lang @m2-beam.md@ §BM29): 'TaskConcurrent''s contract exactly, with
+-- each child in a scheduler of its own where the backend has more than one
+-- core to give it. A backend that has not is free to emit it as
+-- 'TaskConcurrent', and JavaScript does.
 data TaskPrim
   = TaskSucceed
   | TaskFail
@@ -349,6 +355,7 @@ data TaskPrim
   | TaskMap2
   | TaskSpawn
   | TaskKill
+  | TaskParallel
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 data PrimOp
@@ -401,13 +408,15 @@ allPrims =
     -- Appended by D233 (m1b-bytes-prim.md §BY12).
     ++ [BytesOp BtSetBytes]
     -- Appended by D282 and D283 (m1b-source.md §SO22.9).
-    ++ map TaskOp [TaskMap2 .. maxBound]
+    ++ map TaskOp [TaskMap2 .. TaskKill]
     -- Appended by D345 (m1b-extern.md §H18.7).
     ++ [IntOp I32 IClz]
     -- Appended by D348 (m1b-narrow-int.md §NI3).
     ++ map ConvOp [I8ToI32 .. I32ToU16]
     -- Appended by D391 (m2-fdlibm.md §FD9).
     ++ map ConvOp [F64HighWord .. maxBound]
+    -- Appended by D398 (m2-beam.md §BM29).
+    ++ [TaskOp TaskParallel]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -593,6 +602,7 @@ taskPrimName p =
     TaskMap2 -> "task_map2"
     TaskSpawn -> "task_spawn"
     TaskKill -> "task_kill"
+    TaskParallel -> "task_parallel"
 
 nameTable :: Map.Map Text PrimOp
 nameTable = Map.fromList [(primName p, p) | p <- allPrims]
@@ -729,4 +739,5 @@ primArity op =
         TaskMap2 -> 3
         TaskSpawn -> 1
         TaskKill -> 1
+        TaskParallel -> 1
     DebugLog -> 2
