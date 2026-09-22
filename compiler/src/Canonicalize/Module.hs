@@ -7,6 +7,7 @@ module Canonicalize.Module
 where
 
 import AST.Canonical qualified as Can
+import AST.Utils.Type qualified as TypeUtils
 import AST.Source qualified as Src
 import Canonicalize.Derive qualified as Derive
 import Canonicalize.Environment qualified as Env
@@ -399,6 +400,7 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
             checkExtern aname impls tipe
             checkJsExtern aname impls tipe
             checkErlangExtern impls
+            checkErlangVariables (Env._home env) aname impls tipe
             let canImpls = List.sortOn (\(Can.ExternImpl language _) -> language) (map canonicalImpl impls)
             let isPure = any (\(Src.ExternImpl p _ _) -> p) impls
             let cbody = Can.at bodyRegion (Can.VarExtern name canImpls isPure annotation)
@@ -418,6 +420,7 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
                 checkExtern aname impls tipe
                 checkJsExtern aname impls tipe
                 checkErlangExtern impls
+                checkErlangVariables (Env._home env) aname impls tipe
                 return geng
             _ ->
               return body
@@ -543,6 +546,115 @@ checkJsExtern (A.At nameRegion name) impls tipe =
 -- holds to the @-module@ attribute, so it may not have the @\@@ a bare atom
 -- allows: every module the backend emits is @package\@Module@, and without it
 -- an extern's module can never be one of them. The function may, as an atom.
+-- | D421, as D422 leaves it: where an `erlang` row has Erlang hand Geng a
+-- value at a type variable, that variable is one of three things.
+--
+--   * __A builder's__, when a function the row is handed answers it
+--     (@Time.nowWith : (Int64 -> posix) -> Task x posix@). What arrives there
+--     was made by Geng code, so it is believed, which is what D200 said.
+--   * __One that appears nowhere else__, which is a @Task@'s failure variable
+--     or the value of a row that never answers (@Task x Posix@,
+--     @exitWithCodeExtern : Int -> Task x a@). No value can be right there,
+--     so the backend hands the implementation a continuation that crashes.
+--   * __Anything else, which only Erlang can supply__, and that is refused
+--     here. An extern is never constrained (D422), so the row answers a
+--     @Handle@ and the Geng function around it carries @Inbound@.
+checkErlangVariables :: ModuleName.Canonical -> A.Located Name.Name -> [Src.ExternImpl] -> Can.Type -> Result i w ()
+checkErlangVariables home (A.At nameRegion name) impls tipe
+  | not (any (\(Src.ExternImpl _ (A.At _ language) _) -> Name.toChars language == "erlang") impls) =
+      Result.ok ()
+  -- `Inbound.check` is the one row no boundary reaches: the backend puts the
+  -- check it generates at the reference's type in its place (D422, §EI23), and
+  -- its own implementation only raises. Its variable is what makes it the
+  -- instance at every type.
+  | home == ModuleName.inbound && name == Name.inboundCheck =
+      Result.ok ()
+  | otherwise =
+      let isPure = any (\(Src.ExternImpl p _ _) -> p) impls
+          (args, result) = arrows tipe
+          places = resultsOf isPure result
+          produced = concatMap produces args
+          counted = Map.fromListWith (+) [(v, 1 :: Int) | v <- allVars tipe]
+          -- A `Task`'s failure or value, when the whole of it is a variable
+          -- the row's arguments do not supply and nothing else in the row
+          -- mentions, is the second kind: the implementation may call it, and
+          -- the backend hands it a continuation that crashes when it does.
+          -- Every other variable Erlang would hand a value at is refused,
+          -- including one inside a structure and a pure row's result, since
+          -- a pure row always answers.
+          neverRight place =
+            case (isPure, TypeUtils.iteratedDealias place) of
+              (False, Can.TVar v) -> v `notElem` produced && Map.findWithDefault 0 v counted == 1
+              _ -> False
+          refused =
+            [ v
+            | place <- places,
+              not (neverRight place),
+              v <- inbound place,
+              v `notElem` produced
+            ]
+       in case refused of
+            v : _ -> Result.throw (Error.ExternErlangVariable nameRegion name v)
+            [] -> Result.ok ()
+  where
+    -- The types Erlang hands Geng a value at: a pure row's result, and a
+    -- `Task` row's failure and value.
+    resultsOf isPure result
+      | isPure = [result]
+      | otherwise =
+          case TypeUtils.iteratedDealias result of
+            Can.TType _ _ [failure, value] -> [failure, value]
+            _ -> []
+
+    -- A value at this type comes into Geng. A function Erlang hands in is
+    -- called by Geng, so its arguments go out and its result comes in.
+    inbound tipe' =
+      case TypeUtils.iteratedDealias tipe' of
+        Can.TVar v -> [v]
+        Can.TLambda _ r -> inbound r
+        Can.TType _ _ as -> concatMap inbound as
+        Can.TRecord fields _ -> concatMap (\(Can.FieldType _ t) -> inbound t) (Map.elems fields)
+        Can.TAlias {} -> []
+
+    -- The variables a row's argument hands Geng values of, which is what
+    -- makes one D222's builder rather than Erlang's: the argument is the
+    -- variable itself (@Bytes.hostEndianness : endianness -> endianness ->
+    -- Task x endianness@, handed both answers), or a function the row calls
+    -- answers it (@Time.nowWith : (Int64 -> posix) -> Task x posix@), or it
+    -- is in something Geng built to hold values of it.
+    --
+    -- A parameter of another named type is not one of those: a
+    -- @Server request reply@ is a handle, and no value of @reply@ crosses in
+    -- it, which is why D416's call is refused and takes a constraint instead.
+    produces tipe' =
+      case TypeUtils.iteratedDealias tipe' of
+        Can.TVar v -> [v]
+        Can.TLambda _ r -> produces r
+        Can.TRecord fields _ -> concatMap (\(Can.FieldType _ t) -> produces t) (Map.elems fields)
+        Can.TType home name as
+          | holdsItsParameters home name -> concatMap produces as
+        _ -> []
+
+    -- The types whose parameters are the values they hold, rather than a
+    -- name for what a handle stands for.
+    holdsItsParameters home name =
+      ModuleName._package home == Pkg.core
+        && Name.toChars name
+          `elem` ["Array", "Maybe", "Result", "Dict", "Set"]
+
+    allVars tipe' =
+      case TypeUtils.iteratedDealias tipe' of
+        Can.TVar v -> [v]
+        Can.TLambda a r -> allVars a ++ allVars r
+        Can.TType _ _ as -> concatMap allVars as
+        Can.TRecord fields _ -> concatMap (\(Can.FieldType _ t) -> allVars t) (Map.elems fields)
+        Can.TAlias {} -> []
+
+    arrows tipe' =
+      case TypeUtils.iteratedDealias tipe' of
+        Can.TLambda a r -> let (as, final) = arrows r in (a : as, final)
+        other -> ([], other)
+
 checkErlangExtern :: [Src.ExternImpl] -> Result i w ()
 checkErlangExtern impls =
   case [names | Src.ExternImpl _ (A.At _ language) names <- impls, Name.toChars language == "erlang"] of

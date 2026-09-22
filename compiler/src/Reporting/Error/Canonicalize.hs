@@ -101,6 +101,7 @@ data Error
   | ExternJsModule A.Region String
   | ExternJsFunction A.Region String
   | ExternErlangModule A.Region String
+  | ExternErlangVariable A.Region Name.Name Name.Name
   | ExternErlangFunction A.Region String
   | ExternDoesNotCross A.Region Name.Name Extern.Problem
   | ExternNotCompiledYet A.Region Name.Name
@@ -1122,6 +1123,27 @@ toReport source err =
               \ so the module is written as a bare atom: a lowercase letter, then letters, digits\
               \ and `_`, and not one of Erlang's reserved words, as in\
               \ `@extern(erlang, \"geng_time\", \"now\")`."
+          )
+    ExternErlangVariable region name variable ->
+      Report.Report "EXTERN HANDS IN A TYPE VARIABLE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "The `erlang` extern `"
+                ++ Name.toChars name
+                ++ "` has Erlang hand Geng a value at the type variable `"
+                ++ Name.toChars variable
+                ++ "`, and only Erlang could say what that value is:",
+            D.reflow
+              "Nothing checks such a value, so a wrong one fails later, wherever Geng first\
+              \ uses it, naming neither this extern nor the type. Have the row answer an\
+              \ `Extern.Handle`, which is the host's own value and is never looked inside,\
+              \ and put the constraint on the Geng function around it, as in\
+              \ `call : Inbound reply => Server req reply -> req -> Task x reply`, whose body\
+              \ applies `inbound` to the handle. The check is then made at the type each\
+              \ caller asks for (D419, D421, D422)."
           )
     ExternErlangFunction region function ->
       Report.Report "EXTERN FUNCTION NAME" region [] $
