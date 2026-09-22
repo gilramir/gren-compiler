@@ -20,6 +20,7 @@ module Gren.Package
     core,
     browser,
     node,
+    beam,
     url,
     --
     suggestions,
@@ -206,6 +207,12 @@ browser =
 node :: Name
 node =
   fromChars "github.com/geng-language/node"
+
+-- | The @beam@ package, whose @Beam.Server@ and @Beam.Worker@ the build
+-- roots by (D414).
+beam :: Name
+beam =
+  fromChars "github.com/geng-language/beam"
 
 url :: Name
 url =

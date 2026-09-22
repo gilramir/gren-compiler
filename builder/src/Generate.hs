@@ -543,14 +543,34 @@ kernelChunks details =
 -- names wherever it sorts. JavaScript keeps @main@ alone, since
 -- @MakeNonMainFilesIntoJavaScript@ already refuses a JavaScript build of
 -- modules with no @main@.
+--
+-- __And so is every module OTP calls into__ (D414, @m2-interop.md@ §EI21). A
+-- @Beam.Server@ callback module or a module exposing a @Beam.Worker@ is named
+-- by an Erlang child specification, which the build cannot read, and a build
+-- that left one off the command line succeeded and then died at start with
+-- @undefined function app\@Grid\@Scheduler:init/0@. So each of the project's
+-- own modules the build compiled that 'callbackModule' says is one is rooted as
+-- a named module is. Only the project's own: 'cores' holds every module of
+-- every dependency, reached or not, and a dependency's callback module is not
+-- one this covers.
 coreRoots :: Target.Target -> Build.Artifacts -> Map.Map ModuleName.Canonical Core.Module -> [Core.QualName]
 coreRoots target (Build.Artifacts pkg _ roots _) cores =
   [ Core.QualName home name
-  | home <- Set.toAscList (Set.fromList (map (ModuleName.Canonical pkg . rootName) (NE.toList roots))),
+  | home <- Set.toAscList (Set.fromList (named ++ called)),
     Just modul <- [Map.lookup home cores],
     name <- rootsOf modul
   ]
   where
+    named = map (ModuleName.Canonical pkg . rootName) (NE.toList roots)
+    called =
+      case target of
+        Target.Beam ->
+          [ home
+          | (home@(ModuleName.Canonical owner _), modul) <- Map.toList cores,
+            owner == pkg,
+            callbackModule modul
+          ]
+        _ -> []
     rootsOf modul =
       Set.toAscList . Set.fromList $
         [N._main | Maybe.isJust (Core._moduleMain modul)]
@@ -561,6 +581,34 @@ coreRoots target (Build.Artifacts pkg _ roots _) cores =
       case root of
         Build.Inside name -> name
         Build.Outside name _ _ -> name
+
+-- | Is this a module OTP calls into (D414)? Its exposed @init@ answers
+-- @Beam.Server.Init@, or one of its exposed values answers
+-- @Beam.Worker.Worker@: the two types of the @beam@ package's that only an
+-- Erlang child specification can start. Known to the compiler by name, as
+-- @Task@ is.
+callbackModule :: Core.Module -> Bool
+callbackModule modul =
+  any callback
+    [ (Core._binderName binder, Core._binderType binder)
+    | binder <- map Core._bindBinder (Core._moduleDefs modul),
+      Core.QualName (Core._moduleName modul) (Core._binderName binder) `elem` Core._moduleExports modul
+    ]
+  where
+    callback (name, tipe) =
+      case answer tipe of
+        Core.TCon (Core.QualName (ModuleName.Canonical owner home) typeName) _
+          | owner == Pkg.beam ->
+              (is home "Beam.Server" && is typeName "Init" && is name "init")
+                || (is home "Beam.Worker" && is typeName "Worker")
+        _ -> False
+    is name chars =
+      N.toChars name == chars
+    answer tipe =
+      case tipe of
+        Core.TForall _ _ body -> answer body
+        Core.TFun _ result -> answer result
+        _ -> tipe
 
 -- | Every root has one name to be exported under, or the build is refused
 -- (D400, @m2-interop.md@ §EI13).
