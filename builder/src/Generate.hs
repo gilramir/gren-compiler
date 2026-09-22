@@ -3,7 +3,6 @@ module Generate
     Shape (..),
     Request (..),
     make,
-    repl,
     ExtSources,
     extSources,
   )
@@ -16,7 +15,6 @@ import Core.Low qualified as Low
 import Core.Pass qualified as Pass
 import Core.Pretty qualified as Pretty
 import Core.Program qualified as Program
-import Core.Refs qualified as Refs
 import Core.Stage qualified as Stage
 import Core.Target qualified as Target
 import Core.Whole qualified as Whole
@@ -24,7 +22,6 @@ import Core.Wire qualified as Wire
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as B
 import Data.List qualified as List
-import Data.Map ((!))
 import Data.Map qualified as Map
 import Data.Maybe qualified as Maybe
 import Data.Name qualified as N
@@ -343,8 +340,7 @@ programCore details artifacts@(Build.Artifacts pkg _ _ _) =
 --
 -- This is where the serializer becomes load-bearing rather than merely present.
 -- It sits in 'programCore' rather than beside the backend so that one switch
--- covers a build, a @--optimize@ build and a @GENG_DUMP_PROGRAM_CORE@ dump; the
--- REPL has its own assembly and calls it too.
+-- covers a build, a @--optimize@ build and a @GENG_DUMP_PROGRAM_CORE@ dump.
 --
 -- Failure is fatal and is not an @Exit.Generate@: a module that will not encode
 -- or will not decode is a defect in the compiler, not a problem with the user's
@@ -458,8 +454,8 @@ kernelInfo chunks =
 -- @main@ to @Scheduler@ and @Platform@, and a @Task@ extern to @Scheduler@.
 -- Since step 8b the scheduler and the export are helpers the backend emits
 -- itself, ahead of every binding (D285, @m1b-source.md@ §SO24), so no
--- declaration needs an edge, and the REPL's to @Debug@ is the only one left
--- ('replBackend').
+-- declaration needs an edge. The REPL's to @Debug@ was the last, and D410
+-- deleted the REPL.
 
 -- | The linked Core program (§J15).
 --
@@ -737,89 +733,10 @@ spikeBackend =
       Program._backendEdges = Map.empty
     }
 
--- | One REPL entry, generated the way 'javaScript' generates a development build (§J17).
-repl :: Details.Details -> ExtSources -> Bool -> Build.ReplArtifacts -> N.Name -> Task B.Builder
-repl details sources ansi artifacts@(Build.ReplArtifacts home _ localizer annotations) name =
-  do
-    kernels <- kernelChunks details
-    program <- linkReplCore details artifacts name kernels
-    exts <- externFiles Target.Js sources program
-    return $ CoreJS.generateForRepl ansi localizer program kernels exts home name (annotations ! name)
-
--- | 'linkCore' for a REPL entry, which differs from a program in its roots.
---
--- The modules are the REPL\'s own — the generated @Gren_Repl@ module and
--- whatever it imports out of the project — plus the dependencies\' Core, exactly
--- as 'programCore' assembles them for a build, and a cached module contributes
--- its Core here too (D98).
-linkReplCore :: Details.Details -> Build.ReplArtifacts -> N.Name -> Map.Map N.Name [K.Chunk] -> Task Program.Program
-linkReplCore details (Build.ReplArtifacts home modules _ _) name kernels =
-  do
-    let deps = Details.loadCores details
-    let own =
-          Map.fromList
-            [ (ModuleName.Canonical (ModuleName._package home) raw, core)
-            | (raw, core) <- map replModuleCore modules
-            ]
-    _ <- checkReached Target.Js (Map.union own deps) (Map.keys own)
-    Task.io $
-      do
-        cores <- Program.chooseExterns (Target.language Target.Js) Dump.externBodies <$> (throughWire (Map.union own deps) >>= passed)
-        return (checked (Program.link (replBackend kernels cores home name) cores (replRoots home name)))
-
-replModuleCore :: Build.Module -> (ModuleName.Raw, Core.Module)
-replModuleCore modul =
-  case modul of
-    Build.Fresh raw _ core -> (raw, core)
-    Build.Cached raw _ core -> (raw, core)
-
--- | What a REPL entry reaches: the value being printed, and nothing else.
---
--- It used to root @Debug.toString@ as well — not because anything generated
--- calls it, but because that binding was what reached the kernel @Debug@ module
--- the printer's @_Debug_toAnsiString@ lives in. §J13\'s rule said that should be
--- an /edge/ and not a root, since a root says a thing is reachable and says
--- nothing about when; the reason it was a root anyway was to keep the Core REPL
--- and the graph-walking one reaching the same set, so that comparing their
--- output tested the emitter rather than two different programs.
---
--- §J18 deleted the other REPL and §G45 deleted @Debug.toString@, so both halves
--- of that are spent. 'replBackend' supplies the edge §J13 always wanted.
-replRoots :: ModuleName.Canonical -> N.Name -> [Core.QualName]
-replRoots home name =
-  [Core.QualName home name]
-
--- | A program's backend plus the one edge a REPL entry has that a program does
--- not: the printer.
---
--- @Generate.CoreJS.printForRepl@ is appended after every linked item and calls
--- kernel @Debug@\'s @_Debug_toAnsiString@ directly, so the kernel @Debug@ module
--- has to be emitted and has to come first. That is the same shape as a @port@\'s
--- constructor and a static @main@ in 'runtimeEdges' — a name a /runtime/ enters
--- a declaration through, which C16 keeps out of Core and the backend supplies
--- here — and it hangs off the printed value, which is the one binding a REPL
--- entry is guaranteed to have.
-replBackend ::
-  Map.Map N.Name [K.Chunk] ->
-  Map.Map ModuleName.Canonical Core.Module ->
-  ModuleName.Canonical ->
-  N.Name ->
-  Program.Backend
-replBackend kernels cores home name =
-  let backend = kernelBackend kernels cores
-   in backend
-        { Program._backendEdges =
-            Map.insertWith
-              (<>)
-              (Core.QualName home name)
-              (Refs.global (Program.kernelName N.debug))
-              (Program._backendEdges backend)
-        }
-
 -- EXTERN FILES
 
 -- | Every source the build was handed, by package: the project's own and each
--- dependency's, as "Make" and "Repl" hold them.
+-- dependency's, as "Make" holds them.
 --
 -- A @js@ extern's implementation is @src/Ext/<Module>.js@ (F1, D198), and the
 -- front end reads it with the package's other sources under the name
@@ -829,7 +746,7 @@ replBackend kernels cores home name =
 type ExtSources =
   Map.Map Pkg.Name (Map.Map ModuleName.Raw BS.ByteString)
 
--- | 'ExtSources' from what "Make" and "Repl" are handed. The project's own
+-- | 'ExtSources' from what "Make" is handed. The project's own
 -- package is named the way "Build" names it, a dummy name for an application.
 extSources :: Outline.Outline -> Build.Sources -> Map.Map Pkg.Name Details.Dependency -> ExtSources
 extSources outline sources deps =

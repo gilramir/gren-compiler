@@ -7,7 +7,7 @@ Synopsis:
     The `gren` command line interface.
 
 Description:
-    This includes commands like `gren make`, `gren repl`, and many others
+    This includes commands like `gren make` and many others
     for helping make Gren developers happy and productive.
 
 Author: Robin Heggelund Hansen
@@ -248,7 +248,6 @@ Executable geng
         Command
         Make
         Docs
-        Repl
         Package.Bump
         Package.Diff
         Package.Validate
@@ -261,7 +260,6 @@ Executable geng
         directory >= 1.2.3.0 && < 2.0,
         filepath >= 1 && < 2.0,
         process,
-        haskeline,
         utf8-string,
         mtl >= 2.2.1 && < 3,
 

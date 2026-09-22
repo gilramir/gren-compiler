@@ -15,7 +15,6 @@ import Terminal.Init
 import Terminal.Beam
 import Terminal.Run
 import Terminal.Help
-import Terminal.Repl
 import Cli.Report as Report exposing (Report)
 import Terminal.Format
 import Terminal.Protobuf
@@ -255,55 +254,6 @@ parseUserArgs context compilerPath =
                         }
                         |> succeeded
                         |> Task.mapError Terminal.Init.prettifyError
-                        |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
-
-                CliParser.Repl flags ->
-                    Terminal.PackageInstall.readProjectOutline context.fsPermission
-                        |> Task.onError
-                            (\err ->
-                                when err is
-                                    Terminal.PackageInstall.ReadProjectOutlineNoProject _ ->
-                                        Terminal.Repl.setupGlobalReplProject
-                                            { stdout = context.stdout
-                                            , stdin = context.stdin
-                                            , fsPermission = context.fsPermission
-                                            , cpPermission = context.cpPermission
-                                            , cacheRoot = context.cacheRoot
-                                            , corePath = context.corePath
-                                            , useColor = context.useColor
-                                            }
-                                            |> Task.mapError Terminal.Repl.prettifyError
-
-                                    _ ->
-                                        Task.fail err
-                                            |> Task.mapError Terminal.PackageInstall.prettifyProjectOutlineError
-                            )
-                        |> Task.andThen
-                            (\projectOutline ->
-                                Terminal.PackageInstall.run
-                                    { fsPermission = context.fsPermission
-                                    , cpPermission = context.cpPermission
-                                    , cacheRoot = context.cacheRoot
-                                    , corePath = context.corePath
-                                    , interactive = context.interactive
-                                    , useColor = context.useColor
-                                    , stdout = context.stdout
-                                    , stdin = context.stdin
-                                    }
-                                    projectOutline
-                                    |> Task.mapError Terminal.PackageInstall.prettifyError
-                            )
-                        |> Task.andThen
-                            (\resolved ->
-                                backend <|
-                                    Compiler.Backend.Repl
-                                        { interpreter = flags.interpreter
-                                        , projectPath = resolved.projectPath
-                                        , outline = resolved.outline
-                                        , rootSources = resolved.rootSources
-                                        , dependencies = resolved.dependencies
-                                        }
-                            )
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
 
                 CliParser.Make flags ->

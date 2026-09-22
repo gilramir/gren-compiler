@@ -1,7 +1,6 @@
 module Command
   ( Command (..),
     commandDecoder,
-    ReplFlags (..),
     MakeFlags (..),
     DocsFlags (..),
     BumpFlags (..),
@@ -26,21 +25,11 @@ import Json.Decode qualified as Json
 import Make qualified
 
 data Command
-  = Repl ReplFlags
-  | Make MakeFlags
+  = Make MakeFlags
   | Docs DocsFlags
   | PackageValidate ValidateFlags
   | PackageBump BumpFlags
   | PackageDiff DiffFlags
-  deriving (Show)
-
-data ReplFlags = ReplFlags
-  { _repl_interpreter :: Maybe String,
-    _repl_project_path :: FilePath,
-    _repl_outline :: Outline,
-    _repl_root_sources :: Build.Sources,
-    _repl_dependencies :: Map Package.Name Details.Dependency
-  }
   deriving (Show)
 
 data MakeFlags = MakeFlags
@@ -109,7 +98,6 @@ commandDecoder =
     tipe <- Json.field (BS.pack "command") Json.string
     let commandStr = Utf8.toChars tipe
     case commandStr of
-      "repl" -> Repl <$> replDecoder
       "make" -> Make <$> makeDecoder
       "docs" -> Docs <$> docsDecoder
       "packageValidate" -> PackageValidate <$> validateDecoder
@@ -120,15 +108,6 @@ commandDecoder =
 versionDecoder :: Json.Decoder CommandDecoderError Version.Version
 versionDecoder =
   Json.mapError (const InvalidInput) Version.decoder
-
-replDecoder :: Json.Decoder CommandDecoderError ReplFlags
-replDecoder =
-  ReplFlags
-    <$> Json.field (BS.pack "interpreter") (maybeDecoder (fmap Utf8.toChars Json.string))
-    <*> Json.field (BS.pack "project-path") (fmap Utf8.toChars Json.string)
-    <*> Json.field (BS.pack "project-outline") (Json.mapError (const InvalidInput) Outline.decoder)
-    <*> Json.field (BS.pack "sources") (Json.dict (ModuleName.keyDecoder (\_ _ -> InvalidInput)) sourceFileDecoder)
-    <*> Json.field (BS.pack "dependencies") (Json.dict (Package.keyDecoder (\_ _ -> InvalidInput)) makeDependencyDecoder)
 
 makeDecoder :: Json.Decoder CommandDecoderError MakeFlags
 makeDecoder =

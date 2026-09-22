@@ -19,12 +19,10 @@
 module Generate.CoreJS
   ( GeneratedResult (..),
     generate,
-    generateForRepl,
     shortenFieldNames,
   )
 where
 
-import AST.Canonical qualified as Can
 import Core.AST qualified as Core
 import Core.Prim qualified as Prim
 import Core.Program (Linked (..), Program (..))
@@ -50,9 +48,6 @@ import Gren.Kernel qualified as K
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Reporting.Annotation qualified as A
-import Reporting.Doc qualified as D
-import Reporting.Render.Type qualified as RT
-import Reporting.Render.Type.Localizer qualified as L
 
 -- ENTRY
 
@@ -85,65 +80,6 @@ generate mode program kernels exts =
               <> "}(this.module ? this.module.exports : this));",
           _sourceMap = SourceMap.wrap (JS._mappings builder)
         }
-
--- | One REPL entry, as a script that prints the value and its type (§J17).
---
--- The same fold over the link order that 'generate' performs, with the two ends
--- swapped for the REPL's: no module wrapper, because the script is piped
--- straight into @node@ and nothing imports it; and no @_Program_export@,
--- because a REPL entry has no @main@. What replaces the export is
--- 'printForRepl'.
---
--- The value being printed is the only root. The printer calls kernel @Debug@\'s
--- @_Debug_toAnsiString@ directly, and what makes that module reachable is an
--- /edge/ hung off the printed value — §J13\'s rule, which 'Generate.replBackend'
--- is where it is written down. It used to root @Debug.toString@ instead, and
--- §G45 deleted that binding.
-generateForRepl :: Bool -> L.Localizer -> Program -> Map Name [K.Chunk] -> Map (Pkg.Name, Name) BS.ByteString -> ModuleName.Canonical -> Name -> Can.Annotation -> B.Builder
-generateForRepl ansi localizer program kernels exts home name (Can.Forall _ tipe) =
-  let mode = Mode.Dev
-      env = envFor mode program
-      started =
-        JS.addByteString (taskHelpers env program <> JsPrim.recordHelpers <> JsPrim.crashHelpers <> stringHelpers env <> floatBitsHelpers env <> bytesHelpers env <> arrayHelpers env <> sourceHelpers env <> Extern.files exts (_progExterns program)) $
-          List.foldl'
-            (flip JS.stmtToBuilder)
-            (JS.emptyBuilder 0)
-            (constructors env program)
-      builder = List.foldl' (item env kernels) started (_progLinked program)
-   in "process.on('uncaughtException', function(err) { process.stderr.write(err.toString() + '\\n'); process.exit(1); });"
-        <> Functions.functions
-        <> JS._code builder
-        <> printForRepl ansi localizer home name tipe
-
--- | The tail of a REPL script: print the value, then print its type.
---
--- The one part of a REPL entry that is not generated from the program at all —
--- it is written out of the annotation the type checker produced, which is why
--- 'generateForRepl' takes one.
-printForRepl :: Bool -> L.Localizer -> ModuleName.Canonical -> Name -> Can.Type -> B.Builder
-printForRepl ansi localizer home name tipe =
-  let value = JsName.toBuilder (JsName.fromGlobal home name)
-      toString = JsName.toBuilder (JsName.fromKernel Name.debug "toAnsiString")
-      tipeDoc = RT.canToDoc localizer RT.None tipe
-      bool = if ansi then "true" else "false"
-   in "var _value = "
-        <> toString
-        <> "("
-        <> bool
-        <> ", "
-        <> value
-        <> ");\n\
-           \var _type = "
-        <> B.stringUtf8 (show (D.toString tipeDoc))
-        <> ";\n\
-           \function _print(t) { console.log(_value + ("
-        <> bool
-        <> " ? '\x1b[90m' + t + '\x1b[0m' : t)); }\n\
-           \if (_value.length + 3 + _type.length >= 80 || _type.indexOf('\\n') >= 0) {\n\
-           \    _print('\\n    : ' + _type.split('\\n').join('\\n      '));\n\
-           \} else {\n\
-           \    _print(' : ' + _type);\n\
-           \}\n"
 
 prelude :: B.Builder
 prelude =

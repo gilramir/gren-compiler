@@ -671,8 +671,8 @@ taskHelpers =
 //
 // A process's stack holds frames of kind 0 and 1, which continue a success or a
 // failure, and 6 RELEASE { release }. The tags are numbers because the REPL's
-// printer shows any object whose `$` is a number as `<internals>`, which is
-// what a task is to a reader.
+// printer showed any object whose `$` was a number as `<internals>`; D410
+// deleted the REPL, and nothing reads the tags but the scheduler.
 
 function _TaskPrim_succeed(value) {
   return {

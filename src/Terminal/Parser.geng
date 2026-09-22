@@ -22,7 +22,6 @@ import Meta
 
 type Command
     = Init InitFlags
-    | Repl ReplFlags
     | Make MakeFlags
     | Docs DocsFlags
     | PackageInstall (Maybe PackageName)
@@ -40,11 +39,6 @@ type Command
 type alias InitFlags =
     { package : Bool
     , platform : Platform
-    }
-
-
-type alias ReplFlags =
-    { interpreter : Maybe String
     }
 
 
@@ -158,35 +152,6 @@ parser =
                         """
                 , builder =
                     \_args flags -> Init flags
-                }
-            |> Cli.Parser.withCommand
-                { word = "repl"
-                , arguments =
-                    Cli.Parser.noArgs
-                , flags =
-                    Cli.Parser.initFlags
-                        (\maybeInterpreter ->
-                            { interpreter = maybeInterpreter
-                            }
-                        )
-                        |> Cli.Parser.flag "interpreter" interpreterParser "Path to a alternate JS interpreter, like deno or nodejs"
-                , commonDescription =
-                    Just 
-                        """
-                        Open up an interactive programming session. Type in Gren expressions like
-                        (2 + 2) or (String.length \"test\") and see if they equal four!
-                        """
-                , summary =
-                    "The `repl` command opens up an interactive programming session:"
-                , example = 
-                    PP.words
-                        """
-                        Start working through <https://gren-lang.org/learn> to learn how to use this!
-                        It has a whole chapter that uses the REPL for everything, so that is probably
-                        the quickest way to get started.
-                        """
-                , builder =
-                    \_args flags -> Repl flags
                 }
             |> Cli.Parser.withCommand
                 { word = "paths"
@@ -689,19 +654,6 @@ reportParser =
             Nothing
     , examples =
         [ "json" ]
-    }
-
-
-interpreterParser : Cli.Parser.ValueParser String
-interpreterParser =
-    { singular = "interpreter"
-    , plural = "interpreters"
-    , fn = Just
-    , examples =
-        [ "node"
-        , "deno"
-        , "bun"
-        ]
     }
 
 

@@ -6,7 +6,6 @@ module Directories
     ArtifactCache,
     getArtifactCache,
     packageArtifacts,
-    getReplCache,
     getGengHome,
   )
 where
@@ -158,20 +157,6 @@ getArtifactCache =
 packageArtifacts :: ArtifactCache -> Pkg.Name -> V.Version -> Fingerprint.Fingerprint -> FilePath
 packageArtifacts (ArtifactCache dir) name version fingerprint =
   dir </> Pkg.toFilePath name </> V.toChars version </> Fingerprint.toName fingerprint <.> "dat"
-
--- CACHE
-
-getReplCache :: IO FilePath
-getReplCache =
-  getCacheDir "repl"
-
-getCacheDir :: FilePath -> IO FilePath
-getCacheDir projectName =
-  do
-    home <- getGengHome
-    let root = home </> compilerVersion </> projectName
-    Dir.createDirectoryIfMissing True root
-    return root
 
 getGengHome :: IO FilePath
 getGengHome =

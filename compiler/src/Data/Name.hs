@@ -79,8 +79,6 @@ module Data.Name
     _Main,
     dollar,
     identity,
-    replModule,
-    replValueToPrint,
   )
 where
 
@@ -563,8 +561,3 @@ dollar = fromChars "$"
 identity :: Name
 identity = fromChars "identity"
 
-replModule :: Name
-replModule = fromChars "Gren_Repl"
-
-replValueToPrint :: Name
-replValueToPrint = fromChars "repl_input_value_"

@@ -9,8 +9,6 @@ module Reporting.Exit
     docsToReport,
     Bump (..),
     bumpToReport,
-    Repl (..),
-    replToReport,
     Validate (..),
     validateToReport,
     newPackageOverview,
@@ -1670,32 +1668,3 @@ corruptCacheReport =
         \ causing problems your the .gren/ directory. Try disabling 3rd party tools\
         \ one by one until you figure out which it is!"
     ]
-
--- REPL
-
-data Repl
-  = ReplBadDetails Details
-  | ReplBadInput BS.ByteString Error.Error
-  | ReplBadLocalDeps FilePath Error.Module [Error.Module]
-  | ReplProjectProblem BuildProjectProblem
-  | ReplBadGenerate Generate
-  | ReplBadCache
-  | ReplBlocked
-
-replToReport :: Repl -> Help.Report
-replToReport problem =
-  case problem of
-    ReplBadDetails details ->
-      toDetailsReport details
-    ReplBadInput source err ->
-      Help.compilerReport "/" (Error.Module N.replModule "REPL" source err) []
-    ReplBadLocalDeps root e es ->
-      Help.compilerReport root e es
-    ReplProjectProblem projectProblem ->
-      toProjectProblemReport projectProblem
-    ReplBadGenerate generate ->
-      toGenerateReport generate
-    ReplBadCache ->
-      corruptCacheReport
-    ReplBlocked ->
-      corruptCacheReport

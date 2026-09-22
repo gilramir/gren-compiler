@@ -7,12 +7,10 @@ module Build
   ( fromExposed,
     fromPaths,
     fromMainModules,
-    fromRepl,
     Artifacts (..),
     Root (..),
     Module (..),
     CachedInterface (..),
-    ReplArtifacts (..),
     DocsGoal (..),
     getRootNames,
     Source (..),
@@ -63,7 +61,6 @@ import Reporting.Error.Docs qualified as EDocs
 import Reporting.Error.Import qualified as Import
 import Reporting.Error.Syntax qualified as Syntax
 import Reporting.Exit qualified as Exit
-import Reporting.Render.Type.Localizer qualified as L
 import System.Directory qualified as Dir
 import System.FilePath ((<.>))
 import System.FilePath qualified as FP
@@ -910,83 +907,6 @@ toDocs result =
     RBlocked -> Nothing
     RForeign _ -> Nothing
     RKernel -> Nothing
-
---------------------------------------------------------------------------------
------- NOW FOR SOME REPL STUFF -------------------------------------------------
---------------------------------------------------------------------------------
-
--- FROM REPL
-
-data ReplArtifacts = ReplArtifacts
-  { _repl_home :: ModuleName.Canonical,
-    _repl_modules :: [Module],
-    _repl_localizer :: L.Localizer,
-    _repl_annotations :: Map.Map Name.Name Can.Annotation
-  }
-
-fromRepl :: FilePath -> Details.Details -> Sources -> B.ByteString -> IO (Either Exit.Repl ReplArtifacts)
-fromRepl root details rootSources source =
-  do
-    env@(Env _ _ projectType _ _ _ _ _) <- makeEnv Reporting.ignorer root details
-    case Parse.fromByteString projectType source of
-      Left syntaxError ->
-        return $ Left $ Exit.ReplBadInput source $ Error.BadSyntax syntaxError
-      Right modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _) ->
-        do
-          let deps = map (Src.getImportName . snd) imports
-          mvar <- newMVar Map.empty
-          crawlDeps env mvar rootSources deps ()
-
-          statuses <- traverse readMVar =<< readMVar mvar
-
-          case checkMidpoint (Details.loadInterfaces details) statuses of
-            Left problem ->
-              return $ Left $ Exit.ReplProjectProblem problem
-            Right foreigns ->
-              do
-                rmvar <- newEmptyMVar
-                resultMVars <- forkWithKey (checkModule env foreigns rmvar) statuses
-                putMVar rmvar resultMVars
-                results <- traverse readMVar resultMVars
-                writeDetails root details results
-                -- The REPL's entry is new every time, so it has never been
-                -- compiled and nothing it imports can predate it.
-                depsStatus <- checkDeps root resultMVars deps (Details._buildID details)
-                finalizeReplArtifacts env source modul depsStatus resultMVars results
-
-finalizeReplArtifacts :: Env -> B.ByteString -> Src.Module -> DepsStatus -> ResultDict -> Map.Map ModuleName.Raw Result -> IO (Either Exit.Repl ReplArtifacts)
-finalizeReplArtifacts env@(Env _ root projectType platform _ _ _ _) source modul@(Src.Module _ _ _ imports _ _ _ _ _ _ _ _ _) depsStatus resultMVars results =
-  let pkg =
-        projectTypeToPkg projectType
-
-      compileInput ifaces =
-        case Compile.compile platform (isApplication projectType) pkg ifaces modul of
-          Right (Compile.Artifacts canonical annotations _nodeTypes core) ->
-            let h = Can._name canonical
-                m = Fresh (Src.getName modul) (I.fromModule pkg ifaces canonical annotations) core
-                ms = Map.foldrWithKey addInside [] results
-             in return $ Right $ ReplArtifacts h (m : ms) (L.fromModule modul) annotations
-          Left errors ->
-            return $ Left $ Exit.ReplBadInput source errors
-   in case depsStatus of
-        DepsChange ifaces ->
-          compileInput ifaces
-        DepsSame same cached ->
-          do
-            maybeLoaded <- loadInterfaces root same cached
-            case maybeLoaded of
-              Just ifaces -> compileInput ifaces
-              Nothing -> return $ Left Exit.ReplBadCache
-        DepsBlock ->
-          case Map.foldr addErrors [] results of
-            [] -> return $ Left Exit.ReplBlocked
-            e : es -> return $ Left $ Exit.ReplBadLocalDeps root e es
-        DepsNotFound problems ->
-          return $
-            Left $
-              Exit.ReplBadInput source $
-                Error.BadImports $
-                  toImportErrors env resultMVars imports problems
 
 --------------------------------------------------------------------------------
 --------------------------------------------------------------------------------
