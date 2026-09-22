@@ -100,6 +100,8 @@ data Error
   | ExternNotTask A.Region Name.Name Can.Type
   | ExternJsModule A.Region String
   | ExternJsFunction A.Region String
+  | ExternErlangModule A.Region String
+  | ExternErlangFunction A.Region String
   | ExternDoesNotCross A.Region Name.Name Extern.Problem
   | ExternNotCompiledYet A.Region Name.Name
   | RecursiveAlias A.Region Name.Name [Name.Name] Src.Type [Name.Name]
@@ -1106,6 +1108,32 @@ toReport source err =
               "A `js` extern's function is a declaration in its implementation file, and `" ++ function ++ "` is not a JavaScript name:",
             D.reflow
               "Write it as the file declares it: letters, digits, `_` and `$`, not starting with a digit."
+          )
+    ExternErlangModule region modul ->
+      Report.Report "EXTERN MODULE NAME" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "An `erlang` extern's module names its implementation file, and `" ++ modul ++ "` cannot:",
+            D.reflow
+              "The file is `src/Ext/<module>.erl`, and its name is the Erlang module's own atom,\
+              \ so the module is written as a bare atom: a lowercase letter, then letters, digits\
+              \ and `_`, and not one of Erlang's reserved words, as in\
+              \ `@extern(erlang, \"geng_time\", \"now\")`."
+          )
+    ExternErlangFunction region function ->
+      Report.Report "EXTERN FUNCTION NAME" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "An `erlang` extern's function is exported by its implementation file, and `" ++ function ++ "` is not written as an Erlang function name:",
+            D.reflow
+              "Write it as a bare atom: a lowercase letter, then letters, digits, `_` and `@`,\
+              \ and not one of Erlang's reserved words."
           )
     ExternDoesNotCross region name problem ->
       Report.Report "EXTERN TYPE DOES NOT CROSS" region [] $

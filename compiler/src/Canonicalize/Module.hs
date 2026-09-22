@@ -398,6 +398,7 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
             annotation@(Can.Forall freeVars tipe) <- Type.toAnnotation env maybeContext srcType
             checkExtern aname impls tipe
             checkJsExtern aname impls tipe
+            checkErlangExtern impls
             let canImpls = List.sortOn (\(Can.ExternImpl language _) -> language) (map canonicalImpl impls)
             let isPure = any (\(Src.ExternImpl p _ _) -> p) impls
             let cbody = Can.at bodyRegion (Can.VarExtern name canImpls isPure annotation)
@@ -416,6 +417,7 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
               do
                 checkExtern aname impls tipe
                 checkJsExtern aname impls tipe
+                checkErlangExtern impls
                 return geng
             _ ->
               return body
@@ -531,6 +533,49 @@ checkJsExtern (A.At nameRegion name) impls tipe =
 
     isAsciiAlphaNum c =
       Char.isAsciiUpper c || Char.isAsciiLower c || Char.isDigit c
+
+-- | What an @erlang@ row asks of its names, once 'checkExtern' has held
+-- (@m2-beam.md@ §BM19.2, D387; @ffi.md@ F1).
+--
+-- Both are atoms written the way an Erlang author writes them, bare: a
+-- lowercase letter, then letters, digits and @_@, and not a reserved word. The
+-- module is also the name of its file, @src/Ext/<module>.erl@, which @erlc@
+-- holds to the @-module@ attribute, so it may not have the @\@@ a bare atom
+-- allows: every module the backend emits is @package\@Module@, and without it
+-- an extern's module can never be one of them. The function may, as an atom.
+checkErlangExtern :: [Src.ExternImpl] -> Result i w ()
+checkErlangExtern impls =
+  case [names | Src.ExternImpl _ (A.At _ language) names <- impls, Name.toChars language == "erlang"] of
+    [[A.At moduleRegion modul, A.At functionRegion function]] ->
+      do
+        let moduleChars = ES.toChars modul
+        let functionChars = ES.toChars function
+        if isBareAtom (const False) moduleChars
+          then Result.ok ()
+          else Result.throw (Error.ExternErlangModule moduleRegion moduleChars)
+        if isBareAtom (== '@') functionChars
+          then Result.ok ()
+          else Result.throw (Error.ExternErlangFunction functionRegion functionChars)
+    _ ->
+      Result.ok ()
+  where
+    isBareAtom also chars =
+      case chars of
+        first : rest ->
+          Char.isAsciiLower first
+            && all (\c -> Char.isAsciiUpper c || Char.isAsciiLower c || Char.isDigit c || c == '_' || also c) rest
+            && chars `notElem` erlangReservedWords
+        [] -> False
+
+-- | Erlang's reserved words, which an atom may be only when it is quoted:
+-- @Geng.Beam.Erl@'s list, with @else@, which OTP 27 reserves since it turned
+-- @maybe@ on by default.
+erlangReservedWords :: [String]
+erlangReservedWords =
+  [ "after", "and", "andalso", "band", "begin", "bnot", "bor", "bsl", "bsr",
+    "bxor", "case", "catch", "cond", "div", "else", "end", "fun", "if", "let",
+    "maybe", "not", "of", "or", "orelse", "receive", "rem", "try", "when", "xor"
+  ]
 
 -- | D77's table: the extern languages, and how many quoted names each takes.
 externLanguages :: [(String, Int)]

@@ -593,7 +593,7 @@ spawn config program envName flagName args =
                                         ++ ", and what it printed is above."
                                     )
                                 , PP.empty
-                                , PP.words "A build reaches this only once the backend has emitted every binding of your program, so what is left for it to refuse is either an `erlang` extern row naming something Erlang will not take, or a defect in the backend."
+                                , PP.words "A build reaches this only once the backend has emitted every binding of your program, so what is left for it to refuse is a `src/Ext/*.erl` file of one of your packages, or a defect in the backend. An `erlang` extern row cannot be: the front end holds its module and its function to bare atoms."
                                 ]
                             )
             )
