@@ -399,7 +399,12 @@ buildStage config thePlan =
                         clear config.fs thePlan.ebin
                             |> Task.andThen (\_ -> write config.fs thePlan.ebin (built.emitted ++ Runtime.sources))
                             |> Task.andThen (\_ -> externSources config)
-                            |> Task.andThen (erlc config thePlan)
+                            |> Task.andThen
+                                (\externs ->
+                                    distinctExterns config externs
+                                        |> Task.andThen (\_ -> erlc config thePlan externs)
+                                        |> Task.andThen (\_ -> checkExterns config thePlan externs (Build.erlangCalls built.program))
+                                )
                             |> Task.andThen
                                 (\_ ->
                                     if Array.length built.program.mains == 0 then
@@ -447,6 +452,9 @@ erlName name =
 
 A package with no `src/Ext` contributes nothing and is not an error, which is
 almost every package: the directory is absent far more often than it is empty.
+A file is listed once however many times its package is: `packages` can name a
+root twice, and a file given to `erlc` twice would look to D413's check like two
+packages with one module.
 -}
 externSources : Config -> Task Report (Array Path)
 externSources config =
@@ -470,7 +478,142 @@ externSources config =
                     |> Task.onError (\_ -> Task.succeed [])
             )
         |> Task.sequence
-        |> Task.map Array.flatten
+        |> Task.map (Array.flatten >> Array.foldl (\path acc -> if Array.member path acc then acc else Array.pushLast path acc) [])
+
+
+{-| An extern module's name: its file's, less `.erl`. -}
+externModule : Path -> String
+externModule path =
+    Path.filenameWithExtension path
+        |> String.dropLast 4
+
+
+{-| D413 · every `src/Ext` module a build compiles has a name no other module in
+it has. Two packages that each carry `src/Ext/<name>.erl` compile into one
+`.beam`, the later over the earlier, and one package's externs would call the
+other's code; one named like a module of the runtime would replace the
+runtime. Each is refused before `erlc` runs, naming both files.
+-}
+distinctExterns : Config -> Array Path -> Task Report {}
+distinctExterns config externs =
+    let
+        runtime =
+            Array.pushFirst "geng_main" (Array.map (\file -> String.dropLast 4 file.name) Runtime.sources)
+
+        clashes =
+            externs
+                |> Array.indexedMap (\i path -> { i = i, path = path })
+                |> Array.mapAndKeepJust
+                    (\entry ->
+                        let
+                            name =
+                                externModule entry.path
+                        in
+                        if Array.member name runtime then
+                            Just
+                                [ "    " ++ shown config entry.path
+                                , "        is named like the BEAM runtime's own " ++ name ++ ".erl"
+                                ]
+
+                        else
+                            externs
+                                |> Array.takeFirst entry.i
+                                |> Array.findFirst (\earlier -> externModule earlier == name)
+                                |> Maybe.map
+                                    (\found ->
+                                        [ "    " ++ shown config found.value
+                                        , "    " ++ shown config entry.path
+                                        , "        are both " ++ name
+                                        ]
+                                    )
+                    )
+    in
+    if Array.isEmpty clashes then
+        Task.succeed {}
+
+    else
+        Task.fail <|
+            Report.create
+                "EXTERN MODULES COLLIDE"
+                Nothing
+                (PP.verticalBlock
+                    [ PP.words "An `erlang` extern's module is its file's name, and Erlang has one module of a name in a node, so these would replace each other:"
+                    , PP.empty
+                    , PP.verticalBlock (Array.map PP.text (Array.flatten clashes))
+                    , PP.empty
+                    , PP.words "Name each package's modules for the package, as `core`'s are geng_core_console and geng_core_time (D387)."
+                    ]
+                )
+
+
+{-| A file, relative to the project when it is the project's, which is the
+first of `packages`. -}
+shown : Config -> Path -> String
+shown config path =
+    let
+        full =
+            config.toString path
+    in
+    when Array.first config.packages is
+        Just project ->
+            let
+                root =
+                    config.toString project ++ "/"
+            in
+            if String.startsWith root full then
+                String.dropFirst (String.count root) full
+
+            else
+                full
+
+        Nothing ->
+            full
+
+
+{-| D413 · each `erlang` row calls a function that is there: exported, at the
+arity D387 gives the row, by a module of the build's `src/Ext` or of
+Erlang/OTP, and no `src/Ext` module has an OTP module's name. Only a node can
+say which modules OTP has, so `Runtime.externChecker` asks one, with the
+modules `erlc` just wrote first on its code path, and writes each problem on
+our standard error.
+-}
+checkExterns : Config -> Plan -> Array Path -> Array { extern : String, module_ : String, fn : String, arity : Int } -> Task Report {}
+checkExterns config thePlan externs calls =
+    let
+        checker =
+            Path.append (Path.fromPosixString Runtime.externChecker.name) thePlan.work
+
+        words =
+            calls
+                |> Array.sortBy (\c -> c.extern)
+                |> Array.map (\c -> [ c.extern, c.module_, c.fn, String.fromInt c.arity ])
+                |> Array.flatten
+    in
+    FileSystem.writeFile config.fs (Bytes.fromString Runtime.externChecker.text) checker
+        |> Task.mapError (failure "I cannot write the extern checker")
+        |> Task.andThen
+            (\_ ->
+                spawn config
+                    config.tools.escript
+                    "GENG_ESCRIPT"
+                    "--escript"
+                    (\_ ->
+                        Report.create
+                            "ERLANG EXTERNS DO NOT RESOLVE"
+                            Nothing
+                            (PP.verticalBlock
+                                [ PP.words "The program is compiled, and its `erlang` externs do not all call what they name, as the lines above say."
+                                , PP.empty
+                                , PP.words "An `erlang` row names a module of a package's `src/Ext`, or of Erlang/OTP, and a function it exports at the row's arity; a `src/Ext` module may not take the name of one of Erlang/OTP's (ffi.md F1, D387, D413)."
+                                ]
+                            )
+                    )
+                    ([ config.toString checker, config.toString thePlan.ebin ]
+                        ++ Array.map externModule externs
+                        ++ [ "--" ]
+                        ++ words
+                    )
+            )
 
 
 {-| `erlc` over the Erlang in the output directory and each package's.
@@ -500,6 +643,7 @@ erlc config thePlan externs =
                     config.tools.erlc
                     "GENG_ERLC"
                     "--erlc"
+                    (toolchainRefused config.tools.erlc)
                     ([ "-o", config.toString thePlan.ebin ]
                         ++ Array.map config.toString (sources ++ externs)
                     )
@@ -529,6 +673,7 @@ escript config thePlan =
                     config.tools.escript
                     "GENG_ESCRIPT"
                     "--escript"
+                    (toolchainRefused config.tools.escript)
                     [ config.toString writer
                     , config.toString thePlan.escript
                     , config.toString thePlan.ebin
@@ -549,8 +694,8 @@ Under one it is the shell that runs and exits 127, so a `geng make` on a
 machine with no Erlang would report a defect in the backend instead of a
 toolchain that is not installed — which is what it did until this was measured.
 -}
-spawn : Config -> String -> String -> String -> Array String -> Task Report {}
-spawn config program envName flagName args =
+spawn : Config -> String -> String -> String -> (Int -> Report) -> Array String -> Task Report {}
+spawn config program envName flagName refused args =
     { (ChildProcess.defaultSpawnOptions ChildProcess.Integrated)
         | shell = ChildProcess.NoShell
     }
@@ -581,23 +726,27 @@ spawn config program envName flagName args =
                     Task.succeed {}
 
                 else
-                    Task.fail <|
-                        Report.create
-                            "THE BEAM TOOLCHAIN REFUSED THIS PROGRAM"
-                            Nothing
-                            (PP.verticalBlock
-                                [ PP.words
-                                    (program
-                                        ++ " exited with status "
-                                        ++ String.fromInt exitCode
-                                        ++ ", and what it printed is above."
-                                    )
-                                , PP.empty
-                                , PP.words "A build reaches this only once the backend has emitted every binding of your program, so what is left for it to refuse is a `src/Ext/*.erl` file of one of your packages, or a defect in the backend. An `erlang` extern row cannot be: the front end holds its module and its function to bare atoms."
-                                ]
-                            )
+                    Task.fail (refused exitCode)
             )
 
+
+{-| `erlc` or `escript` exited with a status that is not 0, having printed why. -}
+toolchainRefused : String -> Int -> Report
+toolchainRefused program exitCode =
+    Report.create
+        "THE BEAM TOOLCHAIN REFUSED THIS PROGRAM"
+        Nothing
+        (PP.verticalBlock
+            [ PP.words
+                (program
+                    ++ " exited with status "
+                    ++ String.fromInt exitCode
+                    ++ ", and what it printed is above."
+                )
+            , PP.empty
+            , PP.words "A build reaches this only once the backend has emitted every binding of your program, so what is left for it to refuse is a `src/Ext/*.erl` file of one of your packages, or a defect in the backend. An `erlang` extern row cannot be: the front end holds its module and its function to bare atoms, and the build holds each to a function that is there."
+            ]
+        )
 
 read : FileSystem.Permission -> Path -> Task Report (Array Build.File)
 read fs directory =
