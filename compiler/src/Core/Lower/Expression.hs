@@ -149,8 +149,8 @@ witness sp w =
             _ -> Core.Expr (Core.EWitApp global (map (witness sp) args)) table sp
     Resolve.FromRecord cls fields subject tipe ->
       recordWitness sp cls fields (lowerType subject) (lowerType tipe)
-    Resolve.FromInbound holes _ tipe ->
-      inboundWitness sp holes (lowerType tipe)
+    Resolve.FromInbound holes subject _ ->
+      inboundWitness sp holes (lowerType subject)
 
 -- | The table for @Inbound t@ the compiler supplies (geng-lang
 -- `m2-interop.md` D422, §EI23): @{ inbound = Inbound.check h1 … hn }@, where
@@ -162,8 +162,9 @@ witness sp w =
 -- specializer's @retype@ rewrites every node's type in a copy, so a check
 -- inside a copy made at @Maybe Int@ is at @Maybe Int@ and not at @Maybe a@.
 inboundWitness :: Core.Span -> [(Can.Type, Resolve.Witness)] -> Core.Type -> Core.Expr
-inboundWitness sp holes tipe =
-  let checkType = fieldType tipe nameInbound
+inboundWitness sp holes subject =
+  let checkType = Core.TFun [stringType, handleType] subject
+      tipe = Core.TRecord [(nameInbound, checkType)] Nothing
       handed = map (\(_, w) -> method sp inboundCls nameInbound w) holes
       reference t = Core.Expr (Core.EGlobal (Core.QualName ModuleName.inbound Name.inboundCheck)) t sp
       value =
@@ -171,6 +172,18 @@ inboundWitness sp holes tipe =
           [] -> reference checkType
           _ -> Core.Expr (Core.EApp (reference (Core.TFun (map Core.typeOf handed) checkType)) handed) checkType sp
    in Core.Expr (Core.ERecord [(nameInbound, value)]) tipe sp
+
+-- | @Extern.Handle@, the second argument of every @inbound@.
+--
+-- The table's type is built here rather than read off the class, because a
+-- module that calls a constrained function need not be able to name the
+-- class the constraint is on: `Inbound` is not default-imported, as
+-- `Eq`, `Ord` and `Inspect` are, so 'Type.Resolve.witnessType' answers the
+-- empty record for it, and this is the one witness whose methods the
+-- compiler knows without being told.
+handleType :: Core.Type
+handleType =
+  Core.TCon (Core.QualName (ModuleName.Canonical Pkg.core (Name.fromChars "Extern")) (Name.fromChars "Handle")) []
 
 inboundCls :: Can.Class
 inboundCls =
