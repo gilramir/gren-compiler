@@ -18,6 +18,7 @@ import Compiler.Backend
 import Compiler.Outline as Outline exposing (Outline)
 import Compiler.Runtime as Runtime
 import Compiler.Platform as Platform
+import Dict exposing (Dict)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Compiler.ModuleName as ModuleName exposing (ModuleName)
@@ -77,6 +78,7 @@ type alias RunConfig =
     , pathToString : Path -> String
     , path : Path
     , escript : Maybe String
+    , environment : Dict String String
     }
 
 
@@ -227,6 +229,13 @@ runEscript : RunConfig -> String -> Task Error Int
 runEscript config escriptProgram =
     { (ChildProcess.defaultSpawnOptions ChildProcess.Integrated)
         | shell = ChildProcess.NoShell
+        , environmentVariables =
+            if Dict.isEmpty config.environment then
+                ChildProcess.InheritEnvironmentVariables
+
+            else
+                -- D418: the application's `erlang-libraries`, as `ERL_LIBS`.
+                ChildProcess.MergeWithEnvironmentVariables config.environment
     }
         |> ChildProcess.spawn config.cpPermission escriptProgram [ config.pathToString config.path ]
         |> Task.mapError SpawnError

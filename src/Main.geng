@@ -398,6 +398,10 @@ parseUserArgs context compilerPath =
 
                                                         else
                                                             Nothing
+                                                    , environment =
+                                                        Terminal.Beam.libraryEnvironment context.pathToString
+                                                            context.envVars
+                                                            (Terminal.Beam.libraries compiling.resolution.projectPath compiling.resolution.outline)
                                                     }
                                                     |> Task.mapError Terminal.Run.prettifyError
 
@@ -755,6 +759,11 @@ beamMake context compilerPath flags resolved ordinary =
                                             Terminal.Beam.toolchain context.envVars
                                                 { erlc = flags.erlc, escript = flags.escript }
                                         , packages = beamPackages context resolved
+                                        , libraries = Terminal.Beam.libraries resolved.projectPath resolved.outline
+                                        , environment =
+                                            Terminal.Beam.libraryEnvironment context.pathToString
+                                                context.envVars
+                                                (Terminal.Beam.libraries resolved.projectPath resolved.outline)
                                         }
                                         thePlan
                             )

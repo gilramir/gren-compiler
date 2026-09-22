@@ -5,6 +5,8 @@ module Terminal.Beam exposing
     , isTarget
     , plan
     , toolchain
+    , libraries
+    , libraryEnvironment
     , stageEnvironment
     , prepare
     , abandon
@@ -343,7 +345,53 @@ type alias Config =
     , toString : Path -> String
     , tools : Toolchain
     , packages : Array Path
+    , libraries : Array Path
+    , environment : Dict String String
     }
+
+
+{-| D418 · an application's `erlang-libraries`, each joined to the project's
+directory. A package has none: what a program links against is the
+application's to say (geng-lang `m2-interop.md` §EI21).
+-}
+libraries : Path -> Outline -> Array Path
+libraries projectPath outline =
+    when outline is
+        Outline.App app ->
+            Array.map (\library -> Path.append library projectPath) app.erlangLibraries
+
+        Outline.Pkg _ ->
+            []
+
+
+{-| What `erlc`, D413's check and `geng run`'s escript are started with for
+the libraries to be found: `ERL_LIBS`, the libraries first and then whatever
+the environment already has there, which is how OTP's code server finds an
+application's `ebin` and `erlc` a behaviour or an `-include_lib`. Nothing is
+set when there are none, so a build that sets `ERL_LIBS` itself is as it was.
+-}
+libraryEnvironment : (Path -> String) -> Dict String String -> Array Path -> Dict String String
+libraryEnvironment toString envVars directories =
+    if Array.isEmpty directories then
+        Dict.empty
+
+    else
+        Dict.singleton "ERL_LIBS"
+            (String.join ":"
+                (Array.map toString directories
+                    ++ (when Dict.get "ERL_LIBS" envVars is
+                            Just inherited ->
+                                if inherited == "" then
+                                    []
+
+                                else
+                                    [ inherited ]
+
+                            Nothing ->
+                                []
+                       )
+                )
+            )
 
 
 {-| The stage directory turned into the two artifacts D384 asks for, and the
@@ -398,6 +446,7 @@ buildStage config thePlan =
                     Ok built ->
                         clear config.fs thePlan.ebin
                             |> Task.andThen (\_ -> write config.fs thePlan.ebin (built.emitted ++ Runtime.sources))
+                            |> Task.andThen (\_ -> requireLibraries config)
                             |> Task.andThen (\_ -> externSources config)
                             |> Task.andThen
                                 (\externs ->
@@ -616,6 +665,43 @@ checkExterns config thePlan externs calls =
             )
 
 
+{-| D418 · every `erlang-libraries` directory is there. `ERL_LIBS` skips one
+that is not, so a mistyped path would otherwise be an `erlc` warning about
+an undefined behaviour, or an extern D413 cannot find, naming neither.
+-}
+requireLibraries : Config -> Task Report {}
+requireLibraries config =
+    config.libraries
+        |> Array.map
+            (\library ->
+                FileSystem.checkAccess config.fs [] library
+                    |> Task.map (\_ -> [])
+                    |> Task.onError (\_ -> Task.succeed [ library ])
+            )
+        |> Task.sequence
+        |> Task.andThen
+            (\found ->
+                when Array.flatten found is
+                    [] ->
+                        Task.succeed {}
+
+                    missing ->
+                        Task.fail
+                            (Report.create
+                                "AN ERLANG LIBRARY DIRECTORY IS MISSING"
+                                Nothing
+                                (PP.verticalBlock
+                                    [ PP.words "The geng.toml's erlang-libraries names directories that are not there:"
+                                    , PP.empty
+                                    , PP.indent (PP.verticalBlock (Array.map (\path -> PP.words (config.toString path)) missing))
+                                    , PP.empty
+                                    , PP.words "Each is a directory of OTP applications, as ERL_LIBS has them, such as rebar3's _build/default/lib once rebar3 has fetched and compiled them (m2-interop.md D418)."
+                                    ]
+                                )
+                            )
+            )
+
+
 {-| `erlc` over the Erlang in the output directory and each package's.
 
 **No `+debug_info`**, which is measured and not assumed: over
@@ -698,6 +784,12 @@ spawn : Config -> String -> String -> String -> (Int -> Report) -> Array String 
 spawn config program envName flagName refused args =
     { (ChildProcess.defaultSpawnOptions ChildProcess.Integrated)
         | shell = ChildProcess.NoShell
+        , environmentVariables =
+            if Dict.isEmpty config.environment then
+                ChildProcess.InheritEnvironmentVariables
+
+            else
+                ChildProcess.MergeWithEnvironmentVariables config.environment
     }
         |> ChildProcess.spawn config.cp program args
         |> Task.mapError

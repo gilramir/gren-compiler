@@ -193,6 +193,7 @@ generateManifest config projectPath deps =
                     { runtime = Runtime.fromPlatform config.platform
                     , target = "js"
                     , sourceDirectories = [ Path.fromPosixString "src" ]
+                    , erlangLibraries = []
                     , gengVersion = compiler
                     , dependencies = dependencies
                     , sources = Dict.empty
