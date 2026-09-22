@@ -792,7 +792,8 @@ beamMake context compilerPath flags resolved ordinary =
                         |> Task.andThen
                             (\exitCode ->
                                 if exitCode /= 0 then
-                                    Task.succeed exitCode
+                                    Terminal.Beam.abandon context.fsPermission thePlan
+                                        |> Task.map (\_ -> exitCode)
 
                                 else
                                     Terminal.Beam.build
@@ -806,6 +807,11 @@ beamMake context compilerPath flags resolved ordinary =
                                         , packages = beamPackages context resolved
                                         }
                                         thePlan
+                            )
+                        |> Task.onError
+                            (\report ->
+                                Terminal.Beam.abandon context.fsPermission thePlan
+                                    |> Task.andThen (\_ -> Task.fail report)
                             )
 
 

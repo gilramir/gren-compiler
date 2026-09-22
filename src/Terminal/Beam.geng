@@ -7,6 +7,7 @@ module Terminal.Beam exposing
     , toolchain
     , stageEnvironment
     , prepare
+    , abandon
     , build
     , forgetProgram
     , requireProgram
@@ -220,20 +221,51 @@ stageEnvironment toString envVars thePlan =
         Ok (Dict.singleton "GENG_STAGE_WRITE" ("passed:" ++ toString thePlan.stage))
 
 
-{-| The output directory, made and emptied of what an earlier build left.
+{-| The build's scratch directory, made afresh, and nothing else touched.
 
-A program's modules are the program's, and a module left behind from a
-different one would be compiled into this one's directory and shipped in its
-archive. The `geng-build` directory inside it is the compiler's own and is left
-alone here, since the binary is about to write into it.
+**The last good build stays until this one has something to replace it**
+(geng-lang `m2-interop.md` §EI18). A build the compiler refuses, for a type
+error or anything else, leaves `<output>.ebin/`'s modules and the escript as
+the previous build wrote them, and `abandon` takes the scratch away. The
+modules are cleared in `buildStage`, once the backend has emitted a program.
+
+The scratch is emptied first because the compiler writes its stage into it,
+and a stage an earlier build left there, from a different program, would
+otherwise be read as this one's.
 -}
 prepare : FileSystem.Permission -> Plan -> Task Report {}
 prepare fs thePlan =
-    FileSystem.makeDirectory fs { recursive = True } thePlan.work
-        |> Task.mapError (failure "I cannot make the output directory")
-        |> Task.andThen (\_ -> clear fs thePlan.ebin)
+    removeWork fs thePlan
+        |> Task.andThen
+            (\_ ->
+                FileSystem.makeDirectory fs { recursive = True } thePlan.work
+                    |> Task.mapError (failure "I cannot make the output directory")
+            )
+        |> Task.map (\_ -> {})
 
 
+{-| A build that stops before it has a program: its scratch goes, and the
+last good build is left as it was.
+-}
+abandon : FileSystem.Permission -> Plan -> Task Report {}
+abandon fs thePlan =
+    removeWork fs thePlan
+
+
+removeWork : FileSystem.Permission -> Plan -> Task Report {}
+removeWork fs thePlan =
+    FileSystem.remove fs { recursive = True } thePlan.work
+        |> Task.map (\_ -> {})
+        |> Task.onError (\_ -> Task.succeed {})
+
+
+{-| The output directory emptied of the modules an earlier build left.
+
+A program's modules are the program's, and a module left behind from a
+different one would be compiled into this one's directory and shipped in its
+archive. The `geng-build` directory inside it is the build's own and is left
+alone here.
+-}
 clear : FileSystem.Permission -> Path -> Task Report {}
 clear fs directory =
     FileSystem.listDirectory fs directory
@@ -360,10 +392,12 @@ buildStage config thePlan =
                     Err why ->
                         Stream.Log.string config.stderr why
                             |> Task.onError (\_ -> Task.succeed {})
+                            |> Task.andThen (\_ -> abandon config.fs thePlan)
                             |> Task.map (\_ -> 1)
 
                     Ok built ->
-                        write config.fs thePlan.ebin (built.emitted ++ Runtime.sources)
+                        clear config.fs thePlan.ebin
+                            |> Task.andThen (\_ -> write config.fs thePlan.ebin (built.emitted ++ Runtime.sources))
                             |> Task.andThen (\_ -> externSources config)
                             |> Task.andThen (erlc config thePlan)
                             |> Task.andThen
