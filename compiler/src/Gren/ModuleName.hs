@@ -34,6 +34,7 @@ module Gren.ModuleName
     sub,
     debug,
     inspect,
+    inbound,
     virtualDom,
     jsonDecode,
     jsonEncode,
@@ -193,6 +194,11 @@ debug = Canonical Pkg.core Name.debug
 -- so that `inspect` is in scope everywhere (§G43).
 inspect :: Canonical
 inspect = Canonical Pkg.core Name.inspectModule
+
+-- | `Inbound`, whose class checks a term only Erlang could have supplied
+-- (geng-lang `m2-interop.md` D419, D422). Not default-imported.
+inbound :: Canonical
+inbound = Canonical Pkg.core Name.inboundModule
 
 bytes :: Canonical
 bytes = Canonical Pkg.core "Bytes"

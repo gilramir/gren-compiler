@@ -58,6 +58,7 @@ import AST.Utils.Type qualified as Type
 import Canonicalize.NodeId qualified as NodeId
 import Control.Monad (foldM)
 import Control.Monad.Trans.State.Strict (State, execState, get, gets, modify', put)
+import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Maybe (listToMaybe)
 import Data.Name (Name)
@@ -180,6 +181,18 @@ data Witness
     -- different bodies — a conjunction, a chain and a rendering — and by §G43
     -- all three exist.
     FromRecord Can.Class [(Name, Witness)] Can.Type Can.Type
+  | -- | A witness for @Inbound t@ that no written instance supplies, which is
+    -- every type but `Dict` and `Set` (geng-lang `m2-interop.md` D422,
+    -- §EI23). Nothing is named: the table is built where it is used, as a
+    -- record's is, out of one row whose reference is typed at @t@, and a
+    -- backend generates the check for @t@ in its place.
+    --
+    -- The __holes__ are the subterms of @t@ the generated check cannot walk
+    -- itself, each with its witness: a type variable, whose check is the
+    -- enclosing definition's to give, and a type with a written instance
+    -- (D423's `Dict` and `Set`, which are built under their key's `Ord`).
+    -- Then the subject and the witness type.
+    FromInbound [(Can.Type, Witness)] Can.Type Can.Type
 
 -- WHAT GOES IN
 
@@ -316,8 +329,11 @@ witnessFor env bound region wanted because cls tipe =
           Left (E.NotConstrained region wanted cls var because)
     actual@(Can.TType home name args) ->
       case Map.lookup (Can.InstanceKey cls home name) (_envInstances env) of
-        Nothing ->
-          Left (E.NoInstance region wanted cls actual because)
+        Nothing
+          | isInbound cls ->
+              inboundWitness env bound region wanted because cls actual
+          | otherwise ->
+              Left (E.NoInstance region wanted cls actual because)
         Just head_ ->
           do
             let sub = foldl (\seen (a, b) -> match a b seen) Map.empty (zip (Can._ih_args head_) args)
@@ -345,11 +361,64 @@ witnessFor env bound region wanted because cls tipe =
                 (\(field, tipe') -> (,) field <$> witnessFor env bound region wanted deeper cls tipe')
                 [(field, t) | (field, Can.FieldType _ t) <- Map.toAscList fields]
             Right (FromRecord cls ws actual (witnessType env cls actual))
+    actual@(Can.TRecord _ Nothing)
+      | isInbound cls ->
+          inboundWitness env bound region wanted because cls actual
+    actual@(Can.TLambda _ _)
+      | isInbound cls ->
+          inboundWitness env bound region wanted because cls actual
     actual ->
       -- A function, an extensible record, or a record at a class with no
       -- structural definition. An instance head is a type constructor applied
       -- to arguments (§G22.1), so none of them can ever have one.
       Left (E.NoInstance region wanted cls actual because)
+
+-- | The table for @Inbound t@ the compiler supplies (D422, §EI23): @t@'s
+-- holes, each with the witness it resolves to, and nothing else. An
+-- unconstrained type variable among the holes is D419's refusal, which is the
+-- resolver's own @NotConstrained@.
+inboundWitness ::
+  Env ->
+  Bound ->
+  A.Region ->
+  E.Wanted ->
+  [(Can.Class, Can.Type)] ->
+  Can.Class ->
+  Can.Type ->
+  Either E.Error Witness
+inboundWitness env bound region wanted because cls actual =
+  do
+    let deeper = because ++ [(cls, actual)]
+    ws <- traverse (\hole -> (,) hole <$> witnessFor env bound region wanted deeper cls hole) (inboundHoles env cls actual)
+    Right (FromInbound ws actual (witnessType env cls actual))
+
+-- | The subterms of a type that a generated check hands to someone else, in
+-- the order they are met, each once: a type variable, and a type with a
+-- written instance. A function's arguments are not walked, since they go out
+-- to Erlang and only its result comes back in.
+inboundHoles :: Env -> Can.Class -> Can.Type -> [Can.Type]
+inboundHoles env cls root =
+  List.nub (go root)
+  where
+    go tipe =
+      case Type.iteratedDealias tipe of
+        hole@(Can.TVar _) ->
+          [hole]
+        hole@(Can.TType home name args)
+          | Map.member (Can.InstanceKey cls home name) (_envInstances env) -> [hole]
+          | otherwise -> concatMap go args
+        Can.TRecord fields _ ->
+          concatMap (\(_, Can.FieldType _ t) -> go t) (Map.toAscList fields)
+        Can.TLambda _ result ->
+          go result
+        Can.TAlias {} ->
+          []
+
+-- | `Inbound`, whose instances the compiler supplies for every type but the
+-- ones `core` writes (D422).
+isInbound :: Can.Class -> Bool
+isInbound (Can.Class home name) =
+  home == ModuleName.inbound && name == Name.inboundClass
 
 -- | Whether `classes.md` §2.1 defines what this class means for a record.
 --

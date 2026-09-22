@@ -149,6 +149,36 @@ witness sp w =
             _ -> Core.Expr (Core.EWitApp global (map (witness sp) args)) table sp
     Resolve.FromRecord cls fields subject tipe ->
       recordWitness sp cls fields (lowerType subject) (lowerType tipe)
+    Resolve.FromInbound holes _ tipe ->
+      inboundWitness sp holes (lowerType tipe)
+
+-- | The table for @Inbound t@ the compiler supplies (geng-lang
+-- `m2-interop.md` D422, §EI23): @{ inbound = Inbound.check h1 … hn }@, where
+-- the reference to `Inbound.check` is typed at @t@ and each @hi@ is a hole's
+-- @inbound@. A backend replaces the reference with the check it generates at
+-- that type, calling a hole's function at any subterm of the hole's type.
+--
+-- The type goes on the node rather than in a type application because the
+-- specializer's @retype@ rewrites every node's type in a copy, so a check
+-- inside a copy made at @Maybe Int@ is at @Maybe Int@ and not at @Maybe a@.
+inboundWitness :: Core.Span -> [(Can.Type, Resolve.Witness)] -> Core.Type -> Core.Expr
+inboundWitness sp holes tipe =
+  let checkType = fieldType tipe nameInbound
+      handed = map (\(_, w) -> method sp inboundCls nameInbound w) holes
+      reference t = Core.Expr (Core.EGlobal (Core.QualName ModuleName.inbound Name.inboundCheck)) t sp
+      value =
+        case handed of
+          [] -> reference checkType
+          _ -> Core.Expr (Core.EApp (reference (Core.TFun (map Core.typeOf handed) checkType)) handed) checkType sp
+   in Core.Expr (Core.ERecord [(nameInbound, value)]) tipe sp
+
+inboundCls :: Can.Class
+inboundCls =
+  Can.Class ModuleName.inbound Name.inboundClass
+
+nameInbound :: Name
+nameInbound =
+  Name.fromChars "inbound"
 
 -- | The method table for a record type, built where it is needed (§G38).
 --

@@ -164,13 +164,16 @@ jsExpr :: Env -> Core.Expr -> JS.Expr
 jsExpr env = codeToExpr . generate env
 
 generate :: Env -> Core.Expr -> Code
-generate env (Core.Expr value _ sp) =
+generate env (Core.Expr value tipe sp) =
   let pos = start sp
    in case value of
         Core.EVar name ->
           JsExpr (JS.TrackedRef (_home env) pos (JsName.fromLocalHumanReadable name) (JsName.fromLocal name))
-        Core.EGlobal q ->
-          JsExpr (globalRef env pos q)
+        Core.EGlobal q
+          | isInboundCheck q ->
+              JsExpr (inboundCheck env pos (inboundHoles tipe))
+          | otherwise ->
+              JsExpr (globalRef env pos q)
         Core.ELit lit ->
           JsExpr (literal env pos lit)
         Core.ELam binders body ->
@@ -471,6 +474,13 @@ callHelpers =
 call :: Env -> A.Position -> Core.Expr -> [Core.Expr] -> JS.Expr
 call env pos fn args =
   case Core._exprValue fn of
+    Core.EGlobal q
+      | isInboundCheck q ->
+          let holes = inboundHoles (Core.typeOf fn)
+              kept = drop holes args
+           in if null kept
+                then normalCall env pos (inboundCheck env pos holes) (map (jsExpr env) args)
+                else globalCall env pos q (map (jsExpr env) kept)
     Core.EGlobal q@(Core.QualName (ModuleName.Canonical pkg raw) name)
       | Just op <- primAt env q args -> Prim.prim op (map (jsExpr env) args)
       | pkg == Pkg.core && raw == Name.basics -> basicsCall env pos q name args
@@ -492,6 +502,42 @@ primAt env q args =
     Just op
       | Prim.inlines op && length args == CorePrim.primArity op -> Just op
     _ -> Nothing
+
+-- INBOUND.CHECK
+
+-- | `Inbound.check`, which the compiler refers to at each type an `Inbound`
+-- instance is supplied for, applied first to a function per hole (geng-lang
+-- `m2-interop.md` D422, §EI23). JavaScript checks nothing (D419, D200), so
+-- the holes are taken and dropped and the row, which answers the term, is
+-- what is left.
+isInboundCheck :: Core.QualName -> Bool
+isInboundCheck (Core.QualName home name) =
+  home == ModuleName.inbound && name == Name.inboundCheck
+
+-- | The reference with @holes@ leading functions to take and drop.
+inboundCheck :: Env -> A.Position -> Int -> JS.Expr
+inboundCheck env pos holes =
+  let dropped = JsName.fromLocal (Name.fromChars "_")
+   in iterate (\inner -> JS.Function Nothing [dropped] [JS.Return inner]) (globalRef env pos checkName) !! holes
+  where
+    checkName = Core.QualName ModuleName.inbound Name.inboundCheck
+
+-- | How many holes a reference to `Inbound.check` is applied to first: the
+-- leading arguments that are themselves @String -> Handle -> t@.
+inboundHoles :: Core.Type -> Int
+inboundHoles tipe =
+  length (takeWhile isHole (arrows tipe))
+  where
+    arrows t =
+      case t of
+        Core.TForall _ _ body -> arrows body
+        Core.TFun args result -> args ++ arrows result
+        _ -> []
+    isHole t =
+      case arrows t of
+        Core.TCon (Core.QualName m1 n1) [] : Core.TCon (Core.QualName m2 n2) [] : _ ->
+          m1 == ModuleName.string && n1 == Name.string && m2 == ModuleName.Canonical Pkg.core (Name.fromChars "Extern") && n2 == Name.fromChars "Handle"
+        _ -> False
 
 -- | A call to a name whose arity is known and matched goes straight to the
 -- uncurried @name$@; anything else goes through @A2@ … @A9@.

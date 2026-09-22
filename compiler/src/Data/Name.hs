@@ -42,6 +42,9 @@ module Data.Name
     order,
     inspectClass,
     inspectModule,
+    inboundClass,
+    inboundModule,
+    inboundCheck,
     char,
     string,
     num,
@@ -436,6 +439,20 @@ inspectClass =
 inspectModule :: Name
 inspectModule =
   fromChars "Inspect"
+
+-- | The `Inbound` class, its module, and the one row every compiler-supplied
+-- instance refers to (geng-lang `m2-interop.md` D422, §EI23).
+inboundClass :: Name
+inboundClass =
+  fromChars "Inbound"
+
+inboundModule :: Name
+inboundModule =
+  fromChars "Inbound"
+
+inboundCheck :: Name
+inboundCheck =
+  fromChars "check"
 
 char :: Name
 char = fromChars "Char"
