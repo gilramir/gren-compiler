@@ -2,6 +2,8 @@ module Terminal.Beam exposing
     ( Plan
     , Toolchain
     , Config
+    , Identity
+    , identity
     , isTarget
     , plan
     , toolchain
@@ -26,21 +28,27 @@ then everything else here — one command for the person who typed it, and the
 seam `m2-seam.md` §DS5 built underneath (geng-lang `m2-beam.md` §BM23, §BM24).
 
     geng make Main                  the binary, and then
-      app.ebin/*.erl                linked and emitted
-      app.ebin/geng_rt.erl, ...     the runtime, which this compiler carries
-      app.ebin/*.beam               erlc, over those and each package's Ext
+      app.otp/src/*.erl             linked and emitted
+      app.otp/src/geng_rt.erl, ...  the runtime, which this compiler carries
+      app.otp/ebin/*.beam           erlc, over those and each package's Ext
+      app.otp/src/ext/*.erl         each package's Ext, copied in for rebar3
+      app.otp/ebin/<name>.app       the OTP application resource file
+      app.otp/rebar.config          so rebar3 and mix can build it from src
       app                           the escript, which is what a person runs
 
 A build of modules none of which has a `main` is a library, and stops at
-`app.ebin/`: its roots are the modules' exposed values, for Erlang to call
+`app.otp/`: its roots are the modules' exposed values, for Erlang to call
 (D399, `m2-interop.md` §EI13).
 
 **What a build leaves.** `--output` names the file a person runs, `app` by
 default, as it does for the Node platform; the modules go in a directory beside
 it named after it, because a BEAM program is a set of modules and OTP interop,
 a release and `erl -pa` all want the directory rather than the one file (D384,
-D388). `<output>.ebin/geng-build/` is the build's own scratch — the passed Core
-and the escript writer — and it goes when the build succeeds.
+D388). **The directory is an OTP application** (D433, `m2-otp-app.md` §OA8):
+`ebin/` and `src/` as every BEAM build tool lays one out, and the whole build
+is the one application, named by the manifest's `name` and `version` (D432).
+`<output>.otp/geng-build/` is the build's own scratch — the passed Core and the
+build's Erlang tools — and it goes when the build succeeds.
 
 -}
 
@@ -56,6 +64,7 @@ import FileSystem.Path as Path exposing (Path)
 import Geng.Beam.Build as Build
 import Geng.Beam.Runtime as Runtime
 import Geng.Core as Core
+import SemanticVersion
 import Stream
 import Stream.Log
 import Task exposing (Task)
@@ -82,10 +91,71 @@ isTarget outline =
 -}
 type alias Plan =
     { escript : Path
+    , otp : Path
     , ebin : Path
+    , src : Path
     , work : Path
     , stage : Path
     }
+
+
+{-| The OTP application a build is: its name, an Erlang atom, and its version
+(D432).
+-}
+type alias Identity =
+    { name : String
+    , version : String
+    }
+
+
+{-| The manifest's `name` and `version`, or the output's name made an atom and
+`0.0.0` for a manifest that has neither (D432). A release asks for both
+itself, since a release's version is what an upgrade is from.
+-}
+identity : Plan -> Outline -> Identity
+identity thePlan outline =
+    let
+        fromOutput =
+            atomOf (Path.filenameWithExtension thePlan.escript)
+    in
+    when outline is
+        Outline.App app ->
+            { name = Maybe.withDefault fromOutput app.name
+            , version = Maybe.map SemanticVersion.toString app.version |> Maybe.withDefault "0.0.0"
+            }
+
+        Outline.Pkg _ ->
+            { name = fromOutput, version = "0.0.0" }
+
+
+{-| A file name as an atom that needs no quotes: lower-cased, anything but a
+letter, digit or underscore an underscore, and `geng_` before one that does not
+start with a letter.
+-}
+atomOf : String -> String
+atomOf name =
+    let
+        lowered =
+            String.toLower name
+                |> String.map
+                    (\c ->
+                        if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' then
+                            c
+
+                        else
+                            '_'
+                    )
+    in
+    when String.popFirst lowered is
+        Just { first } ->
+            if first >= 'a' && first <= 'z' then
+                lowered
+
+            else
+                "geng_" ++ lowered
+
+        Nothing ->
+            "app"
 
 
 {-| The two programs a BEAM build runs and this compiler does not carry.
@@ -148,16 +218,18 @@ plan fromString output =
 paths : Path -> Plan
 paths escriptPath =
     let
-        ebin =
+        otp =
             Path.append
-                (Path.fromPosixString (Path.filenameWithExtension escriptPath ++ ".ebin"))
+                (Path.fromPosixString (Path.filenameWithExtension escriptPath ++ ".otp"))
                 (Path.parentPath escriptPath |> Maybe.withDefault Path.empty)
 
         work =
-            Path.append (Path.fromPosixString "geng-build") ebin
+            Path.append (Path.fromPosixString "geng-build") otp
     in
     { escript = escriptPath
-    , ebin = ebin
+    , otp = otp
+    , ebin = Path.append (Path.fromPosixString "ebin") otp
+    , src = Path.append (Path.fromPosixString "src") otp
     , work = work
     , stage = Path.append (Path.fromPosixString "stage") work
     }
@@ -227,7 +299,7 @@ stageEnvironment toString envVars thePlan =
 
 **The last good build stays until this one has something to replace it**
 (geng-lang `m2-interop.md` §EI18). A build the compiler refuses, for a type
-error or anything else, leaves `<output>.ebin/`'s modules and the escript as
+error or anything else, leaves `<output>.otp/`'s modules and the escript as
 the previous build wrote them, and `abandon` takes the scratch away. The
 modules are cleared in `buildStage`, once the backend has emitted a program.
 
@@ -261,22 +333,28 @@ removeWork fs thePlan =
         |> Task.onError (\_ -> Task.succeed {})
 
 
-{-| The output directory emptied of the modules an earlier build left.
+{-| An output directory made if it is not there, and emptied of the files an
+earlier build left, those whose names end with one of `endings`.
 
 A program's modules are the program's, and a module left behind from a
 different one would be compiled into this one's directory and shipped in its
-archive. The `geng-build` directory inside it is the build's own and is left
-alone here.
+archive, or listed in its `.app`. The `geng-build` directory beside them is the
+build's own and is left alone here.
 -}
-clear : FileSystem.Permission -> Path -> Task Report {}
-clear fs directory =
-    FileSystem.listDirectory fs directory
-        |> Task.mapError (failure "I cannot read the output directory")
+clear : FileSystem.Permission -> Array String -> Path -> Task Report {}
+clear fs endings directory =
+    FileSystem.makeDirectory fs { recursive = True } directory
+        |> Task.mapError (failure "I cannot make the output directory")
+        |> Task.andThen
+            (\_ ->
+                FileSystem.listDirectory fs directory
+                    |> Task.mapError (failure "I cannot read the output directory")
+            )
         |> Task.andThen
             (\entries ->
                 entries
                     |> Array.map (\entry -> Path.filenameWithExtension entry.path)
-                    |> Array.keepIf (\name -> String.endsWith ".erl" name || String.endsWith ".beam" name)
+                    |> Array.keepIf (\name -> Array.any (\ending -> String.endsWith ending name) endings)
                     |> Array.map
                         (\name ->
                             FileSystem.remove fs
@@ -347,6 +425,7 @@ type alias Config =
     , packages : Array Path
     , libraries : Array Path
     , environment : Dict String String
+    , identity : Identity
     }
 
 
@@ -444,8 +523,10 @@ buildStage config thePlan =
                             |> Task.map (\_ -> 1)
 
                     Ok built ->
-                        clear config.fs thePlan.ebin
-                            |> Task.andThen (\_ -> write config.fs thePlan.ebin (built.emitted ++ Runtime.sources))
+                        clear config.fs [ ".beam", ".app" ] thePlan.ebin
+                            |> Task.andThen (\_ -> clear config.fs [ ".erl", ".app.src" ] thePlan.src)
+                            |> Task.andThen (\_ -> clear config.fs [ ".erl" ] (extCopies thePlan))
+                            |> Task.andThen (\_ -> write config.fs thePlan.src (built.emitted ++ Runtime.sources))
                             |> Task.andThen (\_ -> requireLibraries config)
                             |> Task.andThen (\_ -> externSources config)
                             |> Task.andThen
@@ -453,6 +534,18 @@ buildStage config thePlan =
                                     distinctExterns config externs
                                         |> Task.andThen (\_ -> erlc config thePlan externs)
                                         |> Task.andThen (\_ -> checkExterns config thePlan externs (Build.erlangCalls built.program))
+                                        |> Task.andThen (\_ -> copyExterns config thePlan externs)
+                                )
+                            |> Task.andThen
+                                (\_ ->
+                                    application config
+                                        thePlan
+                                        (if Array.length built.program.mains == 0 then
+                                            "library"
+
+                                         else
+                                            "main"
+                                        )
                                 )
                             |> Task.andThen
                                 (\_ ->
@@ -702,6 +795,94 @@ requireLibraries config =
             )
 
 
+{-| Each package's `src/Ext/*.erl` copied into the application's `src/ext/`,
+once `erlc` has compiled it from where it is, so that its diagnostics name the
+package's own file. A build tool that compiles the application from source,
+`rebar3` or `mix`, needs every module's Erlang under `src/`, which it reads
+recursively, and a build keeps the emitted modules' and the runtime's already
+(D433). They are a directory down so that `src/*.erl` stays what it was, the
+emitted modules and the runtime, and a package's module is not read twice by
+anything that also reads the package.
+-}
+copyExterns : Config -> Plan -> Array Path -> Task Report {}
+copyExterns config thePlan externs =
+    externs
+        |> Array.map
+            (\path ->
+                FileSystem.copyFile config.fs
+                    (Path.append (Path.fromPosixString (Path.filenameWithExtension path)) (extCopies thePlan))
+                    path
+                    |> Task.mapError (failure "I cannot copy an extern's Erlang into the application")
+            )
+        |> Task.sequence
+        |> Task.map (\_ -> {})
+
+
+extCopies : Plan -> Path
+extCopies thePlan =
+    Path.append (Path.fromPosixString "ext") thePlan.src
+
+
+{-| D433 · the application's resource file, `ebin/<name>.app` and
+`src/<name>.app.src`, written by `Runtime.appWriter` once `erlc` has written
+every module, since the applications it needs are computed from their imports
+on this node's code path; and a `rebar.config`, so that `rebar3` and `mix`
+take the directory as an application to build from `src`.
+-}
+application : Config -> Plan -> String -> Task Report {}
+application config thePlan start =
+    let
+        writer =
+            Path.append (Path.fromPosixString Runtime.appWriter.name) thePlan.work
+    in
+    FileSystem.writeFile config.fs (Bytes.fromString Runtime.appWriter.text) writer
+        |> Task.mapError (failure "I cannot write the application writer")
+        |> Task.andThen
+            (\_ ->
+                spawn config
+                    config.tools.escript
+                    "GENG_ESCRIPT"
+                    "--escript"
+                    (\_ ->
+                        Report.create
+                            "THE APPLICATION CANNOT BE WRITTEN"
+                            Nothing
+                            (PP.verticalBlock
+                                [ PP.words "The program is compiled, and its OTP application resource file could not be written, as the lines above say."
+                                , PP.empty
+                                , PP.words "A beam build is one OTP application, named by geng.toml's [application] name, or after --output when it has none (m2-otp-app.md D432, D433)."
+                                ]
+                            )
+                    )
+                    [ config.toString writer
+                    , config.toString thePlan.ebin
+                    , config.toString thePlan.src
+                    , config.identity.name
+                    , config.identity.version
+                    , start
+                    ]
+            )
+        |> Task.andThen
+            (\_ ->
+                FileSystem.writeFile config.fs
+                    (Bytes.fromString rebarConfig)
+                    (Path.append (Path.fromPosixString "rebar.config") thePlan.otp)
+                    |> Task.mapError (failure "I cannot write rebar.config")
+            )
+        |> Task.map (\_ -> {})
+
+
+{-| What `rebar3` needs to build the application from `src`, which is nothing
+but that it is one: every module's Erlang is plain Erlang, the generated ones
+included, and the build compiled it without `debug_info` (see `erlc`).
+-}
+rebarConfig : String
+rebarConfig =
+    "%% Written by geng make: this directory is a Geng build, one OTP application\n"
+        ++ "%% (m2-otp-app.md D433). src/ holds every module's Erlang.\n"
+        ++ "{erl_opts, []}.\n"
+
+
 {-| `erlc` over the Erlang in the output directory and each package's.
 
 **No `+debug_info`**, which is measured and not assumed: over
@@ -713,7 +894,7 @@ there is something to point at the result.
 -}
 erlc : Config -> Plan -> Array Path -> Task Report {}
 erlc config thePlan externs =
-    FileSystem.listDirectory config.fs thePlan.ebin
+    FileSystem.listDirectory config.fs thePlan.src
         |> Task.mapError (failure "I cannot read the output directory")
         |> Task.andThen
             (\entries ->
@@ -723,7 +904,7 @@ erlc config thePlan externs =
                             |> Array.map (\entry -> Path.filenameWithExtension entry.path)
                             |> Array.keepIf (String.endsWith ".erl")
                             |> Array.sort
-                            |> Array.map (\name -> Path.append (Path.fromPosixString name) thePlan.ebin)
+                            |> Array.map (\name -> Path.append (Path.fromPosixString name) thePlan.src)
                 in
                 spawn config
                     config.tools.erlc

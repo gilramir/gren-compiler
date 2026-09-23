@@ -764,6 +764,7 @@ beamMake context compilerPath flags resolved ordinary =
                                             Terminal.Beam.libraryEnvironment context.pathToString
                                                 context.envVars
                                                 (Terminal.Beam.libraries resolved.projectPath resolved.outline)
+                                        , identity = Terminal.Beam.identity thePlan resolved.outline
                                         }
                                         thePlan
                             )
