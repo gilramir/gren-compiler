@@ -45,6 +45,9 @@ module Data.Name
     inboundClass,
     inboundModule,
     inboundCheck,
+    outboundClass,
+    outboundModule,
+    outboundOut,
     char,
     string,
     num,
@@ -453,6 +456,22 @@ inboundModule =
 inboundCheck :: Name
 inboundCheck =
   fromChars "check"
+
+-- | The `Outbound` class, its module, and the one row every
+-- compiler-supplied instance refers to (geng-lang `m2-interop.md` D428). It
+-- is `Inbound`'s mirror: the way out of Geng through a row that takes
+-- anything at all.
+outboundClass :: Name
+outboundClass =
+  fromChars "Outbound"
+
+outboundModule :: Name
+outboundModule =
+  fromChars "Outbound"
+
+outboundOut :: Name
+outboundOut =
+  fromChars "out"
 
 char :: Name
 char = fromChars "Char"

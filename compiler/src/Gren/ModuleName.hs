@@ -35,6 +35,7 @@ module Gren.ModuleName
     debug,
     inspect,
     inbound,
+    outbound,
     virtualDom,
     jsonDecode,
     jsonEncode,
@@ -199,6 +200,11 @@ inspect = Canonical Pkg.core Name.inspectModule
 -- (geng-lang `m2-interop.md` D419, D422). Not default-imported.
 inbound :: Canonical
 inbound = Canonical Pkg.core Name.inboundModule
+
+-- | `Outbound`, `Inbound`'s mirror, whose class hands a value to Erlang
+-- through a row that takes anything at all (D428). Not default-imported.
+outbound :: Canonical
+outbound = Canonical Pkg.core Name.outboundModule
 
 bytes :: Canonical
 bytes = Canonical Pkg.core "Bytes"

@@ -193,6 +193,12 @@ data Witness
     -- (D423's `Dict` and `Set`, which are built under their key's `Ord`).
     -- Then the subject and the witness type.
     FromInbound [(Can.Type, Witness)] Can.Type Can.Type
+  | -- | A witness for @Outbound t@, which the compiler supplies at every type
+    -- (geng-lang `m2-interop.md` D428). `Inbound`'s mirror, and built the same
+    -- way: one row whose reference is typed at @t@, with the subterms the
+    -- generated conversion cannot walk itself as holes, and a backend puts the
+    -- conversion for @t@ in the reference's place.
+    FromOutbound [(Can.Type, Witness)] Can.Type Can.Type
 
 -- WHAT GOES IN
 
@@ -332,6 +338,8 @@ witnessFor env bound region wanted because cls tipe =
         Nothing
           | isInbound cls ->
               inboundWitness env bound region wanted because cls actual
+          | isOutbound cls ->
+              outboundWitness env bound region wanted because cls actual
           | otherwise ->
               Left (E.NoInstance region wanted cls actual because)
         Just head_ ->
@@ -364,9 +372,13 @@ witnessFor env bound region wanted because cls tipe =
     actual@(Can.TRecord _ Nothing)
       | isInbound cls ->
           inboundWitness env bound region wanted because cls actual
+      | isOutbound cls ->
+          outboundWitness env bound region wanted because cls actual
     actual@(Can.TLambda _ _)
       | isInbound cls ->
           inboundWitness env bound region wanted because cls actual
+      | isOutbound cls ->
+          outboundWitness env bound region wanted because cls actual
     actual ->
       -- A function, an extensible record, or a record at a class with no
       -- structural definition. An instance head is a type constructor applied
@@ -391,6 +403,28 @@ inboundWitness env bound region wanted because cls actual =
     let deeper = because ++ [(cls, actual)]
     ws <- traverse (\hole -> (,) hole <$> witnessFor env bound region wanted deeper cls hole) (inboundHoles env cls actual)
     Right (FromInbound ws actual (witnessType env cls actual))
+
+-- | The table for @Outbound t@ (D428), built as 'inboundWitness' builds
+-- `Inbound`'s: the holes of @t@, each with the witness it resolves to.
+--
+-- A value going out is one the program has, so an unconstrained type variable
+-- among the holes is the same refusal as `Inbound`'s, and for the same reason:
+-- what a variable holds is not known here, and only the definition that knows
+-- can say how it crosses.
+outboundWitness ::
+  Env ->
+  Bound ->
+  A.Region ->
+  E.Wanted ->
+  [(Can.Class, Can.Type)] ->
+  Can.Class ->
+  Can.Type ->
+  Either E.Error Witness
+outboundWitness env bound region wanted because cls actual =
+  do
+    let deeper = because ++ [(cls, actual)]
+    ws <- traverse (\hole -> (,) hole <$> witnessFor env bound region wanted deeper cls hole) (inboundHoles env cls actual)
+    Right (FromOutbound ws actual (witnessType env cls actual))
 
 -- | The subterms of a type that a generated check hands to someone else, in
 -- the order they are met, each once: a type variable, and a type with a
@@ -419,6 +453,11 @@ inboundHoles env cls root =
 isInbound :: Can.Class -> Bool
 isInbound (Can.Class home name) =
   home == ModuleName.inbound && name == Name.inboundClass
+
+-- | `Outbound`, whose instances the compiler supplies at every type (D428).
+isOutbound :: Can.Class -> Bool
+isOutbound (Can.Class home name) =
+  home == ModuleName.outbound && name == Name.outboundClass
 
 -- | Whether `classes.md` §2.1 defines what this class means for a record.
 --

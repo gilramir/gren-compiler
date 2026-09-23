@@ -151,6 +151,8 @@ witness sp w =
       recordWitness sp cls fields (lowerType subject) (lowerType tipe)
     Resolve.FromInbound holes subject _ ->
       inboundWitness sp holes (lowerType subject)
+    Resolve.FromOutbound holes subject _ ->
+      outboundWitness sp holes (lowerType subject)
 
 -- | The table for @Inbound t@ the compiler supplies (geng-lang
 -- `m2-interop.md` D422, §EI23): @{ inbound = Inbound.check h1 … hn }@, where
@@ -172,6 +174,29 @@ inboundWitness sp holes subject =
           [] -> reference checkType
           _ -> Core.Expr (Core.EApp (reference (Core.TFun (map Core.typeOf handed) checkType)) handed) checkType sp
    in Core.Expr (Core.ERecord [(nameInbound, value)]) tipe sp
+
+-- | The table for @Outbound t@ (geng-lang `m2-interop.md` D428):
+-- @{ outbound = Outbound.out h1 … hn }@, `Inbound`'s mirror, with the
+-- reference typed at @t -> Handle@ and each @hi@ a hole's @outbound@.
+outboundWitness :: Core.Span -> [(Can.Type, Resolve.Witness)] -> Core.Type -> Core.Expr
+outboundWitness sp holes subject =
+  let outType = Core.TFun [subject] handleType
+      tipe = Core.TRecord [(nameOutbound, outType)] Nothing
+      handed = map (\(_, w) -> method sp outboundCls nameOutbound w) holes
+      reference t = Core.Expr (Core.EGlobal (Core.QualName ModuleName.outbound Name.outboundOut)) t sp
+      value =
+        case handed of
+          [] -> reference outType
+          _ -> Core.Expr (Core.EApp (reference (Core.TFun (map Core.typeOf handed) outType)) handed) outType sp
+   in Core.Expr (Core.ERecord [(nameOutbound, value)]) tipe sp
+
+outboundCls :: Can.Class
+outboundCls =
+  Can.Class ModuleName.outbound Name.outboundClass
+
+nameOutbound :: Name
+nameOutbound =
+  Name.fromChars "outbound"
 
 -- | @Extern.Handle@, the second argument of every @inbound@.
 --

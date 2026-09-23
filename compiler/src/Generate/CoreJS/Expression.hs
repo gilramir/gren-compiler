@@ -172,6 +172,8 @@ generate env (Core.Expr value tipe sp) =
         Core.EGlobal q
           | isInboundCheck q ->
               JsExpr (inboundCheck env pos (inboundHoles tipe))
+          | isOutboundOut q ->
+              JsExpr (outboundOut env pos (outboundHoles tipe))
           | otherwise ->
               JsExpr (globalRef env pos q)
         Core.ELit lit ->
@@ -481,6 +483,12 @@ call env pos fn args =
            in if null kept
                 then normalCall env pos (inboundCheck env pos holes) (map (jsExpr env) args)
                 else globalCall env pos q (map (jsExpr env) kept)
+      | isOutboundOut q ->
+          let holes = outboundHoles (Core.typeOf fn)
+              kept = drop holes args
+           in if null kept
+                then normalCall env pos (outboundOut env pos holes) (map (jsExpr env) args)
+                else globalCall env pos q (map (jsExpr env) kept)
     Core.EGlobal q@(Core.QualName (ModuleName.Canonical pkg raw) name)
       | Just op <- primAt env q args -> Prim.prim op (map (jsExpr env) args)
       | pkg == Pkg.core && raw == Name.basics -> basicsCall env pos q name args
@@ -538,6 +546,40 @@ inboundHoles tipe =
         Core.TCon (Core.QualName m1 n1) [] : Core.TCon (Core.QualName m2 n2) [] : _ ->
           m1 == ModuleName.string && n1 == Name.string && m2 == ModuleName.Canonical Pkg.core (Name.fromChars "Extern") && n2 == Name.fromChars "Handle"
         _ -> False
+
+-- OUTBOUND.OUT
+
+-- | `Outbound.out`, which the compiler refers to at each type an `Outbound`
+-- instance is supplied for, applied first to a function per hole (geng-lang
+-- `m2-interop.md` D428). JavaScript converts nothing (D200), so the holes are
+-- taken and dropped and the row, which answers the value, is what is left.
+isOutboundOut :: Core.QualName -> Bool
+isOutboundOut (Core.QualName home name) =
+  home == ModuleName.outbound && name == Name.outboundOut
+
+-- | The reference with @holes@ leading functions to take and drop.
+outboundOut :: Env -> A.Position -> Int -> JS.Expr
+outboundOut env pos holes =
+  let dropped = JsName.fromLocal (Name.fromChars "_")
+   in iterate (\inner -> JS.Function Nothing [dropped] [JS.Return inner]) (globalRef env pos outName) !! holes
+  where
+    outName = Core.QualName ModuleName.outbound Name.outboundOut
+
+-- | How many holes a reference to `Outbound.out` is applied to first.
+--
+-- Every argument but the last is one: the reference's type is
+-- @h1 -> … -> hn -> t -> Handle@, and unlike `Inbound.check`'s @String ->
+-- Handle -> t@ a hole is not told apart from the subject by its shape, since
+-- both answer a @Handle@.
+outboundHoles :: Core.Type -> Int
+outboundHoles tipe =
+  max 0 (length (arrows tipe) - 1)
+  where
+    arrows t =
+      case t of
+        Core.TForall _ _ body -> arrows body
+        Core.TFun args result -> args ++ arrows result
+        _ -> []
 
 -- | A call to a name whose arity is known and matched goes straight to the
 -- uncurried @name$@; anything else goes through @A2@ … @A9@.

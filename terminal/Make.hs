@@ -78,7 +78,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
             buildExposed style root details sources exposed
         p : ps ->
           do
-            artifacts <- buildPaths style root details sources (NE.List p ps)
+            artifacts <- buildPaths style root details sources (reachOf outline) (NE.List p ps)
             let mains = getMains artifacts
                 -- 'Nothing' is a build that stopped after a stage and wrote
                 -- its Core (@GENG_STAGE_WRITE@, Core.Stage): there is no
@@ -238,10 +238,22 @@ buildExposed style root details sources exposed =
   Task.eio Exit.MakeCannotBuild $
     Build.fromExposed style root details sources Build.IgnoreDocs exposed
 
-buildPaths :: Reporting.Style -> FilePath -> Details.Details -> Build.Sources -> NE.List ModuleName.Raw -> Task Build.Artifacts
-buildPaths style root details sources modules =
+buildPaths :: Reporting.Style -> FilePath -> Details.Details -> Build.Sources -> Build.Reach -> NE.List ModuleName.Raw -> Task Build.Artifacts
+buildPaths style root details sources reach modules =
   Task.eio Exit.MakeCannotBuild $
-    Build.fromMainModules style root details sources modules
+    Build.fromMainModules style root details sources reach modules
+
+-- | How much of the project this build compiles (D426, @m2-interop.md@ §EI25).
+--
+-- A @beam@ build compiles all of it, because a module OTP enters is named by an
+-- Erlang child specification rather than by an import, and 'Generate.coreRoots'
+-- can only root a callback module the build compiled. Every other target
+-- compiles what its roots reach.
+reachOf :: Outline -> Build.Reach
+reachOf outline =
+  case targetOf outline of
+    Target.Beam -> Build.WholeProject
+    _ -> Build.FromRoots
 
 -- GET MAINS
 

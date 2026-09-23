@@ -7,6 +7,7 @@ module Build
   ( fromExposed,
     fromPaths,
     fromMainModules,
+    Reach (..),
     Artifacts (..),
     Root (..),
     Module (..),
@@ -227,8 +228,38 @@ fromPaths style root details sources paths =
                   writeDetails root details results
                   toArtifacts env foreigns results <$> traverse readMVar rrootMVars
 
-fromMainModules :: Reporting.Style -> FilePath -> Details.Details -> Sources -> NE.List ModuleName.Raw -> IO (Either Exit.BuildProblem Artifacts)
-fromMainModules style root details sources rootModules =
+-- | How much of the project a build compiles (D426, @m2-interop.md@ §EI25).
+--
+-- 'FromRoots' is what a build has always done: the modules the named roots
+-- reach through their imports, and nothing else.
+--
+-- 'WholeProject' compiles every module the project has, whether anything
+-- imports it or not. The @beam@ target asks for it, because on the BEAM a
+-- module can be entered without any Geng naming it: an OTP child specification
+-- names a callback module as an atom, which is not an import, and D414 roots
+-- such a module only if the build compiled it. The grid port found what that
+-- costs — six of its seven servers were not compiled, and the tree died at
+-- start (§EI24.2). The price is that a module the program does not use is
+-- compiled, so its errors are the build's; on a target where nothing outside
+-- Geng can enter a module, that price buys nothing, which is why this is not
+-- what every build does.
+data Reach
+  = FromRoots
+  | WholeProject
+  deriving (Show)
+
+-- | The project's own Geng modules, which are what 'WholeProject' compiles.
+--
+-- 'Sources' holds more than those: the frontend puts every kernel and extern
+-- implementation file in it too, keyed by the module it belongs to
+-- (@src\/Ext\/Terms.js@ as @Ext.Terms@), because 'Generate.extSources' reads
+-- them from here. Handing one to the crawler would have it parsed as Geng.
+gengModules :: Sources -> [ModuleName.Raw]
+gengModules sources =
+  [name | (name, Source path _) <- Map.toList sources, List.isSuffixOf ".geng" path]
+
+fromMainModules :: Reporting.Style -> FilePath -> Details.Details -> Sources -> Reach -> NE.List ModuleName.Raw -> IO (Either Exit.BuildProblem Artifacts)
+fromMainModules style root details sources reach rootModules =
   Reporting.trackBuild style $ \key ->
     do
       env <- makeEnv key root details
@@ -237,6 +268,10 @@ fromMainModules style root details sources rootModules =
       smvar <- newMVar Map.empty
       srootMVars <- traverse (fork . crawlRootModule env smvar sources) rootModules
       sroots <- traverse readMVar srootMVars
+      _ <-
+        case reach of
+          FromRoots -> return ()
+          WholeProject -> crawlDeps env smvar sources (gengModules sources) ()
       statuses <- traverse readMVar =<< readMVar smvar
 
       case checkMidpointAndRoots (Details.loadInterfaces details) statuses sroots of
