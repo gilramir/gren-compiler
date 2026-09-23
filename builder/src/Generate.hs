@@ -587,6 +587,11 @@ coreRoots target (Build.Artifacts pkg _ roots _) cores =
 -- @Beam.Worker.Worker@: the two types of the @beam@ package's that only an
 -- Erlang child specification can start. Known to the compiler by name, as
 -- @Task@ is.
+--
+-- __Or it exposes an application's supervision tree__ (D436,
+-- @m2-otp-app.md@ §OA10): a value of @Beam.Supervisor.Supervisor@, which
+-- the application's start module calls by name, as the manifest's
+-- @supervisor@ says, and which nothing in the build imports.
 callbackModule :: Core.Module -> Bool
 callbackModule modul =
   any callback
@@ -601,6 +606,7 @@ callbackModule modul =
           | owner == Pkg.beam ->
               (is home "Beam.Server" && is typeName "Init" && is name "init")
                 || (is home "Beam.Worker" && is typeName "Worker")
+                || (is home "Beam.Supervisor" && is typeName "Supervisor")
         _ -> False
     is name chars =
       N.toChars name == chars

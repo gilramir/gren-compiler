@@ -196,6 +196,7 @@ generateManifest config projectPath deps =
                     , erlangLibraries = []
                     , name = Nothing
                     , version = Nothing
+                    , supervisor = Nothing
                     , gengVersion = compiler
                     , dependencies = dependencies
                     , sources = Dict.empty

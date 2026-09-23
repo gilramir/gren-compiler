@@ -105,6 +105,7 @@ type alias Plan =
 type alias Identity =
     { name : String
     , version : String
+    , supervisor : Maybe String
     }
 
 
@@ -122,10 +123,11 @@ identity thePlan outline =
         Outline.App app ->
             { name = Maybe.withDefault fromOutput app.name
             , version = Maybe.map SemanticVersion.toString app.version |> Maybe.withDefault "0.0.0"
+            , supervisor = Maybe.map (\m -> "app@" ++ String.replace "." "@" m) app.supervisor
             }
 
         Outline.Pkg _ ->
-            { name = fromOutput, version = "0.0.0" }
+            { name = fromOutput, version = "0.0.0", supervisor = Nothing }
 
 
 {-| A file name as an atom that needs no quotes: lower-cased, anything but a
@@ -860,6 +862,7 @@ application config thePlan start =
                     , config.identity.name
                     , config.identity.version
                     , start
+                    , Maybe.withDefault "none" config.identity.supervisor
                     ]
             )
         |> Task.andThen
