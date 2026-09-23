@@ -319,6 +319,95 @@ parseUserArgs context compilerPath =
                             )
                         |> Task.onError (endWithErrorReport reportType)
 
+                CliParser.Release flags ->
+                    -- D437 (geng-lang `m2-otp-app.md`): the build `make`
+                    -- does, into `.gren/release/`, and then the release of the
+                    -- application it wrote.
+                    resolveProject context
+                        |> Task.andThen
+                            (\resolved ->
+                                when Terminal.Beam.releaseIdentity resolved.outline is
+                                    Err report ->
+                                        Task.fail report
+
+                                    Ok identity ->
+                                        if Array.isEmpty flags.entryPoints then
+                                            Task.fail <|
+                                                Report.create
+                                                    "NO MODULES TO RELEASE"
+                                                    Nothing
+                                                    (PP.words "Name the modules to build, as geng make takes them: a module with a main, the modules Erlang calls, or both. The manifest's [application] supervisor is built with them.")
+
+                                        else
+                                            let
+                                                buildPath =
+                                                    resolved.projectPath
+                                                        |> Path.append (Path.fromPosixString ".gren/release")
+                                                        |> Path.append (Path.fromPosixString identity.name)
+
+                                                output =
+                                                    Just (Compiler.Backend.Exe (context.pathToString buildPath))
+
+                                                directory =
+                                                    context.pathFromString (Maybe.withDefault "release" flags.output)
+
+                                                command =
+                                                    Compiler.Backend.Make
+                                                        { optimize = False
+                                                        , sourcemaps = False
+                                                        , output = output
+                                                        , report = Nothing
+                                                        , projectPath = resolved.projectPath
+                                                        , entryPoints = flags.entryPoints
+                                                        , outline = resolved.outline
+                                                        , rootSources = resolved.rootSources
+                                                        , dependencies = resolved.dependencies
+                                                        }
+                                            in
+                                            beamMake context
+                                                compilerPath
+                                                { encodedCommand = encodeFor command
+                                                , headless = False
+                                                , output = output
+                                                , erlc = flags.erlc
+                                                , escript = flags.escript
+                                                }
+                                                resolved
+                                                (backend command)
+                                                |> Task.andThen
+                                                    (\exitCode ->
+                                                        if exitCode /= 0 then
+                                                            Task.succeed exitCode
+
+                                                        else
+                                                            when Terminal.Beam.plan context.pathFromString output is
+                                                                Ok (Just thePlan) ->
+                                                                    Terminal.Beam.release
+                                                                        { fs = context.fsPermission
+                                                                        , cp = context.cpPermission
+                                                                        , stderr = context.stderr
+                                                                        , toString = context.pathToString
+                                                                        , tools =
+                                                                            Terminal.Beam.toolchain context.envVars
+                                                                                { erlc = flags.erlc, escript = flags.escript }
+                                                                        , packages = beamPackages context resolved
+                                                                        , libraries = Terminal.Beam.libraries resolved.projectPath resolved.outline
+                                                                        , environment =
+                                                                            Terminal.Beam.libraryEnvironment context.pathToString
+                                                                                context.envVars
+                                                                                (Terminal.Beam.libraries resolved.projectPath resolved.outline)
+                                                                        , identity = Terminal.Beam.identity thePlan resolved.outline
+                                                                        }
+                                                                        thePlan
+                                                                        directory
+                                                                        |> Task.map (\_ -> 0)
+
+                                                                _ ->
+                                                                    Task.succeed 0
+                                                    )
+                            )
+                        |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
+
                 CliParser.Run opts ->
                     -- `geng run` on a `beam` project is `geng make` and then
                     -- the escript, for the same reason the Make branch above

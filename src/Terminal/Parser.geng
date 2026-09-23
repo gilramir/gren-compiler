@@ -1,6 +1,7 @@
 module Terminal.Parser exposing
     ( Command (..)
     , MakeFlags
+    , ReleaseFlags
     , FormatFlags
     , ProtobufFlags
     , DiffArgs (..)
@@ -23,6 +24,7 @@ import Meta
 type Command
     = Init InitFlags
     | Make MakeFlags
+    | Release ReleaseFlags
     | Docs DocsFlags
     | PackageInstall (Maybe PackageName)
     | PackageUninstall PackageName
@@ -47,6 +49,17 @@ type alias MakeFlags =
     , sourcemaps : Bool
     , output : Maybe Compiler.Backend.MakeOutput
     , report : Maybe {}
+    , erlc : Maybe String
+    , escript : Maybe String
+    , entryPoints : Array ModuleName
+    }
+
+
+{-| `geng release` (geng-lang `m2-otp-app.md` D437): the modules to build, the
+release directory, and the BEAM toolchain as `make` takes it.
+-}
+type alias ReleaseFlags =
+    { output : Maybe String
     , erlc : Maybe String
     , escript : Maybe String
     , entryPoints : Array ModuleName
@@ -315,6 +328,47 @@ parser =
                             , sourcemaps = flags.sourcemaps
                             , output = flags.output
                             , report = flags.report
+                            , erlc = flags.erlc
+                            , escript = flags.escript
+                            , entryPoints = args
+                            }
+                }
+            |> Cli.Parser.withCommand
+                { word = "release"
+                , arguments =
+                    Cli.Parser.zeroOrMoreArgs moduleNameParser
+                , flags =
+                    Cli.Parser.initFlags
+                        (\output erlc escript ->
+                            { output = output
+                            , erlc = erlc
+                            , escript = escript
+                            }
+                        )
+                        |> Cli.Parser.flag "output" releaseDirParser "The directory to write the release in, release by default. A directory that already holds an earlier version of the release gets this one beside it, with an appup and a relup that upgrade a running node from the earlier one."
+                        |> Cli.Parser.flag "erlc" programParser "The Erlang compiler the build runs. Without this I look for GENG_ERLC, and then for erlc on your PATH."
+                        |> Cli.Parser.flag "escript" programParser "The escript runner the build and the release are made with. Without this I look for GENG_ESCRIPT, and then for escript on your PATH."
+                , commonDescription =
+                    Nothing
+                , summary =
+                    "The `release` command builds a beam application and makes an OTP release of it:"
+                , example =
+                    PP.verticalBlock
+                        [ PP.words "For example:"
+                        , PP.empty
+                        , PP.words "geng release Main"
+                            |> PP.indent
+                            |> PP.color PP.Green
+                        , PP.empty
+                        , PP.words
+                            """
+                            This builds the project as geng make does and writes an OTP release in release/: the Erlang runtime, every application the program needs, a boot script, sys.config and vm.args to edit, a tarball to deploy, and bin/NAME to start it with foreground, daemon, stop, ping, eval, remote or upgrade. The project's geng.toml names the application and its version in [application] name and version.
+                            """
+                        ]
+                , builder =
+                    \args flags ->
+                        Release
+                            { output = flags.output
                             , erlc = flags.erlc
                             , escript = flags.escript
                             , entryPoints = args
@@ -664,6 +718,18 @@ carry (`m2-beam.md` §BM24, D390). A name with no separator in it is resolved on
 `PATH`, which is what makes the bare default work, and either form is accepted
 here so that `--erlc=erlc-27` is as good as an absolute path.
 -}
+releaseDirParser : Cli.Parser.ValueParser String
+releaseDirParser =
+    { singular = "directory"
+    , plural = "directories"
+    , fn = Just
+    , examples =
+        [ "release"
+        , "_build/release"
+        ]
+    }
+
+
 programParser : Cli.Parser.ValueParser String
 programParser =
     { singular = "program"

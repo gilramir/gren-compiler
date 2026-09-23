@@ -15,6 +15,8 @@ module Terminal.Beam exposing
     , build
     , forgetProgram
     , requireProgram
+    , releaseIdentity
+    , release
     )
 
 {-| The BEAM half of `geng make`, for a project whose outline says
@@ -128,6 +130,88 @@ identity thePlan outline =
 
         Outline.Pkg _ ->
             { name = fromOutput, version = "0.0.0", supervisor = Nothing }
+
+
+{-| D437 · what `geng release` needs of the manifest: a `beam` application
+that names itself, since a release's name and version are what an upgrade is
+from and to, and a default taken from the output would change with it.
+-}
+releaseIdentity : Outline -> Result Report { name : String, version : String }
+releaseIdentity outline =
+    let
+        refuse why =
+            Err <|
+                Report.create
+                    "A RELEASE NEEDS A NAME AND A VERSION"
+                    Nothing
+                    (PP.verticalBlock
+                        [ PP.words why
+                        , PP.empty
+                        , PP.words "Give the application both in geng.toml's [application] table, as name = \"grid\" and version = \"1.0.0\": the name is the release's and its application's, and the version is what an upgrade goes from and to (m2-otp-app.md D432, D437)."
+                        ]
+                    )
+    in
+    when outline is
+        Outline.App app ->
+            if app.target /= "beam" then
+                refuse ("geng release makes an OTP release, and this project's target is " ++ app.target ++ ".")
+
+            else
+                when { name = app.name, version = app.version } is
+                    { name = Just name, version = Just version } ->
+                        Ok { name = name, version = SemanticVersion.toString version }
+
+                    _ ->
+                        refuse "This application's geng.toml does not say both what it is called and which version it is."
+
+        Outline.Pkg _ ->
+            refuse "geng release makes a release of an application, and this project is a package."
+
+
+{-| D437, D438 · the release, from the application a build just wrote in
+`thePlan.otp`, in `directory`: `Runtime.releaseWriter` with OTP's `systools`
+makes the `.rel`, the boot script, the tarball and the start script, and, when
+the directory already holds earlier versions, the appup and relup that upgrade
+a running node from them.
+-}
+release : Config -> Plan -> Path -> Task Report {}
+release config thePlan directory =
+    let
+        writer =
+            Path.append (Path.fromPosixString Runtime.releaseWriter.name) thePlan.otp
+    in
+    FileSystem.writeFile config.fs (Bytes.fromString Runtime.releaseWriter.text) writer
+        |> Task.mapError (failure "I cannot write the release writer")
+        |> Task.andThen
+            (\_ ->
+                spawn config
+                    config.tools.escript
+                    "GENG_ESCRIPT"
+                    "--escript"
+                    (\_ ->
+                        Report.create
+                            "THE RELEASE CANNOT BE MADE"
+                            Nothing
+                            (PP.verticalBlock
+                                [ PP.words "The application is built, and its release could not be made, as the lines above say."
+                                , PP.empty
+                                , PP.words "geng release uses OTP's own systools, so what it refuses is what an Erlang release of the same applications would be refused for (m2-otp-app.md D437)."
+                                ]
+                            )
+                    )
+                    [ config.toString writer
+                    , config.toString thePlan.otp
+                    , config.identity.name
+                    , config.identity.version
+                    , config.toString directory
+                    ]
+            )
+        |> Task.andThen
+            (\_ ->
+                FileSystem.remove config.fs { recursive = False } writer
+                    |> Task.map (\_ -> {})
+                    |> Task.onError (\_ -> Task.succeed {})
+            )
 
 
 {-| A file name as an atom that needs no quotes: lower-cased, anything but a
