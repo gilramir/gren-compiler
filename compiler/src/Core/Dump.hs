@@ -180,7 +180,7 @@ corePasses =
   where
     fromSetting setting =
       case setting of
-        Nothing -> ["specialize", "case", "tailcall"]
+        Nothing -> ["specialize", "inline", "case", "tailcall"]
         Just "none" -> []
         Just "" -> []
         Just list -> splitOn ',' list

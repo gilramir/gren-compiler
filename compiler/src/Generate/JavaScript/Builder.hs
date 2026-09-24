@@ -580,7 +580,10 @@ fromExpr level@(Level indent nextLevel) grouping expression builder =
       parensFor grouping builder $ \b ->
         b
           & fromPrefix op
-          & fromExpr level Atomic expr
+          & ( if signedLiteral op expr
+                then \inner -> inner & addAscii "(" & fromExpr level Whatever expr & addAscii ")"
+                else fromExpr level Atomic expr
+            )
     Infix op leftExpr rightExpr ->
       parensFor grouping builder $ \b ->
         b
@@ -706,6 +709,19 @@ makeBracketed level expr bracketedExpr builder =
     & addAscii "]"
 
 -- OPERATORS
+
+-- | Whether a prefix operator's operand is a number literal that could print
+-- with a sign of its own: @-@ before @-42@ is @--42@, which JavaScript reads as
+-- a decrement. Core's inliner (D442) is what first put a negation around a
+-- negative literal.
+signedLiteral :: PrefixOp -> Expr -> Bool
+signedLiteral op expr =
+  case (op, expr) of
+    (PrefixNegate, Int n) -> n < 0
+    (PrefixNegate, TrackedInt _ _ n) -> n < 0
+    (PrefixNegate, Float _) -> True
+    (PrefixNegate, TrackedFloat _ _ _) -> True
+    _ -> False
 
 fromPrefix :: PrefixOp -> Builder -> Builder
 fromPrefix op =

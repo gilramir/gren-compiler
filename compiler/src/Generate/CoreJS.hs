@@ -26,12 +26,14 @@ where
 import Core.AST qualified as Core
 import Core.Prim qualified as Prim
 import Core.Program (Linked (..), Program (..))
+import Core.Refs qualified as Refs
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as B
 import Data.ByteString.Lazy.Char8 qualified as BLazy
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Maybe qualified as Maybe
 import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.Set qualified as Set
@@ -65,8 +67,9 @@ data GeneratedResult = GeneratedResult
 generate :: Mode.Mode -> Program -> Map Name [K.Chunk] -> Map (Pkg.Name, Name) BS.ByteString -> GeneratedResult
 generate mode program kernels exts =
   let env = envFor mode program
+      reached = reachedPrims program
       started =
-        JS.addByteString (taskHelpers env program <> JsPrim.recordHelpers <> JsPrim.crashHelpers <> JsPrim.exportHelpers <> stringHelpers env <> floatBitsHelpers env <> bytesHelpers env <> arrayHelpers env <> sourceHelpers env <> Extern.files exts (_progExterns program)) $
+        JS.addByteString (taskHelpers reached program <> JsPrim.recordHelpers <> JsPrim.crashHelpers <> JsPrim.exportHelpers <> stringHelpers reached <> floatBitsHelpers reached <> bytesHelpers reached <> arrayHelpers reached <> sourceHelpers reached <> Extern.files exts (_progExterns program)) $
           List.foldl'
             (flip JS.stmtToBuilder)
             (JS.emptyBuilder firstGeneratedLineNumber)
@@ -265,25 +268,35 @@ envFor mode program =
       Expr._depth = 0
     }
 
+-- | Every primitive the linked program applies, wherever it is applied.
+--
+-- Until D442 every primitive was a binding's whole body in @core@, so the
+-- bindings in 'Expr._prims' were the whole answer. Core's inliner copies those
+-- bodies into their callers and the binding is then linked away, so the answer
+-- is read off the expressions instead: what the program applies, and what a
+-- reachable wrapper binding would apply if called by name.
+reachedPrims :: Program -> [Prim.PrimOp]
+reachedPrims program =
+  Maybe.mapMaybe Prim.primFromCode . Set.toList $
+    Set.unions [Refs.primsIn body | (_, Core.Bind _ body) <- _progBindings program]
+
 -- | The scheduler (D246, @m1b-source.md@ §SO24), when the program can run a
 -- task at all: it has a @main@, reaches a @task_@ or @source_@ primitive, or
 -- links an extern whose result is a @Task@, whose wrapper is a binding node.
 -- It is emitted before every other helper, since the @source_@ helpers and a
 -- zero-argument extern build a node when the program loads.
-taskHelpers :: Expr.Env -> Program -> B.Builder
-taskHelpers env program
+taskHelpers :: [Prim.PrimOp] -> Program -> B.Builder
+taskHelpers prims program
   | not (null (_progMains program))
-      || any JsPrim.isTask (Map.elems (Expr._prims env))
+      || any JsPrim.isTask prims
       || any (not . Core._externPure . snd) (_progExterns program) =
       JsPrim.taskHelpers
   | otherwise = mempty
 
 -- | D206's string helpers, when the program reaches a @str_@ primitive at all
--- (@docs/m1b-str-prim.md@ §Z3). Every primitive is a binding's whole body in
--- @core@, so 'Expr._prims' has one for each that is reachable.
-stringHelpers :: Expr.Env -> B.Builder
-stringHelpers env
-  | any isStr (Map.elems (Expr._prims env)) = JsPrim.helpers
+stringHelpers :: [Prim.PrimOp] -> B.Builder
+stringHelpers prims
+  | any isStr prims = JsPrim.helpers
   | otherwise = mempty
   where
     isStr op =
@@ -294,28 +307,28 @@ stringHelpers env
 -- | The float bits helpers, when the program reaches @f64_bits@,
 -- @f64_from_bits@, @f32_bits@, @f32_from_bits@ or one of D391's three word
 -- primitives (@docs/m1b-bytes-prim.md@ §BY3).
-floatBitsHelpers :: Expr.Env -> B.Builder
-floatBitsHelpers env
-  | any JsPrim.isFloatBits (Map.elems (Expr._prims env)) = JsPrim.bitsHelpers
+floatBitsHelpers :: [Prim.PrimOp] -> B.Builder
+floatBitsHelpers prims
+  | any JsPrim.isFloatBits prims = JsPrim.bitsHelpers
   | otherwise = mempty
 
 -- | The @bytes_@ and @bt_@ helpers, when the program reaches one of that group
 -- (@docs/m1b-bytes-prim.md@ §BY4).
-bytesHelpers :: Expr.Env -> B.Builder
-bytesHelpers env
-  | any JsPrim.isBytes (Map.elems (Expr._prims env)) = JsPrim.bytesHelpers
+bytesHelpers :: [Prim.PrimOp] -> B.Builder
+bytesHelpers prims
+  | any JsPrim.isBytes prims = JsPrim.bytesHelpers
   | otherwise = mempty
 
 -- | The @arr_@ and @tr_@ helpers, when the program reaches one of that group
 -- (@docs/m1b-arr-prim.md@ §AR2).
-sourceHelpers :: Expr.Env -> B.Builder
-sourceHelpers env
-  | any JsPrim.isSource (Map.elems (Expr._prims env)) = JsPrim.sourceHelpers
+sourceHelpers :: [Prim.PrimOp] -> B.Builder
+sourceHelpers prims
+  | any JsPrim.isSource prims = JsPrim.sourceHelpers
   | otherwise = mempty
 
-arrayHelpers :: Expr.Env -> B.Builder
-arrayHelpers env
-  | any JsPrim.isArray (Map.elems (Expr._prims env)) = JsPrim.arrayHelpers
+arrayHelpers :: [Prim.PrimOp] -> B.Builder
+arrayHelpers prims
+  | any JsPrim.isArray prims = JsPrim.arrayHelpers
   | otherwise = mempty
 
 -- | The primitive a binding /is/, when its whole body is one applied to its own

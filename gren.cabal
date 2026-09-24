@@ -129,6 +129,7 @@ Library common
         Core.Order
         Core.Pass
         Core.Pass.Case
+        Core.Pass.Inline
         Core.Pass.Specialize
         Core.Pass.TailCall
         Core.Prim

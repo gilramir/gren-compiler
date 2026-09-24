@@ -40,6 +40,14 @@
 -- its uses are rewritten, and 'Core.Program.link' drops what nothing reaches.
 module Core.Pass.Specialize
   ( run,
+
+    -- * For "Core.Pass.Inline"
+    matchT,
+    substituteT,
+    unquantified,
+    retype,
+    childrenA,
+    children_,
   )
 where
 
