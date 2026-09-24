@@ -37,6 +37,13 @@
 --     constructor is its scrutinee.
 --   * a comparison or @Int@ arithmetic of two literals is its answer, and a
 --     top-level binding that is a literal or a nullary constructor is that.
+--   * a partial application of a global bound by a @let@ and applied at
+--     once, with every argument a value, is the one saturated call — what
+--     inlining @apR@ leaves of @x |> f a@;
+--   * a field of a record written out in place is that field, when the other
+--     fields are values — a witness table once specialization has chosen it;
+--   * a lambda written out in place and applied at once is its body, the
+--     arguments bound as a call's are (m2-beam-toptier.md §TT18).
 --
 -- Together they turn @lt@'s @compare@-then-match into the one comparison.
 --
@@ -313,7 +320,72 @@ node ctx e@(Core.Expr value tipe sp) =
           do
             markFired
             return (Core.Expr folded tipe sp)
+    -- A partial application bound once and applied at once, which is what
+    -- inlining @apR@ leaves of @taskA |> andThen f@: the two argument lists
+    -- together are the one call, which a backend makes directly rather than
+    -- through the function's curried form (m2-beam-toptier.md §TT14.7).
+    -- Every argument is a value, so nothing is evaluated in another order.
+    Core.ELet [Core.Bind b bound] (Core.Expr (Core.EApp (Core.Expr (Core.EVar v) _ _) later) _ _)
+      | v == Core._binderName b,
+        Just (h, earlier) <- partial bound,
+        Core.TFun params _ <- Core.typeOf h,
+        length earlier + length later == length params,
+        not (Set.member v (Set.unions (map Refs.freeLocals later))),
+        all evaluated (earlier ++ later) ->
+          do
+            markFired
+            node ctx (Core.Expr (Core.EApp h (earlier ++ later)) tipe sp)
+    -- A field of a record written out in place, as a witness table is once
+    -- specialization has chosen it: @(record .outbound = f).outbound@ is @f@.
+    -- The other fields are values, so dropping them drops nothing but work.
+    Core.EAccess (Core.Expr (Core.ERecord fields) _ _) f
+      | Just chosen <- lookup f fields,
+        all (evaluated . snd) fields ->
+          do
+            markFired
+            return (Core.Expr (Core._exprValue chosen) tipe sp)
+    -- The same of a variable a @let@ bound to such a record, when the field is
+    -- atomic: an inlined function's record argument (@asciiDelta code { lo =
+    -- 65, hi = 90, delta = 32 }@), whose fields then fold as literals do.
+    Core.EAccess (Core.Expr (Core.EVar x) _ _) f
+      | Just (Core.Expr (Core.ERecord fields) _ _) <- Map.lookup x (_known ctx),
+        Just chosen <- lookup f fields,
+        atomic chosen,
+        Core._exprType chosen == tipe ->
+          do
+            markFired
+            return (Core.Expr (Core._exprValue chosen) tipe sp)
+    -- A lambda written out in place and applied at once, as a witness's
+    -- method is once the access above has read it: the body, with the
+    -- arguments bound as a call's are ('bindAll').
+    Core.EApp (Core.Expr (Core.ELam params body) _ _) args
+      | length params == length args ->
+          do
+            markFired
+            out <- bindAll (zip params args) body tipe sp
+            simplify ctx out
     _ -> return e
+
+-- | A global applied to fewer arguments than it takes, or named alone.
+partial :: Core.Expr -> Maybe (Core.Expr, [Core.Expr])
+partial e =
+  case Core._exprValue e of
+    Core.EGlobal _ -> Just (e, [])
+    Core.EApp h@(Core.Expr (Core.EGlobal _) _ _) args -> Just (h, args)
+    _ -> Nothing
+
+-- | Evaluated already: an atomic expression, a global, a lambda, or a global
+-- given fewer arguments than it takes, each of them evaluated, which builds a
+-- closure and runs nothing.
+evaluated :: Core.Expr -> Bool
+evaluated e =
+  case Core._exprValue e of
+    Core.EGlobal _ -> True
+    Core.ELam _ _ -> True
+    Core.EApp h@(Core.Expr (Core.EGlobal _) _ _) args
+      | Core.TFun params _ <- Core.typeOf h ->
+          length args < length params && all evaluated args
+    _ -> atomic e
 
 -- | A primitive of literals, computed: what inlining a comparison of two
 -- constants leaves (@clamp 0 2147483647 0@ in @Dict.keys@, @negate 3 == 0@), and which a
@@ -333,6 +405,7 @@ fold op args =
     (Prim.IntOp Prim.I64 p, [Core.ELit (Core.LInt64 a), Core.ELit (Core.LInt64 b)]) -> arith Core.LInt64 p a b
     (Prim.IntOp Prim.U32 p, [Core.ELit (Core.LUInt32 a), Core.ELit (Core.LUInt32 b)]) -> arith Core.LUInt32 p a b
     (Prim.IntOp Prim.U64 p, [Core.ELit (Core.LUInt64 a), Core.ELit (Core.LUInt64 b)]) -> arith Core.LUInt64 p a b
+    (Prim.StrOp Prim.SEq, [Core.ELit (Core.LString a), Core.ELit (Core.LString b)]) -> Just (bool (a == b))
     (Prim.IntOp Prim.I32 Prim.INeg, [Core.ELit (Core.LInt a)]) -> Just (Core.ELit (Core.LInt (negate a)))
     (Prim.IntOp Prim.I64 Prim.INeg, [Core.ELit (Core.LInt64 a)]) -> Just (Core.ELit (Core.LInt64 (negate a)))
     _ -> Nothing
@@ -513,8 +586,8 @@ selectBy matching scrut alts fallback =
             NoMatch -> walk more
             Unknown -> Nothing
 
--- | What a @let@'s value is known to be: a constructor or a literal, or one at
--- the end of @let@s. Behind a @let@ the constructor's fields may name what
+-- | What a @let@'s value is known to be: a constructor, a literal or a record
+-- written out, or a constructor or literal at the end of @let@s. Behind a @let@ the constructor's fields may name what
 -- that @let@ bound, which is out of scope at the case, so they are kept only
 -- as their types: 'matchBound' binds no field that is not atomic, and an
 -- 'Core.Unreachable' crash is not.
@@ -523,10 +596,14 @@ knownValue v =
   case Core._exprValue v of
     Core.ECtor _ _ _ -> Just v
     Core.ELit _ -> Just v
+    Core.ERecord _ -> Just v
     Core.ELet _ body ->
       case knownValue body of
         Just (Core.Expr (Core.ECtor q tag args) t sp) ->
           Just (Core.Expr (Core.ECtor q tag [Core.Expr (Core.ECrash Core.Unreachable) (Core.typeOf a) (Core.spanOf a) | a <- args]) t sp)
+        -- A record's fields are what its access reads, and behind a @let@ they
+        -- may name what the @let@ bound, so such a record is not known.
+        Just (Core.Expr (Core.ERecord _) _ _) -> Nothing
         other -> other
     _ -> Nothing
 
