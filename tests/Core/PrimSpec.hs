@@ -19,7 +19,7 @@ spec = do
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
       -- someone noticing.
-      length allPrims `shouldBe` 183
+      length allPrims `shouldBe` 185
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -69,6 +69,16 @@ spec = do
         primCode (ConvOp F64FromWords)
       )
         `shouldBe` (182, "task_parallel", 1, 169, 181)
+
+    it "appends D449's two primitives after every code that existed" $
+      -- A Geng process's context (m2-beam-toptier.md §TT21), after
+      -- `task_parallel`, which did not move.
+      ( map (primCode . TaskOp) [TaskContext, TaskWithContext],
+        map (primName . TaskOp) [TaskContext, TaskWithContext],
+        map (primArity . TaskOp) [TaskContext, TaskWithContext],
+        primCode (TaskOp TaskParallel)
+      )
+        `shouldBe` ([183, 184], ["task_context", "task_with_context"], [0, 2], 182)
 
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved
@@ -135,14 +145,14 @@ spec = do
           names = [t <> "_" <> op | t <- ["i32", "i64", "u32", "u64"], op <- ops]
        in filter (\n -> primFromName n == Nothing) names `shouldBe` []
 
-    it "gives every primitive but source_new an arity of at least one" $
-      -- @source_new@ is the only one that takes nothing (D252): @Source.new@ is
-      -- a @Task@, and a @Task@ is a description that allocates nothing until it
-      -- is run, so a unit argument would buy no delay the type does not already
-      -- give. Everything that eta-expands a primitive used as a value has to
-      -- cope with an empty argument list because of it
-      -- ('Core.Lower.Expression.primValue').
-      filter (\p -> primArity p < 1) allPrims `shouldBe` [TaskOp SourceNew]
+    it "gives every primitive but source_new and task_context an arity of at least one" $
+      -- @source_new@ takes nothing (D252): @Source.new@ is a @Task@, and a
+      -- @Task@ is a description that allocates nothing until it is run, so a
+      -- unit argument would buy no delay the type does not already give.
+      -- @task_context@ is the same case (D449). Everything that eta-expands a
+      -- primitive used as a value has to cope with an empty argument list
+      -- because of them ('Core.Lower.Expression.primValue').
+      filter (\p -> primArity p < 1) allPrims `shouldBe` [TaskOp SourceNew, TaskOp TaskContext]
 
   describe "the wire codes" $
     it "keeps the first primitive at zero" $

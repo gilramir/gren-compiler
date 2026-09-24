@@ -632,6 +632,8 @@ task p args =
     (TaskKill, [_]) -> helper "_TaskPrim_kill" args
     -- D373: JavaScript has one core to give, so a parallel is a concurrent.
     (TaskParallel, [_]) -> helper "_TaskPrim_concurrent" args
+    (TaskContext, []) -> JS.Ref (JsName.fromLocalHumanReadable "_TaskPrim_context")
+    (TaskWithContext, [_, _]) -> helper "_TaskPrim_withContext" args
     (TaskFinally, _) -> arityError (TaskOp p) args
     _ -> source p args
   where
@@ -668,9 +670,12 @@ taskHelpers =
 //   3 AND_THEN  { callback, task }
 //   4 ON_ERROR  { callback, task }
 //   5 BRACKET   { release, task }
+//   7 CONTEXT   {}                         the process's context (D449)
+//   8 WITH      { context, task }          `task`, under `context`
 //
 // A process's stack holds frames of kind 0 and 1, which continue a success or a
-// failure, and 6 RELEASE { release }. The tags are numbers because the REPL's
+// failure, 6 RELEASE { release }, and 7 RESTORE { context }, which puts back
+// the context a WITH replaced when its task ends either way. The tags are numbers because the REPL's
 // printer showed any object whose `$` was a number as `<internals>`; D410
 // deleted the REPL, and nothing reads the tags but the scheduler.
 
@@ -696,6 +701,19 @@ function _TaskPrim_binding(callback) {
   return {
     $: 2,
     callback: callback,
+  };
+}
+
+// D449 (geng-lang m2-beam-toptier.md §TT21). A process's context is an array
+// of `{ key, value }` strings; a process starts with its spawner's, which is
+// the process being stepped when it is made, and the empty array otherwise.
+var _TaskPrim_context = { $: 7 };
+
+function _TaskPrim_withContext(context, task) {
+  return {
+    $: 8,
+    context: context,
+    task: task,
   };
 }
 
@@ -902,6 +920,9 @@ function _TaskPrim_map2(callback, taskA, taskB) {
 
 var _TaskPrim_guid = 0;
 
+// The process being stepped, whose context a process it makes inherits.
+var _TaskPrim_current = null;
+
 function _TaskPrim_rawSpawn(task) {
   var proc = {
     $: 0,
@@ -910,6 +931,7 @@ function _TaskPrim_rawSpawn(task) {
     stack: null,
     wait: null,
     cancel: null,
+    context: _TaskPrim_current ? _TaskPrim_current.context : [],
   };
 
   _TaskPrim_enqueue(proc);
@@ -1079,6 +1101,7 @@ type alias Process =
                  | { $: RELEASE, release: () -> Task Never {}, rest: stack }
   , wait : null | {}               the token of the wait in progress
   , cancel : null | () -> ?Task    that wait's cancel function
+  , context : Array { key, value } D449
   }
 
 */
@@ -1105,6 +1128,16 @@ function _TaskPrim_enqueue(proc) {
 }
 
 function _TaskPrim_step(proc) {
+  var outer = _TaskPrim_current;
+  _TaskPrim_current = proc;
+  try {
+    _TaskPrim_stepIn(proc);
+  } finally {
+    _TaskPrim_current = outer;
+  }
+}
+
+function _TaskPrim_stepIn(proc) {
   stepping: while (proc.root) {
     var rootTag = proc.root.$;
     if (rootTag === 0 || rootTag === 1) {
@@ -1121,6 +1154,9 @@ function _TaskPrim_step(proc) {
           proc.root = _TaskPrim_releasing(proc.stack, proc.root);
           proc.stack = proc.stack.rest;
           continue stepping;
+        }
+        if (proc.stack.$ === 7) {
+          proc.context = proc.stack.context;
         }
         proc.stack = proc.stack.rest;
       }
@@ -1160,6 +1196,16 @@ function _TaskPrim_step(proc) {
         release: proc.root.release,
         rest: proc.stack,
       };
+      proc.root = proc.root.task;
+    } else if (rootTag === 7) {
+      proc.root = _TaskPrim_succeed(proc.context);
+    } else if (rootTag === 8) {
+      proc.stack = {
+        $: 7,
+        context: proc.context,
+        rest: proc.stack,
+      };
+      proc.context = proc.root.context;
       proc.root = proc.root.task;
     } // if (rootTag === 3 || rootTag === 4)
     else {

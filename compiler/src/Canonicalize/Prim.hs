@@ -298,6 +298,8 @@ taskType p =
     TaskSpawn -> Just (fn [tTask x a] (tTask y tProcessId))
     TaskKill -> Just (fn [tProcessId] (tTask x tUnit))
     TaskParallel -> Just (fn [tArray (tTask x a)] (tTask x (tArray a)))
+    TaskContext -> Just (fn [] (tTask x (tArray tContextEntry)))
+    TaskWithContext -> Just (fn [tArray tContextEntry, tTask x a] (tTask x a))
     _ -> sourceType p
   where
     a = Can.TVar "a"
@@ -343,6 +345,14 @@ tTask x ok = Can.TType ModuleName.taskInternal "Task" [x, ok]
 
 tUnit :: Can.Type
 tUnit = Can.TRecord Map.empty Nothing
+
+-- | One entry of a Geng process's context (D449): @{ key : String, value :
+-- String }@.
+tContextEntry :: Can.Type
+tContextEntry =
+  Can.TRecord
+    (Map.fromList [("key", Can.FieldType 0 tString), ("value", Can.FieldType 1 tString)])
+    Nothing
 
 fn :: [Can.Type] -> Can.Type -> Can.Type
 fn args result = foldr Can.TLambda result args

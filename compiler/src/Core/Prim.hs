@@ -337,6 +337,12 @@ data TransientPrim
 -- each child in a scheduler of its own where the backend has more than one
 -- core to give it. A backend that has not is free to emit it as
 -- 'TaskConcurrent', and JavaScript does.
+--
+-- 'TaskContext' and 'TaskWithContext' are D449's (geng-lang
+-- @m2-beam-toptier.md@ §TT21), __appended__ after 'TaskParallel': a Geng
+-- process's context, an array of key and value strings that the process's
+-- children inherit, read and set for a task. They are the scheduler's because
+-- only the scheduler knows which process is running.
 data TaskPrim
   = TaskSucceed
   | TaskFail
@@ -356,6 +362,8 @@ data TaskPrim
   | TaskSpawn
   | TaskKill
   | TaskParallel
+  | TaskContext
+  | TaskWithContext
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 data PrimOp
@@ -417,6 +425,8 @@ allPrims =
     ++ map ConvOp [F64HighWord .. maxBound]
     -- Appended by D398 (m2-beam.md §BM29).
     ++ [TaskOp TaskParallel]
+    -- Appended by D449 (m2-beam-toptier.md §TT21).
+    ++ map TaskOp [TaskContext, TaskWithContext]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -603,6 +613,8 @@ taskPrimName p =
     TaskSpawn -> "task_spawn"
     TaskKill -> "task_kill"
     TaskParallel -> "task_parallel"
+    TaskContext -> "task_context"
+    TaskWithContext -> "task_with_context"
 
 nameTable :: Map.Map Text PrimOp
 nameTable = Map.fromList [(primName p, p) | p <- allPrims]
@@ -740,4 +752,7 @@ primArity op =
         TaskSpawn -> 1
         TaskKill -> 1
         TaskParallel -> 1
+        TaskContext -> 0
+        -- the context, and the task that runs under it
+        TaskWithContext -> 2
     DebugLog -> 2
