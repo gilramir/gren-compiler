@@ -5,7 +5,7 @@
 -- folded away (@docs/m2-beam-toptier.md@ §TT11, D442).
 --
 -- Every operator in Geng is a function, and after specialization most of them
--- are a short chain of small ones: @n < 2@ at @Int@ is @Basics.lt$s2@, which
+-- are a short chain of small ones: @n < 2@ at @Int@ is a copy of @Basics.lt@, which
 -- calls the @Ord Int@ instance's @compare@, which calls @ltInt@, which is the
 -- primitive, and @lt@ then matches the 'Basics.Order' that @compare@ built.
 -- A backend that cannot inline across modules — the BEAM cannot — pays every
@@ -13,7 +13,7 @@
 -- what such a compiler's middle end does, and it is Core → Core, so every
 -- backend gains:
 --
--- > case lt$s2 n 2 of …     ⟹     case prim i32_lt n 2 of …
+-- > case lt$s… n 2 of …     ⟹     case prim i32_lt n 2 of …
 --
 -- __What is inlined__: a top-level binding whose value is a lambda, whose body
 -- is at most 'sizeLimit' nodes once this pass has run over it, that is not

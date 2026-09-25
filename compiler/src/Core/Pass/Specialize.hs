@@ -65,7 +65,9 @@ import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Gren.Fingerprint qualified as FP
 import Gren.ModuleName qualified as ModuleName
+import Gren.Package qualified as Pkg
 
 -- WHAT A WITNESS IS, TO THIS PASS
 
@@ -270,25 +272,68 @@ witOf e =
 
 -- NAMES
 
--- | One name per instantiation, assigned from the sorted key set.
+-- | One name per instantiation, __named by the instantiation it is__ (D456,
+-- @m2-beam-toptier.md@ §TT25): @$s@ and the first eight hex digits of a
+-- fingerprint of its key, the generic binding and the witnesses it is handed,
+-- each instance table by its package, module and name and each built witness
+-- by its type.
 --
--- The suffix is positional over @Set.toAscList@ rather than a counter over the
--- traversal, so the name a copy gets depends on /which/ instantiations a program
--- needs and not on the order they were found in — the same discipline C6 asks of
--- every other generated name, and one less thing for a second frontend to
--- reproduce. @$@ cannot appear in a Gren name, so no copy can collide with
--- something written.
+-- The name used to be a position among the binding's instantiations, and a
+-- position is a fact about the whole program: a second build that needs one
+-- more instantiation of @Table.get@ gave @get$s0@ to it, so a caller whose
+-- source had not changed changed, and code of the first build still running
+-- during an upgrade reached the second build's @get$s0@ and ran it at another
+-- type (§TT25.3). Named by the key, the same name is the same instantiation in
+-- every build, and old code that asks for one the new build does not have gets
+-- @undef@. It is still independent of the order instantiations were found in,
+-- which C6 asks of every generated name, and @$@ still cannot appear in a Gren
+-- name, so no copy collides with something written.
+--
+-- Two keys of one binding whose first eight digits agree take all sixteen,
+-- and so does the rest of that binding's group, which keeps the choice a
+-- property of the group alone.
 assign :: Set Key -> Map Key Name
 assign keys =
   Map.fromList
-    [ (key, suffixed (Core._qnName name) i)
+    [ (key, Name.fromChars (Name.toChars (Core._qnName name) ++ "$s" ++ take width digits))
     | (name, group) <- Map.toAscList grouped,
-      (i, key) <- zip [0 :: Int ..] group
+      let hexes = [(key, FP.toHex (keyPrint key)) | key <- group],
+      let width = if distinct (map (take 8 . snd) hexes) then 8 else 16,
+      (key, digits) <- hexes
     ]
   where
     grouped =
-      Map.map List.sort (Map.fromListWith (++) [(name, [key]) | key@(name, _) <- Set.toList keys])
-    suffixed base i = Name.fromChars (Name.toChars base ++ "$s" ++ show i)
+      Map.fromListWith (++) [(name, [key]) | key@(name, _) <- Set.toList keys]
+    distinct xs = length xs == Set.size (Set.fromList xs)
+
+-- | What 'assign' names a copy by: every part of the key, length-prefixed by
+-- 'FP.chars' and tagged by shape, so that two different keys feed different
+-- bytes.
+keyPrint :: Key -> FP.Fingerprint
+keyPrint (name, wits) =
+  foldl (flip ($)) FP.empty (qual name : count wits : map wit wits)
+  where
+    count xs = FP.word64 (fromIntegral (length xs))
+    tag = FP.chars
+    qual (Core.QualName (ModuleName.Canonical pkg home) n) fp =
+      FP.chars (Name.toChars n) (FP.chars (Name.toChars home) (FP.chars (Pkg.toChars pkg) fp))
+    wit w fp =
+      case w of
+        Wit table args -> foldl (flip wit) (count args (qual table (tag "w" fp))) args
+        Built tipe _ -> ty tipe (tag "b" fp)
+    ty t fp =
+      case t of
+        Core.TVar v -> FP.chars (Name.toChars v) (tag "v" fp)
+        Core.TCon q args -> foldl (flip ty) (count args (qual q (tag "c" fp))) args
+        Core.TFun args result -> ty result (foldl (flip ty) (count args (tag "f" fp)) args)
+        Core.TRecord fields row ->
+          let fp' = count fields (tag "r" fp)
+              fp'' = foldl (\acc (field, ft) -> ty ft (FP.chars (Name.toChars field) acc)) fp' fields
+           in maybe (tag "closed" fp'') (\r -> FP.chars (Name.toChars r) (tag "open" fp'')) row
+        Core.TForall vars constraints body ->
+          let fp' = foldl (\acc v -> FP.chars (Name.toChars v) acc) (count vars (tag "a" fp)) vars
+              fp'' = foldl (\acc (Core.CClass c ct) -> ty ct (qual c acc)) (count constraints fp') constraints
+           in ty body fp''
 
 nameOf :: Map Key Name -> Key -> Core.QualName
 nameOf names key@(Core.QualName home _, _) =

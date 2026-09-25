@@ -620,8 +620,8 @@ callbackModule modul =
 -- (D400, @m2-interop.md@ §EI13).
 --
 -- A constrained root has none. R1 specializes a constrained binding at each
--- type the program uses it at, into copies named by the order it met the uses
--- (@sumAll$s0@, @sumAll$s1@), and what is left under the binding's own name
+-- type the program uses it at, into copies named by the instance each is
+-- (@sumAll$s@ and eight hex digits, D456), and what is left under the binding's own name
 -- takes a witness record as its first argument, which nothing outside Geng
 -- can build. So a root that carries a constraint is refused by name, and the
 -- report says to expose a wrapper at one type. Only 'coreRoots''s @beam@ roots

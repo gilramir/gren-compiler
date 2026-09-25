@@ -20,11 +20,11 @@ spec = do
   describe "one copy per instantiation" $ do
     it "makes a copy for each distinct witness a generic is applied to" $
       let out = pass [same, use "callInt" (witnessOf "eqInt"), use "callStr" (witnessOf "eqStr")]
-       in defNames out `shouldBe` ["callInt", "callStr", "eqInt", "eqStr", "same", "same$s0", "same$s1"]
+       in map (masked "same") (defNames out) `shouldBe` ["callInt", "callStr", "eqInt", "eqStr", "same", "same$s…", "same$s…"]
 
     it "makes one copy when two sites ask for the same witness" $
       let out = pass [same, use "one" (witnessOf "eqInt"), use "two" (witnessOf "eqInt")]
-       in List.filter (isCopy "same") (defNames out) `shouldBe` ["same$s0"]
+       in length (List.filter (isCopy "same") (defNames out)) `shouldBe` 1
 
     it "leaves the generic binding alone, for the linker to drop" $
       let out = pass [same, use "callInt" (witnessOf "eqInt")]
@@ -32,37 +32,37 @@ spec = do
 
     it "rewrites the call site to name the copy" $
       let out = pass [same, use "callInt" (witnessOf "eqInt")]
-       in globalsOf (valueOf out "callInt") `shouldBe` ["same$s0"]
+       in globalsOf (valueOf out "callInt") `shouldBe` [theCopy "same" out]
 
   describe "erasing the witness" $ do
     it "substitutes the witness parameter away" $
       let out = pass [same, use "callInt" (witnessOf "eqInt")]
-       in valueOf out "same$s0" `shouldSatisfy` not . isWitLam
+       in valueOf out (theCopy "same" out) `shouldSatisfy` not . isWitLam
 
     it "folds the projection out of a known table into the method itself" $
       -- The half that pays: dropping the parameter alone would leave the copy
       -- reading a field out of a record whose identity it now knows, which was
       -- the cost the pass exists to remove (§G27.2).
       let out = pass [same, use "callInt" (witnessOf "eqInt")]
-       in globalsOf (valueOf out "same$s0") `shouldBe` ["intEq"]
+       in globalsOf (valueOf out (theCopy "same" out)) `shouldBe` ["intEq"]
 
     it "leaves a projection off a record whose fields are not names" $
       -- The fold's condition is that the field is a name, so that replacing the
       -- projection duplicates no work. A computed field is not one.
       let table = def "computed" (record [("eq", call (globalE "mk") [])])
           out = pass [same, table, use "callInt" (globalE "computed")]
-       in globalsOf (valueOf out "same$s0") `shouldBe` ["computed"]
+       in globalsOf (valueOf out (theCopy "same" out)) `shouldBe` ["computed"]
 
   describe "an instance with a context" $ do
     it "specializes the table binding too, so a nested witness is a name" $
       -- `Eq a => Eq (Array a)` is an `EWitLam` over a table, which is a generic
       -- binding like any other — D125 doing its job.
       let out = pass [same, arrayEq, use "callArr" (witApp (globalE "eqArray") [witnessOf "eqInt"])]
-       in List.filter (isCopy "eqArray") (defNames out) `shouldBe` ["eqArray$s0"]
+       in length (List.filter (isCopy "eqArray") (defNames out)) `shouldBe` 1
 
     it "reaches the witness the nested one is built from" $
       let out = pass [same, arrayEq, use "callArr" (witApp (globalE "eqArray") [witnessOf "eqInt"])]
-       in globalsOf (valueOf out "same$s0") `shouldBe` ["eqArray$s0"]
+       in globalsOf (valueOf out (theCopy "same" out)) `shouldBe` [theCopy "eqArray" out]
 
   describe "what it leaves alone" $ do
     it "leaves a witness application whose argument is a parameter" $
@@ -85,25 +85,38 @@ spec = do
       -- instance table whose binding carries the concrete type, so matching it
       -- against the generic witness parameter says what `a` was.
       let out = pass [generic, useOf "generic" "callInt" (witnessOf "eqInt")]
-       in typeOf out "generic$s0" `shouldBe` Core.TFun [intT] intT
+       in typeOf out (theCopy "generic" out) `shouldBe` Core.TFun [intT] intT
 
     it "substitutes it into the binders inside the body too" $
       -- What a JS backend never reads and the Core -> C spike does: a copy with
       -- a boxed parameter where the call site passes an int32_t.
       let out = pass [generic, useOf "generic" "callInt" (witnessOf "eqInt")]
-       in lamBinderTypes (valueOf out "generic$s0") `shouldBe` [intT]
+       in lamBinderTypes (valueOf out (theCopy "generic" out)) `shouldBe` [intT]
 
     it "keeps quantifying whatever the instantiation did not fix" $
       let out = pass [generic2, useOf "generic2" "callInt" (witnessOf "eqInt")]
-       in typeOf out "generic2$s0" `shouldBe` Core.TForall ["b"] [] (Core.TFun [intT] (Core.TVar "b"))
+       in typeOf out (theCopy "generic2" out) `shouldBe` Core.TForall ["b"] [] (Core.TFun [intT] (Core.TVar "b"))
 
-  describe "the names" $
-    it "numbers a generic's copies over the sorted key set, not the traversal" $
+  describe "the names" $ do
+    it "names a generic's copies by their keys, not the traversal" $
       -- Same two instantiations, opposite discovery order, same two names on the
       -- same two witnesses (C6).
       let forward = pass [same, use "a" (witnessOf "eqInt"), use "b" (witnessOf "eqStr")]
           backward = pass [same, use "b" (witnessOf "eqStr"), use "a" (witnessOf "eqInt")]
        in globalsOf (valueOf forward "a") `shouldBe` globalsOf (valueOf backward "a")
+
+    it "gives an instantiation the same name whatever others the program has" $
+      -- D456: a build that needs one more instantiation leaves the others'
+      -- names alone, so a caller that did not change does not change and old
+      -- code never reaches another type's copy under its own name (§TT25.3).
+      let alone = pass [same, use "a" (witnessOf "eqInt")]
+          joined = pass [same, use "a" (witnessOf "eqInt"), use "b" (witnessOf "eqStr")]
+       in globalsOf (valueOf alone "a") `shouldBe` globalsOf (valueOf joined "a")
+
+    it "is $s and eight hex digits" $
+      let out = pass [same, use "a" (witnessOf "eqInt")]
+       in drop (length ("same$s" :: String)) (Name.toChars (theCopy "same" out))
+            `shouldSatisfy` (\digits -> length digits == 8 && all (`elem` ("0123456789abcdef" :: String)) digits)
 
   describe "a local constrained definition (§G55, D357)" $ do
     it "gets a copy per witness row, bound in its own let, and is dropped" $
@@ -125,7 +138,7 @@ spec = do
     it "specializes it in a copy of its enclosing definition" $
       let body = witLam ["$w0"] (letE [localSame] (witApp (var "loc") [var "$w0"]))
           out = pass [Core.Bind (Core.Binder "onward" witFunT span0) body, useOf "onward" "callInt" (witnessOf "eqInt")]
-       in letNames (valueOf out "onward$s0") `shouldBe` ["loc$s0"]
+       in letNames (valueOf out (theCopy "onward" out)) `shouldBe` ["loc$s0"]
 
     it "gives a recursive local one copy, which calls itself" $
       let self = Core.Bind (Core.Binder "loop" witFunT span0) (witLam ["$w1"] (witApp (var "loop") [var "$w1"]))
@@ -172,6 +185,19 @@ valueOf m wanted =
   case [v | Core.Bind b v <- Core._moduleDefs m, Core._binderName b == wanted] of
     v : _ -> v
     [] -> error ("no definition named " ++ show wanted)
+
+-- | A program's one copy of @base@, whose name is a fingerprint (D456).
+theCopy :: Name -> Core.Module -> Name
+theCopy base m =
+  case List.filter (isCopy base) (defNames m) of
+    [c] -> c
+    cs -> error ("not one copy of " ++ show base ++ ": " ++ show cs)
+
+-- | A copy of @base@ with its digits hidden, for a list of names to compare.
+masked :: Name -> Name -> Name
+masked base name
+  | isCopy base name = Name.fromChars (Name.toChars base ++ "$s…")
+  | otherwise = name
 
 -- | Whether a name is one of @base@'s copies.
 isCopy :: Name -> Name -> Bool
