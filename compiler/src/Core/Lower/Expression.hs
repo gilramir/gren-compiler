@@ -153,6 +153,8 @@ witness sp w =
       inboundWitness sp holes (lowerType subject)
     Resolve.FromOutbound holes subject _ ->
       outboundWitness sp holes (lowerType subject)
+    Resolve.FromMigrate holes subject _ ->
+      migrateWitness sp holes (lowerType subject)
 
 -- | The table for @Inbound t@ the compiler supplies (geng-lang
 -- `m2-interop.md` D422, §EI23): @{ inbound = Inbound.check h1 … hn }@, where
@@ -189,6 +191,30 @@ outboundWitness sp holes subject =
           [] -> reference outType
           _ -> Core.Expr (Core.EApp (reference (Core.TFun (map Core.typeOf handed) outType)) handed) outType sp
    in Core.Expr (Core.ERecord [(nameOutbound, value)]) tipe sp
+
+-- | The table for @Migrate t@ (geng-lang `m2-beam-toptier.md` D458):
+-- @{ migrate = Migrate.check h1 … hn }@, built as `Inbound`'s is, with the
+-- reference typed at @String -> Handle -> t@ and each @hi@ a hole's
+-- @migrate@.
+migrateWitness :: Core.Span -> [(Can.Type, Resolve.Witness)] -> Core.Type -> Core.Expr
+migrateWitness sp holes subject =
+  let checkType = Core.TFun [stringType, handleType] subject
+      tipe = Core.TRecord [(nameMigrate, checkType)] Nothing
+      handed = map (\(_, w) -> method sp migrateCls nameMigrate w) holes
+      reference t = Core.Expr (Core.EGlobal (Core.QualName ModuleName.migrate Name.migrateCheck)) t sp
+      value =
+        case handed of
+          [] -> reference checkType
+          _ -> Core.Expr (Core.EApp (reference (Core.TFun (map Core.typeOf handed) checkType)) handed) checkType sp
+   in Core.Expr (Core.ERecord [(nameMigrate, value)]) tipe sp
+
+migrateCls :: Can.Class
+migrateCls =
+  Can.Class ModuleName.migrate Name.migrateClass
+
+nameMigrate :: Name
+nameMigrate =
+  Name.fromChars "migrate"
 
 outboundCls :: Can.Class
 outboundCls =

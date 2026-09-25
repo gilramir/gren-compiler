@@ -172,6 +172,8 @@ generate env (Core.Expr value tipe sp) =
         Core.EGlobal q
           | isInboundCheck q ->
               JsExpr (inboundCheck env pos (inboundHoles tipe))
+          | isMigrateCheck q ->
+              JsExpr (checkRef env pos q (inboundHoles tipe))
           | isOutboundOut q ->
               JsExpr (outboundOut env pos (outboundHoles tipe))
           | otherwise ->
@@ -483,6 +485,12 @@ call env pos fn args =
            in if null kept
                 then normalCall env pos (inboundCheck env pos holes) (map (jsExpr env) args)
                 else globalCall env pos q (map (jsExpr env) kept)
+      | isMigrateCheck q ->
+          let holes = inboundHoles (Core.typeOf fn)
+              kept = drop holes args
+           in if null kept
+                then normalCall env pos (checkRef env pos q holes) (map (jsExpr env) args)
+                else globalCall env pos q (map (jsExpr env) kept)
       | isOutboundOut q ->
           let holes = outboundHoles (Core.typeOf fn)
               kept = drop holes args
@@ -525,10 +533,20 @@ isInboundCheck (Core.QualName home name) =
 -- | The reference with @holes@ leading functions to take and drop.
 inboundCheck :: Env -> A.Position -> Int -> JS.Expr
 inboundCheck env pos holes =
+  checkRef env pos (Core.QualName ModuleName.inbound Name.inboundCheck) holes
+
+-- | A check's row with @holes@ leading functions to take and drop.
+checkRef :: Env -> A.Position -> Core.QualName -> Int -> JS.Expr
+checkRef env pos checkName holes =
   let dropped = JsName.fromLocal (Name.fromChars "_")
    in iterate (\inner -> JS.Function Nothing [dropped] [JS.Return inner]) (globalRef env pos checkName) !! holes
-  where
-    checkName = Core.QualName ModuleName.inbound Name.inboundCheck
+
+-- | `Migrate.check` (geng-lang `m2-beam-toptier.md` D458), `Inbound.check`'s
+-- shape: no `js` program is upgraded in place, so its holes are dropped and
+-- the row is what is left, as `Inbound`'s are.
+isMigrateCheck :: Core.QualName -> Bool
+isMigrateCheck (Core.QualName home name) =
+  home == ModuleName.migrate && name == Name.migrateCheck
 
 -- | How many holes a reference to `Inbound.check` is applied to first: the
 -- leading arguments that are themselves @String -> Handle -> t@.

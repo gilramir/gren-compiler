@@ -46,6 +46,9 @@ module Data.Name
     inboundModule,
     inboundCheck,
     outboundClass,
+    migrateClass,
+    migrateModule,
+    migrateCheck,
     outboundModule,
     outboundOut,
     char,
@@ -455,6 +458,21 @@ inboundModule =
 
 inboundCheck :: Name
 inboundCheck =
+  fromChars "check"
+
+-- | The `Migrate` class, its module, and the one row every compiler-supplied
+-- instance refers to (geng-lang `m2-beam-toptier.md` D458): the check an
+-- upgrade reads a value of the build before it with.
+migrateClass :: Name
+migrateClass =
+  fromChars "Migrate"
+
+migrateModule :: Name
+migrateModule =
+  fromChars "Migrate"
+
+migrateCheck :: Name
+migrateCheck =
   fromChars "check"
 
 -- | The `Outbound` class, its module, and the one row every

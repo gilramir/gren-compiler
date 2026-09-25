@@ -199,6 +199,11 @@ data Witness
     -- generated conversion cannot walk itself as holes, and a backend puts the
     -- conversion for @t@ in the reference's place.
     FromOutbound [(Can.Type, Witness)] Can.Type Can.Type
+  | -- | A witness for @Migrate t@, which the compiler supplies at every type
+    -- (geng-lang `m2-beam-toptier.md` D458), built as `Inbound`'s is. No
+    -- instance of it is written, so its holes are the type variables alone,
+    -- and a backend generates a check over Geng's own representation of @t@.
+    FromMigrate [(Can.Type, Witness)] Can.Type Can.Type
 
 -- WHAT GOES IN
 
@@ -340,6 +345,8 @@ witnessFor env bound region wanted because cls tipe =
               inboundWitness env bound region wanted because cls actual
           | isOutbound cls ->
               outboundWitness env bound region wanted because cls actual
+          | isMigrate cls ->
+              migrateWitness env bound region wanted because cls actual
           | otherwise ->
               Left (E.NoInstance region wanted cls actual because)
         Just head_ ->
@@ -374,11 +381,17 @@ witnessFor env bound region wanted because cls tipe =
           inboundWitness env bound region wanted because cls actual
       | isOutbound cls ->
           outboundWitness env bound region wanted because cls actual
+      | isMigrate cls ->
+          migrateWitness env bound region wanted because cls actual
     actual@(Can.TLambda _ _)
       | isInbound cls ->
           inboundWitness env bound region wanted because cls actual
       | isOutbound cls ->
           outboundWitness env bound region wanted because cls actual
+      | isMigrate cls ->
+          -- D458: a function has an instance, whose check fails where it
+          -- meets one, since the class is asked of every server's state.
+          migrateWitness env bound region wanted because cls actual
     actual ->
       -- A function, an extensible record, or a record at a class with no
       -- structural definition. An instance head is a type constructor applied
@@ -426,6 +439,25 @@ outboundWitness env bound region wanted because cls actual =
     ws <- traverse (\hole -> (,) hole <$> witnessFor env bound region wanted deeper cls hole) (inboundHoles env cls actual)
     Right (FromOutbound ws actual (witnessType env cls actual))
 
+-- | The table for @Migrate t@ (D458), built as 'inboundWitness' builds
+-- `Inbound`'s. `Migrate` has no written instance, so its holes are @t@'s type
+-- variables, and one the enclosing definition does not constrain is refused
+-- as `Inbound`'s is.
+migrateWitness ::
+  Env ->
+  Bound ->
+  A.Region ->
+  E.Wanted ->
+  [(Can.Class, Can.Type)] ->
+  Can.Class ->
+  Can.Type ->
+  Either E.Error Witness
+migrateWitness env bound region wanted because cls actual =
+  do
+    let deeper = because ++ [(cls, actual)]
+    ws <- traverse (\hole -> (,) hole <$> witnessFor env bound region wanted deeper cls hole) (inboundHoles env cls actual)
+    Right (FromMigrate ws actual (witnessType env cls actual))
+
 -- | The subterms of a type that a generated check hands to someone else, in
 -- the order they are met, each once: a type variable, and a type with a
 -- written instance. A function's arguments are not walked, since they go out
@@ -458,6 +490,11 @@ isInbound (Can.Class home name) =
 isOutbound :: Can.Class -> Bool
 isOutbound (Can.Class home name) =
   home == ModuleName.outbound && name == Name.outboundClass
+
+-- | `Migrate`, whose instances the compiler supplies at every type (D458).
+isMigrate :: Can.Class -> Bool
+isMigrate (Can.Class home name) =
+  home == ModuleName.migrate && name == Name.migrateClass
 
 -- | Whether `classes.md` §2.1 defines what this class means for a record.
 --

@@ -36,6 +36,7 @@ module Gren.ModuleName
     inspect,
     inbound,
     outbound,
+    migrate,
     virtualDom,
     jsonDecode,
     jsonEncode,
@@ -205,6 +206,12 @@ inbound = Canonical Pkg.core Name.inboundModule
 -- through a row that takes anything at all (D428). Not default-imported.
 outbound :: Canonical
 outbound = Canonical Pkg.core Name.outboundModule
+
+-- | `Migrate`, whose class reads a value an earlier build of the program made,
+-- across an upgrade (geng-lang `m2-beam-toptier.md` D458). Not
+-- default-imported.
+migrate :: Canonical
+migrate = Canonical Pkg.core Name.migrateModule
 
 bytes :: Canonical
 bytes = Canonical Pkg.core "Bytes"

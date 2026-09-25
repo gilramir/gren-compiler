@@ -569,6 +569,10 @@ checkErlangVariables home (A.At nameRegion name) impls tipe
   -- instance at every type.
   | home == ModuleName.inbound && name == Name.inboundCheck =
       Result.ok ()
+  -- `Migrate.check` is the same row for an upgrade (geng-lang
+  -- `m2-beam-toptier.md` D458), replaced by the check the backend generates.
+  | home == ModuleName.migrate && name == Name.migrateCheck =
+      Result.ok ()
   | otherwise =
       let isPure = any (\(Src.ExternImpl p _ _) -> p) impls
           (args, result) = arrows tipe
