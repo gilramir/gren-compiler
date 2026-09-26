@@ -6,6 +6,7 @@ module Terminal.Beam exposing
     , identity
     , isTarget
     , plan
+    , paths
     , toolchain
     , libraries
     , libraryEnvironment

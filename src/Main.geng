@@ -14,6 +14,7 @@ import Terminal.Paths
 import Terminal.Init
 import Terminal.Beam
 import Terminal.Run
+import Terminal.Test
 import Terminal.Help
 import Cli.Report as Report exposing (Report)
 import Terminal.Format
@@ -496,6 +497,114 @@ parseUserArgs context compilerPath =
 
                                             else
                                                 Task.succeed exitCode
+                                        )
+                            )
+                        |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
+
+                CliParser.Test opts ->
+                    -- `geng test` (D461, geng-lang `m2-beam-toptier.md` §TT33):
+                    -- `geng run`'s build of a module the command writes, and
+                    -- then, for a `beam` application with a tree, the
+                    -- application in a node of its own instead of the escript.
+                    Terminal.Test.make
+                        { fsPermission = context.fsPermission
+                        , cpPermission = context.cpPermission
+                        , cacheRoot = context.cacheRoot
+                        , corePath = context.corePath
+                        , useColor = context.useColor
+                        , pathToString = context.pathToString
+                        }
+                        opts.modules
+                        |> Task.mapError Terminal.Test.prettifyError
+                        |> Task.andThen
+                            (\made ->
+                                let
+                                    compiling =
+                                        made.compiling
+
+                                    tools =
+                                        Terminal.Beam.toolchain context.envVars
+                                            { erlc = opts.erlc, escript = opts.escript }
+
+                                    environment =
+                                        Terminal.Beam.libraryEnvironment context.pathToString
+                                            context.envVars
+                                            (Terminal.Beam.libraries compiling.resolution.projectPath compiling.resolution.outline)
+
+                                    ordinary =
+                                        startBackend context compilerPath Dict.empty
+                                            |> Task.andThen
+                                                (talkToBackend context
+                                                    { headless = True
+                                                    , encodedCommand = compiling.encodedCommand
+                                                    }
+                                                )
+
+                                    built =
+                                        if compiling.beam then
+                                            Terminal.Beam.forgetProgram context.fsPermission compiling.outputPath
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        beamMake context
+                                                            compilerPath
+                                                            { encodedCommand = compiling.encodedCommand
+                                                            , headless = True
+                                                            , output = Just compiling.output
+                                                            , erlc = opts.erlc
+                                                            , escript = opts.escript
+                                                            }
+                                                            compiling.resolution
+                                                            ordinary
+                                                    )
+                                                |> Task.andThen
+                                                    (\exitCode ->
+                                                        if exitCode == 0 then
+                                                            Terminal.Beam.requireProgram context.fsPermission
+                                                                "GengTest"
+                                                                compiling.outputPath
+                                                                |> Task.map (\_ -> exitCode)
+
+                                                        else
+                                                            Task.succeed exitCode
+                                                    )
+
+                                        else
+                                            ordinary
+
+                                    thePlan =
+                                        Terminal.Beam.paths compiling.outputPath
+                                in
+                                built
+                                    |> Task.andThen
+                                        (\exitCode ->
+                                            if exitCode /= 0 then
+                                                Task.succeed exitCode
+
+                                            else if Terminal.Test.startsApplication made then
+                                                Terminal.Test.runApplication
+                                                    { cpPermission = context.cpPermission
+                                                    , erl = Terminal.Test.erlBeside context.envVars tools.escript
+                                                    , ebin = context.pathToString thePlan.ebin
+                                                    , application = (Terminal.Beam.identity thePlan made.outline).name
+                                                    , environment = environment
+                                                    }
+                                                    |> Task.mapError Terminal.Test.prettifyError
+
+                                            else
+                                                Terminal.Run.run
+                                                    { cpPermission = context.cpPermission
+                                                    , fsPermission = context.fsPermission
+                                                    , pathToString = context.pathToString
+                                                    , path = compiling.outputPath
+                                                    , escript =
+                                                        if compiling.beam then
+                                                            Just tools.escript
+
+                                                        else
+                                                            Nothing
+                                                    , environment = environment
+                                                    }
+                                                    |> Task.mapError Terminal.Run.prettifyError
                                         )
                             )
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))

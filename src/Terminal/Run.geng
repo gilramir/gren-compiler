@@ -1,6 +1,10 @@
 module Terminal.Run exposing
     ( Error
+    , Compiling
+    , ProjectOutline
+    , Build
     , make
+    , makeProjectWith
     , run
     , prettifyError
     )
@@ -101,8 +105,30 @@ make config =
 
 
 makeProject : MakeConfig -> ProjectOutline -> Task Error Compiling
-makeProject config projectOutline =
-    when getOutputPath projectOutline is
+makeProject config =
+    makeProjectWith config
+        { entryPoints = [ config.moduleName ]
+        , outputName = "app"
+        , prepare = Task.succeed
+        }
+
+
+{-| What a build is of, besides the project: the modules it starts from, the
+name of the program under the project's `.gren/`, and a step between
+resolving the packages and encoding the command, which `geng test` uses to
+add the module it writes to the sources (geng-lang `m2-beam-toptier.md`
+§TT33).
+-}
+type alias Build =
+    { entryPoints : Array ModuleName
+    , outputName : String
+    , prepare : PackageResolution -> Task Error PackageResolution
+    }
+
+
+makeProjectWith : { a | fsPermission : FileSystem.Permission, cacheRoot : Compiler.Paths.CacheRoot, corePath : Path, cpPermission : ChildProcess.Permission, useColor : Bool, pathToString : Path -> String } -> Build -> ProjectOutline -> Task Error Compiling
+makeProjectWith config build projectOutline =
+    when getOutputPath build.outputName projectOutline is
         Nothing ->
             Task.fail NotAnApplication
 
@@ -141,7 +167,7 @@ makeProject config projectOutline =
                             , output = Just output
                             , report = Nothing
                             , projectPath = packageResolution.projectPath
-                            , entryPoints = [ config.moduleName ]
+                            , entryPoints = build.entryPoints
                             , outline = packageResolution.outline
                             , rootSources = packageResolution.rootSources
                             , dependencies = packageResolution.dependencies
@@ -159,6 +185,7 @@ makeProject config projectOutline =
             in
             Help.getNullStream
                 |> Task.andThen installPackages
+                |> Task.andThen build.prepare
                 |> Task.map compiling
 
 
@@ -310,8 +337,8 @@ getProjectOutline fsPermission path =
                             |> Task.fail
             )
 
-getOutputPath : ProjectOutline -> Maybe { outputType : (String -> Backend.MakeOutput), outputPath : Path }
-getOutputPath projectOutline =
+getOutputPath : String -> ProjectOutline -> Maybe { outputType : (String -> Backend.MakeOutput), outputPath : Path }
+getOutputPath exeName projectOutline =
     let
         platform =
             when projectOutline.outline is
@@ -332,7 +359,7 @@ getOutputPath projectOutline =
     in
     when platform is
         Platform.Node ->
-            Just (getPath Backend.Exe "app")
+            Just (getPath Backend.Exe exeName)
         Platform.Browser ->
             Just (getPath Backend.Html "app.html")
         Platform.Common ->

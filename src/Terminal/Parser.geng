@@ -34,6 +34,7 @@ type Command
     | PackageDiff DiffArgs
     | Paths Paths.Options
     | Run RunOptions
+    | Test TestOptions
     | Format FormatFlags
     | Protobuf ProtobufFlags
 
@@ -89,6 +90,17 @@ type alias DocsFlags =
 type alias RunOptions =
     { moduleName : ModuleName
     , package : Maybe PackageName
+    , erlc : Maybe String
+    , escript : Maybe String
+    }
+
+
+{-| `geng test` (geng-lang `m2-beam-toptier.md` D461, §TT33): the modules whose
+`tests` to run, none meaning every module that exposes one, and the BEAM
+toolchain as `run` takes it.
+-}
+type alias TestOptions =
+    { modules : Array ModuleName
     , erlc : Maybe String
     , escript : Maybe String
     }
@@ -412,6 +424,47 @@ parser =
                         Run
                             { moduleName = arg
                             , package = flags.package
+                            , erlc = flags.erlc
+                            , escript = flags.escript
+                            }
+                    )
+                }
+            |> Cli.Parser.withCommand
+                { word = "test"
+                , arguments =
+                    Cli.Parser.zeroOrMoreArgs moduleNameParser
+                , flags =
+                    Cli.Parser.initFlags
+                        (\erlc escript ->
+                            { erlc = erlc
+                            , escript = escript
+                            }
+                        )
+                        |> Cli.Parser.flag "erlc" programParser "The Erlang compiler a beam build runs. Without this I look for GENG_ERLC, and then for erlc on your PATH."
+                        |> Cli.Parser.flag "escript" programParser "The escript runner a beam build writes its program with. The node an application's tests run in is started by the erl beside it. Without this I look for GENG_ESCRIPT, and then for escript on your PATH."
+                , commonDescription =
+                    Nothing
+                , summary =
+                    "The `test` command builds a project's tests and runs them:"
+                , example =
+                    PP.verticalBlock
+                        [ PP.words "For example:"
+                        , PP.empty
+                        , PP.words "geng test"
+                            |> PP.indent
+                            |> PP.color PP.Green
+                        , PP.empty
+                        , PP.words
+                            """
+                            This runs the `tests` of every module in the project that exposes one by name, or of the modules given. Each must be a Test.
+                            They run on the project's target, with test-runner-node on node and test-runner-beam on the beam, which the project depends on.
+                            On the beam, a project whose manifest names a supervisor is started as its application, so its tree is running before the first test.
+                            """
+                        ]
+                , builder =
+                    (\args flags ->
+                        Test
+                            { modules = args
                             , erlc = flags.erlc
                             , escript = flags.escript
                             }

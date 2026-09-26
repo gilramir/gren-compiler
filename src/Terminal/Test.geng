@@ -1,0 +1,550 @@
+module Terminal.Test exposing
+    ( Error
+    , Made
+    , erlBeside
+    , make
+    , prettifyError
+    , runApplication
+    , startsApplication
+    )
+
+{-| `geng test` (geng-lang `m2-beam-toptier.md` D461, §TT33): a project's tests,
+built for its target and run.
+
+The tests are the `tests` values of the project's modules, and their
+`taskTests`, `test-tasks`' `Test.Task.Test`s (D463, §TT35): the modules named
+on the command line, or with none, every module whose header exposes either by
+name. The command writes a module of its own, `GengTest`, whose `main` runs them
+with the target's runner, and builds from it; the module is written under the
+project's `.gren/`, not into its source directories. On the BEAM, a project
+whose manifest names a `supervisor` is started as its application, so its tree
+is running before the first test.
+-}
+
+import Bytes
+import ChildProcess
+import Cli.PrettyPrinter as PP
+import Cli.Report as Report exposing (Report)
+import Compiler.Ast.Source as AST
+import Compiler.ModuleName as ModuleName exposing (ModuleName)
+import Compiler.Outline as Outline exposing (Outline)
+import Compiler.Parse.Context
+import Compiler.Parse.Module
+import Compiler.Paths
+import Dict exposing (Dict)
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import String.Parser.Advanced
+import Task exposing (Task)
+import Terminal.Beam
+import Terminal.PackageInstall as PackageInstall
+import Terminal.Run
+
+
+type Error
+    = RunError Terminal.Run.Error
+    | ReadOutline PackageInstall.ReadProjectOutlineError
+    | FindSources Outline.FindSourceFilesError
+    | NotAnApplication
+    | MissingPackage { package : String, runner : Bool }
+    | NoTests
+    | NoSuchModule String
+    | NameTaken
+    | HeaderDoesNotParse { moduleName : String, message : String }
+    | CannotWrite FileSystem.Error
+    | CannotStart ChildProcess.SpawnError
+
+
+type alias Config =
+    { fsPermission : FileSystem.Permission
+    , cpPermission : ChildProcess.Permission
+    , cacheRoot : Compiler.Paths.CacheRoot
+    , corePath : Path
+    , useColor : Bool
+    , pathToString : Path -> String
+    }
+
+
+{-| What `make` answers: the build, as `geng run`'s is, and whether its tests
+run on the BEAM.
+-}
+type alias Made =
+    { compiling : Terminal.Run.Compiling
+    , beam : Bool
+    , outline : Outline
+    }
+
+
+{-| The module the command writes. A project with a module of that name is
+refused rather than shadowed.
+-}
+mainModule : String
+mainModule =
+    "GengTest"
+
+
+{-| The runner a target's tests run on: for `gren-lang/test`'s tests, its
+package and module, and for task tests, the package and module whose
+`runTasks` runs them, which the project must depend on as it depends on
+`test`.
+-}
+runnerFor : Bool -> { package : String, module_ : String, taskPackage : String, taskModule : String }
+runnerFor beam =
+    if beam then
+        { package = "github.com/geng-language/test-runner-beam"
+        , module_ = "Test.Runner.Beam"
+        , taskPackage = "github.com/geng-language/test-runner-beam"
+        , taskModule = "Test.Runner.Beam"
+        }
+
+    else
+        { package = "github.com/geng-language/test-runner-node"
+        , module_ = "Test.Runner.Node"
+        , taskPackage = "github.com/geng-language/test-tasks-node"
+        , taskModule = "Test.Task.Node"
+        }
+
+
+testPackage : String
+testPackage =
+    "github.com/geng-language/test"
+
+
+tasksPackage : String
+tasksPackage =
+    "github.com/geng-language/test-tasks"
+
+
+{-| A module whose tests run, and which of its two values it has.
+-}
+type alias Found =
+    { name : String
+    , tests : Bool
+    , taskTests : Bool
+    }
+
+
+{-| Find the tests, write `GengTest`, and hand the build to `Terminal.Run`.
+-}
+make : Config -> Array ModuleName -> Task Error Made
+make config named =
+    Task.await (PackageInstall.readProjectOutline config.fsPermission |> Task.mapError ReadOutline) <| \projectOutline ->
+    Task.await (fromResult (applicationOf projectOutline.outline)) <| \app ->
+        let
+            beam =
+                Terminal.Beam.isTarget projectOutline.outline
+
+            runner =
+                runnerFor beam
+
+            findSources =
+                Outline.findSourceFiles config.fsPermission projectOutline.outline projectOutline.projectPath
+                    |> Task.mapError FindSources
+        in
+        Task.await (fromResult (dependsOn app testPackage)) <| \_ ->
+        Task.await findSources <| \sources ->
+        Task.await (fromResult (testModules named sources)) <| \modules ->
+            let
+                tasks =
+                    Array.any .taskTests modules
+
+                needed =
+                    if tasks then
+                        [ tasksPackage, runner.taskPackage ]
+
+                    else
+                        [ runner.package ]
+            in
+            Task.await (fromResult (Array.foldl (\package ok -> Result.andThen (\_ -> dependsOn app package) ok) (Ok {}) needed)) <| \_ ->
+                let
+                    generated =
+                        projectOutline.projectPath
+                            |> Path.append (Path.fromPosixString (".gren/geng-test/" ++ mainModule ++ ".geng"))
+
+                    text =
+                        mainSource
+                            (if tasks then
+                                runner.taskModule
+
+                             else
+                                runner.module_
+                            )
+                            modules
+                in
+                Task.await (write config.fsPermission generated text) <| \_ ->
+                    Terminal.Run.makeProjectWith config
+                        { entryPoints = ModuleName.fromString mainModule |> Maybe.map (\m -> [ m ]) |> Maybe.withDefault []
+                        , outputName = "test"
+                        , prepare =
+                            \resolution ->
+                                Task.succeed { resolution | rootSources = Dict.set mainModule { path = generated, data = text } resolution.rootSources }
+                        }
+                        projectOutline
+                        |> Task.mapError RunError
+                        |> Task.map (\compiling -> { compiling = compiling, beam = beam, outline = projectOutline.outline })
+
+
+fromResult : Result x a -> Task x a
+fromResult result =
+    when result is
+        Ok value ->
+            Task.succeed value
+
+        Err error ->
+            Task.fail error
+
+
+applicationOf : Outline -> Result Error Outline.AppOutline
+applicationOf outline =
+    when outline is
+        Outline.App app ->
+            Ok app
+
+        Outline.Pkg _ ->
+            Err NotAnApplication
+
+
+{-| The project must depend on `test`, on the target's runner, and on
+`test-tasks` when it has task tests, since the command adds nothing to its
+manifest.
+-}
+dependsOn : Outline.AppOutline -> String -> Result Error {}
+dependsOn app package =
+    if Dict.member package app.dependencies then
+        Ok {}
+
+    else
+        Err (MissingPackage { package = package, runner = String.startsWith "github.com/geng-language/test-runner-" package || package == "github.com/geng-language/test-tasks-node" })
+
+
+{-| The modules whose tests run: the named ones, each of which must be the
+project's, or every module whose header exposes `tests` or `taskTests` by
+name. A module exposing `(..)` is run only when named, and then as having
+`tests`, since its header does not say what it has.
+-}
+testModules : Array ModuleName -> Array { path : Path, moduleName : ModuleName, source : String } -> Result Error (Array Found)
+testModules named sources =
+    let
+        names =
+            Array.map (\s -> ModuleName.toString s.moduleName) sources
+
+        namedNames =
+            Array.map ModuleName.toString named
+
+        chosen =
+            if Array.isEmpty named then
+                sources
+
+            else
+                Array.keepIf (\s -> Array.member (ModuleName.toString s.moduleName) namedNames) sources
+
+        found source soFar =
+            headerOf source
+                |> Result.map
+                    (\exports ->
+                        let
+                            module_ =
+                                { name = ModuleName.toString source.moduleName
+                                , tests = exposes "tests" exports || (isOpen exports && not (Array.isEmpty named))
+                                , taskTests = exposes "taskTests" exports
+                                }
+                        in
+                        if module_.tests || module_.taskTests then
+                            Array.pushLast module_ soFar
+
+                        else
+                            soFar
+                    )
+    in
+    if Array.member mainModule names then
+        Err NameTaken
+
+    else
+        when Array.findFirst (\m -> not (Array.member m names)) namedNames is
+            Just missing ->
+                Err (NoSuchModule missing.value)
+
+            Nothing ->
+                Array.foldl (\source result -> Result.andThen (found source) result) (Ok []) chosen
+                    |> Result.andThen
+                        (\modules ->
+                            if Array.isEmpty modules then
+                                Err NoTests
+
+                            else
+                                Ok (Array.sortBy .name modules)
+                        )
+
+
+headerOf : { path : Path, moduleName : ModuleName, source : String } -> Result Error AST.Exposing
+headerOf source =
+    when String.Parser.Advanced.run Compiler.Parse.Module.headerParser Compiler.Parse.Context.empty source.source is
+        Err deadEnds ->
+            Err
+                (HeaderDoesNotParse
+                    { moduleName = ModuleName.toString source.moduleName
+                    , message = Compiler.Parse.Module.errorsToString source.source deadEnds
+                    }
+                )
+
+        Ok header ->
+            Ok header.exports
+
+
+isOpen : AST.Exposing -> Bool
+isOpen exposing_ =
+    when exposing_ is
+        AST.Open ->
+            True
+
+        AST.Explicit _ ->
+            False
+
+
+exposes : String -> AST.Exposing -> Bool
+exposes value exposing_ =
+    when exposing_ is
+        AST.Open ->
+            False
+
+        AST.Explicit exposed ->
+            Array.any
+                (\e ->
+                    when e is
+                        AST.ExposedLower name ->
+                            name.value == value
+
+                        _ ->
+                            False
+                )
+                exposed
+
+
+{-| `GengTest`: each module's tests under a `describe` of the module's name,
+so that two modules' tests may share a description, and the runner's `run`;
+or, when a module has task tests, every module's under `Test.Task` and the
+runner's `runTasks`, a module's `tests` put in with `Test.Task.wrap`.
+-}
+mainSource : String -> Array Found -> String
+mainSource runnerModule modules =
+    let
+        tasks =
+            Array.any .taskTests modules
+
+        pure m =
+            if tasks then
+                "Test.Task.wrap (Test.describe \"" ++ m.name ++ "\" [ " ++ m.name ++ ".tests ])"
+
+            else
+                "Test.describe \"" ++ m.name ++ "\" [ " ++ m.name ++ ".tests ]"
+
+        entries =
+            Array.mapAndFlatten
+                (\m ->
+                    (if m.tests then
+                        [ pure m ]
+
+                     else
+                        []
+                    )
+                        ++ (if m.taskTests then
+                                [ "Test.Task.describe \"" ++ m.name ++ "\" [ " ++ m.name ++ ".taskTests ]" ]
+
+                            else
+                                []
+                           )
+                )
+                modules
+    in
+    String.join "\n"
+        ([ "module " ++ mainModule ++ " exposing (main)"
+         , ""
+         , "import Task exposing (Task)"
+         , "import Test"
+         , "import " ++ runnerModule
+         ]
+            ++ (if tasks then
+                    [ "import Test.Task" ]
+
+                else
+                    []
+               )
+            ++ Array.map (\m -> "import " ++ m.name) modules
+            ++ [ ""
+               , ""
+               , "main : Task Never {}"
+               , "main ="
+               , "    "
+                    ++ runnerModule
+                    ++ (if tasks then
+                            ".runTasks"
+
+                        else
+                            ".run"
+                       )
+               , "        ("
+                    ++ (if tasks then
+                            "Test.Task.concat"
+
+                        else
+                            "Test.concat"
+                       )
+               , "            [ " ++ String.join "\n            , " entries
+               , "            ]"
+               , "        )"
+               , ""
+               ]
+        )
+
+
+write : FileSystem.Permission -> Path -> String -> Task Error {}
+write fsPermission path text =
+    let
+        directory =
+            Path.parentPath path |> Maybe.withDefault Path.empty
+    in
+    FileSystem.makeDirectory fsPermission { recursive = True } directory
+        |> Task.andThen (\_ -> FileSystem.writeFile fsPermission (Bytes.fromString text) path)
+        |> Task.map (\_ -> {})
+        |> Task.mapError CannotWrite
+
+
+{-| Whether the tests run in the application rather than the escript: a `beam`
+project whose manifest names a `supervisor`.
+-}
+startsApplication : Made -> Bool
+startsApplication made =
+    made.beam
+        && (when made.outline is
+                Outline.App app ->
+                    app.supervisor /= Nothing
+
+                Outline.Pkg _ ->
+                    False
+           )
+
+
+{-| Run a BEAM build's tests in its application: a node of its own, with the
+build's modules on its path, that starts the application, whose `geng_app`
+starts the tree and then `GengTest.main`, and ends with the run's status
+(D434). An application that does not start ends with status 1 and the reason.
+-}
+runApplication :
+    { cpPermission : ChildProcess.Permission
+    , erl : String
+    , ebin : String
+    , application : String
+    , environment : Dict String String
+    }
+    -> Task Error Int
+runApplication config =
+    let
+        start =
+            "case application:ensure_all_started('"
+                ++ config.application
+                ++ "') of {ok, _} -> ok; {error, Reason} -> io:format(standard_error, \"the application did not start: ~0tp~n\", [Reason]), erlang:halt(1) end."
+    in
+    { (ChildProcess.defaultSpawnOptions ChildProcess.Integrated)
+        | shell = ChildProcess.NoShell
+        , environmentVariables =
+            if Dict.isEmpty config.environment then
+                ChildProcess.InheritEnvironmentVariables
+
+            else
+                ChildProcess.MergeWithEnvironmentVariables config.environment
+    }
+        |> ChildProcess.spawn config.cpPermission config.erl [ "-noshell", "-pa", config.ebin, "-eval", start ]
+        |> Task.mapError CannotStart
+        |> Task.andThen ChildProcess.waitForExit
+
+
+{-| The `erl` an application's tests are started with: `GENG_ERL`, or the
+`erl` beside the `escript` the build resolved when that is a path, or `erl` on
+`PATH`, in the order D390 resolves `escript` itself.
+-}
+erlBeside : Dict String String -> String -> String
+erlBeside envVars escript =
+    when Dict.get "GENG_ERL" envVars is
+        Just given ->
+            given
+
+        Nothing ->
+            when String.lastIndexOf "/" escript is
+                Just index ->
+                    String.slice 0 (index + 1) escript ++ "erl"
+
+                Nothing ->
+                    "erl"
+
+
+prettifyError : Error -> Report
+prettifyError error =
+    when error is
+        RunError err ->
+            Terminal.Run.prettifyError err
+
+        ReadOutline err ->
+            PackageInstall.prettifyProjectOutlineError err
+
+        FindSources err ->
+            Report.create "CANNOT READ THE PROJECT'S MODULES"
+                Nothing
+                (PP.words (PackageInstall.outlineFindSourcesErrorToString err))
+
+        NotAnApplication ->
+            Report.create "NOT AN APPLICATION"
+                Nothing
+                (PP.words "`geng test` runs an application project's tests, and this project is a package. A package's tests are a project of their own that depends on it, as `tests/` is for the packages in this repository.")
+
+        MissingPackage { package, runner } ->
+            Report.create "A TEST PACKAGE IS MISSING"
+                Nothing
+                (PP.verticalBlock
+                    [ PP.words
+                        (if runner then
+                            "The tests run on " ++ package ++ ", the runner for this project's target, and the project does not depend on it."
+
+                         else
+                            "The tests are written with " ++ package ++ ", and the project does not depend on it."
+                        )
+                    , PP.empty
+                    , PP.words ("geng package install " ++ package)
+                        |> PP.indent
+                        |> PP.color PP.Green
+                    ]
+                )
+
+        NoTests ->
+            Report.create "NO TESTS"
+                Nothing
+                (PP.words "No module of this project exposes a value named `tests` or `taskTests`. Expose a `tests : Test`, or a `taskTests : Test.Task.Test`, from the modules that have tests, or name the modules to run.")
+
+        NoSuchModule name ->
+            Report.create "NO SUCH MODULE"
+                Nothing
+                (PP.words ("You asked me to run the tests of " ++ name ++ ", and this project has no module of that name."))
+
+        NameTaken ->
+            Report.create "A MODULE HAS THE TEST RUNNER'S NAME"
+                Nothing
+                (PP.words ("This project has a module named " ++ mainModule ++ ", which is the name of the module `geng test` writes to run the tests. Rename it."))
+
+        HeaderDoesNotParse { moduleName, message } ->
+            Report.create "A MODULE'S HEADER DOES NOT PARSE"
+                Nothing
+                (PP.verticalBlock
+                    [ PP.words ("I read each module's header to find the ones that expose `tests`, and " ++ moduleName ++ "'s does not parse:")
+                    , PP.empty
+                    , PP.words message |> PP.indent
+                    ]
+                )
+
+        CannotWrite err ->
+            Report.create "CANNOT WRITE THE TEST RUNNER"
+                Nothing
+                (PP.words ("I could not write the module that runs the tests: " ++ FileSystem.errorToString err))
+
+        CannotStart err ->
+            Report.create "CANNOT START A PROCESS"
+                Nothing
+                (PP.words ("I could not start `" ++ err.program ++ "`: " ++ err.errorCode))
