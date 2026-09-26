@@ -1,23 +1,23 @@
 module Terminal.Beam exposing
-    ( Plan
-    , Toolchain
-    , Config
+    ( Config
     , Identity
-    , identity
-    , isTarget
-    , plan
-    , paths
-    , toolchain
-    , libraries
-    , libraryEnvironment
-    , stageEnvironment
-    , prepare
+    , Plan
+    , Toolchain
     , abandon
     , build
     , forgetProgram
-    , requireProgram
-    , releaseIdentity
+    , identity
+    , isTarget
+    , libraries
+    , libraryEnvironment
+    , paths
+    , plan
+    , prepare
     , release
+    , releaseIdentity
+    , requireProgram
+    , stageEnvironment
+    , toolchain
     )
 
 {-| The BEAM half of `geng make`, for a project whose outline says
@@ -597,11 +597,12 @@ build config thePlan =
 buildStage : Config -> Plan -> Task Report Int
 buildStage config thePlan =
     read config.fs thePlan.stage
+        |> Task.andThen (\files -> Task.map (\direct -> { files = files, direct = direct }) (directRows config))
         |> Task.andThen
-            (\files ->
+            (\found ->
                 when
-                    Build.link Core.ExternErlang files
-                        |> Result.andThen (\program -> Result.map (\emitted -> { program = program, emitted = emitted }) (Build.emit program))
+                    Build.link Core.ExternErlang found.files
+                        |> Result.andThen (\program -> Result.map (\emitted -> { program = program, emitted = emitted }) (Build.emitWith found.direct program))
                 is
                     Err why ->
                         Stream.Log.string config.stderr why
@@ -707,7 +708,44 @@ externSources config =
                     |> Task.onError (\_ -> Task.succeed [])
             )
         |> Task.sequence
-        |> Task.map (Array.flatten >> Array.foldl (\path acc -> if Array.member path acc then acc else Array.pushLast path acc) [])
+        |> Task.map
+            (Array.flatten >> Array.foldl
+                                (\path acc ->
+                                    if Array.member path acc then
+                                        acc
+
+                                    else
+                                        Array.pushLast path acc
+                                )
+                                []
+            )
+
+
+{-| D476 · The `erlang` rows every package's `src/Ext` declares run in place in
+a tree of one (`Geng.Beam.Build.directRows`), read before the program is
+emitted, since the emitted Erlang is written before `erlc` compiles `src/Ext`
+(geng-lang `m2-beam-toptier.md` §TT46).
+-}
+directRows : Config -> Task Report (Dict String String)
+directRows config =
+    externSources config
+        |> Task.andThen
+            (\externs ->
+                externs
+                    |> Array.map
+                        (\path ->
+                            FileSystem.readFile config.fs path
+                                |> Task.mapError (failure "I cannot read an extern module")
+                                |> Task.map
+                                    (\data ->
+                                        Bytes.toString data
+                                            |> Maybe.map (Build.directRows (externModule path))
+                                            |> Maybe.withDefault []
+                                    )
+                        )
+                    |> Task.sequence
+            )
+        |> Task.map (\found -> Array.foldl (\row acc -> Dict.set row.key row.direct acc) Dict.empty (Array.flatten found))
 
 
 {-| An extern module's name: its file's, less `.erl`. -}
@@ -1108,6 +1146,7 @@ toolchainRefused program exitCode =
             , PP.words "A build reaches this only once the backend has emitted every binding of your program, so what is left for it to refuse is a `src/Ext/*.erl` file of one of your packages, or a defect in the backend. An `erlang` extern row cannot be: the front end holds its module and its function to bare atoms, and the build holds each to a function that is there."
             ]
         )
+
 
 read : FileSystem.Permission -> Path -> Task Report (Array Build.File)
 read fs directory =
