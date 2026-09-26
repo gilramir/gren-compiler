@@ -149,7 +149,7 @@ spec = do
           pid = Can.TType ModuleName.process "Id" []
           str = Can.TType ModuleName.string "String" []
           entry = Can.TRecord (Map.fromList [("key", Can.FieldType 0 str), ("value", Can.FieldType 1 str)]) Nothing
-       in map typeOf ["task_succeed", "task_fail", "task_and_then", "task_on_error", "task_concurrent", "task_race", "task_bracket", "task_map2", "task_spawn", "task_kill", "task_parallel", "task_context", "task_with_context"]
+       in map typeOf ["task_succeed", "task_fail", "task_and_then", "task_on_error", "task_concurrent", "task_race", "task_bracket", "task_map2", "task_spawn", "task_kill", "task_parallel", "task_context", "task_with_context", "task_map"]
             `shouldBe` [ Just (fn [v "a"] (t (v "x") (v "a"))),
                          Just (fn [v "x"] (t (v "x") (v "a"))),
                          Just (fn [fn [v "a"] (t (v "x") (v "b")), t (v "x") (v "a")] (t (v "x") (v "b"))),
@@ -162,7 +162,8 @@ spec = do
                          Just (fn [pid] (t (v "x") tUnit)),
                          Just (fn [arr (t (v "x") (v "a"))] (t (v "x") (arr (v "a")))),
                          Just (fn [] (t (v "x") (arr entry))),
-                         Just (fn [arr entry, t (v "x") (v "a")] (t (v "x") (v "a")))
+                         Just (fn [arr entry, t (v "x") (v "a")] (t (v "x") (v "a"))),
+                         Just (fn [fn [v "a"] (v "b"), t (v "x") (v "a")] (t (v "x") (v "b")))
                        ]
 
     it "`task_finally` is retired and has no type (D282)" $

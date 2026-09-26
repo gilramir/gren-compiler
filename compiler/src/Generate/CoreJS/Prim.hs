@@ -634,6 +634,7 @@ task p args =
     (TaskParallel, [_]) -> helper "_TaskPrim_concurrent" args
     (TaskContext, []) -> JS.Ref (JsName.fromLocalHumanReadable "_TaskPrim_context")
     (TaskWithContext, [_, _]) -> helper "_TaskPrim_withContext" args
+    (TaskMap, [_, _]) -> helper "_TaskPrim_map" args
     (TaskFinally, _) -> arityError (TaskOp p) args
     _ -> source p args
   where
@@ -907,6 +908,14 @@ function _TaskPrim_race(first, rest) {
       return _TaskPrim_succeed(res);
     };
   });
+}
+
+// D477 (geng-lang m2-beam-toptier.md §TT46): `Task.map` is a primitive, which
+// this scheduler builds as `core`'s Geng did, over `andThen` and `succeed`.
+function _TaskPrim_map(callback, task) {
+  return _TaskPrim_andThen(function (value) {
+    return _TaskPrim_succeed(callback(value));
+  }, task);
 }
 
 function _TaskPrim_map2(callback, taskA, taskB) {

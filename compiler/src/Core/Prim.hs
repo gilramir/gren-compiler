@@ -343,6 +343,12 @@ data TransientPrim
 -- process's context, an array of key and value strings that the process's
 -- children inherit, read and set for a task. They are the scheduler's because
 -- only the scheduler knows which process is running.
+--
+-- 'TaskMap' is D477's (geng-lang @m2-beam-toptier.md@ §TT46), __appended__
+-- after 'TaskWithContext': @Task.map@, which was Geng over 'TaskAndThen' and
+-- 'TaskSucceed', as a node of its own, so that a backend that steps it applies
+-- the function to the value where it stands, with no continuation closure and
+-- no task wrapped around the result. JavaScript builds it over those two still.
 data TaskPrim
   = TaskSucceed
   | TaskFail
@@ -364,6 +370,7 @@ data TaskPrim
   | TaskParallel
   | TaskContext
   | TaskWithContext
+  | TaskMap
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 data PrimOp
@@ -427,6 +434,8 @@ allPrims =
     ++ [TaskOp TaskParallel]
     -- Appended by D449 (m2-beam-toptier.md §TT21).
     ++ map TaskOp [TaskContext, TaskWithContext]
+    -- Appended by D477 (m2-beam-toptier.md §TT46).
+    ++ [TaskOp TaskMap]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -615,6 +624,7 @@ taskPrimName p =
     TaskParallel -> "task_parallel"
     TaskContext -> "task_context"
     TaskWithContext -> "task_with_context"
+    TaskMap -> "task_map"
 
 nameTable :: Map.Map Text PrimOp
 nameTable = Map.fromList [(primName p, p) | p <- allPrims]
@@ -755,4 +765,6 @@ primArity op =
         TaskContext -> 0
         -- the context, and the task that runs under it
         TaskWithContext -> 2
+        -- the function, and the task whose value it is applied to
+        TaskMap -> 2
     DebugLog -> 2

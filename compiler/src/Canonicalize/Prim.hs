@@ -300,6 +300,7 @@ taskType p =
     TaskParallel -> Just (fn [tArray (tTask x a)] (tTask x (tArray a)))
     TaskContext -> Just (fn [] (tTask x (tArray tContextEntry)))
     TaskWithContext -> Just (fn [tArray tContextEntry, tTask x a] (tTask x a))
+    TaskMap -> Just (fn [fn [a] b, tTask x a] (tTask x b))
     _ -> sourceType p
   where
     a = Can.TVar "a"

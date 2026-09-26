@@ -19,7 +19,7 @@ spec = do
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
       -- someone noticing.
-      length allPrims `shouldBe` 185
+      length allPrims `shouldBe` 186
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -79,6 +79,12 @@ spec = do
         primCode (TaskOp TaskParallel)
       )
         `shouldBe` ([183, 184], ["task_context", "task_with_context"], [0, 2], 182)
+
+    it "appends D477's task_map after every code that existed" $
+      -- Task.map as a node of its own (m2-beam-toptier.md §TT46), after
+      -- `task_with_context`, which did not move.
+      (primCode (TaskOp TaskMap), primName (TaskOp TaskMap), primArity (TaskOp TaskMap), primCode (TaskOp TaskWithContext))
+        `shouldBe` (185, "task_map", 2, 184)
 
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved
