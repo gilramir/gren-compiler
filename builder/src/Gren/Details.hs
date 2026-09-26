@@ -538,7 +538,7 @@ build cache depsMVar fingerprint pkg (Dependency outline sources) =
   case outline of
     (Outline.App _) ->
       do
-        return $ Left $ Just $ Exit.BD_BadBuild pkg V.one Map.empty
+        return $ Left $ Just $ Exit.BD_BadBuild pkg Nothing (Just "it is an application, and only a package can be a dependency")
     (Outline.Pkg (Outline.PkgOutline _ _ _ version exposed deps _ platform declared)) ->
       do
         let path = Dirs.packageArtifacts cache pkg version fingerprint
@@ -548,7 +548,7 @@ build cache depsMVar fingerprint pkg (Dependency outline sources) =
             return $ case targetDrift pkg declared (_cores artifacts) of
               Just drift -> Left (Just (Exit.BD_TargetDrift drift))
               Nothing -> Right artifacts
-          Nothing -> compileDep path depsMVar pkg sources exposed deps platform declared
+          Nothing -> compileDep path depsMVar pkg version sources exposed deps platform declared
 
 -- | A package's modules, compiled, and checked against the targets its
 -- @geng.toml@ declares before anything is written to the cache (D50, D321).
@@ -557,8 +557,8 @@ build cache depsMVar fingerprint pkg (Dependency outline sources) =
 -- artifacts are named for the package's sources and not its manifest, so a
 -- @target@ edited after they were written would otherwise pass unchecked
 -- (§MF9.4).
-compileDep :: FilePath -> MVar (Map.Map Pkg.Name (MVar Dep)) -> Pkg.Name -> Map.Map ModuleName.Raw ByteString -> Outline.Exposed -> Map.Map Pkg.Name a -> P.Platform -> Maybe (Set.Set Target.Target) -> IO Dep
-compileDep path depsMVar pkg sources exposed deps platform declared =
+compileDep :: FilePath -> MVar (Map.Map Pkg.Name (MVar Dep)) -> Pkg.Name -> V.Version -> Map.Map ModuleName.Raw ByteString -> Outline.Exposed -> Map.Map Pkg.Name a -> P.Platform -> Maybe (Set.Set Target.Target) -> IO Dep
+compileDep path depsMVar pkg version sources exposed deps platform declared =
   do
     allDeps <- readMVar depsMVar
     directDeps <- traverse readMVar (Map.intersection allDeps (directDependencies pkg deps))
@@ -573,17 +573,17 @@ compileDep path depsMVar pkg sources exposed deps platform declared =
           let docsStatus = DocsNeeded
           let authorizedForKernelCode = Pkg.isKernel pkg
           mvar <- newEmptyMVar
-          mvars <- Map.traverseWithKey (const . fork . crawlModule foreignDeps sources mvar pkg docsStatus authorizedForKernelCode) exposedDict
+          mvars <- Map.traverseWithKey (const . fork . crawlModule foreignDeps sources mvar pkg docsStatus authorizedForKernelCode Nothing) exposedDict
           putMVar mvar mvars
           mapM_ readMVar mvars
           maybeStatuses <- traverse readMVar =<< readMVar mvar
           case sequence maybeStatuses of
-            Left CrawlCorruption ->
+            Left (CrawlCorruption why) ->
               do
-                return $ Left $ Just $ Exit.BD_BadBuild pkg V.one Map.empty
+                return $ Left $ Just $ Exit.BD_BadBuild pkg (Just version) (Just why)
             Left CrawlUnsignedKernelCode ->
               do
-                return $ Left $ Just $ Exit.BD_UnsignedBuild pkg V.one
+                return $ Left $ Just $ Exit.BD_UnsignedBuild pkg version
             Right statuses ->
               do
                 rmvar <- newEmptyMVar
@@ -593,7 +593,12 @@ compileDep path depsMVar pkg sources exposed deps platform declared =
                 case sequence maybeResults of
                   Nothing ->
                     do
-                      return $ Left $ Just $ Exit.BD_BadBuild pkg V.one Map.empty
+                      -- With @GENG_DEP_ERRORS@ set, 'reportDepError' has
+                      -- printed them already, and the report says so rather
+                      -- than asking for the variable that is set.
+                      shown <- Env.lookupEnv "GENG_DEP_ERRORS"
+                      let why = fmap (const "one of its modules does not compile, and its errors are above") shown
+                      return $ Left $ Just $ Exit.BD_BadBuild pkg (Just version) why
                   Just results ->
                     let ifaces = gatherInterfaces exposedDict results
                         cores = gatherCores results
@@ -710,19 +715,30 @@ data Status
   | SKernelLocal [Kernel.Chunk]
   | SKernelForeign
 
+-- | Why a dependency's modules could not all be found. 'CrawlCorruption'
+-- says which module and what is wrong with it, since it is the whole of what
+-- the person building is told: it was a bare constructor, and a package
+-- whose module imports one that does not exist was reported as the same
+-- guess about version ranges as a type error, naming no module at all.
 data CrawlError
   = CrawlUnsignedKernelCode
-  | CrawlCorruption
+  | CrawlCorruption String
 
-crawlModule :: Map.Map ModuleName.Raw ForeignInterface -> Map.Map ModuleName.Raw ByteString -> MVar StatusDict -> Pkg.Name -> DocsStatus -> Bool -> ModuleName.Raw -> IO (Either CrawlError Status)
-crawlModule foreignDeps sources mvar pkg docsStatus authorizedForKernelCode name =
+-- | The module a package names, found: its own, a dependency's, or a kernel
+-- module. @importer@ is the module that imports it, or 'Nothing' for a module
+-- the package exposes, and is there so that a module that cannot be found is
+-- reported with where it was asked for.
+crawlModule :: Map.Map ModuleName.Raw ForeignInterface -> Map.Map ModuleName.Raw ByteString -> MVar StatusDict -> Pkg.Name -> DocsStatus -> Bool -> Maybe ModuleName.Raw -> ModuleName.Raw -> IO (Either CrawlError Status)
+crawlModule foreignDeps sources mvar pkg docsStatus authorizedForKernelCode importer name =
   case (Map.lookup name foreignDeps, Map.lookup name sources) of
     (Just ForeignAmbiguous, _) ->
-      return $ Left CrawlCorruption
+      return $ Left $ CrawlCorruption $
+        "more than one of its dependencies has a module named " ++ ModuleName.toChars name ++ importedBy importer
     (Just (ForeignSpecific iface), Nothing) ->
       return $ Right (SForeign iface)
     (Just (ForeignSpecific _), Just _) ->
-      return $ Left CrawlCorruption
+      return $ Left $ CrawlCorruption $
+        ModuleName.toChars name ++ " is both one of its own modules and a module of one of its dependencies"
     (_, Just bytes) ->
       if Pkg.isKernel pkg && Name.isKernel name
         then
@@ -733,14 +749,26 @@ crawlModule foreignDeps sources mvar pkg docsStatus authorizedForKernelCode name
     (Nothing, Nothing) ->
       if Pkg.isKernel pkg && Name.isKernel name && authorizedForKernelCode
         then return $ Right SKernelForeign
-        else return $ Left CrawlCorruption
+        else return $ Left $ CrawlCorruption $
+          case importer of
+            Nothing ->
+              "it exposes a module named " ++ ModuleName.toChars name ++ ", and has no such module"
+            Just _ ->
+              "neither it nor any of its dependencies has a module named " ++ ModuleName.toChars name ++ importedBy importer
+
+-- | Where a module that could not be found was imported, for a reason.
+importedBy :: Maybe ModuleName.Raw -> String
+importedBy importer =
+  case importer of
+    Nothing -> ""
+    Just from -> ", which " ++ ModuleName.toChars from ++ " imports"
 
 crawlFile :: Map.Map ModuleName.Raw ForeignInterface -> Map.Map ModuleName.Raw ByteString -> MVar StatusDict -> Pkg.Name -> DocsStatus -> Bool -> ModuleName.Raw -> ByteString -> IO (Either CrawlError Status)
 crawlFile foreignDeps sources mvar pkg docsStatus authorizedForKernelCode expectedName bytes =
   case Parse.fromByteString (Parse.Package pkg) bytes of
     Right modul@(Src.Module (Just (A.At _ actualName)) _ _ imports _ _ _ _ _ _ _ _ _) | expectedName == actualName ->
       do
-        deps <- crawlImports foreignDeps sources mvar pkg authorizedForKernelCode (fmap snd imports)
+        deps <- crawlImports foreignDeps sources mvar pkg authorizedForKernelCode (Just expectedName) (fmap snd imports)
         return (Right (SLocal docsStatus deps modul bytes))
     Left err ->
       do
@@ -748,17 +776,21 @@ crawlFile foreignDeps sources mvar pkg docsStatus authorizedForKernelCode expect
         -- typecheck, and reaches the user as the same guess about version
         -- ranges. Same escape hatch, same reason.
         reportDepError pkg expectedName bytes (E.BadSyntax err)
-        return $ Left CrawlCorruption
-    _ ->
-      return $ Left CrawlCorruption
+        return $ Left $ CrawlCorruption $ "its module " ++ ModuleName.toChars expectedName ++ " does not parse"
+    Right (Src.Module (Just (A.At _ actualName)) _ _ _ _ _ _ _ _ _ _ _ _) ->
+      return $ Left $ CrawlCorruption $
+        "the file of its module " ++ ModuleName.toChars expectedName ++ " says it is module " ++ ModuleName.toChars actualName
+    Right _ ->
+      return $ Left $ CrawlCorruption $
+        "the file of its module " ++ ModuleName.toChars expectedName ++ " has no module header"
 
-crawlImports :: Map.Map ModuleName.Raw ForeignInterface -> Map.Map ModuleName.Raw ByteString -> MVar StatusDict -> Pkg.Name -> Bool -> [Src.Import] -> IO (Map.Map ModuleName.Raw ())
-crawlImports foreignDeps sources mvar pkg authorizedForKernelCode imports =
+crawlImports :: Map.Map ModuleName.Raw ForeignInterface -> Map.Map ModuleName.Raw ByteString -> MVar StatusDict -> Pkg.Name -> Bool -> Maybe ModuleName.Raw -> [Src.Import] -> IO (Map.Map ModuleName.Raw ())
+crawlImports foreignDeps sources mvar pkg authorizedForKernelCode importer imports =
   do
     statusDict <- takeMVar mvar
     let deps = Map.fromList (map (\i -> (Src.getImportName i, ())) imports)
     let news = Map.difference deps statusDict
-    mvars <- Map.traverseWithKey (const . fork . crawlModule foreignDeps sources mvar pkg DocsNotNeeded authorizedForKernelCode) news
+    mvars <- Map.traverseWithKey (const . fork . crawlModule foreignDeps sources mvar pkg DocsNotNeeded authorizedForKernelCode importer) news
     putMVar mvar (Map.union mvars statusDict)
     mapM_ readMVar mvars
     return deps
@@ -767,10 +799,10 @@ crawlKernel :: Map.Map ModuleName.Raw ForeignInterface -> Map.Map ModuleName.Raw
 crawlKernel foreignDeps sources mvar pkg bytes =
   case Kernel.fromByteString pkg (Map.mapMaybe getDepHome foreignDeps) bytes of
     Nothing ->
-      return $ Left CrawlCorruption
+      return $ Left $ CrawlCorruption "one of its kernel modules does not parse"
     Just (Kernel.Content imports chunks) ->
       do
-        _ <- crawlImports foreignDeps sources mvar pkg True imports
+        _ <- crawlImports foreignDeps sources mvar pkg True Nothing imports
         return (Right (SKernelLocal chunks))
 
 getDepHome :: ForeignInterface -> Maybe Pkg.Name

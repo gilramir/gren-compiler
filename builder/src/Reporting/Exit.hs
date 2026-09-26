@@ -34,7 +34,6 @@ import Core.Target qualified as Target
 import Data.ByteString qualified as BS
 import Data.ByteString.UTF8 qualified as BS_UTF8
 import Data.List qualified as List
-import Data.Map qualified as Map
 import Data.Name qualified as N
 import Data.NonEmptyList qualified as NE
 import Data.Set qualified as Set
@@ -816,7 +815,11 @@ data Details
   = DetailsBadDeps FilePath [DetailsBadDep]
 
 data DetailsBadDep
-  = BD_BadBuild Pkg.Name V.Version (Map.Map Pkg.Name V.Version)
+  = -- | A dependency that did not build: its version, when it is a package,
+    -- and why, when the reason is one line. A module that does not typecheck
+    -- has none here: its errors are pages of someone else's code, and
+    -- @GENG_DEP_ERRORS@ prints them ('Gren.Details.reportDepError').
+    BD_BadBuild Pkg.Name (Maybe V.Version) (Maybe String)
   | BD_UnsignedBuild Pkg.Name V.Version
   | BD_TargetDrift TargetDrift
 
@@ -847,28 +850,19 @@ toDetailsReport details =
             ]
         d : _ ->
           case d of
-            BD_BadBuild pkg vsn fingerprint ->
+            BD_BadBuild pkg vsn why ->
               Help.report
                 "PROBLEM BUILDING DEPENDENCIES"
                 Nothing
-                "I ran into a compilation error when trying to build the following package:"
-                [ D.indent 4 $ D.red $ D.fromChars $ Pkg.toChars pkg ++ " " ++ V.toChars vsn,
-                  D.reflow
-                    "This probably means it has package constraints that are too wide. It may be\
-                    \ possible to tweak your geng.toml to avoid the root problem as a stopgap. Head\
-                    \ over to https://gren-lang.org/community to get help figuring out how to take\
-                    \ this path!",
-                  D.toSimpleNote
-                    "To help with the root problem, please report this to the package author along\
-                    \ with the following information:",
-                  D.indent 4 $
-                    D.vcat $
-                      map (\(p, v) -> D.fromChars $ Pkg.toChars p ++ " " ++ V.toChars v) $
-                        Map.toList fingerprint,
-                  D.reflow
-                    "If you want to help out even more, try building the package locally. That should\
-                    \ give you much more specific information about why this package is failing to\
-                    \ build, which will in turn make it easier for the package author to fix it!"
+                "I could not build this package, which the project depends on:"
+                [ D.indent 4 $ D.red $ D.fromChars $ Pkg.toChars pkg ++ maybe "" (\v -> " " ++ V.toChars v) vsn,
+                  case why of
+                    Just reason ->
+                      D.reflow ("The reason: " ++ reason ++ ".")
+                    Nothing ->
+                      D.reflow
+                        "One of its modules does not compile. Set GENG_DEP_ERRORS=1 and build again to see\
+                        \ its errors, or build the package on its own."
                 ]
             BD_TargetDrift drift ->
               targetDriftReport drift

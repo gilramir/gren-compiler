@@ -255,9 +255,14 @@ simplify ctx e =
         e' <- Specialize.childrenA (simplify ctx) e
         node ctx e'
 
--- | A @let@'s bindings without those an atomic value was substituted for and
--- nothing names any more, when there are any: a binding left behind is a
--- variable @erlc@ warns is unused.
+-- | A @let@'s bindings without those nothing names any more whose value has no
+-- effect, when there are any: a binding left behind is a variable @erlc@ warns
+-- is unused, and a record or constructor built for it is "a term is
+-- constructed, but never used". Atomic values were the first of these (an
+-- atomic value is substituted for its name, and the binding is left); the
+-- rest are what a known @case@ leaves when its branch ignores the field it
+-- bound, such as the record @Test.Runner.getFailureReason@ answers under a
+-- @Just _@ once it is inlined (m2-beam-toptier.md §TT30.5).
 unused :: [Core.Bind] -> Core.Expr -> Maybe [Core.Bind]
 unused binds body =
   let go rest =
@@ -265,7 +270,7 @@ unused binds body =
           [] -> ([], Refs.freeLocals body)
           b@(Core.Bind binder value) : more ->
             let (keptAfter, free) = go more
-             in if atomic value && not (Set.member (Core._binderName binder) free)
+             in if pure_ value && not (Set.member (Core._binderName binder) free)
                   then (keptAfter, free)
                   else (b : keptAfter, Set.union (Refs.freeLocals value) (Set.delete (Core._binderName binder) free))
       (kept, _) = go binds
@@ -480,7 +485,14 @@ pure_ e =
   case Core._exprValue e of
     Core.EVar _ -> True
     Core.ELit _ -> True
+    Core.EGlobal _ -> True
+    Core.ELam _ _ -> True
+    Core.ELet binds body -> all (\(Core.Bind _ v) -> pure_ v) binds && pure_ body
     Core.ECtor _ _ args -> all pure_ args
+    Core.ERecord fields -> all (pure_ . snd) fields
+    Core.EAccess record _ -> pure_ record
+    Core.EUpdate record fields -> pure_ record && all (pure_ . snd) fields
+    Core.EArray items -> all pure_ items
     Core.EPrim op args -> comparison op && all pure_ args
     _ -> False
   where
@@ -494,6 +506,36 @@ pure_ e =
         _ -> False
 
 -- CASES
+
+-- | The branches with every pattern variable their bodies do not name made
+-- @_@, and every alias they do not name its own pattern, when that changes
+-- any. A variable nothing reads is a value the backend binds for nothing, and
+-- on the BEAM more than that: a flat constructor's pattern (D443) that binds
+-- its record builds the record back as a map after the match, which @erlc@
+-- warns "is constructed, but never used" when the branch ignores it, as
+-- @Test.Runner.getFailureReason@'s @Fail _@ does once it is inlined
+-- (m2-beam-toptier.md §TT30.5).
+thinned :: [Core.Alt] -> Maybe [Core.Alt]
+thinned alts =
+  let thinAlt (Core.Alt p b) = Core.Alt (thin (Refs.freeLocals b) p) b
+      alts' = map thinAlt alts
+   in if alts' /= alts then Just alts' else Nothing
+
+thin :: Set Name -> Core.Pattern -> Core.Pattern
+thin free p =
+  case p of
+    Core.PVar b
+      | not (Set.member (Core._binderName b) free) -> Core.PWild
+    Core.PAs b inner
+      | not (Set.member (Core._binderName b) free) -> thin free inner
+      | otherwise -> Core.PAs b (thin free inner)
+    Core.PCtor q tag args ->
+      Core.PCtor q tag (map (thin free) args)
+    Core.PRecord fields ->
+      Core.PRecord [(field, thin free q) | (field, q) <- fields]
+    Core.PArray items tailBinder ->
+      Core.PArray (map (thin free) items) tailBinder
+    _ -> p
 
 caseOf :: Ctx -> Core.Expr -> Core.Expr -> [Core.Alt] -> Maybe Core.Expr -> M Core.Expr
 caseOf ctx e scrut alts fallback =
@@ -524,6 +566,10 @@ caseOf ctx e scrut alts fallback =
           do
             markFired
             return (Core.Expr (Core.ECase scrut kept fallback) (Core.typeOf e) (Core.spanOf e))
+      | Just thinnedAlts <- thinned alts ->
+          do
+            markFired
+            return (Core.Expr (Core.ECase scrut thinnedAlts fallback) (Core.typeOf e) (Core.spanOf e))
       | otherwise -> return e
   where
     -- A known value whose branch cannot be taken whole (its pattern binds a
