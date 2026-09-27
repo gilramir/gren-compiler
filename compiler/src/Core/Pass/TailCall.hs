@@ -29,8 +29,10 @@
 -- 'EJoin' — a jump is in tail position, so what a join's body evaluates to is
 -- what the function returns. A call anywhere else stays a call.
 --
--- __Mutual recursion is not here__, and is not this pass's job: D14 gives it a
--- trampoline in @Low@, and the BEAM does it natively.
+-- __Mutual recursion is not here__, and is not this pass's job. A local group
+-- whose calls to one another are all tail calls reaches it as one function,
+-- which "Core.Pass.Mutual" made (D479), and is a loop like any other; the rest
+-- D14 gives a trampoline in @Low@, and the BEAM does natively.
 module Core.Pass.TailCall
   ( run,
   )

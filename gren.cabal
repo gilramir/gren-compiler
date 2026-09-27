@@ -130,6 +130,7 @@ Library common
         Core.Pass
         Core.Pass.Case
         Core.Pass.Inline
+        Core.Pass.Mutual
         Core.Pass.Specialize
         Core.Pass.TailCall
         Core.Prim
@@ -290,6 +291,7 @@ Test-Suite gren-tests
         Core.LowerTypeSpec
         Core.OrderSpec
         Core.PassCaseSpec
+        Core.PassMutualSpec
         Core.PassSpecializeSpec
         Core.PassTailCallSpec
         Core.PrimSpec
