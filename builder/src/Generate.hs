@@ -490,17 +490,25 @@ reported program =
 -- legitimate — the witness path still runs. On for @harness/run.py@\'s
 -- @geng-hs-spec@ target, where it is the standing form of the measurement that
 -- the pass is complete on every program the corpus has.
+--
+-- @GENG_MONO_STRICT=1@ is the same question for types (D491): no reachable
+-- binding has a type variable left in it once "Core.Pass.Mono" has run.
 checked :: Program.Program -> Program.Program
-checked program
-  | not Dump.specializeStrict = program
-  | otherwise =
-      case Program.unspecialized program of
-        [] -> program
-        names ->
+checked program =
+  strictly Dump.monoStrict "GENG_MONO_STRICT" "still have a type variable" (Program.polymorphic program) $
+    strictly Dump.specializeStrict "GENG_SPECIALIZE_STRICT" "still carry a witness or type-abstraction node" (Program.unspecialized program) $
+      program
+  where
+    strictly on flag what names result
+      | not on || null names = result
+      | otherwise =
           error $
-            "GENG_SPECIALIZE_STRICT: "
+            flag
+              ++ ": "
               ++ show (length names)
-              ++ " reachable binding(s) still carry a witness or type-abstraction node:\n"
+              ++ " reachable binding(s) "
+              ++ what
+              ++ ":\n"
               ++ unlines (map (("  " ++) . Program.qualToChars) names)
 
 -- | The kernel modules' JavaScript, which C16 keeps in the build system.

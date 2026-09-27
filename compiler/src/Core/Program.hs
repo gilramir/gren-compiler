@@ -46,6 +46,7 @@ module Core.Program
     link,
     chooseExterns,
     unspecialized,
+    polymorphic,
     kernelName,
     qualToChars,
     render,
@@ -56,6 +57,7 @@ where
 import Canonicalize.Prim qualified as PrimType
 import Core.AST qualified as Core
 import Core.Order qualified as Order
+import Core.Pass.Mono qualified as Mono
 import Core.Prim qualified as Prim
 import Core.Refs (Refs (..), ctor, global, primsIn, refsIn, strictIn)
 import Data.ByteString.Builder qualified as B
@@ -174,6 +176,15 @@ unspecialized program =
   [ name
   | (name, bind) <- _progBindings program,
     not (Core.isSpecialized (Core._bindValue bind))
+  ]
+
+-- | The reachable bindings that still have a type variable somewhere in them,
+-- which @GENG_MONO_STRICT@ refuses (D491).
+polymorphic :: Program -> [Core.QualName]
+polymorphic program =
+  [ name
+  | (name, bind) <- _progBindings program,
+    not (Mono.monomorphic bind)
   ]
 
 kernelName :: Name -> Core.QualName

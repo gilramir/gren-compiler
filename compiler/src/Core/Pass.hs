@@ -14,6 +14,7 @@
 -- > GENG_CORE_PASSES=inline        -- small functions inlined ("Core.Pass.Inline")
 -- > GENG_CORE_PASSES=mutual        -- local mutual tail calls, one function ("Core.Pass.Mutual")
 -- > GENG_CORE_PASSES=float         -- a let in a let's right-hand side floated out ("Core.Pass.Float")
+-- > GENG_CORE_PASSES=mono          -- every type variable copied away by shape ("Core.Pass.Mono")
 --
 -- A switch rather than a mode, for the reason C4 gives: the pass is optional,
 -- its output is still Core, and a program has to answer the same either way.
@@ -54,6 +55,14 @@
 -- in @GENG_CORE_PASSES@ still turns it on there, which is how it is measured.
 -- The other targets keep it until their own measurements say otherwise.
 --
+-- __Monomorphization is native's__ (D491, @m3-native.md@ §NA19). It is in
+-- 'defaults' for 'Target.Native' alone, since JavaScript and the BEAM have a
+-- uniform representation and would only pay for its copies; a list naming it
+-- runs it anywhere, which is how the corpus holds it on node (@run.py@'s
+-- @geng-hs-mono@). It runs straight after specialization, whose copies are the
+-- per-type ones it relies on (D492), and before inlining, so that what the
+-- inliner copies is already monomorphic.
+--
 -- __Specialization runs before either__, and it is the one pass that is not a
 -- function of a single module: it needs every module's Core to know what
 -- instantiations a program asks for (§G27). It runs first because the copies it
@@ -72,6 +81,7 @@ import Core.Dump qualified as Dump
 import Core.Pass.Case qualified as Case
 import Core.Pass.Float qualified as Float
 import Core.Pass.Inline qualified as Inline
+import Core.Pass.Mono qualified as Mono
 import Core.Pass.Mutual qualified as Mutual
 import Core.Pass.Specialize qualified as Specialize
 import Core.Pass.TailCall qualified as TailCall
@@ -87,18 +97,21 @@ names :: Target.Target -> [String]
 names target =
   Maybe.fromMaybe (defaults target) Dump.corePasses
 
--- | Every pass, less @inline@ on JavaScript (D487).
+-- | Every pass, less @inline@ on JavaScript (D487), and @mono@ only on native
+-- (D491).
 defaults :: Target.Target -> [String]
 defaults target =
   case target of
     Target.Js -> ["specialize", "float", "mutual", "case", "tailcall"]
+    Target.Native -> ["specialize", "mono", "inline", "float", "mutual", "case", "tailcall"]
     _ -> ["specialize", "inline", "float", "mutual", "case", "tailcall"]
 
 run :: Target.Target -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
 run target cores =
   let pass name f = if name `elem` names target then f else id
       specialized = pass "specialize" Specialize.run cores
-      inlined = pass "inline" Inline.run specialized
+      monomorphized = pass "mono" (Mono.run (Target.language target) Dump.externBodies) specialized
+      inlined = pass "inline" Inline.run monomorphized
       floated = pass "float" (Map.map Float.run) inlined
       grouped = pass "mutual" (Map.map Mutual.run) floated
       tbl = Case.table (Map.elems grouped)

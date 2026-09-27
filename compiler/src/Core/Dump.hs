@@ -36,6 +36,7 @@ module Core.Dump
     linkEveryExport,
     corePasses,
     specializeStrict,
+    monoStrict,
     specializeReport,
     externBodies,
     spikeFile,
@@ -155,6 +156,20 @@ specializeStrict :: Bool
 specializeStrict =
   unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_SPECIALIZE_STRICT")
 {-# NOINLINE specializeStrict #-}
+
+-- | @GENG_MONO_STRICT=1@: refuse to emit a program in which a binding it
+-- reaches has a type variable in its type, a node's or a binder's (D491,
+-- @m3-native.md@ §NA19).
+--
+-- "Core.Pass.Mono" gives up on nothing — a variable no use determines is
+-- @{}@ (D493) — so this is the check that the pass left nothing behind, and
+-- that no later pass put a variable back. On for @harness/run.py@'s
+-- @geng-hs-mono@ target, as 'specializeStrict' is for @geng-hs-spec@; the
+-- native backend will need it true of every program it is handed.
+monoStrict :: Bool
+monoStrict =
+  unsafePerformIO ((== Just "1") <$> Env.lookupEnv "GENG_MONO_STRICT")
+{-# NOINLINE monoStrict #-}
 
 -- | @GENG_SPECIALIZE_REPORT@: a file, like @GENG_DUMP_LINK@'s, where @Generate@
 -- writes the reachable bindings that still carry a witness or type-abstraction

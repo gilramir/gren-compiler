@@ -48,6 +48,9 @@ module Core.Pass.Specialize
     retype,
     childrenA,
     children_,
+
+    -- * For "Core.Pass.Mono"
+    reorder,
   )
 where
 
