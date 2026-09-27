@@ -121,7 +121,6 @@ Library common
         Core.AST
         Core.Dump
         Core.Extern
-        Core.Low
         Core.Lower.Expression
         Core.Lower.Literal
         Core.Lower.Module
@@ -151,7 +150,6 @@ Library common
         Generate.CoreJS.Expression
         Generate.CoreJS.Extern
         Generate.Html
-        Generate.LowC
         Generate.Node
         Generate.JavaScript.Builder
         Generate.JavaScript.Functions

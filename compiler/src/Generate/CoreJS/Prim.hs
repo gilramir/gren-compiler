@@ -344,7 +344,7 @@ conversion p a =
     -- `String.fromCodePoint` through the kernel's `chr` box, because a `Char`
     -- was a one-character string; this is the whole of what that
     -- representation cost on this backend, and the two lines that replace it
-    -- are what `Generate.LowC` already did.
+    -- are what the M1a C spike's `Generate.LowC` already did.
     --
     -- `i32_to_char` is unchecked, and that is `core`'s to guard: `Char.fromCode`
     -- answers `Nothing` outside the two valid ranges and nothing else in `core`

@@ -309,7 +309,8 @@ literal env pos lit =
     Core.LString text -> JS.TrackedString (_home env) pos (text_ (Utf8.toChars text))
     -- A `Char` is its code point (C8, `docs/m1b-str.md` §T12), which on
     -- JavaScript is an ordinary number in `[0, 0x10FFFF]` -- the same
-    -- representation `Generate.LowC` has always emitted for one.
+    -- representation the M1a C spike's `Generate.LowC` emitted for one, and the C
+    -- backend's `Geng.C.Low` does.
     --
     -- It was a one-character string, and in dev mode that string boxed in a
     -- `String` object by the kernel's `_Utils_chr`, so that the untyped printer

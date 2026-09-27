@@ -499,6 +499,17 @@ beta (Cand params body declared) siteType args tipe sp =
 
 -- | Bind each binder to its expression around a body, as 'beta' says, and
 -- rename the body's own binders fresh.
+--
+-- __A parameter bound by a @let@, and the result, keep what both types say.__
+-- The candidate's types and the call site's are the same for a candidate
+-- 'beta' instantiated, and they are not for a copy "Core.Pass.Mono" made,
+-- whose types are shapes: @apR$kPP@'s @x@ is @$P@ where its argument is
+-- @{ offset : Int, t : Transient }@, and a field read from the variable the
+-- inliner bound it to had lost the record it reads. Nor is the call site
+-- always the specific side: a lambda inlined at @f x@ inside @Maybe.map$kPP@
+-- builds a record whose call is typed @$P@ (@m3-native.md@ §NA21). D498 lays a
+-- shape and the type it stands for out alike, so 'refine' keeps the concrete
+-- side of every shape it meets.
 bindAll :: [(Core.Binder, Core.Expr)] -> Core.Expr -> Core.Type -> Core.Span -> M Core.Expr
 bindAll pairs body tipe sp =
   go pairs Map.empty []
@@ -508,7 +519,8 @@ bindAll pairs body tipe sp =
         [] ->
           do
             body' <- freshen env body
-            return (foldr (\b acc -> Core.Expr (Core.ELet [b] acc) tipe sp) body' (reverse lets))
+            let typed = body' {Core._exprType = refine (Core.typeOf body') tipe}
+            return (foldr (\b acc -> Core.Expr (Core.ELet [b] acc) tipe sp) typed (reverse lets))
         (binder, arg) : more
           | atomic arg ->
               go more (Map.insert (Core._binderName binder) arg env) lets
@@ -523,9 +535,32 @@ bindAll pairs body tipe sp =
           | otherwise ->
               do
                 n <- fresh
-                let binder' = binder {Core._binderName = n}
-                    var = Core.Expr (Core.EVar n) (Core._binderType binder) (Core._binderSpan binder)
+                let known = refine (Core.typeOf arg) (Core._binderType binder)
+                    binder' = binder {Core._binderName = n, Core._binderType = known}
+                    var = Core.Expr (Core.EVar n) known (Core._binderSpan binder)
                 go more (Map.insert (Core._binderName binder) var env) (Core.Bind binder' arg : lets)
+
+-- | Two types of one value, as one: where one is a shape type ("Core.Pass.Mono"'s
+-- @$P@, @$I4@ and the rest) and the other is not, the other; where both have
+-- structure, the structure refined; otherwise the first.
+refine :: Core.Type -> Core.Type -> Core.Type
+refine a b =
+  case (a, b) of
+    _ | isShape a -> b
+    _ | isShape b -> a
+    (Core.TCon q xs, Core.TCon q' ys)
+      | q == q', length xs == length ys -> Core.TCon q (zipWith refine xs ys)
+    (Core.TFun xs r, Core.TFun ys r')
+      | length xs == length ys -> Core.TFun (zipWith refine xs ys) (refine r r')
+    (Core.TRecord fs row, Core.TRecord gs _)
+      | map fst fs == map fst gs -> Core.TRecord (zipWith (\(f, x) (_, y) -> (f, refine x y)) fs gs) row
+    _ -> a
+  where
+    isShape t =
+      case t of
+        Core.TCon (Core.QualName home name) []
+          | home == ModuleName.basics -> take 1 (Name.toChars name) == "$"
+        _ -> False
 
 -- | A lambda written out.
 lambda :: Core.Expr -> Bool

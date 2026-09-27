@@ -54,7 +54,7 @@ main =
 
 -- | @GENG_WIRE_READ=path.corepb@: read one Core file and say what happened.
 --
--- A debug hook in the shape @GENG_DUMP_LINK@ and @GENG_SPIKE_C@ already have —
+-- A debug hook in the shape @GENG_DUMP_LINK@ already has —
 -- a measurement hung off the binary, not a mode of it and not a subcommand.
 -- What it is for is @harness/wire.py@'s third check: the reader has to refuse a
 -- file that is not in canonical form (@docs/m1a-wire.md@ §B7), and a corpus of

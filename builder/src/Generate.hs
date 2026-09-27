@@ -11,7 +11,6 @@ where
 import Build qualified
 import Core.AST qualified as Core
 import Core.Dump qualified as Dump
-import Core.Low qualified as Low
 import Core.Pass qualified as Pass
 import Core.Pretty qualified as Pretty
 import Core.Program qualified as Program
@@ -30,7 +29,6 @@ import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
 import Generate.CoreJS qualified as CoreJS
 import Generate.Html qualified as Html
-import Generate.LowC qualified as LowC
 import Generate.Mode qualified as Mode
 import Generate.Node qualified as Node
 import Generate.SourceMap qualified as SourceMap
@@ -43,8 +41,6 @@ import Gren.Platform qualified as Platform
 import Nitpick.Debug qualified as Nitpick
 import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
-import System.FilePath ((</>))
-import System.FilePath qualified as FilePath
 import Prelude hiding (cycle, print)
 
 -- GENERATORS
@@ -112,11 +108,11 @@ backendFor target =
     Target.Wasm -> Nothing
 
 -- | A build, as stages (§DS5 item 3): the target gate, @--optimize@'s refusal
--- of @Debug@, the front end's Core through the wire, the passes, the C spike
--- when a dev build asks for it, and then the target's backend.
+-- of @Debug@, the front end's Core through the wire, the passes, and then the
+-- target's backend.
 --
 -- Each stage runs once. 'programCore' and 'passed' used to be called again by
--- 'dumpCore', by 'spikeC' and by the link, so a dev build with dumps set put
+-- 'dumpCore', by the M1a C spike and by the link, so a dev build with dumps set put
 -- the program through the wire three times and ran "Core.Pass" twice over.
 --
 -- __The stages can now be separate processes__ (§DS5 item 4). "Core.Stage"'s
@@ -141,11 +137,11 @@ make target details sources artifacts request =
       Just (Stage.Passed, dir) ->
         do
           (whole, passedCores) <- resumed target details artifacts request dir
-          emit backend details sources artifacts whole (Cores passedCores passedCores) request
+          emit backend details sources whole (Cores passedCores passedCores) request
       Just (Stage.Front, dir) ->
         do
           (whole, front) <- resumed target details artifacts request dir
-          afterFront backend details sources artifacts whole front request
+          afterFront backend details sources whole front request
       Nothing ->
         do
           front <- Task.io (programCore details artifacts)
@@ -154,16 +150,16 @@ make target details sources artifacts request =
           checkRoots whole front
           case Stage.writeTo of
             Just (Stage.Front, dir) -> Task.io (Stage.write dir whole front) >> return Nothing
-            _ -> afterFront backend details sources artifacts whole front request
+            _ -> afterFront backend details sources whole front request
 
 -- | The passes, and then either a stop or the rest of the build.
-afterFront :: Maybe Backend -> Details.Details -> ExtSources -> Build.Artifacts -> Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> Request -> Task (Maybe B.Builder)
-afterFront backend details sources artifacts whole front request =
+afterFront :: Maybe Backend -> Details.Details -> ExtSources -> Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> Request -> Task (Maybe B.Builder)
+afterFront backend details sources whole front request =
   do
     passedCores <- Task.io (passed (Whole._programTarget whole) front)
     case Stage.writeTo of
       Just (Stage.Passed, dir) -> Task.io (Stage.write dir whole passedCores) >> return Nothing
-      _ -> emit backend details sources artifacts whole (Cores front passedCores) request
+      _ -> emit backend details sources whole (Cores front passedCores) request
 
 -- | The C spike on a dev build, and then the backend.
 --
@@ -173,16 +169,12 @@ afterFront backend details sources artifacts whole front request =
 -- Geng package outside this binary, and it is handed the directory
 -- @GENG_STAGE_WRITE=passed:@ leaves; the gate above still runs in that process,
 -- so D320 is asked of a @beam@ build exactly as it is of a @js@ one.
-emit :: Maybe Backend -> Details.Details -> ExtSources -> Build.Artifacts -> Whole.Program -> Cores -> Request -> Task (Maybe B.Builder)
-emit maybeBackend details sources artifacts whole cores request =
+emit :: Maybe Backend -> Details.Details -> ExtSources -> Whole.Program -> Cores -> Request -> Task (Maybe B.Builder)
+emit maybeBackend details sources whole cores request =
   case maybeBackend of
     Nothing -> Task.throw (Exit.GenerateNoBackend (Whole._programTarget whole))
     Just backend ->
-      do
-        case _requestMode request of
-          Dev -> spikeC artifacts cores
-          Prod -> return ()
-        Just <$> _backendEmit backend details sources whole cores request
+      Just <$> _backendEmit backend details sources whole cores request
 
 -- | A stage read back from files, and the check that it is this build's
 -- (@m2-seam.md@ §DS5 item 4).
@@ -724,76 +716,6 @@ dumpLink whole kernels cores =
           case maybePrims of
             Nothing -> return ()
             Just file -> B.writeFile file (report Program.renderPrims)
-
--- | The Core → C spike (@docs/m1a-c-spike.md@), when @GENG_SPIKE_C@ asks for it.
---
--- Hung off a build rather than given a CLI surface, because §X10 is explicit
--- that the spike is __not a backend__: no @geng make --output=x.c@, no target
--- in @harness/run.py@, no corpus. When it is over, "Generate.CoreJS" is still
--- the only backend and deleting this function deletes the spike.
---
--- __The roots are the whole trick__ (§X3). This links from the one scalar
--- binding @GENG_SPIKE_ROOT@ names, not from the program\'s @main@ — measured
--- 2026-09-06, @main = "x"@ links 56 bindings and 26 kernel JavaScript
--- functions, among them @Platform.leaf@ and @Scheduler.spawn@, and the language
--- itself costs five of them. 'Program.link' takes its roots as a plain list, so
--- this is an argument at a call site and not a mechanism.
---
--- Two files: the C, and the finding. §X9 makes the spike\'s criterion a written
--- list of everything @Low@ had to compute that Core does not carry, and
--- "Core.Low" produces it as it goes rather than leaving it to be remembered.
-spikeC :: Build.Artifacts -> Cores -> Task ()
-spikeC (Build.Artifacts pkg _ _ _) cores0 =
-  case (Dump.spikeFile, Dump.spikeRoot) of
-    (Just file, Just (home, name)) ->
-      Task.io $
-        do
-          let cores = Program.chooseExterns Core.ExternC Dump.externBodies (_coresPassed cores0)
-          let root =
-                Core.QualName
-                  (ModuleName.Canonical pkg (N.fromChars home))
-                  (N.fromChars name)
-          let program = Program.link spikeBackend cores [root]
-          case Low.lower program root of
-            Left err -> B.writeFile file (B.stringUtf8 ("/* " ++ err ++ " */\n"))
-            Right low ->
-              do
-                B.writeFile file (LowC.generate low)
-                B.writeFile (file ++ ".notes") (Low.renderNotes (Low._lowNotes low))
-                -- The spike's own link, and not the program's. @GENG_DUMP_LINK@
-                -- writes the link rooted at @main@, which is the 87-binding one
-                -- §X2 measured; §X5's budget is about what the /spike's/ root
-                -- reaches, and checking the C kernel against the wrong list
-                -- would pass anything.
-                B.writeFile (file ++ ".link") (Program.render program)
-                B.writeFile (FilePath.takeDirectory file </> "geng_tags.h") (LowC.renderTags low)
-    _ -> return ()
-
--- | The linker's view of a backend that has no JavaScript in it.
---
--- __Both fields empty, and that is the whole of §X5's budget.__ A kernel
--- module is a node in the JS link because its chunks are spliced and its
--- JavaScript calls back into Gren — so reaching @Basics.add@ reaches the whole
--- @Basics@ chunk list, which references @Utils@, which references @Dict@,
--- @Set@ and @Array@. Measured on the first spike run: linking @Case.answer@
--- with the JavaScript backend's kernel map dragged in @Dict@, @Set@ and
--- @Array.splice1@, none of which the arithmetic wants.
---
--- For C there is no JavaScript to splice. So a kernel name is not defined, the
--- graph stops there, and the reference comes out in 'Program._progMissing'
--- instead — which is exactly the list §X5 makes the C kernel's budget. The
--- transitive closure disappears because the edge that created it was a fact
--- about JavaScript.
---
--- 'Program._backendEdges' is empty for the same kind of reason: its edges are a
--- @port@'s runtime constructor and a static @main@'s entry point, and §X3's
--- root has neither.
-spikeBackend :: Program.Backend
-spikeBackend =
-  Program.Backend
-    { Program._backendKernels = Map.empty,
-      Program._backendEdges = Map.empty
-    }
 
 -- EXTERN FILES
 
