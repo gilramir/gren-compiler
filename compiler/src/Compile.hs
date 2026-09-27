@@ -323,7 +323,7 @@ dumpCore canonical core =
       unsafePerformIO $
         do
           Dump.writeModule dir (Can._name canonical) $
-            Pretty.moduleToBuilder Pretty.defaultOptions core
+            Pretty.moduleToBuilder (Dump.options (Can._name canonical)) core
           return (Right ())
 
 -- | D63's range check: a numeric literal outside the range of the type it has

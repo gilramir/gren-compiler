@@ -366,7 +366,7 @@ passed target cores =
       Nothing -> return ()
       Just dir ->
         mapM_
-          (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder Pretty.defaultOptions core))
+          (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder (Dump.options home) core))
           (Map.toAscList after)
     roundTrip Dump.passedDir after
 
@@ -666,7 +666,7 @@ dumpProgramCore modules =
     Just dir ->
       Task.io $
         mapM_
-          (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder Pretty.defaultOptions core))
+          (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder (Dump.options home) core))
           (Map.toAscList modules)
 
 -- | @GENG_DUMP_LINK@ and @GENG_DUMP_PRIMS@: 'Core.Program.link''s summary —

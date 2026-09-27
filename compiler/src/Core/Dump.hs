@@ -25,6 +25,7 @@ module Core.Dump
     wireFileName,
     writeModule,
     writeWire,
+    options,
     moduleDir,
     programDir,
     linkFile,
@@ -42,8 +43,10 @@ module Core.Dump
   )
 where
 
+import Core.Pretty qualified as Pretty
 import Data.ByteString.Builder qualified as B
 import Data.List qualified as List
+import Data.Name qualified as Name
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import System.Directory qualified as Dir
@@ -82,6 +85,25 @@ writeWire dir home builder =
   do
     Dir.createDirectoryIfMissing True dir
     B.writeFile (dir </> wireFileName home) builder
+
+-- | How every dump prints a module: 'Pretty.defaultOptions', or with each
+-- expression's and binder's type when @GENG_DUMP_TYPES@ names the module
+-- (@GENG_DUMP_TYPES=Case@, or several separated by commas).
+--
+-- The types are what a pass that reads them believes, and nothing else holds
+-- them: JavaScript and the BEAM erase them, so a node type that disagrees with
+-- the checker's is invisible until a monomorphizer lays a value out by it
+-- (`docs/m3-native.md` §NA3). @harness/core-golden.py@ names a case's root
+-- module when the case says @"core-types": true@, and only then: a typed dump
+-- is a wall, and a dependency's dump is digested once for every case.
+options :: ModuleName.Canonical -> Pretty.Options
+options home =
+  Pretty.defaultOptions {Pretty._showTypes = ModuleName._module home `elem` typedModules}
+
+typedModules :: [ModuleName.Raw]
+typedModules =
+  unsafePerformIO (maybe [] (map Name.fromChars . splitOn ',') <$> Env.lookupEnv "GENG_DUMP_TYPES")
+{-# NOINLINE typedModules #-}
 
 -- | @GENG_DUMP_CORE@: where "Compile" writes each module as it is compiled.
 moduleDir :: Maybe FilePath

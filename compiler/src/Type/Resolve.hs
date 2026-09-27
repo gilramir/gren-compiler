@@ -678,11 +678,12 @@ close q var tipe =
 -- | Which enclosing definition, if any, quantifies a type variable.
 --
 -- __A name and not an identity, and that is as good as this gets.__ Two
--- variables in one module can share a name — a use of @abs : (Num a, Ord a) =>
--- a -> a@ makes a flexible variable called @a@, and any signature may call one
--- of its own variables @a@ too ('Type.Type.keepName' says why nothing renames
--- them). So this asks the question the rest of the elaborator asks: within the
--- definitions this node is nested in, which one's type mentions the name? An
+-- variables in one module can share a name — two signatures may each call one
+-- of their own variables @a@, and so may two top-level definitions the solver
+-- annotated ('Type.Type.foundName' says why nothing renames them; a flexible
+-- variable met nowhere else is renamed on a clash, D494). So this asks the
+-- question the rest of the elaborator asks: within the definitions this node
+-- is nested in, which one's type mentions the name? An
 -- enclosing /signature/ is deliberately not consulted. It would be the better
 -- answer when the names really are the same variable, and it is the wrong
 -- answer far more often, because @a@ is the commonest variable name there is.

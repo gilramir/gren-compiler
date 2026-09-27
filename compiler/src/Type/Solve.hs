@@ -47,7 +47,7 @@ run constraint =
           -- A mark of its own, past the one 'defaultStuck' just used, because
           -- the constant one every annotation walk shares would say every
           -- variable had already been visited.
-          (nodeTypes, constrained) <- Type.toNodeTypes (nextMark (nextMark mark)) nodes
+          (nodeTypes, constrained) <- Type.toNodeTypes (nextMark (nextMark mark)) (Map.elems env) nodes
           let defaults = Map.mapMaybe (fmap atom . Class.defaultsTo) constrained
           -- After defaulting, because that is what closes a bare literal's
           -- variable at `Int` and the range to check against is the closed

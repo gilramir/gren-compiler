@@ -40,9 +40,11 @@ where
 
 import AST.Canonical qualified as Can
 import AST.Utils.Type qualified as Type
+import Control.Monad (foldM)
 import Control.Monad.State.Strict (StateT, liftIO)
 import Control.Monad.State.Strict qualified as State
 import Data.Foldable (foldrM)
+import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Name qualified as Name
 import Data.Word (Word32)
@@ -353,24 +355,35 @@ toAnnotation variable =
 -- lambda's binder type and its body's occurrence of it to agree, so the naming
 -- has to be module-wide.
 --
+-- __Which names are kept and which are renamed__ is 'foundName''s to say.
+-- The variables of the module's top-level annotations come first, because
+-- 'toAnnotation' has already named them and published those names: the
+-- elaborator matches an annotation's context against a node type by name
+-- (§G33), so the two have to agree.
+--
 -- The classes come out with the types because this is the only walk that sees
 -- every variable in the module — an annotation's walk sees one definition's —
 -- and `classes.md` §0's rule has to be answerable for any of them once an
 -- /open/ constraint can put a variable in front of it (§G33.2).
-toNodeTypes :: Mark -> Map.Map Can.NodeId Type -> IO (Map.Map Can.NodeId Can.Type, Map.Map Name.Name Class.Classes)
-toNodeTypes visited types =
+toNodeTypes :: Mark -> [Variable] -> Map.Map Can.NodeId Type -> IO (Map.Map Can.NodeId Can.Type, Map.Map Name.Name Class.Classes)
+toNodeTypes visited annotated types =
   do
-    userNames <- foldrM (collectTypeVarNames visited) Map.empty (Map.elems types)
+    fromAnnotations <- foldrM (varNames visited (foundName True)) [] annotated
+    found <- foldrM (collectTypeVarNames visited) fromAnnotations (Map.elems types)
+    let (fixed, flexible) = List.partition _foundFixed found
+        kept = Map.fromListWith (\_ old -> old) [(_foundName f, _foundVar f) | f <- fixed]
+        rename taken (Found _ name var makeContent) = addName 0 name var makeContent taken
+    userNames <- foldM rename kept flexible
     (canTypes, NameState _ _ _ constrained) <-
       State.runStateT (traverse typeToCanType types) (makeNameState userNames)
     return (canTypes, constrained)
 
-collectTypeVarNames :: Mark -> Type -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
+collectTypeVarNames :: Mark -> Type -> [Found] -> IO [Found]
 collectTypeVarNames visited tipe taken =
   let recurse = collectTypeVarNames visited
    in case tipe of
         PlaceHolder _ -> return taken
-        VarN var -> keepVarNames visited var taken
+        VarN var -> varNames visited (foundName False) var taken
         AliasN _ _ args real ->
           recurse real =<< foldrM recurse taken (map snd args)
         AppN _ _ args -> foldrM recurse taken args
@@ -690,12 +703,15 @@ getVarNames :: Variable -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name V
 getVarNames =
   varNames getVarNamesMark (addName 0)
 
--- | The same, without renaming a duplicate — see 'keepName'.
-keepVarNames :: Mark -> Variable -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
-keepVarNames visited =
-  varNames visited keepName
+-- | A name 'toNodeTypes' found, and whether it is kept as it stands.
+data Found = Found
+  { _foundFixed :: Bool,
+    _foundName :: Name.Name,
+    _foundVar :: Variable,
+    _foundContent :: Name.Name -> Content
+  }
 
--- | Register a name that is already taken by a different variable.
+-- | Note a variable's name for 'toNodeTypes', which decides after the walk.
 --
 -- 'addName' renames: two distinct rigid variables both called @a@ come out as
 -- @a@ and @a1@, which is what a message showing one type at a time needs, and
@@ -707,13 +723,29 @@ keepVarNames visited =
 -- scoped to the definition whose annotation names it, and no node type mentions
 -- two of them. Renaming there makes a body's type disagree with the signature
 -- the body is checked against — which is invisible while nothing reads the two
--- together, and is exactly what a witness parameter is looked up by (§G26).
-keepName :: Name.Name -> Variable -> (Name.Name -> Content) -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
-keepName givenName var _ takenNames =
-  return (Map.insertWith (\_ old -> old) givenName var takenNames)
+-- together, and is exactly what a witness parameter is looked up by (§G26). So
+-- a rigid variable keeps its name, and so does one a top-level annotation
+-- published ('toNodeTypes' passes @True@ for those).
+--
+-- __A flexible variable is renamed on a clash.__ Its name is only a hint,
+-- copied from the scheme it was instantiated from: @Nothing : Maybe a@ used
+-- twice is two variables called @a@, and @{ a = Nothing, b = Nothing }@ in a
+-- @let@ was recorded as @{ a : Maybe a, b : Maybe a }@ — one variable where
+-- the checker has two, which a pass that believes the types lays out wrong
+-- (`docs/m3-native.md` §NA3, D494).
+foundName :: Bool -> Name.Name -> Variable -> (Name.Name -> Content) -> [Found] -> IO [Found]
+foundName annotated name var makeContent found =
+  do
+    (Descriptor content _ _ _) <- UF.get var
+    let rigid =
+          case content of
+            RigidVar _ -> True
+            RigidSuper _ _ -> True
+            _ -> False
+    return (Found (annotated || rigid) name var makeContent : found)
 
-type Register =
-  Name.Name -> Variable -> (Name.Name -> Content) -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
+type Register acc =
+  Name.Name -> Variable -> (Name.Name -> Content) -> acc -> IO acc
 
 -- | Every name already spoken for in what this walk can reach.
 --
@@ -725,7 +757,7 @@ type Register =
 -- nothing. What it collects is the set a fresh name has to avoid, so collecting
 -- nothing means inventing a name another variable in the module already has
 -- (§G33.3).
-varNames :: Mark -> Register -> Variable -> Map.Map Name.Name Variable -> IO (Map.Map Name.Name Variable)
+varNames :: Mark -> Register acc -> Variable -> acc -> IO acc
 varNames visited register var takenNames =
   do
     (Descriptor content rank mark copy) <- UF.get var
