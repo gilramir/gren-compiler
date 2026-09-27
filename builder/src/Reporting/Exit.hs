@@ -1595,9 +1595,9 @@ toGenerateReport problem =
         Nothing
         ( "This application's geng.toml builds it for the "
             ++ Target.toChars target
-            ++ " target, and this compiler has no backend for it."
+            ++ " target, and this compiler has no backend for it yet."
         )
-        [ D.reflow "It has one backend, which writes JavaScript for the js target."
+        [ D.reflow "It writes JavaScript for the js target and Erlang for the beam target. A build for another target can still stop after the Core passes and write its Core, which is what GENG_STAGE_WRITE=passed:<directory> does."
         ]
     GenerateConstrainedRoots problems ->
       Help.report

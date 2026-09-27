@@ -1221,7 +1221,9 @@ prettifyError error =
                 (PP.words
                     ("The geng.toml file says this package works on the "
                         ++ Runtime.toString runtime
-                        ++ " runtime, and this compiler builds for any, browser and node, so it cannot build it as the project. It can still be a dependency of a project whose runtime is "
+                        ++ " runtime, and this compiler builds for "
+                        ++ Runtime.builtNames
+                        ++ ", so it cannot build it as the project. It can still be a dependency of a project whose runtime is "
                         ++ Runtime.toString runtime
                         ++ " or below it, once a compiler builds for one (D319)."
                     )
