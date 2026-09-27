@@ -20,6 +20,7 @@ module Generate.CoreJS
   ( GeneratedResult (..),
     generate,
     shortenFieldNames,
+    fieldNames,
   )
 where
 
@@ -360,12 +361,41 @@ ctorEntries d =
           Expr._ctorFields = length (Core._ctorFields c),
           Expr._ctorAlts = length (Core._dataCtors d),
           Expr._ctorHome = home,
-          Expr._ctorShort = short
+          Expr._ctorShort = short,
+          Expr._ctorFlat = flatOf d c
         }
     )
   | c <- Core._dataCtors d,
     let Core.QualName home short = Core._ctorName c
   ]
+
+-- | D485 (geng-lang @pre-m3-js.md@ §JS4): a constructor whose one field is a
+-- closed record, of a datatype with more than one constructor, is flat — its
+-- record's fields beside the tag rather than a record under @a@ — which is
+-- @Geng.Beam.Flat@'s rule on the BEAM (D443). @Dict@'s node is the one every
+-- program builds. A one-constructor type is left alone: under @--optimize@ it is
+-- already its payload ('Expr.Unbox'). So are the types whose values the runtime
+-- builds rather than their declaration, which the BEAM leaves alone too, and a
+-- JavaScript extern never reads a constructor (D192), so nothing outside the
+-- backend sees the change.
+flatOf :: Core.DataDecl -> Core.Ctor -> Maybe [Name]
+flatOf d c =
+  case (shapeOf d, Core._ctorFields c) of
+    (Expr.Normal, [Core.TRecord fields@(_ : _) Nothing])
+      | not (runtimeBuilt (Core._dataName d)) -> Just (map fst fields)
+    _ -> Nothing
+
+runtimeBuilt :: Core.QualName -> Bool
+runtimeBuilt (Core.QualName (ModuleName.Canonical pkg modul) short) =
+  pkg == Pkg.core
+    && (Name.toChars modul ++ "." ++ Name.toChars short)
+      `elem` [ "Task.Internal.Task",
+               "Source.Source",
+               "Process.Id",
+               "Extern.Handle",
+               "Array.Transient.Transient",
+               "Bytes.Transient.Transient"
+             ]
 
 -- | The representation choice, derived the way `Canonicalize.Environment.Local`
 -- derives it from source and @Generate.FromCore.ctorOpts@ derived it from Core.
@@ -386,6 +416,20 @@ shapeOf d =
 -- rather than of the program. So the assignment here is alphabetical instead —
 -- correct either way, since all that is required is a bijection, and measurably
 -- a little larger. §J15 says how much.
+-- | The fields @--optimize@ has to name: the program's, and a flat
+-- constructor's (D485), whose definition copies every field of its record
+-- whether or not the program writes one.
+fieldNames :: Program -> Set.Set Name
+fieldNames program =
+  Set.union (_progFields program) $
+    Set.fromList
+      [ f
+      | d <- _progData program,
+        c <- Core._dataCtors d,
+        Just fields <- [flatOf d c],
+        f <- fields
+      ]
+
 shortenFieldNames :: Set.Set Name -> Mode.ShortFieldNames
 shortenFieldNames fields =
   Map.fromList (zipWith (\i f -> (f, JsName.fromInt i)) [0 ..] (Set.toAscList fields))

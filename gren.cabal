@@ -130,6 +130,7 @@ Library common
         Core.Pass
         Core.Pass.Case
         Core.Pass.Inline
+        Core.Pass.Float
         Core.Pass.Mutual
         Core.Pass.Specialize
         Core.Pass.TailCall

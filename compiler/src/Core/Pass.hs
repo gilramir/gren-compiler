@@ -3,7 +3,7 @@
 -- | The Core→Core passes, and which of them run.
 --
 -- @docs/core.md@ C11 puts the passes in Haskell through M1b. M1a's pipeline
--- had none of them; since D169 they all run (four since D442, five since D479) unless @GENG_CORE_PASSES@ says
+-- had none of them; since D169 they all run (four since D442, five since D479, six since D483) unless @GENG_CORE_PASSES@ says
 -- otherwise ('Core.Dump.corePasses'):
 --
 -- > GENG_CORE_PASSES=none          -- none of them
@@ -12,6 +12,7 @@
 -- > GENG_CORE_PASSES=specialize    -- witness erasure ("Core.Pass.Specialize")
 -- > GENG_CORE_PASSES=inline        -- small functions inlined ("Core.Pass.Inline")
 -- > GENG_CORE_PASSES=mutual        -- local mutual tail calls, one function ("Core.Pass.Mutual")
+-- > GENG_CORE_PASSES=float         -- a let in a let's right-hand side floated out ("Core.Pass.Float")
 --
 -- A switch rather than a mode, for the reason C4 gives: the pass is optional,
 -- its output is still Core, and a program has to answer the same either way.
@@ -30,6 +31,12 @@
 -- are the monomorphic chains it collapses, and before the per-module passes,
 -- which then see plain cases of primitives rather than calls. It is the second
 -- whole-program pass, because what it copies is another module's body.
+--
+-- __Floating follows it__ (D483): the inliner binds an inlined call's
+-- arguments with @let@s where the call was, so a call used as a value leaves a
+-- @let@ in a @let@'s right-hand side, which JavaScript and C can only compile as
+-- a function called on the spot. "Core.Pass.Float" moves those bindings out
+-- beside the one they were inside, per module.
 --
 -- __Mutual tail calls are next__ (D479): a local group whose calls to one
 -- another are all tail calls becomes one self-recursive function, which the
@@ -53,6 +60,7 @@ where
 import Core.AST qualified as Core
 import Core.Dump qualified as Dump
 import Core.Pass.Case qualified as Case
+import Core.Pass.Float qualified as Float
 import Core.Pass.Inline qualified as Inline
 import Core.Pass.Mutual qualified as Mutual
 import Core.Pass.Specialize qualified as Specialize
@@ -70,6 +78,7 @@ run cores =
   let pass name f = if name `elem` Dump.corePasses then f else id
       specialized = pass "specialize" Specialize.run cores
       inlined = pass "inline" Inline.run specialized
-      grouped = pass "mutual" (Map.map Mutual.run) inlined
+      floated = pass "float" (Map.map Float.run) inlined
+      grouped = pass "mutual" (Map.map Mutual.run) floated
       tbl = Case.table (Map.elems grouped)
    in Map.map (pass "case" (Case.run tbl) . pass "tailcall" TailCall.run) grouped

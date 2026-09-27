@@ -151,11 +151,14 @@ function _Extern_Array(extern, v, element) {
 // source, and not the source itself. `emit` checks its value the way a returned
 // one is checked, so a host number cannot reach a `Source Int64`. Emitting into
 // a closed source is a no-op rather than an error -- an event that arrives
-// while the program is shutting down is the ordinary case, not a mistake.
+// while the program is shutting down is the ordinary case, not a mistake --
+// and `emit` answers 'closed' for it and 'ok' otherwise, the BEAM's two atoms
+// (D430, D486), so an implementation that emits for as long as it is let, as
+// `Time.every`'s ticker does, knows when to stop.
 function _Extern_source(extern, source, element) {
   return {
     emit: function (value) {
-      _SourcePrim_emit(source, element(extern, value));
+      return _SourcePrim_emit(source, element(extern, value)) ? 'ok' : 'closed';
     },
     close: function () {
       _SourcePrim_shut(source);

@@ -115,7 +115,11 @@ data Ctor = Ctor
     -- @type@ from being compared against itself.
     _ctorAlts :: !Int,
     _ctorHome :: !ModuleName.Canonical,
-    _ctorShort :: !Name
+    _ctorShort :: !Name,
+    -- | The record's field names, alphabetical, when this is a flat
+    -- constructor (D485): one of several whose one field is a closed record,
+    -- built as @{ $: tag, f1: …, fn: … }@ rather than as @{ $: tag, a: { … } }@.
+    _ctorFlat :: !(Maybe [Name])
   }
 
 data Shape = Normal | Enum | Unbox
@@ -148,8 +152,31 @@ codeToExpr :: Code -> JS.Expr
 codeToExpr code =
   case code of
     JsExpr expr -> expr
-    JsBlock [JS.Return expr] -> expr
-    JsBlock stmts -> JS.Call (JS.Function Nothing [] stmts) []
+    JsBlock stmts
+      | Just expr <- conditional stmts -> expr
+      | otherwise -> JS.Call (JS.Function Nothing [] stmts) []
+
+-- | A block that is only @if@s and @return@s, as the conditional expression it
+-- is (D483, geng-lang @pre-m3-js.md@ §JS2). Since D442 a @case@ an inlined
+-- body leaves in expression position is common — @p1 || p2@ inlined from
+-- @Basics.or@ is @if (p1) { return true; } else { return p2; }@ — and a
+-- function made and called for it on every evaluation cost the formatter's
+-- parser a tenth of its time. Anything with a binding in it stays a function:
+-- a @var@ in an expression would be the enclosing function's, and sibling
+-- blocks may bind one name.
+conditional :: [JS.Stmt] -> Maybe JS.Expr
+conditional stmts =
+  case stmts of
+    [JS.Return expr] -> Just expr
+    [JS.Block inner] -> conditional inner
+    [JS.IfStmt cond yes no] -> JS.If cond <$> arm yes <*> arm no
+    JS.IfStmt cond yes JS.EmptyStmt : rest@(_ : _) -> JS.If cond <$> arm yes <*> conditional rest
+    _ -> Nothing
+  where
+    arm stmt =
+      case stmt of
+        JS.Block inner -> conditional inner
+        _ -> conditional [stmt]
 
 codeToStmtList :: Code -> [JS.Stmt]
 codeToStmtList code =
@@ -332,14 +359,38 @@ ctor env pos name@(Core.QualName _ short) _tag args
   | otherwise =
       let c = lookupCtor env name
           built = map (jsExpr env) args
-       in case (_ctorShape c, built) of
-            (Enum, _) -> ctorRef c
-            (_, []) -> ctorRef c
-            (Unbox, [one]) | Mode.Prod _ <- _mode env -> one
+       in case (_ctorShape c, _ctorFlat c, args) of
+            (Enum, _, _) -> ctorRef c
+            (_, _, []) -> ctorRef c
+            (Unbox, _, [_]) | Mode.Prod _ <- _mode env, [one] <- built -> one
+            (_, Just _, [Core.Expr (Core.ERecord fields) _ _]) ->
+              JS.Object ((JsName.dollar, tagValue env c) : [(generateField (_mode env) f, jsExpr env v) | (f, v) <- fields])
+            (_, Just names, [_]) ->
+              JS.Call (flatFrom env c names) built
             _ -> object env c built
 
 ctorRef :: Ctor -> JS.Expr
 ctorRef c = JS.Ref (JsName.fromGlobal (_ctorHome c) (_ctorShort c))
+
+-- | A flat constructor of a record that is not written out where it is built
+-- (a variable, a call): a function of the record copying its fields beside
+-- the tag. The record a flat constructor is built of is almost always written
+-- out in place, which 'ctor' builds directly.
+flatFrom :: Env -> Ctor -> [Name] -> JS.Expr
+flatFrom env c names =
+  let r = JsName.fromLocal (Name.fromChars "record")
+   in JS.Function Nothing [r] [JS.Return (flatObject env c (JS.Ref r) names)]
+
+flatObject :: Env -> Ctor -> JS.Expr -> [Name] -> JS.Expr
+flatObject env c r names =
+  JS.Object ((JsName.dollar, tagValue env c) : [(field, JS.Access r field) | f <- names, let field = generateField (_mode env) f])
+
+-- | A flat constructor's record, built back from the constructor: for a
+-- pattern that binds the record as a whole, which is the one place a program
+-- takes it as a value of its own.
+flatRecord :: Env -> JS.Expr -> [Name] -> JS.Expr
+flatRecord env value names =
+  JS.Object [(field, JS.Access value field) | f <- names, let field = generateField (_mode env) f]
 
 -- | The tagged record a constructor builds: the tag under @$@, then one field
 -- per argument named @a@, @b@, … in order.
@@ -414,8 +465,11 @@ ctorDefinition env name
                   case _mode env of
                     Mode.Prod _ -> JS.Function Nothing [JsName.dollar] [JS.Return (JS.Ref JsName.dollar)]
                     Mode.Dev -> JS.Function Nothing argNames [JS.Return body]
-            (Normal, 1) ->
-              Just (JS.Var global (JS.Function Nothing argNames [JS.Return body]))
+            (Normal, 1)
+              | Just names <- _ctorFlat c ->
+                  Just (JS.Var global (flatFrom env c names))
+              | otherwise ->
+                  Just (JS.Var global (JS.Function Nothing argNames [JS.Return body]))
             (Normal, _) ->
               Just $
                 JS.Block
@@ -940,13 +994,26 @@ match env value pattern =
       | otherwise ->
           let c = lookupCtor env name
               subs =
-                case _ctorShape c of
-                  Unbox -> [match env (unboxed env value) p | p <- args]
+                case (_ctorShape c, _ctorFlat c, args) of
+                  (Unbox, _, _) -> [match env (unboxed env value) p | p <- args]
+                  (_, Just names, [p]) -> [flatMatch env value names p]
                   _ -> Index.indexedMap (\i p -> match env (JS.Access value (JsName.fromIndex i)) p) args
               (tests, binds) = collect subs
            in (ctorTest env c value ++ tests, binds)
   where
     collect subs = (concatMap fst subs, concatMap snd subs)
+
+-- | A pattern on a flat constructor's record. The constructor holds the
+-- record's fields itself, so a record pattern reads them off it; a name for the
+-- record as a whole is bound to the record built back ('flatRecord').
+flatMatch :: Env -> JS.Expr -> [Name] -> Core.Pattern -> ([JS.Expr], [JS.Stmt])
+flatMatch env value names p =
+  case p of
+    Core.PAs binder inner ->
+      let (tests, binds) = flatMatch env value names inner
+       in (tests, JS.Var (JsName.fromLocal (Core._binderName binder)) (flatRecord env value names) : binds)
+    Core.PVar _ -> match env (flatRecord env value names) p
+    _ -> match env value p
 
 -- | A datatype with one constructor is irrefutable, so it gets no test — which
 -- is also what keeps an unboxed constructor from being compared against its own

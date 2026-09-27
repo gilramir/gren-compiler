@@ -1388,8 +1388,9 @@ function _SourcePrim_shut(source) {
   }
 }
 
+// Whether the source took the event: false once it is closed.
 function _SourcePrim_emit(source, value) {
-  if (source.closed) return;
+  if (source.closed) return false;
   var waiting = source.waiting;
   if (waiting) {
     source.waiting = null;
@@ -1397,6 +1398,7 @@ function _SourcePrim_emit(source, value) {
   } else {
     source.queue.push(value);
   }
+  return true;
 }
 
 // What a reader is answered with: a SUCCEED node that can hand its event back.

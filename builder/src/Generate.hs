@@ -278,7 +278,7 @@ javaScript =
       let jsMode =
             case mode of
               Dev -> Mode.Dev
-              Prod -> Mode.Prod (CoreJS.shortenFieldNames (Program._progFields program))
+              Prod -> Mode.Prod (CoreJS.shortenFieldNames (CoreJS.fieldNames program))
           CoreJS.GeneratedResult source sourceMap = CoreJS.generate jsMode program kernels exts
           mapped leadingLines js =
             case maybeSources of

@@ -295,6 +295,22 @@ letsKnown ctx binds =
 node :: Ctx -> Core.Expr -> M Core.Expr
 node ctx e@(Core.Expr value tipe sp) =
   case value of
+    -- @x |> f a@ and @f a <| x@ are the one call @f a x@, as the JavaScript
+    -- backend has always emitted them ('Generate.CoreJS.Expression.apply').
+    -- Inlining @apR@'s body instead bound @f a@ to a @let@ and called the
+    -- closure it made, which the fold below catches only when every argument
+    -- is a value: a curried call and a closure per pipeline step, which cost the
+    -- formatter a tenth of its time on node (pre-m3-js.md §JS2, D483). For
+    -- @<|@ the order is the same; for @|>@ the moved value is evaluated after
+    -- @f@'s arguments, so one of the two sides has to be free of effects.
+    Core.EApp (Core.Expr (Core.EGlobal (Core.QualName home name)) _ _) [left, right]
+      | home == ModuleName.basics,
+        Just (fn, arg, reorders) <- pipe name left right,
+        Just call <- appliedTo fn arg,
+        not reorders || pure_ arg || all pure_ (earlierOf fn) ->
+          do
+            markFired
+            node ctx (Core.Expr call tipe sp)
     Core.EApp (Core.Expr (Core.EGlobal q) siteType _) args
       | Just cand <- _candidate ctx q,
         length args == length (_candParams cand) ->
@@ -370,6 +386,40 @@ node ctx e@(Core.Expr value tipe sp) =
             out <- bindAll (zip params args) body tipe sp
             simplify ctx out
     _ -> return e
+
+-- | Which side of a pipe is the function, which the value, and whether
+-- applying one to the other moves the value after the function's arguments.
+pipe :: Name -> Core.Expr -> Core.Expr -> Maybe (Core.Expr, Core.Expr, Bool)
+pipe name left right
+  | name == Name.fromChars "apR" = Just (right, left, True)
+  | name == Name.fromChars "apL" = Just (left, right, False)
+  | otherwise = Nothing
+
+-- | A function expression given one more argument, when that makes a saturated
+-- call: a global given all but its last, a global or a local of one parameter,
+-- or a lambda of one, which the fold of a lambda applied at once then opens.
+appliedTo :: Core.Expr -> Core.Expr -> Maybe Core.Expr_
+appliedTo fn arg =
+  case Core._exprValue fn of
+    Core.EApp h@(Core.Expr (Core.EGlobal _) _ _) args
+      | Core.TFun params _ <- Core.typeOf h,
+        length args + 1 == length params ->
+          Just (Core.EApp h (args ++ [arg]))
+    Core.ELam [_] _ -> Just (Core.EApp fn [arg])
+    _
+      | Core.TFun [_] _ <- Core.typeOf fn,
+        isName (Core._exprValue fn) ->
+          Just (Core.EApp fn [arg])
+    _ -> Nothing
+  where
+    isName v = case v of Core.EGlobal _ -> True; Core.EVar _ -> True; _ -> False
+
+-- | The arguments a function expression already holds.
+earlierOf :: Core.Expr -> [Core.Expr]
+earlierOf fn =
+  case Core._exprValue fn of
+    Core.EApp _ args -> args
+    _ -> []
 
 -- | A global applied to fewer arguments than it takes, or named alone.
 partial :: Core.Expr -> Maybe (Core.Expr, [Core.Expr])
@@ -462,12 +512,34 @@ bindAll pairs body tipe sp =
         (binder, arg) : more
           | atomic arg ->
               go more (Map.insert (Core._binderName binder) arg env) lets
+          | lambda arg && uses (Core._binderName binder) body == 1 ->
+              -- A lambda is a value, so making it where it is used rather than
+              -- where the call was changes nothing, and a candidate's body has no
+              -- lambda of its own for the one use to sit under. Bound by a @let@
+              -- it would be a closure called through a variable, which the
+              -- lambda-applied-at-once fold below cannot see: inlining @<|@ or
+              -- @|>@ with a lambda made exactly that (@pre-m3-js.md@ §JS2, D483).
+              go more (Map.insert (Core._binderName binder) arg env) lets
           | otherwise ->
               do
                 n <- fresh
                 let binder' = binder {Core._binderName = n}
                     var = Core.Expr (Core.EVar n) (Core._binderType binder) (Core._binderSpan binder)
                 go more (Map.insert (Core._binderName binder) var env) (Core.Bind binder' arg : lets)
+
+-- | A lambda written out.
+lambda :: Core.Expr -> Bool
+lambda e =
+  case Core._exprValue e of
+    Core.ELam _ _ -> True
+    _ -> False
+
+-- | How many times a local name is read in an expression.
+uses :: Name -> Core.Expr -> Int
+uses name e =
+  case Core._exprValue e of
+    Core.EVar n | n == name -> 1
+    _ -> getSum (Specialize.children_ (Sum . uses name) e)
 
 -- | Free of effects and cheap enough to copy: a variable, a literal, a
 -- constructor with no fields.
