@@ -617,6 +617,18 @@ constrainRecursiveDefs :: RTV -> [Can.Def] -> Constraint -> IO Constraint
 constrainRecursiveDefs rtv defs bodyCon =
   recDefsHelp rtv defs bodyCon emptyInfo emptyInfo
 
+-- | Every unannotated member's argument and result variables are introduced
+-- in the group's own 'CLet', so that the group is generalized once, together
+-- (D482, geng-lang @docs/pre-m3-tail.md@ §MT6).
+--
+-- Stock (and Elm, whose code this is) seeded each member's pattern state with
+-- the variables of the members before it and kept only the last member's for
+-- the group, so a member's variables were introduced in the /next/ member's
+-- pattern 'CLet' and generalized when that one closed, before the rest of the
+-- group and the body had used them. @pick : a -> a -> Int -> a@ with a local
+-- pair over @x@ and @y@ was refused at @String@ (compiler#389, elm#1766), and
+-- the node types Core records disagreed with the body: a parameter left
+-- @number@ beside the @Int@ it is added to.
 recDefsHelp :: RTV -> [Can.Def] -> Constraint -> Info -> Info -> IO Constraint
 recDefsHelp rtv defs bodyCon rigidInfo flexInfo =
   case defs of
@@ -635,7 +647,7 @@ recDefsHelp rtv defs bodyCon rigidInfo flexInfo =
             let (Info flexVars flexCons flexHeaders) = flexInfo
 
             (Args newFlexVars tipe resultType (Pattern.State headers pvars revCons)) <-
-              argsHelp args (Pattern.State Map.empty flexVars [])
+              argsHelp args Pattern.emptyState
 
             exprCon <-
               constrain rtv expr (NoExpectation resultType)
@@ -651,7 +663,7 @@ recDefsHelp rtv defs bodyCon rigidInfo flexInfo =
 
             recDefsHelp rtv otherDefs bodyCon rigidInfo $
               Info
-                { _vars = newFlexVars,
+                { _vars = newFlexVars ++ flexVars,
                   _cons = recordDefType nid tipe defCon : flexCons,
                   _headers = Map.insert name (A.At region tipe) flexHeaders
                 }
