@@ -160,7 +160,7 @@ make target details sources artifacts request =
 afterFront :: Maybe Backend -> Details.Details -> ExtSources -> Build.Artifacts -> Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> Request -> Task (Maybe B.Builder)
 afterFront backend details sources artifacts whole front request =
   do
-    passedCores <- Task.io (passed front)
+    passedCores <- Task.io (passed (Whole._programTarget whole) front)
     case Stage.writeTo of
       Just (Stage.Passed, dir) -> Task.io (Stage.write dir whole passedCores) >> return Nothing
       _ -> emit backend details sources artifacts whole (Cores front passedCores) request
@@ -358,10 +358,10 @@ throughWire =
 -- trip, so the Core a backend reads — join points, jumps, decision trees,
 -- specialized copies — had never been encoded by any gate, and C11's Geng port
 -- of the passes had nothing byte-level to be held to.
-passed :: Map.Map ModuleName.Canonical Core.Module -> IO (Map.Map ModuleName.Canonical Core.Module)
-passed cores =
+passed :: Target.Target -> Map.Map ModuleName.Canonical Core.Module -> IO (Map.Map ModuleName.Canonical Core.Module)
+passed target cores =
   do
-    let after = Pass.run cores
+    let after = Pass.run target cores
     case Dump.passedDir of
       Nothing -> return ()
       Just dir ->

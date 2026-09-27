@@ -3,8 +3,9 @@
 -- | The Core→Core passes, and which of them run.
 --
 -- @docs/core.md@ C11 puts the passes in Haskell through M1b. M1a's pipeline
--- had none of them; since D169 they all run (four since D442, five since D479, six since D483) unless @GENG_CORE_PASSES@ says
--- otherwise ('Core.Dump.corePasses'):
+-- had none of them; since D169 they all run (four since D442, five since D479,
+-- six since D483), except @inline@ on JavaScript since D487, unless
+-- @GENG_CORE_PASSES@ says otherwise ('Core.Dump.corePasses'):
 --
 -- > GENG_CORE_PASSES=none          -- none of them
 -- > GENG_CORE_PASSES=case          -- decision trees (C4, "Core.Pass.Case")
@@ -44,6 +45,15 @@
 -- case pass builds its constructor table, since the second form declares a
 -- data type whose constructors the case pass has to know.
 --
+-- __Inlining is the BEAM's, not JavaScript's__ (D487, @pre-m3-js.md@ §JS12).
+-- D442 was measured on the BEAM, where nothing else inlines across modules. On
+-- node, after D483 took out what it left in expression position, it still cost
+-- the compiler's own front end 12% on @geng fmt --check@, spread over its
+-- candidates rather than in any one, and gained only on micro-benchmarks, which
+-- V8 inlines anyway. So 'defaults' leaves it out for 'Target.Js'; a list named
+-- in @GENG_CORE_PASSES@ still turns it on there, which is how it is measured.
+-- The other targets keep it until their own measurements say otherwise.
+--
 -- __Specialization runs before either__, and it is the one pass that is not a
 -- function of a single module: it needs every module's Core to know what
 -- instantiations a program asks for (§G27). It runs first because the copies it
@@ -53,7 +63,7 @@
 -- copy's own name and not to the generic one.
 module Core.Pass
   ( run,
-    enabled,
+    names,
   )
 where
 
@@ -65,17 +75,28 @@ import Core.Pass.Inline qualified as Inline
 import Core.Pass.Mutual qualified as Mutual
 import Core.Pass.Specialize qualified as Specialize
 import Core.Pass.TailCall qualified as TailCall
+import Core.Target qualified as Target
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Maybe qualified as Maybe
 import Gren.ModuleName qualified as ModuleName
 
--- | Whether any pass is on, so that a caller can skip the work of asking.
-enabled :: Bool
-enabled = not (null Dump.corePasses)
+-- | The passes that run for a target: @GENG_CORE_PASSES@'s list when it names
+-- one, and 'defaults' when it does not.
+names :: Target.Target -> [String]
+names target =
+  Maybe.fromMaybe (defaults target) Dump.corePasses
 
-run :: Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
-run cores =
-  let pass name f = if name `elem` Dump.corePasses then f else id
+-- | Every pass, less @inline@ on JavaScript (D487).
+defaults :: Target.Target -> [String]
+defaults target =
+  case target of
+    Target.Js -> ["specialize", "float", "mutual", "case", "tailcall"]
+    _ -> ["specialize", "inline", "float", "mutual", "case", "tailcall"]
+
+run :: Target.Target -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
+run target cores =
+  let pass name f = if name `elem` names target then f else id
       specialized = pass "specialize" Specialize.run cores
       inlined = pass "inline" Inline.run specialized
       floated = pass "float" (Map.map Float.run) inlined

@@ -160,30 +160,32 @@ externBodies =
 {-# NOINLINE externBodies #-}
 
 -- | @GENG_CORE_PASSES@: which Core→Core passes run before the backend reads
--- the program.
+-- the program, when it says; 'Nothing' when it is unset, and the target's
+-- default list in "Core.Pass" applies.
 --
--- __All three by default__ (@docs/m1b-classes.md@ §G47.7, D169). Without
--- @specialize@ every class method is a witness projection at run time, which
--- §G47.5 measured at 5.5× stock for a loop of @<@ and 2.4× for a @Dict@, and
--- §G47.6 found specialization costs no bundle size. M1a's pipeline had none
--- (C11) and this was off until M1b's classes made "off" the slow program.
+-- __All of them by default__ (@docs/m1b-classes.md@ §G47.7, D169), except
+-- @inline@ on JavaScript (D487). Without @specialize@ every class method is a
+-- witness projection at run time, which §G47.5 measured at 5.5× stock for a
+-- loop of @<@ and 2.4× for a @Dict@, and §G47.6 found specialization costs no
+-- bundle size. M1a's pipeline had none (C11) and this was off until M1b's
+-- classes made "off" the slow program.
 --
 -- The switch stays, because C4 says the passes are optional and C12 asks that
--- the same programs answer the same with and without them:
+-- the same programs answer the same with and without them. A list it names is
+-- run on every target, @inline@ on JavaScript included:
 --
 -- > GENG_CORE_PASSES=none          -- no passes (the harness's geng-hs-nopasses)
 -- > GENG_CORE_PASSES=specialize    -- one of them
 -- > GENG_CORE_PASSES=case,tailcall -- any list
-corePasses :: [String]
+corePasses :: Maybe [String]
 corePasses =
-  unsafePerformIO (fromSetting <$> Env.lookupEnv "GENG_CORE_PASSES")
+  unsafePerformIO (fmap fromSetting <$> Env.lookupEnv "GENG_CORE_PASSES")
   where
     fromSetting setting =
       case setting of
-        Nothing -> ["specialize", "inline", "float", "mutual", "case", "tailcall"]
-        Just "none" -> []
-        Just "" -> []
-        Just list -> splitOn ',' list
+        "none" -> []
+        "" -> []
+        list -> splitOn ',' list
 {-# NOINLINE corePasses #-}
 
 -- | @GENG_WIRE=1@: put every module through the wire format before the backend
