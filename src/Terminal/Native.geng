@@ -1,0 +1,387 @@
+module Terminal.Native exposing
+    ( Config
+    , Plan
+    , abandon
+    , build
+    , isTarget
+    , plan
+    , prepare
+    , stageEnvironment
+    , toolchain
+    )
+
+{-| The native half of `geng make`, for a project whose outline says
+`target = "native"` (geng-lang `m3-native.md` §NA25).
+
+`Terminal.Beam`'s shape, smaller. The backend is `packages/c-backend`, a Geng
+package this front end imports (D491), so a native build is this process running
+the binary with `GENG_STAGE_WRITE=passed:dir`, then:
+
+    <output>.native-build/program.c     linked, lowered and printed
+    <output>.native-build/geng*.{c,h}   the runtime, which this compiler carries
+    <output>                            the C compiler over those and each
+                                        package's src/Ext/*.c, with Boehm
+
+and the scratch directory goes when the build succeeds. The program is
+compiled with D490's flags, `-ffp-contract=off -fno-fast-math
+-fstack-clash-protection` whatever else is asked, at `-O2`, and with
+`NIX_HARDENING_ENABLE` empty so that nixpkgs' compiler wrapper adds nothing to
+them (D500).
+
+**The C compiler is the machine's**, found as `Terminal.Beam` finds `erlc`
+(D390): `GENG_CC`, then `clang` on `PATH` (D496). `GENG_CFLAGS` is added to its
+command line, split on spaces, which is how a machine says where Boehm's header
+and library are when its compiler does not know.
+
+A native build of modules none of which has a `main` would be a library, which
+is the embedding ABI's (§NA16 step 10), and is refused until then.
+
+-}
+
+import Bytes
+import ChildProcess
+import Cli.PrettyPrinter as PP
+import Cli.Report as Report exposing (Report)
+import Compiler.Backend
+import Compiler.Outline as Outline exposing (Outline)
+import Dict exposing (Dict)
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Geng.C.Build as Build
+import Geng.C.Runtime as Runtime
+import Stream
+import Stream.Log
+import Task exposing (Task)
+
+
+{-| Whether this project is built for the `native` target. -}
+isTarget : Outline -> Bool
+isTarget outline =
+    when outline is
+        Outline.App app ->
+            app.target == "native"
+
+        Outline.Pkg _ ->
+            False
+
+
+{-| Where a native build's things go. -}
+type alias Plan =
+    { exe : Path
+    , work : Path
+    , stage : Path
+    }
+
+
+type alias Toolchain =
+    { cc : String
+    , flags : Array String
+    }
+
+
+type alias Config =
+    { fs : FileSystem.Permission
+    , cp : ChildProcess.Permission
+    , stderr : Stream.Writable Bytes.Bytes
+    , toString : Path -> String
+    , tools : Toolchain
+    , packages : Array Path
+    }
+
+
+{-| `GENG_CC`, else `clang`; and `GENG_CFLAGS`, split on spaces. -}
+toolchain : Dict String String -> Toolchain
+toolchain envVars =
+    { cc = Maybe.withDefault "clang" (Dict.get "GENG_CC" envVars)
+    , flags =
+        Dict.get "GENG_CFLAGS" envVars
+            |> Maybe.withDefault ""
+            |> String.split " "
+            |> Array.keepIf (\flag -> flag /= "")
+    }
+
+
+{-| The plan for an `--output`, or why there is none: `/dev/null` asks for no
+program, and the three JavaScript artifacts are refused, a native program being
+none of them.
+-}
+plan : (String -> Path) -> Maybe Compiler.Backend.MakeOutput -> Result Report (Maybe Plan)
+plan fromString output =
+    let
+        refuse what instead =
+            Err <|
+                Report.create
+                    "THAT OUTPUT IS NOT A NATIVE PROGRAM"
+                    Nothing
+                    (PP.verticalBlock
+                        [ PP.words ("You have asked for " ++ what ++ ", but this project's target is native.")
+                        , PP.empty
+                        , PP.words instead
+                        ]
+                    )
+    in
+    when output is
+        Nothing ->
+            Ok (Just (paths (fromString "app")))
+
+        Just (Compiler.Backend.Exe path) ->
+            Ok (Just (paths (fromString path)))
+
+        Just Compiler.Backend.StdOut ->
+            refuse "the program on standard output" "A native program is an executable file. Give me a file name instead."
+
+        Just (Compiler.Backend.Js path) ->
+            refuse ("JavaScript at " ++ path) "Drop the .js from --output and I will write a native program there."
+
+        Just (Compiler.Backend.Html path) ->
+            refuse ("an HTML page at " ++ path) "A page needs the js target and the browser platform."
+
+        Just Compiler.Backend.DevNull ->
+            Ok Nothing
+
+
+paths : Path -> Plan
+paths exe =
+    let
+        work =
+            Path.append
+                (Path.fromPosixString (Path.filenameWithExtension exe ++ ".native-build"))
+                (Path.parentPath exe |> Maybe.withDefault Path.empty)
+    in
+    { exe = exe
+    , work = work
+    , stage = Path.append (Path.fromPosixString "stage") work
+    }
+
+
+{-| What the compiler binary is run with. `Main.nativeMake` does not get here
+when either stage variable is set — for native, a person's `GENG_STAGE_WRITE`
+stops the build at the stage, as §NA20 documented — so the refusal below is
+for a caller that skips that check. -}
+stageEnvironment : (Path -> String) -> Dict String String -> Plan -> Result Report (Dict String String)
+stageEnvironment toString envVars thePlan =
+    let
+        taken name =
+            Err <|
+                Report.create
+                    "THE STAGE IS ALREADY SET"
+                    Nothing
+                    (PP.verticalBlock
+                        [ PP.words (name ++ " is set in this environment, and a build for the native target sets GENG_STAGE_WRITE itself: the backend is not in the compiler binary, so the build stops at the passed Core and finishes here.")
+                        , PP.empty
+                        , PP.words "Unset it, or build this project for the js target."
+                        ]
+                    )
+    in
+    if Dict.member "GENG_STAGE_WRITE" envVars then
+        taken "GENG_STAGE_WRITE"
+
+    else if Dict.member "GENG_STAGE_READ" envVars then
+        taken "GENG_STAGE_READ"
+
+    else
+        Ok (Dict.singleton "GENG_STAGE_WRITE" ("passed:" ++ toString thePlan.stage))
+
+
+{-| The scratch directory, made afresh. -}
+prepare : FileSystem.Permission -> Plan -> Task Report {}
+prepare fs thePlan =
+    abandon fs thePlan
+        |> Task.andThen
+            (\_ ->
+                FileSystem.makeDirectory fs { recursive = True } thePlan.stage
+                    |> Task.mapError (failure "I cannot make the build directory")
+            )
+        |> Task.map (\_ -> {})
+
+
+{-| The scratch directory, gone. -}
+abandon : FileSystem.Permission -> Plan -> Task Report {}
+abandon fs thePlan =
+    FileSystem.remove fs { recursive = True } thePlan.work
+        |> Task.map (\_ -> {})
+        |> Task.onError (\_ -> Task.succeed {})
+
+
+{-| The stage directory made a program, and the status that answers. A build
+that wrote no stage wrote no program, which `--output=/dev/null` asks for, so a
+missing stage is a silent 0.
+-}
+build : Config -> Plan -> Task Report Int
+build config thePlan =
+    FileSystem.checkAccess config.fs [] thePlan.stage
+        |> Task.map (\_ -> True)
+        |> Task.onError (\_ -> Task.succeed False)
+        |> Task.andThen
+            (\staged ->
+                if staged then
+                    buildStage config thePlan
+
+                else
+                    Task.succeed 0
+            )
+
+
+buildStage : Config -> Plan -> Task Report Int
+buildStage config thePlan =
+    read config.fs thePlan.stage
+        |> Task.andThen
+            (\files ->
+                when Build.link files |> Result.andThen (Build.generate { primPrototypes = False }) is
+                    Err why ->
+                        Stream.Log.string config.stderr why
+                            |> Task.onError (\_ -> Task.succeed {})
+                            |> Task.andThen (\_ -> abandon config.fs thePlan)
+                            |> Task.map (\_ -> 1)
+
+                    Ok out ->
+                        if String.contains "/* no entry:" out.text then
+                            abandon config.fs thePlan
+                                |> Task.andThen
+                                    (\_ ->
+                                        Task.fail <|
+                                            Report.create
+                                                "A NATIVE LIBRARY IS NOT BUILT YET"
+                                                Nothing
+                                                (PP.words "A native build needs a module with a main. A library for C to call is the embedding ABI, which is not built yet.")
+                                    )
+
+                        else
+                            write config.fs thePlan.work (Array.pushFirst { name = "program.c", text = out.text } Runtime.sources)
+                                |> Task.andThen (\_ -> externSources config)
+                                |> Task.andThen (\externs -> compile config thePlan externs)
+                                |> Task.andThen (\_ -> abandon config.fs thePlan)
+                                |> Task.map (\_ -> 0)
+            )
+
+
+write : FileSystem.Permission -> Path -> Array { name : String, text : String } -> Task Report {}
+write fs directory files =
+    files
+        |> Array.map
+            (\file ->
+                FileSystem.writeFile fs (Bytes.fromString file.text) (Path.append (Path.fromPosixString file.name) directory)
+                    |> Task.mapError (failure "I cannot write the C")
+            )
+        |> Task.sequence
+        |> Task.map (\_ -> {})
+
+
+{-| Every `src/Ext/*.c` a package of this build has (`ffi.md` F1), each once. -}
+externSources : Config -> Task Report (Array Path)
+externSources config =
+    config.packages
+        |> Array.map
+            (\root ->
+                let
+                    directory =
+                        Path.append (Path.fromPosixString "Ext") (Path.append (Path.fromPosixString "src") root)
+                in
+                FileSystem.listDirectory config.fs directory
+                    |> Task.map
+                        (\entries ->
+                            entries
+                                |> Array.map (\entry -> Path.filenameWithExtension entry.path)
+                                |> Array.keepIf (String.endsWith ".c")
+                                |> Array.sort
+                                |> Array.map (\name -> Path.append (Path.fromPosixString name) directory)
+                        )
+                    |> Task.onError (\_ -> Task.succeed [])
+            )
+        |> Task.sequence
+        |> Task.map
+            (Array.flatten
+                >> Array.foldl
+                    (\path acc ->
+                        if Array.member path acc then
+                            acc
+
+                        else
+                            Array.pushLast path acc
+                    )
+                    []
+            )
+
+
+compile : Config -> Plan -> Array Path -> Task Report {}
+compile config thePlan externs =
+    let
+        in_ name =
+            config.toString (Path.append (Path.fromPosixString name) thePlan.work)
+
+        args =
+            [ "-std=c11", "-O2", "-ffp-contract=off", "-fno-fast-math", "-fstack-clash-protection" ]
+                ++ config.tools.flags
+                ++ [ "-I", config.toString thePlan.work, "-o", config.toString thePlan.exe ]
+                ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c" ]
+                ++ Array.map config.toString externs
+                ++ [ "-lgc", "-lpthread", "-lm" ]
+    in
+    { (ChildProcess.defaultSpawnOptions ChildProcess.Integrated)
+        | shell = ChildProcess.NoShell
+        , environmentVariables = ChildProcess.MergeWithEnvironmentVariables (Dict.singleton "NIX_HARDENING_ENABLE" "")
+    }
+        |> ChildProcess.spawn config.cp config.tools.cc args
+        |> Task.mapError
+            (\err ->
+                Report.create
+                    "I CANNOT RUN THE C COMPILER"
+                    Nothing
+                    (PP.verticalBlock
+                        [ PP.words ("A build for the native target runs " ++ config.tools.cc ++ ", and I could not start it: " ++ err.errorCode ++ ".")
+                        , PP.empty
+                        , PP.words "The C compiler is not part of this compiler. Put clang on your PATH, or tell me which compiler to run with the GENG_CC environment variable."
+                        ]
+                    )
+            )
+        |> Task.andThen ChildProcess.waitForExit
+        |> Task.andThen
+            (\exitCode ->
+                if exitCode == 0 then
+                    Task.succeed {}
+
+                else
+                    Task.fail <|
+                        Report.create
+                            "THE C COMPILER REFUSED THIS PROGRAM"
+                            Nothing
+                            (PP.verticalBlock
+                                [ PP.words (config.tools.cc ++ " exited with status " ++ String.fromInt exitCode ++ ", and what it printed is above.")
+                                , PP.empty
+                                , PP.words "What is left for it to refuse once the backend has printed every binding is a src/Ext/*.c file of one of your packages, a missing Boehm (set GENG_CFLAGS to where its header and library are), or a defect in the backend."
+                                ]
+                            )
+            )
+
+
+read : FileSystem.Permission -> Path -> Task Report (Array Build.File)
+read fs directory =
+    FileSystem.listDirectory fs directory
+        |> Task.mapError (failure "I cannot read the stage directory")
+        |> Task.andThen
+            (\entries ->
+                entries
+                    |> Array.map (\entry -> Path.filenameWithExtension entry.path)
+                    |> Array.keepIf Build.isCore
+                    |> Array.sort
+                    |> Array.map
+                        (\name ->
+                            FileSystem.readFile fs (Path.append (Path.fromPosixString name) directory)
+                                |> Task.mapError (failure "I cannot read the stage directory")
+                                |> Task.map (\data -> { name = name, data = data })
+                        )
+                    |> Task.sequence
+            )
+
+
+failure : String -> FileSystem.Error -> Report
+failure what error =
+    Report.create
+        "CANNOT BUILD FOR NATIVE"
+        Nothing
+        (PP.verticalBlock
+            [ PP.words (what ++ ":")
+            , PP.empty
+            , PP.words (FileSystem.errorToString error)
+            ]
+        )

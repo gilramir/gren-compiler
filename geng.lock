@@ -9,6 +9,11 @@ version = "0.1.0"
 path = "../../../packages/beam-backend"
 
 [[package]]
+name = "github.com/geng-language/c-backend"
+version = "0.1.0"
+path = "../../../packages/c-backend"
+
+[[package]]
 name = "github.com/geng-language/compiler-common"
 version = "3.0.0"
 path = "../../gren-lang/compiler-common"

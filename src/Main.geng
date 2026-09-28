@@ -1,42 +1,43 @@
 module Main exposing (main)
 
-import Meta
-import Node
+import Bytes exposing (Bytes)
 import ChildProcess
-import Terminal.Parser as CliParser
-import Terminal.PackageInstall
-import Terminal.PackageUninstall
-import Terminal.PackageOutdated
-import Terminal.PackageBump
-import Terminal.PackageDiff
-import Terminal.PackageValidate
-import Terminal.Paths
-import Terminal.Init
-import Terminal.Beam
-import Terminal.Run
-import Terminal.Test
-import Terminal.Help
+import Cli.Parser
+import Cli.PrettyPrinter as PP
 import Cli.Report as Report exposing (Report)
-import Terminal.Format
-import Terminal.Protobuf
 import Compiler.Backend
+import Compiler.ModuleName as ModuleName exposing (ModuleName)
+import Compiler.Outline as Outline exposing (Outline)
 import Compiler.PackageName as PackageName exposing (PackageName)
 import Compiler.Paths
-import Compiler.Outline as Outline exposing (Outline)
-import Compiler.ModuleName as ModuleName exposing (ModuleName)
-import Git
-import Stream
-import Stream.Log
-import Task exposing (Task)
 import Dict exposing (Dict)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
-import Bytes exposing (Bytes)
-import Terminal
-import Cli.Parser
-import Cli.PrettyPrinter as PP
-import SemanticVersion exposing (SemanticVersion)
+import Git
 import Json.Encode as Json
+import Meta
+import Node
+import SemanticVersion exposing (SemanticVersion)
+import Stream
+import Stream.Log
+import Task exposing (Task)
+import Terminal
+import Terminal.Beam
+import Terminal.Format
+import Terminal.Help
+import Terminal.Init
+import Terminal.Native
+import Terminal.PackageBump
+import Terminal.PackageDiff
+import Terminal.PackageInstall
+import Terminal.PackageOutdated
+import Terminal.PackageUninstall
+import Terminal.PackageValidate
+import Terminal.Parser as CliParser
+import Terminal.Paths
+import Terminal.Protobuf
+import Terminal.Run
+import Terminal.Test
 
 
 {-| The front end is a task (D72): it reads its environment, does what the
@@ -115,11 +116,13 @@ start env =
                 , pathToString =
                     if env.platform == Node.Win32 then
                         Path.toWin32String
+
                     else
                         Path.toPosixString
                 , pathFromString =
                     if env.platform == Node.Win32 then
                         Path.fromWin32String
+
                     else
                         Path.fromPosixString
                 , envVars = envVars
@@ -183,8 +186,7 @@ parseUserArgs : Context -> Path -> Task x Int
 parseUserArgs context compilerPath =
     let
         printOpts =
-            { useColor = context.useColor
-            }
+            { useColor = context.useColor }
 
         endWithError prettyErr =
             Report.prettyPrint printOpts prettyErr
@@ -204,23 +206,23 @@ parseUserArgs context compilerPath =
     when Cli.Parser.run context.args CliParser.parser is
         Cli.Parser.UnknownCommand commandName ->
             endWithErrorString ("I don't recognize this command: " ++ commandName ++ "\n")
-    
+
         Cli.Parser.BadFlags err ->
             err
                 |> Cli.Parser.flagErrorPrettified
                 |> endWithError
-    
+
         Cli.Parser.BadArguments err ->
             err
                 |> Cli.Parser.argumentErrorPrettified
                 |> endWithError
-    
+
         Cli.Parser.HelpText prettifiedText ->
             prettifiedText
                 |> Report.prettyPrint printOpts
                 |> Stream.Log.line context.stdout
                 |> succeeded
-    
+
         Cli.Parser.Success parsedCommand ->
             let
                 encodeFor backendCommand =
@@ -311,6 +313,19 @@ parseUserArgs context compilerPath =
                                         , output = flags.output
                                         , erlc = flags.erlc
                                         , escript = flags.escript
+                                        }
+                                        resolved
+                                        (backend command)
+
+                                else if Terminal.Native.isTarget resolved.outline && Array.length flags.entryPoints /= 0 then
+                                    -- The same for `native`: the backend is
+                                    -- `packages/c-backend` (D491, geng-lang
+                                    -- `m3-native.md` §NA25).
+                                    nativeMake context
+                                        compilerPath
+                                        { encodedCommand = encodeFor command
+                                        , headless = False
+                                        , output = flags.output
                                         }
                                         resolved
                                         (backend command)
@@ -801,7 +816,7 @@ parseUserArgs context compilerPath =
                                                     Outline.App _ ->
                                                         -- TODO
                                                         Terminal.PackageDiff.LocalCannotDiffApplication
-                                                            |> Terminal.PackageDiff.prettifyLocalError 
+                                                            |> Terminal.PackageDiff.prettifyLocalError
                                                             |> Task.fail
 
                                                     Outline.Pkg pkgOutline ->
@@ -973,6 +988,81 @@ beamMake context compilerPath flags resolved ordinary =
                             )
 
 
+{-| A `native` build: the compiler binary stopped after the passes, and then
+the C backend over the Core it left and the C compiler (`Terminal.Native`),
+as `beamMake` is for the BEAM.
+-}
+nativeMake :
+    Context
+    -> Path
+    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput }
+    -> Terminal.PackageInstall.PackageResolution
+    -> Task Report Int
+    -> Task Report Int
+nativeMake context compilerPath flags resolved ordinary =
+    -- A stage asked for is a stage given: `GENG_STAGE_WRITE` set stops the
+    -- build there, as §NA20 documented it for native, and nothing is compiled.
+    -- The harness's `native.py` and the C census read the stage that way.
+    if Dict.member "GENG_STAGE_WRITE" context.envVars || Dict.member "GENG_STAGE_READ" context.envVars then
+        ordinary
+
+    else
+        nativeMakeBuild context compilerPath flags resolved ordinary
+
+
+nativeMakeBuild :
+    Context
+    -> Path
+    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput }
+    -> Terminal.PackageInstall.PackageResolution
+    -> Task Report Int
+    -> Task Report Int
+nativeMakeBuild context compilerPath flags resolved ordinary =
+    when Terminal.Native.plan context.pathFromString flags.output is
+        Err report ->
+            Task.fail report
+
+        Ok Nothing ->
+            ordinary
+
+        Ok (Just thePlan) ->
+            when Terminal.Native.stageEnvironment context.pathToString context.envVars thePlan is
+                Err report ->
+                    Task.fail report
+
+                Ok environment ->
+                    Terminal.Native.prepare context.fsPermission thePlan
+                        |> Task.andThen (\_ -> startBackend context compilerPath environment)
+                        |> Task.andThen
+                            (talkToBackend context
+                                { headless = flags.headless
+                                , encodedCommand = flags.encodedCommand
+                                }
+                            )
+                        |> Task.andThen
+                            (\exitCode ->
+                                if exitCode /= 0 then
+                                    Terminal.Native.abandon context.fsPermission thePlan
+                                        |> Task.map (\_ -> exitCode)
+
+                                else
+                                    Terminal.Native.build
+                                        { fs = context.fsPermission
+                                        , cp = context.cpPermission
+                                        , stderr = context.stderr
+                                        , toString = context.pathToString
+                                        , tools = Terminal.Native.toolchain context.envVars
+                                        , packages = beamPackages context resolved
+                                        }
+                                        thePlan
+                            )
+                        |> Task.onError
+                            (\report ->
+                                Terminal.Native.abandon context.fsPermission thePlan
+                                    |> Task.andThen (\_ -> Task.fail report)
+                            )
+
+
 {-| Every package root this build is made of, for the `src/Ext/*.erl` each may
 have (`ffi.md` F1).
 
@@ -1126,7 +1216,7 @@ verifyMakeFlags fsPermission entryPoints maybeOutput resolution =
 
                 Just Compiler.Backend.StdOut ->
                     Nothing
-                    
+
                 Just Compiler.Backend.DevNull ->
                     Nothing
 
@@ -1171,7 +1261,7 @@ verifyMakeFlags fsPermission entryPoints maybeOutput resolution =
                                                         (Just path)
                                                         (PP.verticalBlock
                                                             [ PP.words
-                                                                ( "You have told me to compile this project to "
+                                                                ("You have told me to compile this project to "
                                                                     ++ Path.toPosixString path
                                                                     ++ ", but I cannot access this path for some reason!"
                                                                 )
@@ -1191,7 +1281,7 @@ verifyMakeFlags fsPermission entryPoints maybeOutput resolution =
                                                             (Just path)
                                                             (PP.verticalBlock
                                                                 [ PP.words
-                                                                    ( "You have told me to compile this project to "
+                                                                    ("You have told me to compile this project to "
                                                                         ++ Path.toPosixString path
                                                                         ++ ", but this is a directory!"
                                                                     )
@@ -1202,7 +1292,7 @@ verifyMakeFlags fsPermission entryPoints maybeOutput resolution =
                                                     else
                                                         Task.succeed {}
                                         )
-                                )
+                            )
     in
     compatibleOutputCheck
         |> Task.andThen
@@ -1218,7 +1308,7 @@ verifyMakeFlags fsPermission entryPoints maybeOutput resolution =
                                 Nothing
                                 (PP.verticalBlock
                                     [ PP.words
-                                        ( "You have told me to compile "
+                                        ("You have told me to compile "
                                             ++ ModuleName.toString moduleName
                                             ++ ", but this module isn't defined in this project!"
                                         )

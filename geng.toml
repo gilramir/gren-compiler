@@ -4,6 +4,7 @@ runtime = "node"
 
 [dependencies]
 "github.com/geng-language/beam-backend" = "0.1.0 <= v < 0.2.0"
+"github.com/geng-language/c-backend" = "0.1.0 <= v < 0.2.0"
 "github.com/geng-language/core-wire" = "0.1.0 <= v < 0.2.0"
 "github.com/geng-language/stream" = "0.1.0 <= v < 0.2.0"
 "github.com/geng-language/node" = "6.1.3 <= v < 7.0.0"
@@ -13,6 +14,7 @@ runtime = "node"
 
 [sources]
 "github.com/geng-language/beam-backend" = { path = "../../../packages/beam-backend" }
+"github.com/geng-language/c-backend" = { path = "../../../packages/c-backend" }
 "github.com/geng-language/core-wire" = { path = "../../../packages/core-wire" }
 "github.com/geng-language/protobuf" = { path = "../../../packages/protobuf" }
 "github.com/geng-language/stream" = { path = "../../../packages/stream" }
