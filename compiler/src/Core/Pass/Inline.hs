@@ -924,7 +924,12 @@ identity e scrut alts fallback =
 freshen :: Map Name Core.Expr -> Core.Expr -> M Core.Expr
 freshen env e@(Core.Expr value tipe sp) =
   case value of
-    Core.EVar n -> return (Maybe.fromMaybe e (Map.lookup n env))
+    -- What a name is replaced by keeps the concrete side of the two types, as
+    -- 'bindAll' keeps it for one it binds: @Result.map$kPP@'s @$P@ variable
+    -- read where @.text@'s parameter was is the record the field is read from
+    -- (m3-native.md §NA32).
+    Core.EVar n ->
+      return (maybe e (\r -> r {Core._exprType = refine (Core.typeOf r) tipe}) (Map.lookup n env))
     Core.ELam bs body ->
       do
         (bs', env') <- binders env bs

@@ -291,7 +291,7 @@ buildStage config thePlan =
                             |> Task.map (\_ -> 1)
 
                     Ok out ->
-                        if String.contains "/* no entry:" out.text then
+                        if out.noEntry /= Nothing then
                             abandon config.fs thePlan
                                 |> Task.andThen
                                     (\_ ->
