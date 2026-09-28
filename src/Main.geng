@@ -326,6 +326,7 @@ parseUserArgs context compilerPath =
                                         { encodedCommand = encodeFor command
                                         , headless = False
                                         , output = flags.output
+                                        , optimization = "-O2"
                                         }
                                         resolved
                                         (backend command)
@@ -429,7 +430,9 @@ parseUserArgs context compilerPath =
                     -- the escript, for the same reason the Make branch above
                     -- finishes in this process: the backend for that target
                     -- is a Geng package here and not code in the binary
-                    -- (D382, `m2-beam.md` §BM25).
+                    -- (D382, `m2-beam.md` §BM25). On a `native` project it is
+                    -- `geng make` at `-O0` and then the executable (geng-lang
+                    -- `m3-native.md` §NA28).
                     Terminal.Run.make
                         { fsPermission = context.fsPermission
                         , cpPermission = context.cpPermission
@@ -485,6 +488,33 @@ parseUserArgs context compilerPath =
                                                             Task.succeed exitCode
                                                     )
 
+                                        else if compiling.native then
+                                            -- A program an earlier run left
+                                            -- goes first, so that a build that
+                                            -- stops at the stage cannot run it.
+                                            Terminal.Beam.forgetProgram context.fsPermission compiling.outputPath
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        nativeMake context
+                                                            compilerPath
+                                                            { encodedCommand = compiling.encodedCommand
+                                                            , headless = True
+                                                            , output = Just compiling.output
+                                                            , optimization = "-O0"
+                                                            }
+                                                            compiling.resolution
+                                                            ordinary
+                                                    )
+                                                |> Task.andThen
+                                                    (\exitCode ->
+                                                        if exitCode == 0 then
+                                                            Terminal.Native.requireProgram context.fsPermission compiling.outputPath
+                                                                |> Task.map (\_ -> exitCode)
+
+                                                        else
+                                                            Task.succeed exitCode
+                                                    )
+
                                         else
                                             ordinary
                                 in
@@ -497,12 +527,15 @@ parseUserArgs context compilerPath =
                                                     , fsPermission = context.fsPermission
                                                     , pathToString = context.pathToString
                                                     , path = compiling.outputPath
-                                                    , escript =
+                                                    , runner =
                                                         if compiling.beam then
-                                                            Just tools.escript
+                                                            Terminal.Run.Escript tools.escript
+
+                                                        else if compiling.native then
+                                                            Terminal.Run.Executable
 
                                                         else
-                                                            Nothing
+                                                            Terminal.Run.ByPlatform
                                                     , environment =
                                                         Terminal.Beam.libraryEnvironment context.pathToString
                                                             context.envVars
@@ -611,12 +644,12 @@ parseUserArgs context compilerPath =
                                                     , fsPermission = context.fsPermission
                                                     , pathToString = context.pathToString
                                                     , path = compiling.outputPath
-                                                    , escript =
+                                                    , runner =
                                                         if compiling.beam then
-                                                            Just tools.escript
+                                                            Terminal.Run.Escript tools.escript
 
                                                         else
-                                                            Nothing
+                                                            Terminal.Run.ByPlatform
                                                     , environment = environment
                                                     }
                                                     |> Task.mapError Terminal.Run.prettifyError
@@ -990,12 +1023,13 @@ beamMake context compilerPath flags resolved ordinary =
 
 {-| A `native` build: the compiler binary stopped after the passes, and then
 the C backend over the Core it left and the C compiler (`Terminal.Native`),
-as `beamMake` is for the BEAM.
+as `beamMake` is for the BEAM. `geng make` compiles the C at `-O2` and `geng
+run` at `-O0` (§NA28).
 -}
 nativeMake :
     Context
     -> Path
-    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput }
+    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String }
     -> Terminal.PackageInstall.PackageResolution
     -> Task Report Int
     -> Task Report Int
@@ -1013,7 +1047,7 @@ nativeMake context compilerPath flags resolved ordinary =
 nativeMakeBuild :
     Context
     -> Path
-    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput }
+    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String }
     -> Terminal.PackageInstall.PackageResolution
     -> Task Report Int
     -> Task Report Int
@@ -1052,6 +1086,7 @@ nativeMakeBuild context compilerPath flags resolved ordinary =
                                         , stderr = context.stderr
                                         , toString = context.pathToString
                                         , tools = Terminal.Native.toolchain context.envVars
+                                        , optimization = flags.optimization
                                         , packages = beamPackages context resolved
                                         }
                                         thePlan

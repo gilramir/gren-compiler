@@ -3,6 +3,7 @@ module Terminal.Run exposing
     , Compiling
     , ProjectOutline
     , Build
+    , Runner(..)
     , make
     , makeProjectWith
     , run
@@ -33,6 +34,7 @@ import Stream
 import Task exposing (Task)
 import Terminal.PackageInstall as PackageInstall exposing (PackageResolution)
 import Terminal.Beam
+import Terminal.Native
 import Terminal.Help as Help
 import Cli.Report as Report exposing (Report)
 
@@ -59,13 +61,14 @@ type alias MakeConfig =
 {-| The command to hand the backend, where the build will write the program,
 and what `Main` needs to finish a build this process cannot.
 
-**A `beam` build is not over when the backend exits**: the backend for that
-target is not in the compiler binary, so that process stops at the passed Core
-and `Terminal.Beam` makes the program out of it (D382, `m2-beam.md` §BM23).
-That is why this answers the resolution rather than swallowing it — the
-`src/Ext/*.erl` `erlc` compiles belong to the packages in it — and why the
-backend is started by the caller, which is the one place that knows to set
-`GENG_STAGE_WRITE` in its environment.
+**A `beam` or `native` build is not over when the backend exits**: the
+backend for those targets is not in the compiler binary, so that process stops
+at the passed Core and `Terminal.Beam` or `Terminal.Native` makes the program
+out of it (D382, `m2-beam.md` §BM23; geng-lang `m3-native.md` §NA25). That is
+why this answers the resolution rather than swallowing it — the `src/Ext/*.erl`
+`erlc` compiles and the `src/Ext/*.c` the C compiler does belong to the
+packages in it — and why the backend is started by the caller, which is the
+one place that knows to set `GENG_STAGE_WRITE` in its environment.
 -}
 type alias Compiling =
     { encodedCommand : Bytes
@@ -73,7 +76,17 @@ type alias Compiling =
     , outputPath : Path
     , resolution : PackageResolution
     , beam : Bool
+    , native : Bool
     }
+
+
+{-| What runs the program a build wrote: the `escript` a `beam` build resolved,
+nothing for a `native` build's executable, or the project's platform for
+JavaScript. -}
+type Runner
+    = Escript String
+    | Executable
+    | ByPlatform
 
 
 type alias RunConfig =
@@ -81,7 +94,7 @@ type alias RunConfig =
     , fsPermission : FileSystem.Permission
     , pathToString : Path -> String
     , path : Path
-    , escript : Maybe String
+    , runner : Runner
     , environment : Dict String String
     }
 
@@ -181,6 +194,7 @@ makeProjectWith config build projectOutline =
                     , outputPath = outputPath
                     , resolution = packageResolution
                     , beam = Terminal.Beam.isTarget projectOutline.outline
+                    , native = Terminal.Native.isTarget projectOutline.outline
                     }
             in
             Help.getNullStream
@@ -224,18 +238,38 @@ clonePackage config packageName =
 {-| Run the program `make` built, and answer its exit status.
 
 A `beam` build names the program that runs its escript, because its toolchain
-is resolved where it was built. Everything else is read back off disk: a
-JavaScript program is run by its project's platform, and the outline that says
-which is found from the path.
+is resolved where it was built. A `native` build's program is an executable and
+runs itself. Everything else is read back off disk: a JavaScript program is run
+by its project's platform, and the outline that says which is found from the
+path.
 -}
 run : RunConfig -> Task Error Int
 run config =
-    when config.escript is
-        Just escriptProgram ->
+    when config.runner is
+        Escript escriptProgram ->
             runEscript config escriptProgram
 
-        Nothing ->
+        Executable ->
+            runExecutable config
+
+        ByPlatform ->
             runForPlatform config
+
+
+{-| A native build's executable, started as itself (geng-lang `m3-native.md`
+§NA28). It has no interpreter to find, so none of `runEscript`'s reasons to
+name one apply, and no shell for the same reason as there: a program that
+cannot start is reported as the spawn that failed. Its status is `geng run`'s,
+so `Os.setExitCode`'s (D509) and a crash's 1 (D489) reach the caller.
+-}
+runExecutable : RunConfig -> Task Error Int
+runExecutable config =
+    { (ChildProcess.defaultSpawnOptions ChildProcess.Integrated)
+        | shell = ChildProcess.NoShell
+    }
+        |> ChildProcess.spawn config.cpPermission (config.pathToString config.path) []
+        |> Task.mapError SpawnError
+        |> Task.andThen ChildProcess.waitForExit
 
 
 {-| D384's escript, run by the `escript` this build resolved (D390).

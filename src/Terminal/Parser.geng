@@ -416,7 +416,7 @@ parser =
                         , PP.words
                             """
                             This tries to compile a Geng file named src/Main.geng, and then runs what it built.
-                            The file must have a `main`. For a project built for the beam target this builds the program the way geng make does, and what runs is the escript.
+                            The file must have a `main`. For a project built for the beam target this builds the program the way geng make does, and what runs is the escript. For the native target it builds the executable the way geng make does, but compiles the C at -O0, and runs it.
                             """
                         ]
                 , builder =

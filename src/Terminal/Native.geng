@@ -6,6 +6,7 @@ module Terminal.Native exposing
     , isTarget
     , plan
     , prepare
+    , requireProgram
     , stageEnvironment
     , toolchain
     )
@@ -24,14 +25,16 @@ the binary with `GENG_STAGE_WRITE=passed:dir`, then:
 
 and the scratch directory goes when the build succeeds. The program is
 compiled with D490's flags, `-ffp-contract=off -fno-fast-math
--fstack-clash-protection` whatever else is asked, at `-O2`, and with
+-fstack-clash-protection` whatever else is asked, at `-O2` for `geng make` and
+`-O0` for `geng run`, whose build is scratch and is run once (§NA28), and with
 `NIX_HARDENING_ENABLE` empty so that nixpkgs' compiler wrapper adds nothing to
 them (D500).
 
 **The C compiler is the machine's**, found as `Terminal.Beam` finds `erlc`
 (D390): `GENG_CC`, then `clang` on `PATH` (D496). `GENG_CFLAGS` is added to its
 command line, split on spaces, which is how a machine says where Boehm's header
-and library are when its compiler does not know.
+and library are when its compiler does not know. It comes after the
+optimization level, so an `-O` in it is the one the compiler takes.
 
 A native build of modules none of which has a `main` would be a library, which
 is the embedding ABI's (§NA16 step 10), and is refused until then.
@@ -85,6 +88,7 @@ type alias Config =
     , stderr : Stream.Writable Bytes.Bytes
     , toString : Path -> String
     , tools : Toolchain
+    , optimization : String
     , packages : Array Path
     }
 
@@ -193,6 +197,26 @@ prepare fs thePlan =
                     |> Task.mapError (failure "I cannot make the build directory")
             )
         |> Task.map (\_ -> {})
+
+
+{-| That a `geng run` build left a program to run.
+
+A native build with no `main` is refused before this, so a successful build
+leaves no program only when a person's `GENG_STAGE_WRITE` stopped it at the
+stage, which a `geng run` then has nothing to run after.
+-}
+requireProgram : FileSystem.Permission -> Path -> Task Report {}
+requireProgram fs path =
+    FileSystem.checkAccess fs [] path
+        |> Task.map (\_ -> {})
+        |> Task.onError
+            (\_ ->
+                Task.fail <|
+                    Report.create
+                        "THE BUILD STOPPED AT THE STAGE"
+                        Nothing
+                        (PP.words "GENG_STAGE_WRITE is set in this environment, so the build stopped at the passed Core and wrote no program for geng run to run. Unset it to run the program.")
+            )
 
 
 {-| The scratch directory, gone. -}
@@ -310,7 +334,7 @@ compile config thePlan externs =
             config.toString (Path.append (Path.fromPosixString name) thePlan.work)
 
         args =
-            [ "-std=c11", "-O2", "-ffp-contract=off", "-fno-fast-math", "-fstack-clash-protection" ]
+            [ "-std=c11", config.optimization, "-ffp-contract=off", "-fno-fast-math", "-fstack-clash-protection" ]
                 ++ config.tools.flags
                 ++ [ "-I", config.toString thePlan.work, "-o", config.toString thePlan.exe ]
                 ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c" ]
