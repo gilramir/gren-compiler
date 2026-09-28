@@ -52,6 +52,7 @@ type alias MakeFlags =
     , report : Maybe {}
     , erlc : Maybe String
     , escript : Maybe String
+    , debugInfo : Bool
     , entryPoints : Array ModuleName
     }
 
@@ -92,6 +93,7 @@ type alias RunOptions =
     , package : Maybe PackageName
     , erlc : Maybe String
     , escript : Maybe String
+    , debugInfo : Bool
     }
 
 
@@ -300,13 +302,14 @@ parser =
                     Cli.Parser.zeroOrMoreArgs moduleNameParser
                 , flags =
                     Cli.Parser.initFlags 
-                        (\optimize sourcemaps output report erlc escript ->
+                        (\optimize sourcemaps output report erlc escript debugInfo ->
                             { optimize = optimize
                             , sourcemaps = sourcemaps
                             , output = output
                             , report = report
                             , erlc = erlc
                             , escript = escript
+                            , debugInfo = debugInfo
                             }
                         )
                         |> Cli.Parser.toggle "optimize" "Turn on optimizations to make code smaller and faster. For example, the compiler renames record fields to be as short as possible and unboxes values to reduce allocation."
@@ -315,6 +318,7 @@ parser =
                         |> Cli.Parser.flag "report" reportParser "You can say --report=json to get error messages as JSON. This is only really useful if you are an editor plugin. Humans should avoid it!"
                         |> Cli.Parser.flag "erlc" programParser "The Erlang compiler a beam build runs. Without this I look for GENG_ERLC, and then for erlc on your PATH."
                         |> Cli.Parser.flag "escript" programParser "The escript runner a beam build writes its program with. Without this I look for GENG_ESCRIPT, and then for escript on your PATH."
+                        |> Cli.Parser.toggle "debug-info" "Put debug information in a native program, for gdb, perf and gcov: the C is compiled with -g, and the directory holding the C and the runtime's sources is kept beside the program. Only the native target reads this."
                 , commonDescription =
                     Nothing
                 , summary =
@@ -342,6 +346,7 @@ parser =
                             , report = flags.report
                             , erlc = flags.erlc
                             , escript = flags.escript
+                            , debugInfo = flags.debugInfo
                             , entryPoints = args
                             }
                 }
@@ -392,15 +397,17 @@ parser =
                     Cli.Parser.oneArg moduleNameParser
                 , flags =
                     Cli.Parser.initFlags 
-                        (\package erlc escript ->
+                        (\package erlc escript debugInfo ->
                             { package = package
                             , erlc = erlc
                             , escript = escript
+                            , debugInfo = debugInfo
                             }
                         )
                         |> Cli.Parser.flag "package" Cli.Parser.packageNameParser "Run a module in a particular package."
                         |> Cli.Parser.flag "erlc" programParser "The Erlang compiler a beam build runs. Without this I look for GENG_ERLC, and then for erlc on your PATH."
                         |> Cli.Parser.flag "escript" programParser "The escript runner a beam build writes its program with, and runs it with. Without this I look for GENG_ESCRIPT, and then for escript on your PATH."
+                        |> Cli.Parser.toggle "debug-info" "Put debug information in a native program, for gdb, perf and gcov: the C is compiled with -g, and the directory holding the C and the runtime's sources is kept beside the program. Only the native target reads this."
                 , commonDescription =
                     Nothing
                 , summary =
@@ -426,6 +433,7 @@ parser =
                             , package = flags.package
                             , erlc = flags.erlc
                             , escript = flags.escript
+                            , debugInfo = flags.debugInfo
                             }
                     )
                 }

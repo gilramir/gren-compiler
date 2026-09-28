@@ -56,7 +56,11 @@
 -- counter per definition, so two copies in one function never bind one name.
 -- __Spans__ keep saying where the code was written: an inlined node's span
 -- names the module it came from, which the target module's file table gains
--- an entry for (C5 anticipated exactly this).
+-- an entry for (C5 anticipated exactly this). __Except where the call was__
+-- (D514, geng-lang @m3-native.md@ §NA30): the root of a copy from another file
+-- has the call's span, and a case case-of-case rebuilds has the outer case's,
+-- so that a debugger, a profiler and a source map find code on the row a
+-- person wrote the call or the @when@ on, not only on @core@'s.
 --
 -- Run after "Core.Pass.Specialize", which makes the chains monomorphic, and
 -- before "Core.Pass.Case" and "Core.Pass.TailCall", which then see one
@@ -519,7 +523,12 @@ bindAll pairs body tipe sp =
         [] ->
           do
             body' <- freshen env body
-            let typed = body' {Core._exprType = refine (Core.typeOf body') tipe}
+            let -- D514: a body from another file stands at the call.
+                at =
+                  if Core._spanFile (Core.spanOf body') == Core._spanFile sp
+                    then Core.spanOf body'
+                    else sp
+                typed = body' {Core._exprType = refine (Core.typeOf body') tipe, Core._exprSpan = at}
             return (foldr (\b acc -> Core.Expr (Core.ELet [b] acc) tipe sp) typed (reverse lets))
         (binder, arg) : more
           | atomic arg ->
@@ -851,7 +860,8 @@ caseOfCase outer scrut alts fallback =
     push e =
       case Core._exprValue e of
         Core.ECase s inner fb ->
-          Core.Expr (Core.ECase s [Core.Alt p (push b) | Core.Alt p b <- inner] (fmap push fb)) outerType (Core.spanOf e)
+          -- D514: the case that decides is the outer one's, where it was written.
+          Core.Expr (Core.ECase s [Core.Alt p (push b) | Core.Alt p b <- inner] (fmap push fb)) outerType outerSpan
         Core.ELet binds body ->
           Core.Expr (Core.ELet binds (push body)) outerType (Core.spanOf e)
         _ ->

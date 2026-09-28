@@ -327,6 +327,7 @@ parseUserArgs context compilerPath =
                                         , headless = False
                                         , output = flags.output
                                         , optimization = "-O2"
+                                        , debugInfo = flags.debugInfo
                                         }
                                         resolved
                                         (backend command)
@@ -501,6 +502,7 @@ parseUserArgs context compilerPath =
                                                             , headless = True
                                                             , output = Just compiling.output
                                                             , optimization = "-O0"
+                                                            , debugInfo = opts.debugInfo
                                                             }
                                                             compiling.resolution
                                                             ordinary
@@ -1024,12 +1026,12 @@ beamMake context compilerPath flags resolved ordinary =
 {-| A `native` build: the compiler binary stopped after the passes, and then
 the C backend over the Core it left and the C compiler (`Terminal.Native`),
 as `beamMake` is for the BEAM. `geng make` compiles the C at `-O2` and `geng
-run` at `-O0` (§NA28).
+run` at `-O0` (§NA28), and either with `-g` when `--debug-info` asks (D512).
 -}
 nativeMake :
     Context
     -> Path
-    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String }
+    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String, debugInfo : Bool }
     -> Terminal.PackageInstall.PackageResolution
     -> Task Report Int
     -> Task Report Int
@@ -1047,7 +1049,7 @@ nativeMake context compilerPath flags resolved ordinary =
 nativeMakeBuild :
     Context
     -> Path
-    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String }
+    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String, debugInfo : Bool }
     -> Terminal.PackageInstall.PackageResolution
     -> Task Report Int
     -> Task Report Int
@@ -1087,7 +1089,9 @@ nativeMakeBuild context compilerPath flags resolved ordinary =
                                         , toString = context.pathToString
                                         , tools = Terminal.Native.toolchain context.envVars
                                         , optimization = flags.optimization
+                                        , debugInfo = flags.debugInfo
                                         , packages = beamPackages context resolved
+                                        , sources = nativeSources context resolved
                                         }
                                         thePlan
                             )
@@ -1109,6 +1113,22 @@ beamPackages : Context -> Terminal.PackageInstall.PackageResolution -> Array Pat
 beamPackages context resolved =
     [ resolved.projectPath, context.corePath ]
         ++ Array.map .path (Dict.values resolved.dependencies)
+
+
+{-| Where the files a native program's `#line`s name are on this machine
+(D513): the project's modules by their own paths, `core` by name for the reason
+`beamPackages` gives, and every other package by the name it is resolved under.
+-}
+nativeSources : Context -> Terminal.PackageInstall.PackageResolution -> Array { name : String, path : String }
+nativeSources context resolved =
+    Terminal.Native.sourceMaps context.pathToString
+        { modules = Dict.foldl (\name file acc -> Array.pushLast { module_ = name, path = file.path } acc) [] resolved.rootSources
+        , packages =
+            Dict.foldl
+                (\name dependency acc -> Array.pushLast { name = name, root = dependency.path } acc)
+                [ { name = "core", root = context.corePath } ]
+                resolved.dependencies
+        }
 
 
 {-| The backend, started, with `environment` set in it on top of ours.

@@ -7,6 +7,7 @@ module Terminal.Native exposing
     , plan
     , prepare
     , requireProgram
+    , sourceMaps
     , stageEnvironment
     , toolchain
     )
@@ -23,7 +24,18 @@ the binary with `GENG_STAGE_WRITE=passed:dir`, then:
     <output>                            the C compiler over those and each
                                         package's src/Ext/*.c, with Boehm
 
-and the scratch directory goes when the build succeeds. The program is
+and the scratch directory goes when the build succeeds, unless the build asked
+for debug information (`--debug-info`, D512), which compiles with `-g` and
+keeps the directory, less the stage, since it holds the C and the runtime's
+sources a debugger shows for the frames that are not Geng's (§NA30).
+
+**The debug information names real files whatever the flags** (D513). The C's
+`#line`s name a Geng module by its package and path, as C5 keeps them
+(`app/Main.geng`, `core/Basics.geng`), and the compile maps each of those to
+the file on this machine with `-ffile-prefix-map`: every module of the project
+by its own path, and every package by its `src/`, each ending in `/` since the
+map is a plain prefix of the name. So the C is the same on every machine and
+only the command line carries this one's paths. The program is
 compiled with D490's flags, `-ffp-contract=off -fno-fast-math
 -fstack-clash-protection` whatever else is asked, at `-O2` for `geng make` and
 `-O0` for `geng run`, whose build is scratch and is run once (§NA28), and with
@@ -89,8 +101,28 @@ type alias Config =
     , toString : Path -> String
     , tools : Toolchain
     , optimization : String
+    , debugInfo : Bool
     , packages : Array Path
+    , sources : Array { name : String, path : String }
     }
+
+
+{-| What the C's `#line`s name, mapped to the files: a module of the project by
+itself, since its source directories are the project's to choose, and a package
+by its `src/`. `name` is C5's (`Geng.C.Low.sourceName`), which is
+`app` for the project's own modules.
+-}
+sourceMaps :
+    (Path -> String)
+    -> { modules : Array { module_ : String, path : Path }, packages : Array { name : String, root : Path } }
+    -> Array { name : String, path : String }
+sourceMaps toString project =
+    Array.map
+        (\m -> { name = "app/" ++ String.join "/" (String.split "." m.module_) ++ ".geng", path = toString m.path })
+        project.modules
+        ++ Array.map
+            (\p -> { name = p.name ++ "/", path = toString (Path.append (Path.fromPosixString "src") p.root) ++ "/" })
+            project.packages
 
 
 {-| `GENG_CC`, else `clang`; and `GENG_CFLAGS`, split on spaces. -}
@@ -274,9 +306,23 @@ buildStage config thePlan =
                             write config.fs thePlan.work (Array.pushFirst { name = "program.c", text = out.text } Runtime.sources)
                                 |> Task.andThen (\_ -> externSources config)
                                 |> Task.andThen (\externs -> compile config thePlan externs)
-                                |> Task.andThen (\_ -> abandon config.fs thePlan)
+                                |> Task.andThen (\_ -> finish config thePlan)
                                 |> Task.map (\_ -> 0)
             )
+
+
+{-| A built program's scratch directory: gone, or with debug information kept
+for the debugger, all but the stage (D512). The next build's `prepare` removes
+it either way. -}
+finish : Config -> Plan -> Task Report {}
+finish config thePlan =
+    if config.debugInfo then
+        FileSystem.remove config.fs { recursive = True } thePlan.stage
+            |> Task.map (\_ -> {})
+            |> Task.onError (\_ -> Task.succeed {})
+
+    else
+        abandon config.fs thePlan
 
 
 write : FileSystem.Permission -> Path -> Array { name : String, text : String } -> Task Report {}
@@ -333,8 +379,21 @@ compile config thePlan externs =
         in_ name =
             config.toString (Path.append (Path.fromPosixString name) thePlan.work)
 
+        -- The names `#line` gives, mapped to the files (D513); `program.c` is
+        -- what the C calls itself where the Geng code ends.
+        maps =
+            Array.pushFirst { name = "program.c", path = in_ "program.c" } config.sources
+                |> Array.map (\m -> "-ffile-prefix-map=" ++ m.name ++ "=" ++ m.path)
+
         args =
             [ "-std=c11", config.optimization, "-ffp-contract=off", "-fno-fast-math", "-fstack-clash-protection" ]
+                ++ (if config.debugInfo then
+                        [ "-g" ]
+
+                    else
+                        []
+                   )
+                ++ maps
                 ++ config.tools.flags
                 ++ [ "-I", config.toString thePlan.work, "-o", config.toString thePlan.exe ]
                 ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c" ]
