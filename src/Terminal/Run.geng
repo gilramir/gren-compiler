@@ -260,7 +260,7 @@ run config =
 §NA28). It has no interpreter to find, so none of `runEscript`'s reasons to
 name one apply, and no shell for the same reason as there: a program that
 cannot start is reported as the spawn that failed. Its status is `geng run`'s,
-so `Os.setExitCode`'s (D509) and a crash's 1 (D489) reach the caller.
+so `Os.Env.setExitCode`'s (D509) and a crash's 1 (D489) reach the caller.
 -}
 runExecutable : RunConfig -> Task Error Int
 runExecutable config =
