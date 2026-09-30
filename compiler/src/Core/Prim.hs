@@ -250,7 +250,9 @@ data StrPrim
 
 -- | Every width, both byte orders and both float widths are Geng over 'BGetU8',
 -- 'BtSetU8' and the @*_bits@ conversions, with no width primitive and no
--- intrinsic (D232, @docs/m1b-bytes-prim.md@ §BY5).
+-- intrinsic (D232, @docs/m1b-bytes-prim.md@ §BY5). 'BGetU8' answers a
+-- @UInt8@, the first of a family of sized reads whose wider members wait for a
+-- profile (D542, geng-lang @docs/m3-bytes-access.md@ §BA11).
 --
 -- The group is D233's eight. 'BtSetBytes' was added by it and is __appended__
 -- to 'allPrims' after every other primitive, so no earlier wire code moved.

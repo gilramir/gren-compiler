@@ -218,7 +218,7 @@ bytesType :: BytesPrim -> Maybe Can.Type
 bytesType p =
   case p of
     BLength -> Just (fn [tBytes] tInt)
-    BGetU8 -> Just (fn [tBytes, tInt] tInt)
+    BGetU8 -> Just (fn [tBytes, tInt] tUInt8)
     BSlice -> Just (fn [tBytes, tInt, tInt] tBytes)
     BAppend -> Nothing
     BEq -> Just (fn [tBytes, tBytes] tBool)
