@@ -16,7 +16,8 @@
 -- > case lt$s… n 2 of …     ⟹     case prim i32_lt n 2 of …
 --
 -- __What is inlined__: a top-level binding whose value is a lambda, whose body
--- is at most 'sizeLimit' nodes once this pass has run over it, that is not
+-- is at most 'sizeLimit' nodes once this pass has run over it (or of any size,
+-- when @core@ wrote @\@inline@ on it, D545), that is not
 -- part of a recursive group, and whose body is plain data and control — no
 -- lambda, no @let rec@, no join, no witness or type node, no task primitive and
 -- no reference to an extern. That last set is what keeps the pass out of the
@@ -31,6 +32,10 @@
 --   * a case of a case whose every leaf is known is pushed into the leaves,
 --     where the first rule then fires (case-of-case) — only when a branch that
 --     would be copied more than once is small;
+--   * a case of a @let@ is the @let@ of the case, when the branches name
+--     nothing the @let@ binds, so that the two rules above reach the @case@
+--     an inlined body such as @Array.get@'s ends in, behind the @let@s it
+--     starts with (@m3-bytes-access.md@ §BA12, D544);
 --   * a case whose branches are all one nullary constructor or literal, of a
 --     scrutinee with no effect, is that constructor;
 --   * a case that answers each constructor of its scrutinee with that same
@@ -125,6 +130,12 @@ run cores =
             ext <- Core._moduleExterns modul
           ]
       recursive = recursiveNames defs
+      marked =
+        Set.fromList
+          [ q
+          | modul <- Map.elems cores,
+            q <- Core._moduleInline modul
+          ]
       barred q = Set.member q externs || Set.member q recursive
 
       -- The knot: each definition optimized against the others' optimized
@@ -137,7 +148,7 @@ run cores =
         | otherwise =
             case value of
               Core.Expr (Core.ELam params body) tipe _
-                | inlinable externs body && size body <= sizeLimit -> Just (Cand params body tipe)
+                | inlinable externs body && (size body <= sizeLimit || Set.member (source q) marked) -> Just (Cand params body tipe)
               _ -> Nothing
       candidate q = Maybe.fromMaybe Nothing (Map.lookup q classified)
       constants = Map.mapWithKey constantOf optimized
@@ -150,6 +161,16 @@ run cores =
               _ -> Nothing
       constant q = Maybe.fromMaybe Nothing (Map.lookup q constants)
    in Map.mapWithKey (rebuild space optimized) cores
+
+-- | The binding a specialized or monomorphic copy was made from: @get$kI4@
+-- and @get$s0896c1b6@ are copies of @get@, and what @\@inline@ says of @get@
+-- it says of them. A name Geng source can write has no @$@ in it; one that
+-- starts with @$@ (an instance's method) is its own.
+source :: Core.QualName -> Core.QualName
+source q@(Core.QualName home name) =
+  case Name.toChars name of
+    '$' : _ -> q
+    chars -> Core.QualName home (Name.fromChars (takeWhile (/= '$') chars))
 
 data Cand = Cand
   { _candParams :: [Core.Binder],
@@ -666,6 +687,10 @@ caseOf ctx e scrut alts fallback =
         markFired
         return (Core.Expr crash (Core.typeOf e) (Core.spanOf e))
     Nothing
+      | Just floated <- letOfCase e scrut alts fallback ->
+          do
+            markFired
+            simplify ctx floated
       | Just pushed <- caseOfCase e scrut alts fallback ->
           do
             markFired
@@ -817,6 +842,30 @@ match scrut pattern =
         Core.LFloat _ -> True
         Core.LFloat32 _ -> True
         _ -> False
+
+-- | @case (let bs in e) of alts@ is @let bs in case e of alts@ (D544). The
+-- bindings were evaluated before a branch was chosen either way, so nothing
+-- moves in time; a name they bind that a branch or the fallback also names
+-- from outside would be captured, and then the case is left as it is. Without
+-- it an inlined body that starts with a @let@ hides its known leaves from
+-- 'caseOfCase': @Array.get@ opened in a loop still built its @Just@ natively,
+-- and the loop took 98 ms where it takes 6 with this (§BA12.1).
+letOfCase :: Core.Expr -> Core.Expr -> [Core.Alt] -> Maybe Core.Expr -> Maybe Core.Expr
+letOfCase outer scrut alts fallback =
+  case Core._exprValue scrut of
+    Core.ELet binds inner
+      | Set.null (Set.intersection bound free) ->
+          Just (Core.Expr (Core.ELet binds (Core.Expr (Core.ECase inner alts fallback) tipe sp)) tipe sp)
+      where
+        bound = Set.fromList (map (Core._binderName . Core._bindBinder) binds)
+        free =
+          Set.unions $
+            maybe Set.empty Refs.freeLocals fallback
+              : [Set.difference (Refs.freeLocals b) (Refs.patternBinders p) | Core.Alt p b <- alts]
+    _ -> Nothing
+  where
+    tipe = Core.typeOf outer
+    sp = Core.spanOf outer
 
 -- | Case-of-case: when every leaf of the inner case is a known value, the outer
 -- case moves into the leaves, where 'select' then decides each.

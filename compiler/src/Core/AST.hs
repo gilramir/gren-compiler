@@ -250,7 +250,12 @@ data Module = Module
     -- and it is here rather than among '_moduleDefs' because what it is bound
     -- to is the host's. One with a Geng body (D222) also has that body among
     -- '_moduleDefs', under the same name, and the backend keeps one of the two.
-    _moduleExterns :: ![Extern]
+    _moduleExterns :: ![Extern],
+    -- | The bindings @core@ wrote @\@inline@ on (D545, geng-lang
+    -- @m3-bytes-access.md@ §BA13), sorted by name: "Core.Pass.Inline" opens
+    -- them, and the copies "Core.Pass.Specialize" and "Core.Pass.Mono" make
+    -- of them, whatever their size.
+    _moduleInline :: ![QualName]
   }
   deriving (Eq, Show)
 

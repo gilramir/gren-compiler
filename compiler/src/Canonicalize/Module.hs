@@ -48,9 +48,10 @@ type Result i w a =
 -- MODULES
 
 canonicalize :: Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Result i [W.Warning] Can.Module
-canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ capabilities) =
+canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ capabilities inlines) =
   do
     checkClassesAreFirstParty pkg (fmap snd classes)
+    checkInlinesAreCore pkg inlines
 
     let values = fmap snd valuesWithSourceOrder
     let home = ModuleName.Canonical pkg (Src.getName modul)
@@ -85,7 +86,7 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
 
     checkClosedClassesCovered home (fmap snd classes) cclasses cinstances
 
-    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities))
+    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities)) (Set.fromList (map A.toValue inlines))
 
 -- | Every member of a closed class this module declares has an instance here.
 --
@@ -154,6 +155,20 @@ checkClassesAreFirstParty pkg classes
           Result.ok ()
         A.At region (Src.Class (A.At _ name) _ _ _) : _ ->
           Result.throw (Error.ClassDeclThirdParty region name)
+
+-- | Only `core` writes `@inline` (D545), as only `core` writes `@prim`: it
+-- tells the inliner to copy a body whatever its size, which is `core`'s
+-- promise about its own few functions, not something a package can ask of every
+-- program that depends on it.
+checkInlinesAreCore :: Pkg.Name -> [A.Located Name.Name] -> Result i w ()
+checkInlinesAreCore pkg inlines
+  | pkg == Pkg.core = Result.ok ()
+  | otherwise =
+      case inlines of
+        [] ->
+          Result.ok ()
+        A.At region name : _ ->
+          Result.throw (Error.InlineOutsideCore region name)
 
 -- | The instances `@derive` asks for (`classes.md` §2.1, §G25).
 --

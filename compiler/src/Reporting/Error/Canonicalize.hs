@@ -91,6 +91,7 @@ data Error
   | NotFoundVariant A.Region (Maybe Name.Name) Name.Name PossibleNames
   | NotFoundBinop A.Region Name.Name (Set.Set Name.Name)
   | PrimOutsideCore A.Region Name.Name
+  | InlineOutsideCore A.Region Name.Name
   | PrimUnknown A.Region Name.Name
   | PrimHasNoTypeYet A.Region Name.Name
   | ExternUnknownLanguage A.Region Name.Name
@@ -983,6 +984,21 @@ toReport source err =
               "A primitive is not a capability a package can be granted -- it is the language\
               \ itself, and its preconditions are guarded by the functions `core` wraps it in.\
               \ Whatever you were reaching for, a `core` function is the way to reach it."
+          )
+    InlineOutsideCore region name ->
+      Report.Report "INLINE OUTSIDE CORE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This `@inline` is on `"
+                ++ Name.toChars name
+                ++ "`, and only `core` may write `@inline`:",
+            D.reflow
+              "It makes the compiler copy a function into every call whatever its size, which\
+              \ `core` promises only for the few functions a count showed hot. The compiler\
+              \ already copies every small function without being asked."
           )
     PrimUnknown region name ->
       Report.Report "UNKNOWN PRIMITIVE" region [] $

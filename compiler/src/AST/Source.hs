@@ -244,12 +244,15 @@ data Module = Module
     -- | The values declared under @\@capability@ (D258, @m1b-source.md@
     -- §SO12.4), which only the application and this module's own package may
     -- refer to.
-    _capabilities :: [A.Located Name]
+    _capabilities :: [A.Located Name],
+    -- | The values declared under @\@inline@ (D545), which only @core@ may
+    -- write and the inliner opens whatever their size.
+    _inlines :: [A.Located Name]
   }
   deriving (Show)
 
 getName :: Module -> Name
-getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _ _) =
+getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _ _ _) =
   case maybeName of
     Just (A.At _ name) ->
       name

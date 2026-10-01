@@ -351,7 +351,10 @@ data Module = Module
     -- | The values declared under @\@capability@ (D258, @m1b-source.md@
     -- §SO12.4). "Nitpick.Capability" refuses a reference to one from a module
     -- of another package, unless that module is the application's.
-    _capabilities :: Set.Set Name
+    _capabilities :: Set.Set Name,
+    -- | The values declared under @\@inline@ (D545), which lowering hands
+    -- Core for the inliner.
+    _inlines :: Set.Set Name
   }
   deriving (Show)
 

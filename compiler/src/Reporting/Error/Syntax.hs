@@ -180,6 +180,7 @@ data Attribute
   | AttributeExternName Row Col
   | AttributeAfterExtern Name.Name Row Col
   | AttributeCapabilityAnnotation Row Col
+  | AttributeInlineNotOnValue Row Col
   | --
     AttributeIndentName Row Col
   | AttributeIndentOpen Row Col
@@ -1707,6 +1708,12 @@ toAttributeReport source attribute startRow startCol =
               "I was expecting a type annotation on this value. A `@capability` is how a\
               \ package lets an application obtain a capability, so its type is written\
               \ down where a reader can see what is being obtained."
+        AttributeInlineNotOnValue row col ->
+          stuck row col "MISPLACED ATTRIBUTE" $
+            D.reflow
+              "I was expecting a value declaration with a type annotation after this attribute.\
+              \ `@inline` says the inliner opens every call to a value, and its annotation is\
+              \ the line the attribute stands above."
         AttributeIndentName row col ->
           stuck row col "UNFINISHED ATTRIBUTE" $
             D.reflow "I was expecting the name of an attribute next."

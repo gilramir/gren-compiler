@@ -106,6 +106,15 @@ spec = do
         refused ((moduleWith []) {_moduleExterns = [Extern (binder "b") [ExternImpl ExternJs [utf8 "m", utf8 "b"]] True True]})
         refused ((moduleWith [bindOf (lit (LInt 1))]) {_moduleExterns = [Extern (binder "b") [ExternImpl ExternJs [utf8 "m", utf8 "b"]] True False]})
 
+    it "carries the bindings core marks @inline (D545)" $
+      roundTrip ((moduleWith [bindOf (lit (LInt 1)), Bind (binder "c") (lit (LInt 2))]) {_moduleInline = [qual "b", qual "c"]})
+
+    it "refuses an @inline that names no binding of the module, or is out of order" $
+      do
+        refused ((moduleWith []) {_moduleInline = [qual "b"]})
+        refused ((moduleWith [bindOf (lit (LInt 1)), Bind (binder "c") (lit (LInt 2))]) {_moduleInline = [qual "c", qual "b"]})
+        refused ((moduleWith [bindOf (lit (LInt 1))]) {_moduleInline = [qual "b", qual "b"]})
+
     it "carries each kind of main" $
       mapM_ (\m -> roundTrip ((moduleWith []) {_moduleMain = Just m})) everyMain
 
@@ -348,7 +357,8 @@ moduleWith defs =
       _moduleDefsRec = [[qual "a", qual "b"]],
       _moduleExports = [qual "b"],
       _moduleMain = Nothing,
-      _moduleExterns = []
+      _moduleExterns = [],
+      _moduleInline = []
     }
 
 -- | All 21 of them (C2). The list is the point: adding a node to 'Expr_' and

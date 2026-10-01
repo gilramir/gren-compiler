@@ -766,7 +766,7 @@ importedBy importer =
 crawlFile :: Map.Map ModuleName.Raw ForeignInterface -> Map.Map ModuleName.Raw ByteString -> MVar StatusDict -> Pkg.Name -> DocsStatus -> Bool -> ModuleName.Raw -> ByteString -> IO (Either CrawlError Status)
 crawlFile foreignDeps sources mvar pkg docsStatus authorizedForKernelCode expectedName bytes =
   case Parse.fromByteString (Parse.Package pkg) bytes of
-    Right modul@(Src.Module (Just (A.At _ actualName)) _ _ imports _ _ _ _ _ _ _ _ _) | expectedName == actualName ->
+    Right modul@(Src.Module (Just (A.At _ actualName)) _ _ imports _ _ _ _ _ _ _ _ _ _) | expectedName == actualName ->
       do
         deps <- crawlImports foreignDeps sources mvar pkg authorizedForKernelCode (Just expectedName) (fmap snd imports)
         return (Right (SLocal docsStatus deps modul bytes))
@@ -777,7 +777,7 @@ crawlFile foreignDeps sources mvar pkg docsStatus authorizedForKernelCode expect
         -- ranges. Same escape hatch, same reason.
         reportDepError pkg expectedName bytes (E.BadSyntax err)
         return $ Left $ CrawlCorruption $ "its module " ++ ModuleName.toChars expectedName ++ " does not parse"
-    Right (Src.Module (Just (A.At _ actualName)) _ _ _ _ _ _ _ _ _ _ _ _) ->
+    Right (Src.Module (Just (A.At _ actualName)) _ _ _ _ _ _ _ _ _ _ _ _ _) ->
       return $ Left $ CrawlCorruption $
         "the file of its module " ++ ModuleName.toChars expectedName ++ " says it is module " ++ ModuleName.toChars actualName
     Right _ ->

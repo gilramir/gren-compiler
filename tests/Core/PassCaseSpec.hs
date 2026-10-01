@@ -187,7 +187,8 @@ modul defs =
       Core._moduleDefsRec = [],
       Core._moduleMain = Nothing,
       Core._moduleExports = [],
-      Core._moduleExterns = []
+      Core._moduleExterns = [],
+      Core._moduleInline = []
     }
 
 ctorDecl :: Name -> Int -> [Core.Type] -> Core.Ctor

@@ -94,7 +94,8 @@ lower platform annotations types elaboration modul =
           Core._moduleExterns =
             List.sortOn
               (Core._binderName . Core._externBinder)
-              (map (externOf env) externDefs ++ concatMap (externWithBody env annotations (Can._externBodies modul)) valueDefs)
+              (map (externOf env) externDefs ++ concatMap (externWithBody env annotations (Can._externBodies modul)) valueDefs),
+          Core._moduleInline = map (Core.QualName home) (Set.toAscList (Can._inlines modul))
         }
 
 -- EXTERNS

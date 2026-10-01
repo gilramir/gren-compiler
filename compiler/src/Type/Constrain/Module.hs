@@ -14,7 +14,7 @@ import Type.Type (Constraint (..))
 -- CONSTRAIN
 
 constrain :: Can.Module -> IO Constraint
-constrain (Can.Module _ _ _ decls _ _ _ instances _ _ _) =
+constrain (Can.Module _ _ _ decls _ _ _ instances _ _ _ _) =
   constrainDecls decls =<< constrainInstances instances
 
 -- CONSTRAIN INSTANCES

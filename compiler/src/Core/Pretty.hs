@@ -55,6 +55,7 @@ moduleToBuilder opts m =
   mconcat
     [ "module " <> canonical (_moduleName m) <> "\n",
       section "exports" (map qual (_moduleExports m)),
+      section "inline" (map qual (_moduleInline m)),
       section "files" (map fileEntry (Map.toList (_moduleFiles m))),
       block (map (dataDecl opts) (_moduleData m)),
       block (map (classDecl opts) (_moduleClasses m)),

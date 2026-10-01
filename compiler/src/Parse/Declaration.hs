@@ -39,6 +39,11 @@ data Decl
   | -- | A value declaration under @\@capability@ (D258, @m1b-source.md@
     -- §SO12.4): an ordinary value, and a name "Parse.Module" collects.
     Capability (Maybe Src.DocComment) (A.Located Src.Value)
+  | -- | A value declaration under @\@inline@ (D545, geng-lang
+    -- @m3-bytes-access.md@ §BA13): an ordinary value, and a name "Parse.Module"
+    -- collects for the inliner. Only @core@ may write one, which
+    -- canonicalization checks, as it does for @\@prim@.
+    Inline (Maybe Src.DocComment) (A.Located Src.Value)
   | Class (Maybe Src.DocComment) (A.Located Src.Class)
   | Instance (Maybe Src.DocComment) (A.Located Src.Instance)
   | Union (Maybe Src.DocComment) (A.Located Src.Union)
@@ -84,6 +89,20 @@ declaration =
               return ((Capability docs value, comments), end)
             _ ->
               capabilityNeedsAnnotation start
+      Just InlineAttribute ->
+        -- What follows is an annotated value declaration and nothing else, as
+        -- after `@capability` (the formatter lays the attribute out with the
+        -- annotation); anything else is a misplaced attribute, as `@derive` on
+        -- something other than a custom type is.
+        oneOf
+          E.DeclStart
+          [ do
+              ((decl, comments), end) <- valueDecl maybeDocs start
+              case decl of
+                Value docs value@(A.At _ (Src.Value _ _ _ (Just _) _)) -> return ((Inline docs value, comments), end)
+                _ -> inlineNotOnValue start,
+            inlineNotOnValue start
+          ]
       Nothing ->
         oneOf
           E.DeclStart
@@ -108,6 +127,9 @@ data Attribute
   | -- | @\@capability@, bare, on a value that mints a capability (D258): only
     -- the application and the declaring package may refer to it.
     CapabilityAttribute
+  | -- | @\@inline@, bare, on a value in @core@ that the inliner opens whatever
+    -- its size (D545).
+    InlineAttribute
 
 chompAttribute :: Parser E.Decl (Maybe Attribute)
 chompAttribute =
@@ -120,6 +142,8 @@ chompAttribute =
             then Just . Derive <$> chompDeriveArgs
             else if name == Name.fromChars "capability"
             then Just CapabilityAttribute <$ chompBareAttributeEnd
+            else if name == Name.fromChars "inline"
+            then Just InlineAttribute <$ chompBareAttributeEnd
             else
               if name == Name.fromChars "prim"
                 then Just . Prim <$> chompPrimArg
@@ -303,6 +327,11 @@ capabilityNeedsAnnotation :: A.Position -> Space.Parser E.Decl (Decl, [Src.Comme
 capabilityNeedsAnnotation (A.Position row col) =
   P.Parser $ \_ _ _ cerr _ ->
     cerr row col (E.DeclAttribute (E.AttributeCapabilityAnnotation row col))
+
+inlineNotOnValue :: A.Position -> Space.Parser E.Decl (Decl, [Src.Comment])
+inlineNotOnValue (A.Position row col) =
+  P.Parser $ \_ _ _ cerr _ ->
+    cerr row col (E.DeclAttribute (E.AttributeInlineNotOnValue row col))
 
 attributeUnknown :: Name.Name -> A.Position -> Parser E.Attribute a
 attributeUnknown name (A.Position row col) =

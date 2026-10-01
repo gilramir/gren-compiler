@@ -698,6 +698,7 @@ moduleEnc m =
     <> repQual 11 (_moduleExports m)
     <> optMsg 14 mainEnc (_moduleMain m)
     <> rep 15 externEnc (_moduleExterns m)
+    <> repQual 16 (_moduleInline m)
 
 recGroupEnc :: [QualName] -> Enc
 recGroupEnc names = repQual 1 names

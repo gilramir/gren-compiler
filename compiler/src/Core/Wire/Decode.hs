@@ -47,6 +47,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe qualified as BS
 import Data.Coerce qualified as Coerce
 import Data.Int (Int32, Int64)
+import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Data.Set qualified as Set
@@ -974,6 +975,15 @@ moduleBodyP =
             failAt here ("the extern " ++ Name.toChars (_binderName (_externBinder e)) ++ " has a body and no binding of its name")
         | otherwise ->
             failAt here ("the extern " ++ Name.toChars (_binderName (_externBinder e)) ++ " has no body and a binding of its name")
+    there <- offset
+    inline <- repQual "inline" 16
+    case [q | q@(QualName home n) <- inline, home /= name || not (Set.member n bound)] of
+      [] -> pure ()
+      QualName home n : _ ->
+        failAt there ("inline names " ++ Name.toChars (ModuleName._module home) ++ "." ++ Name.toChars n ++ ", which is not a binding of this module")
+    if List.sort inline /= inline || length (List.nub inline) /= length inline
+      then failAt there "inline is not sorted by name, or names one binding twice"
+      else pure ()
     pure
       Module
         { _moduleName = name,
@@ -985,7 +995,8 @@ moduleBodyP =
           _moduleDefsRec = defsRec,
           _moduleExports = exports,
           _moduleMain = main_,
-          _moduleExterns = externs
+          _moduleExterns = externs,
+          _moduleInline = inline
         }
 
 -- THE PROGRAM
