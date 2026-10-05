@@ -144,7 +144,7 @@ run given =
         | Map.null gens = cores
         | otherwise =
             let keys = demand gens tys cores
-                names = assign keys
+                names = assignTwins keys
                 added =
                   Map.fromListWith
                     (++)
@@ -213,7 +213,9 @@ demand gens tys cores =
       | key `Set.member` seen = go seen rest
       | otherwise =
           let seen' = Set.insert key seen
-           in go seen' (sites gens (instantiated gens tys key) ++ rest)
+           in go seen' (sites gens (instantiated gens tys key) ++ twinOf key ++ rest)
+    twinOf (name, wits) =
+      [(twin, wits) | Just twin <- [Map.lookup name twins], Map.member twin gens]
 
 -- | The keys one expression asks for, including the ones nested inside a
 -- witness: a witness for @Eq (Array Int)@ is the @Eq (Array a)@ table applied to
@@ -337,6 +339,34 @@ keyPrint (name, wits) =
           let fp' = foldl (\acc v -> FP.chars (Name.toChars v) acc) (count vars (tag "a" fp)) vars
               fp'' = foldl (\acc (Core.CClass c ct) -> ty ct (qual c acc)) (count constraints fp') constraints
            in ty body fp''
+
+-- | D582 (geng-lang @m3-fold.md@ §FL10): @core@'s @Dict@ transient twins.
+-- Whenever a key of the first is copied, the second is copied for the same
+-- witnesses, and named by the first's copy with its own name in front:
+-- @set$s1a2b3c4d@'s twin is @setT$s1a2b3c4d@, which is how
+-- "Core.Pass.Transient", running after this pass, finds the twin of a call
+-- it rewrites. Nothing else names a twin, so a twin's copy nothing calls is
+-- one 'Core.Program.link' drops.
+twins :: Map Core.QualName Core.QualName
+twins =
+  Map.fromList
+    [ (Core.QualName ModuleName.dict (Name.fromChars a), Core.QualName ModuleName.dict (Name.fromChars b))
+    | (a, b) <- [("set", "setT"), ("update", "updateT"), ("updateWithDefault", "updateWithDefaultT"), ("remove", "removeT")]
+    ]
+
+-- | 'assign', with every twin key named after its original's copy.
+assignTwins :: Set Key -> Map Key Name
+assignTwins keys =
+  let twinned = Set.fromList [(twin, wits) | (name, wits) <- Set.toList keys, Just twin <- [Map.lookup name twins], Set.member (twin, wits) keys]
+      base = assign (Set.difference keys twinned)
+      named =
+        Map.fromList
+          [ ((twin, wits), Name.fromChars (Name.toChars (Core._qnName twin) ++ drop (length (Name.toChars (Core._qnName name))) (Name.toChars copied)))
+          | ((name, wits), copied) <- Map.toList base,
+            Just twin <- [Map.lookup name twins],
+            Set.member (twin, wits) twinned
+          ]
+   in Map.union base named
 
 nameOf :: Map Key Name -> Key -> Core.QualName
 nameOf names key@(Core.QualName home _, _) =

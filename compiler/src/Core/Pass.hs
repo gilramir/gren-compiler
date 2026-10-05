@@ -15,6 +15,8 @@
 -- > GENG_CORE_PASSES=mutual        -- local mutual tail calls, one function ("Core.Pass.Mutual")
 -- > GENG_CORE_PASSES=float         -- a let in a let's right-hand side floated out ("Core.Pass.Float")
 -- > GENG_CORE_PASSES=mono          -- every type variable copied away by shape ("Core.Pass.Mono")
+-- > GENG_CORE_PASSES=foldspec      -- a fold copied for the function it is handed ("Core.Pass.FoldSpec")
+-- > GENG_CORE_PASSES=transient     -- a Dict a loop threads updated in place ("Core.Pass.Transient")
 --
 -- A switch rather than a mode, for the reason C4 gives: the pass is optional,
 -- its output is still Core, and a program has to answer the same either way.
@@ -63,6 +65,20 @@
 -- per-type ones it relies on (D492), and before inlining, so that what the
 -- inliner copies is already monomorphic.
 --
+-- __A fold is copied for its function next__ (D579, geng-lang @m3-fold.md@):
+-- after specialization, so that what it copies passes no witness, and before
+-- monomorphization, which copies the copy by shape like any other definition.
+-- It is in every target's 'defaults': alone it saves nothing measurable
+-- (§FL5), and what it is for is the loop it leaves, a fold's accumulator a
+-- loop's parameter.
+--
+-- __The @Dict@ transient follows it__ (D579, D582): a loop that threads a
+-- @Dict@ and keeps no old version of it calls @core@'s twins of @set@ and
+-- the rest, which write the nodes the loop made. It reads the fold pass's
+-- copies and names the twins by the specializer's, and it runs where
+-- something is written in place: natively and on JavaScript, not on the BEAM
+-- (D518).
+--
 -- __Specialization runs before either__, and it is the one pass that is not a
 -- function of a single module: it needs every module's Core to know what
 -- instantiations a program asks for (§G27). It runs first because the copies it
@@ -80,11 +96,13 @@ import Core.AST qualified as Core
 import Core.Dump qualified as Dump
 import Core.Pass.Case qualified as Case
 import Core.Pass.Float qualified as Float
+import Core.Pass.FoldSpec qualified as FoldSpec
 import Core.Pass.Inline qualified as Inline
 import Core.Pass.Mono qualified as Mono
 import Core.Pass.Mutual qualified as Mutual
 import Core.Pass.Specialize qualified as Specialize
 import Core.Pass.TailCall qualified as TailCall
+import Core.Pass.Transient qualified as Transient
 import Core.Target qualified as Target
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -102,15 +120,17 @@ names target =
 defaults :: Target.Target -> [String]
 defaults target =
   case target of
-    Target.Js -> ["specialize", "float", "mutual", "case", "tailcall"]
-    Target.Native -> ["specialize", "mono", "inline", "float", "mutual", "case", "tailcall"]
-    _ -> ["specialize", "inline", "float", "mutual", "case", "tailcall"]
+    Target.Js -> ["specialize", "foldspec", "transient", "float", "mutual", "case", "tailcall"]
+    Target.Native -> ["specialize", "foldspec", "transient", "mono", "inline", "float", "mutual", "case", "tailcall"]
+    _ -> ["specialize", "foldspec", "inline", "float", "mutual", "case", "tailcall"]
 
 run :: Target.Target -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
 run target cores =
   let pass name f = if name `elem` names target then f else id
       specialized = pass "specialize" Specialize.run cores
-      monomorphized = pass "mono" (Mono.run (Target.language target) Dump.externBodies) specialized
+      folded = pass "foldspec" FoldSpec.run specialized
+      transient = pass "transient" Transient.run folded
+      monomorphized = pass "mono" (Mono.run (Target.language target) Dump.externBodies) transient
       inlined = pass "inline" Inline.run monomorphized
       floated = pass "float" (Map.map Float.run) inlined
       grouped = pass "mutual" (Map.map Mutual.run) floated

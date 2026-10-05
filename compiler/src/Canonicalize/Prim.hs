@@ -17,7 +17,7 @@ module Canonicalize.Prim
 where
 
 import AST.Canonical qualified as Can
-import Core.Prim (ArrPrim (..), BytesPrim (..), ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..), TaskPrim (..), TransientPrim (..))
+import Core.Prim (ArrPrim (..), BytesPrim (..), ConvPrim (..), DictPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..), TaskPrim (..), TransientPrim (..))
 import Core.Prim qualified as Prim
 import Data.Map qualified as Map
 import Data.Name qualified as Name
@@ -86,6 +86,7 @@ primType op =
     ArrOp p -> Just (arrType p)
     TransientOp p -> Just (transientType p)
     TaskOp p -> taskType p
+    DictOp p -> Just (dictType p)
     _ -> Nothing
 
 -- INTEGERS
@@ -274,6 +275,22 @@ transientType p =
     a = Can.TVar "a"
     tArray = Can.TType ModuleName.array "Array" [a]
     tTransient = Can.TType ModuleName.arrayTransient "Transient" [a]
+
+-- | D579's @Dict@ transient (D582, geng-lang @m3-fold.md@ §FL10), over the
+-- node @core@'s @Dict@ declares: an owner is an @Int@, the node's colour is
+-- @Dict@'s own @NColor@, and every one but the owner answers a node.
+dictType :: DictPrim -> Can.Type
+dictType p =
+  case p of
+    DictOwner -> fn [tUnit] tInt
+    DictNode -> fn [tInt, tColor, k, v, tDict, tDict] tDict
+    DictEdit -> fn [tInt, tDict, tColor, tDict, tDict] tDict
+    DictEditValue -> fn [tInt, tDict, v] tDict
+  where
+    k = Can.TVar "k"
+    v = Can.TVar "v"
+    tDict = Can.TType ModuleName.dict "Dict" [k, v]
+    tColor = Can.TType ModuleName.dict "NColor" []
 
 -- | The @Task@ tree (D246, D282, D283; @m1b-source.md@ §SO22). Each type is the
 -- signature @Task@ or @Process@ exposes the function under, so @core@ declares

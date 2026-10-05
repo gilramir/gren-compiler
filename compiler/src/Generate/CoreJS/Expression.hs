@@ -36,6 +36,7 @@ module Generate.CoreJS.Expression
     ctorArity,
     ctorDefinition,
     isBool,
+    dictHelpers,
   )
 where
 
@@ -493,6 +494,71 @@ ctorArity env name =
   case Map.lookup name (_ctors env) of
     Just c | _ctorShape c == Normal -> Just (_ctorFields c)
     _ -> Nothing
+
+-- | D582's four @Dict@ transient primitives (geng-lang @m3-fold.md@ §FL10),
+-- written with this program's spelling of a @Dict@ node: its tag and its
+-- fields, which @--optimize@ renames. The owner is a property @$o@ that only a
+-- transient's nodes carry (D576), which no renamed field can be, since a
+-- renamed field is letters; a persistent node has none, so it is never the
+-- running loop's. Owners count from 1 and never come back: a double counts
+-- to 2^53 before one would.
+--
+-- > _Dict_edit(o, n, c, l, r): n written, if it carries o; n, if nothing
+-- >   changes; otherwise a node carrying o with n's key and value.
+dictHelpers :: Env -> [JS.Stmt]
+dictHelpers env =
+  let c = lookupCtor env (Core.QualName ModuleName.dict (Name.fromChars "RBNode_gren_builtin"))
+      field = generateField (_mode env) . Name.fromChars
+      color = field "color"
+      key = field "key"
+      left = field "left"
+      right = field "right"
+      value = field "value"
+      owner = JsName.fromLocalHumanReadable (Name.fromChars "$o")
+      ref = JS.Ref . JsName.fromLocalHumanReadable . Name.fromChars
+      local = JsName.fromLocalHumanReadable . Name.fromChars
+      o = ref "o"
+      n = ref "n"
+      cv = ref "c"
+      k = ref "k"
+      v = ref "v"
+      l = ref "l"
+      r = ref "r"
+      at e f = JS.Access e f
+      set e f x = JS.ExprStmt (JS.Assign (JS.LDot e f) x)
+      setIfMoved e f x = JS.IfStmt (JS.Infix JS.OpNe (at e f) x) (set e f x) JS.EmptyStmt
+      owned = JS.Infix JS.OpEq (at n owner) o
+      node args = JS.Call (ref "_Dict_node") args
+      counter = local "_Dict_owners"
+   in [ JS.Var counter (JS.Int 0),
+        JS.FunctionStmt
+          (local "_Dict_owner")
+          []
+          [JS.Return (JS.Assign (JS.LRef counter) (JS.Infix JS.OpAdd (JS.Ref counter) (JS.Int 1)))],
+        JS.FunctionStmt
+          (local "_Dict_node")
+          (map local ["o", "c", "k", "v", "l", "r"])
+          [JS.Return (JS.Object [(JsName.dollar, tagValue env c), (color, cv), (key, k), (left, l), (right, r), (value, v), (owner, o)])],
+        JS.FunctionStmt
+          (local "_Dict_edit")
+          (map local ["o", "n", "c", "l", "r"])
+          [ JS.IfStmt
+              owned
+              (JS.Block [set n color cv, setIfMoved n left l, setIfMoved n right r, JS.Return n])
+              JS.EmptyStmt,
+            JS.IfStmt
+              (JS.Infix JS.OpAnd (JS.Infix JS.OpEq (at n color) cv) (JS.Infix JS.OpAnd (JS.Infix JS.OpEq (at n left) l) (JS.Infix JS.OpEq (at n right) r)))
+              (JS.Return n)
+              JS.EmptyStmt,
+            JS.Return (node [o, cv, at n key, at n value, l, r])
+          ],
+        JS.FunctionStmt
+          (local "_Dict_editValue")
+          (map local ["o", "n", "v"])
+          [ JS.IfStmt owned (JS.Block [set n value v, JS.Return n]) JS.EmptyStmt,
+            JS.Return (node [o, at n color, at n key, v, at n left, at n right])
+          ]
+      ]
 
 lookupCtor :: Env -> Core.QualName -> Ctor
 lookupCtor env name@(Core.QualName _ short) =

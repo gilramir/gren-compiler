@@ -19,7 +19,7 @@ spec = do
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
       -- someone noticing.
-      length allPrims `shouldBe` 186
+      length allPrims `shouldBe` 190
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -85,6 +85,14 @@ spec = do
       -- `task_with_context`, which did not move.
       (primCode (TaskOp TaskMap), primName (TaskOp TaskMap), primArity (TaskOp TaskMap), primCode (TaskOp TaskWithContext))
         `shouldBe` (185, "task_map", 2, 184)
+
+    it "appends D582's dict_ primitives after every code that existed" $
+      -- D579's Dict transient (geng-lang m3-fold.md §FL10), after `task_map`,
+      -- which did not move.
+      ( map (\p -> (primCode (DictOp p), primName (DictOp p), primArity (DictOp p))) [minBound .. maxBound],
+        primCode (TaskOp TaskMap)
+      )
+        `shouldBe` ([(186, "dict_owner", 1), (187, "dict_node", 6), (188, "dict_edit", 5), (189, "dict_edit_value", 3)], 185)
 
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved

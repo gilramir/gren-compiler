@@ -130,10 +130,12 @@ Library common
         Core.Pass.Case
         Core.Pass.Inline
         Core.Pass.Float
+        Core.Pass.FoldSpec
         Core.Pass.Mono
         Core.Pass.Mutual
         Core.Pass.Specialize
         Core.Pass.TailCall
+        Core.Pass.Transient
         Core.Prim
         Core.Program
         Core.Pretty

@@ -74,7 +74,7 @@ generate mode program kernels exts =
           List.foldl'
             (flip JS.stmtToBuilder)
             (JS.emptyBuilder firstGeneratedLineNumber)
-            (constructors env program)
+            (constructors env program ++ (if any JsPrim.isDict reached then Expr.dictHelpers env else []))
       builder = List.foldl' (item env kernels) started (_progLinked program)
    in GeneratedResult
         { _source =

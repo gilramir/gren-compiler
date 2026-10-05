@@ -72,6 +72,15 @@
 -- program's worth of plain cases.
 module Core.Pass.Inline
   ( run,
+
+    -- * For "Core.Pass.FoldSpec" (prototype)
+    Space,
+    fileSpace,
+    toGlobal,
+    spaceName,
+    spanFiles,
+    respan,
+    reorder,
   )
 where
 
@@ -1114,6 +1123,9 @@ fileSpace cores =
           Set.unions (Map.keysSet cores : map (Set.fromList . Map.elems . Core._moduleFiles) (Map.elems cores))
       indexed = zip [0 ..] names
    in Space (Map.fromList [(n, i) | (i, n) <- indexed]) (Map.fromList indexed)
+
+spaceName :: Space -> Int -> ModuleName.Canonical
+spaceName space i = _spaceNames space Map.! i
 
 toGlobal :: Space -> Core.Module -> Core.Expr -> Core.Expr
 toGlobal space modul =

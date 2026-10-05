@@ -10,6 +10,9 @@
 -- > and its transient — and for the @Task@ and @Source@ nodes the scheduler
 -- > owns. Everything else in @core@ is Geng source.
 --
+-- D582 (geng-lang @m3-fold.md@ §FL10) adds a @Dict@ node's owner, which
+-- D579's transient keeps where the backend chooses: 'DictPrim'.
+--
 -- Three things follow, and they are why this list is as short as it is:
 --
 --   * __Semantics live in Geng wherever they can.__ A primitive is the /raw/
@@ -45,6 +48,7 @@ module Core.Prim
     ArrPrim (..),
     TransientPrim (..),
     TaskPrim (..),
+    DictPrim (..),
 
     -- * The table
     allPrims,
@@ -375,6 +379,40 @@ data TaskPrim
   | TaskMap
   deriving (Eq, Ord, Show, Enum, Bounded)
 
+-- | D579's @Dict@ transient (geng-lang @m3-fold.md@ §FL10, D582): a loop that
+-- threads a @Dict@ through itself and keeps no old version of it updates the
+-- tree in place, through @core@'s twins of @set@, @update@ and @remove@,
+-- which are Geng over these four. An /owner/ is a number taken once per entry
+-- to such a loop; a node that carries the running loop's owner was made by
+-- this loop and nothing else holds it, so it may be written; any other node
+-- is copied once, the copy carrying the owner (Clojure's editable nodes).
+--
+-- Each one __answers the node it made or wrote__, and @core@'s twins use
+-- only that answer, so that a backend whose nodes cannot be written (the
+-- BEAM) gives these their plain meaning — a node built anew — and the program
+-- is the same program. Owner 0 is no loop's: a node made under it is an
+-- ordinary node, and nothing is written under it.
+--
+--   * @dict_owner {}@ — a fresh owner, never handed out before; 0 where the
+--     backend writes nothing in place, and natively once 2^31 − 1 are spent
+--     (§IP4: an owner must never be handed out twice).
+--   * @dict_node o c k v l r@ — a node, carrying @o@.
+--   * @dict_edit o n c l r@ — @n@ with its colour and children replaced: @n@
+--     itself, written, when it carries @o@ (and @o@ is not 0); @n@ itself when
+--     nothing would change; otherwise a new node carrying @o@ with @n@'s key
+--     and value.
+--   * @dict_edit_value o n v@ — the same, for @n@'s value.
+--
+-- A node's owner is backend-local: natively the colour field's spare bits
+-- (D576), on JavaScript a property only a transient's nodes carry. The BEAM
+-- writes nothing in place (D518): owner 0 and a node built anew.
+data DictPrim
+  = DictOwner
+  | DictNode
+  | DictEdit
+  | DictEditValue
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
 data PrimOp
   = IntOp !IntType !IntPrim
   | FloatOp !FloatType !FloatPrim
@@ -384,6 +422,7 @@ data PrimOp
   | ArrOp !ArrPrim
   | TransientOp !TransientPrim
   | TaskOp !TaskPrim
+  | DictOp !DictPrim
   | -- | The barrier. No Core→Core pass may eliminate, duplicate, hoist or
     -- reorder it against another 'DebugLog' or a @task_@ boundary (S8). Dev
     -- builds only.
@@ -438,6 +477,8 @@ allPrims =
     ++ map TaskOp [TaskContext, TaskWithContext]
     -- Appended by D477 (m2-beam-toptier.md §TT46).
     ++ [TaskOp TaskMap]
+    -- Appended by D582 (m3-fold.md §FL10).
+    ++ map DictOp [minBound .. maxBound]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -451,6 +492,7 @@ primName op =
     ArrOp p -> "arr_" <> arrPrimName p
     TransientOp p -> "tr_" <> transientPrimName p
     TaskOp p -> taskPrimName p
+    DictOp p -> "dict_" <> dictPrimName p
     DebugLog -> "debug_log"
 
 -- | 'primName' as a 'Name.Name', which is the form an error report and a
@@ -628,6 +670,14 @@ taskPrimName p =
     TaskWithContext -> "task_with_context"
     TaskMap -> "task_map"
 
+dictPrimName :: DictPrim -> Text
+dictPrimName p =
+  case p of
+    DictOwner -> "owner"
+    DictNode -> "node"
+    DictEdit -> "edit"
+    DictEditValue -> "edit_value"
+
 nameTable :: Map.Map Text PrimOp
 nameTable = Map.fromList [(primName p, p) | p <- allPrims]
 
@@ -769,4 +819,15 @@ primArity op =
         TaskWithContext -> 2
         -- the function, and the task whose value it is applied to
         TaskMap -> 2
+    DictOp p ->
+      case p of
+        -- `{}`: an owner is taken where the call is, never hoisted to a
+        -- constant (D582)
+        DictOwner -> 1
+        -- owner, colour, key, value, left, right
+        DictNode -> 6
+        -- owner, node, colour, left, right
+        DictEdit -> 5
+        -- owner, node, value
+        DictEditValue -> 3
     DebugLog -> 2

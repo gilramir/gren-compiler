@@ -39,13 +39,14 @@ module Generate.CoreJS.Prim
     isSource,
     taskHelpers,
     isTask,
+    isDict,
     exportHelpers,
     recordHelpers,
     crashHelpers,
   )
 where
 
-import Core.Prim (ArrPrim (..), BytesPrim (..), ConvPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..), TaskPrim (..), TransientPrim (..))
+import Core.Prim (ArrPrim (..), BytesPrim (..), ConvPrim (..), DictPrim (..), FloatPrim (..), FloatType (..), IntPrim (..), IntType (..), PrimOp (..), StrPrim (..), TaskPrim (..), TransientPrim (..))
 import Core.Prim qualified as Prim
 import Data.ByteString.Builder qualified as B
 import Data.Name qualified as Name
@@ -88,6 +89,7 @@ prim op args =
     (ArrOp p, _) -> array p args
     (TransientOp p, _) -> transient p args
     (TaskOp p, _) -> task p args
+    (DictOp p, _) -> dict p args
     _ ->
       error $
         "Generate.CoreJS.Prim: no JavaScript for "
@@ -614,6 +616,27 @@ transient p args =
     _ -> arityError (TransientOp p) args
   where
     helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
+
+-- | D582's @Dict@ transient: helpers 'Generate.CoreJS.Expression.dictHelpers'
+-- writes with the program's spelling of a node. @dict_owner@'s unit argument
+-- is a literal and is dropped.
+dict :: DictPrim -> [JS.Expr] -> JS.Expr
+dict p args =
+  case (p, args) of
+    (DictOwner, [_]) -> helper "_Dict_owner" []
+    (DictNode, [_, _, _, _, _, _]) -> helper "_Dict_node" args
+    (DictEdit, [_, _, _, _, _]) -> helper "_Dict_edit" args
+    (DictEditValue, [_, _, _]) -> helper "_Dict_editValue" args
+    _ -> arityError (DictOp p) args
+  where
+    helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
+
+-- | Whether a primitive is one of D582's, whose helpers a program then needs.
+isDict :: PrimOp -> Bool
+isDict op =
+  case op of
+    DictOp _ -> True
+    _ -> False
 
 -- | The @Task@ tree (D246, @m1b-source.md@ §SO24): each primitive is a call to
 -- the helper that builds its node, or starts or stops a process.
