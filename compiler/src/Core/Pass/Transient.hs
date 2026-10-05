@@ -2,7 +2,8 @@
 {-# OPTIONS_GHC -Wall #-}
 
 -- | A @Dict@ updated in place in a loop that keeps no old version of it
--- (geng-lang @m3-fold.md@ §FL10, D579, D582; @m3-inplace.md@ D518, D576).
+-- (geng-lang @m3-fold.md@ §FL10, §FL11, D579, D582, D584; @m3-inplace.md@
+-- D518, D576).
 --
 -- > fill i n d = if i >= n then d else fill (i + 1) n (Dict.set i (i * 2) d)
 -- >   ⟹ fill i n d = fill$tr (dict_owner {}) i n d
@@ -16,9 +17,15 @@
 -- @Dict@ is never looked at again, so that writing a node this loop made can
 -- change nothing anything else holds.
 --
+-- __A @Set@__ is a version too (D584, §FL11): it is @Set_gren_builtin@ over a
+-- @Dict@, and 'setTwins' makes @Set@'s twins of @set@, @remove@ and @toggle@
+-- from @Set@'s own copies by this rule, with two steps only @Set@'s code can
+-- reach: taking a version apart makes the @Dict@ inside it the version, and
+-- wrapping a version is one. @core@'s @Dict@ twins stay unexposed.
+--
 -- __Which loops__: a top-level function that calls itself, every use of its
 -- own name a saturated call outside any lambda, with a parameter of type
--- @Dict k v@ — the /version/. Where "Core.Pass.FoldSpec" has copied a fold
+-- @Dict k v@ or @Set a@ — the /version/. Where "Core.Pass.FoldSpec" has copied a fold
 -- for its lambda, the copy is such a function, and its accumulator such a
 -- parameter (D579).
 --
@@ -51,8 +58,8 @@
 -- among the defaults.
 --
 -- With @GENG_TRANSIENT_CENSUS=<file>@ it appends a line for every function
--- that calls itself and takes a @Dict@: its module and name, the parameter,
--- and @taken@ or @refused@.
+-- that calls itself and takes a @Dict@ or a @Set@: its module and name, the
+-- parameter, and whether the loop was @taken@ or @refused@.
 module Core.Pass.Transient
   ( run,
   )
@@ -74,6 +81,7 @@ import Data.Name qualified as Name
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Gren.ModuleName qualified as ModuleName
+import Gren.Package qualified as Pkg
 import System.Environment qualified as Env
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -82,37 +90,38 @@ census = unsafePerformIO (Env.lookupEnv "GENG_TRANSIENT_CENSUS")
 {-# NOINLINE census #-}
 
 -- | The updates that have twins, with how many arguments each takes and which
--- is the dictionary.
-updates :: Map String (Int, Int)
+-- is the dictionary. @Dict@'s twins are @core@'s; @Set@'s are made here, by
+-- 'setTwins'.
+updates :: Map (ModuleName.Canonical, String) (Int, Int)
 updates =
   Map.fromList
-    [ ("set", (3, 2)),
-      ("update", (3, 2)),
-      ("updateWithDefault", (4, 3)),
-      ("remove", (2, 1))
+    [ ((ModuleName.dict, "set"), (3, 2)),
+      ((ModuleName.dict, "update"), (3, 2)),
+      ((ModuleName.dict, "updateWithDefault"), (4, 3)),
+      ((ModuleName.dict, "remove"), (2, 1)),
+      ((setModule, "set"), (2, 1)),
+      ((setModule, "remove"), (2, 1)),
+      ((setModule, "toggle"), (2, 1))
     ]
 
--- | @Dict@'s functions whose answer holds no node of the dictionary they read,
--- with which argument that is.
-readers :: Map String Int
+-- | @Dict@'s and @Set@'s functions whose answer holds no node of the
+-- collection they read, with which argument that is.
+readers :: Map (ModuleName.Canonical, String) Int
 readers =
-  Map.fromList
-    [ ("get", 1),
-      ("member", 1),
-      ("count", 0),
-      ("isEmpty", 0),
-      ("first", 0),
-      ("last", 0),
-      ("keys", 0),
-      ("values", 0)
+  Map.fromList $
+    [ ((ModuleName.dict, n), at)
+    | (n, at) <- [("get", 1), ("member", 1), ("count", 0), ("isEmpty", 0), ("first", 0), ("last", 0), ("keys", 0), ("values", 0)]
     ]
+      ++ [ ((setModule, n), at)
+         | (n, at) <- [("member", 1), ("count", 0), ("isEmpty", 0), ("first", 0), ("last", 0), ("toArray", 0)]
+         ]
 
 data Ck = Ck
   { _loop :: Core.QualName,
     _arity :: Int,
     _pos :: Int,
     _owner :: Core.Expr,
-    _dictDefs :: Set Name
+    _twins :: Set Core.QualName
   }
 
 run :: Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
@@ -120,12 +129,61 @@ run cores =
   case Map.lookup ModuleName.dict cores of
     Nothing -> cores
     Just dictModule ->
-      let dictDefs = Set.fromList [Core._binderName b | Core.Bind b _ <- Core._moduleDefs dictModule]
-       in Map.mapWithKey (module_ dictDefs) cores
+      let dictTwins = Set.fromList [Core.QualName ModuleName.dict (Core._binderName b) | Core.Bind b _ <- Core._moduleDefs dictModule]
+          withSet = case Map.lookup setModule cores of
+            Nothing -> cores
+            Just setM -> Map.insert setModule (setTwins dictTwins setM) cores
+          twins =
+            Set.union dictTwins $
+              Set.fromList
+                [Core.QualName setModule (Core._binderName b) | Just setM <- [Map.lookup setModule withSet], Core.Bind b _ <- Core._moduleDefs setM]
+       in Map.mapWithKey (module_ twins) withSet
 
-module_ :: Set Name -> ModuleName.Canonical -> Core.Module -> Core.Module
-module_ dictDefs home modul =
-  let results = [(b, v, loop dictDefs (Core.QualName home (Core._binderName b)) v) | Core.Bind b v <- Core._moduleDefs modul]
+-- | @Set@'s module with a twin of each copy of @set@, @remove@ and @toggle@
+-- that the rule passes (D584): @set$s…@'s is @setT$s…@, taking the owner
+-- first, its body @set$s…@'s with the @Dict@ the @Set@ wraps as the version
+-- and its update made @core@'s twin. Its own rule is what says it may be:
+-- the @Set@ is taken apart once, its @Dict@ consumed once on every path and
+-- read only before, and only a version is wrapped again. A twin nothing
+-- calls is one the linker drops.
+setTwins :: Set Core.QualName -> Core.Module -> Core.Module
+setTwins dictTwins modul =
+  let made =
+        [ Core.Bind (Core.Binder twin twinType sp) (Core.Expr (Core.ELam (ownerB : ps) body') twinType sp)
+        | Core.Bind b (Core.Expr (Core.ELam ps body) (Core.TFun ts r) sp) <- Core._moduleDefs modul,
+          let name = Core._binderName b,
+          (base, suffix) <- [splitCopy (Name.toChars name)],
+          "$s" `List.isPrefixOf` suffix,
+          Just (n, at) <- [Map.lookup (setModule, base) updates],
+          length ps == n,
+          isVersionType (Core._binderType (ps !! at)),
+          let twin = Name.fromChars (base ++ "T" ++ suffix),
+          let twinType = Core.TFun (tInt : ts) r,
+          let ownerB = Core.Binder (Name.fromChars "$owner") tInt sp,
+          let ownerV = Core.Expr (Core.EVar (Core._binderName ownerB)) tInt sp,
+          let ck = Ck (Core.QualName setModule name) n at ownerV dictTwins,
+          Just (body', True) <- [version ck (Set.singleton (Core._binderName (ps !! at))) body],
+          body' /= body
+        ]
+   in if null made
+        then modul
+        else
+          let ordered = Inline.reorder setModule (Core._moduleDefs modul ++ made)
+           in modul
+                { Core._moduleDefs = concat ordered,
+                  Core._moduleDefsRec =
+                    [ map (Core.QualName setModule . Core._binderName . Core._bindBinder) grp
+                    | grp <- ordered,
+                      length grp > 1
+                    ]
+                }
+
+setModule :: ModuleName.Canonical
+setModule = ModuleName.Canonical Pkg.core (Name.fromChars "Set")
+
+module_ :: Set Core.QualName -> ModuleName.Canonical -> Core.Module -> Core.Module
+module_ twins home modul =
+  let results = [(b, v, loop twins (Core.QualName home (Core._binderName b)) v) | Core.Bind b v <- Core._moduleDefs modul]
    in logged home modul results $
         if null [() | (_, _, Just _) <- results]
           then modul
@@ -160,21 +218,23 @@ logged home@(ModuleName.Canonical _ m) _ results out =
             | (b, Core.Expr (Core.ELam ps body) _ _, found) <- results,
               calls (Core.QualName home (Core._binderName b)) body,
               p <- ps,
-              isDict (Core._binderType p),
+              isVersionType (Core._binderType p),
               let taken = maybe False (const True) found
             ]
         return out
 
-isDict :: Core.Type -> Bool
-isDict t =
+-- | A @Dict k v@, or a @Set a@, which is one (D584).
+isVersionType :: Core.Type -> Bool
+isVersionType t =
   case t of
     Core.TCon dict [_, _] -> dict == dictType
+    Core.TCon set [_] -> set == setType
     _ -> False
 
 -- | A loop's entry and its copy that takes the owner, when one of its
 -- parameters passes the rule.
-loop :: Set Name -> Core.QualName -> Core.Expr -> Maybe (Core.Expr, (Core.Binder, Core.Expr))
-loop dictDefs q value =
+loop :: Set Core.QualName -> Core.QualName -> Core.Expr -> Maybe (Core.Expr, (Core.Binder, Core.Expr))
+loop twins q value =
   case value of
     Core.Expr (Core.ELam ps body) fnType sp
       | selfOnly q (length ps) body,
@@ -183,8 +243,8 @@ loop dictDefs q value =
               ownerV = Core.Expr (Core.EVar (Core._binderName ownerB)) tInt sp
               qt = Core.QualName (Core._qnHome q) (Name.fromChars (Name.toChars (Core._qnName q) ++ "$tr"))
               try body0 (i, p)
-                | isDict (Core._binderType p) =
-                    case version (Ck q (length ps) i ownerV dictDefs) (Set.singleton (Core._binderName p)) body0 of
+                | isVersionType (Core._binderType p) =
+                    case version (Ck q (length ps) i ownerV twins) (Set.singleton (Core._binderName p)) body0 of
                       Just (body1, _) | body1 /= body0 -> body1
                       _ -> body0
                 | otherwise = body0
@@ -218,6 +278,13 @@ tInt = Core.TCon (Core.QualName ModuleName.basics (Name.fromChars "Int")) []
 
 dictType :: Core.QualName
 dictType = Core.QualName ModuleName.dict (Name.fromChars "Dict")
+
+setType :: Core.QualName
+setType = Core.QualName setModule (Name.fromChars "Set")
+
+-- | @Set@'s one constructor, which wraps its @Dict@.
+isSetCtor :: Core.QualName -> Bool
+isSetCtor c = c == Core.QualName setModule (Name.fromChars "Set_gren_builtin")
 
 -- | Whether the body calls the function.
 calls :: Core.QualName -> Core.Expr -> Bool
@@ -267,6 +334,18 @@ version ck v e
           do
             (e', c) <- lets ck v binds body
             return (e {Core._exprValue = Core._exprValue e'}, c)
+        Core.ECase scrut@(Core.Expr (Core.EVar x) _ _) [Core.Alt p@(Core.PCtor c _ [Core.PVar d]) b] Nothing
+          | Set.member x v,
+            isSetCtor c,
+            not (mentions (Set.delete (Core._binderName d) v) b) ->
+              do
+                (b', c') <- version ck (Set.singleton (Core._binderName d)) b
+                return (e {Core._exprValue = Core.ECase scrut [Core.Alt p b'] Nothing}, c')
+        Core.ECtor c tag [x]
+          | isSetCtor c ->
+              do
+                (x', c') <- version ck v x
+                return (e {Core._exprValue = Core.ECtor c tag [x']}, c')
         Core.ECase scrut alts fallback
           | readsOnly ck v scrut ->
               do
@@ -363,31 +442,29 @@ readsOnly ck v e =
           all (\(j, a) -> if j == at then isVersionName v a || readsOnly ck v a else readsOnly ck v a) (zip [0 ..] args)
     _ -> getAll (Specialize.children_ (All . readsOnly ck v) e)
 
--- | A call to one of @Dict@'s 'updates' as "Core.Pass.Specialize" copied it,
+-- | A call to one of @Dict@'s or @Set@'s 'updates' as "Core.Pass.Specialize" copied it,
 -- and the twin to call instead: @set$s…@'s is @setT$s…@, taking the owner
 -- first.
 update :: Ck -> Core.Expr -> Maybe (Core.Expr, Int, Int)
 update ck fn =
   case fn of
     Core.Expr (Core.EGlobal (Core.QualName home name)) fnType sp
-      | home == ModuleName.dict,
-        (base, suffix) <- splitCopy (Name.toChars name),
+      | (base, suffix) <- splitCopy (Name.toChars name),
         "$s" `List.isPrefixOf` suffix,
-        Just (n, at) <- Map.lookup base updates,
+        Just (n, at) <- Map.lookup (home, base) updates,
         let twin = Name.fromChars (base ++ "T" ++ suffix),
-        Set.member twin (_dictDefs ck),
+        Set.member (Core.QualName home twin) (_twins ck),
         Core.TFun ts r <- fnType ->
           Just (Core.Expr (Core.EGlobal (Core.QualName home twin)) (Core.TFun (tInt : ts) r) sp, n, at)
     _ -> Nothing
 
--- | A call to one of @Dict@'s 'readers', copied or not.
+-- | A call to one of @Dict@'s or @Set@'s 'readers', copied or not.
 readOf :: Ck -> Core.Expr -> Maybe (Int, Int)
 readOf _ fn =
   case Core._exprValue fn of
     Core.EGlobal (Core.QualName home name)
-      | home == ModuleName.dict,
-        (base, _) <- splitCopy (Name.toChars name),
-        Just at <- Map.lookup base readers,
+      | (base, _) <- splitCopy (Name.toChars name),
+        Just at <- Map.lookup (home, base) readers,
         Core.TFun ts _ <- Core.typeOf fn ->
           Just (length ts, at)
     _ -> Nothing
