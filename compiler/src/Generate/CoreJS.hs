@@ -266,7 +266,8 @@ envFor mode program =
           ],
       Expr._tails = Map.empty,
       Expr._home = ModuleName.basics,
-      Expr._depth = 0
+      Expr._depth = 0,
+      Expr._makers = Set.empty
     }
 
 -- | Every primitive the linked program applies, wherever it is applied.

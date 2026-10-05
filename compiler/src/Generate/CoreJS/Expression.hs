@@ -41,6 +41,9 @@ where
 
 import Core.AST qualified as Core
 import Core.Prim qualified as CorePrim
+import Control.Monad.Trans.State.Strict (runState, state)
+import Core.Pass.Specialize qualified as Specialize
+import Core.Refs qualified as Refs
 import Data.ByteString.Builder qualified as B
 import Data.Index qualified as Index
 import Data.IntMap qualified as IntMap
@@ -49,6 +52,8 @@ import Data.Map (Map, (!))
 import Data.Map qualified as Map
 import Data.Name (Name)
 import Data.Name qualified as Name
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
 import Generate.CoreJS.Prim qualified as Prim
 import Generate.JavaScript.Builder qualified as JS
@@ -99,7 +104,10 @@ data Env = Env
     -- siblings in a chain each assign before they read — so the nesting depth is
     -- a sufficient and deterministic name. The old pipeline gets the same thing
     -- from @Optimize.Names@' @_v0@ counter.
-    _depth :: Int
+    _depth :: Int,
+    -- | The makers in scope (D580, 'lifted'): a call to one is a plain
+    -- JavaScript call, since a maker is a plain function of its arguments.
+    _makers :: Set Name
   }
 
 -- | What a constructor compiles to, which the datatype decides and not the
@@ -556,6 +564,16 @@ call env pos fn args =
       | Just op <- primAt env q args -> Prim.prim op (map (jsExpr env) args)
       | pkg == Pkg.core && raw == Name.basics -> basicsCall env pos q name args
       | otherwise -> globalCall env pos q (map (jsExpr env) args)
+    -- A maker takes exactly what its lambda captures; an argument past those
+    -- is one `apply` added for @x |> f@, and applies the closure it answers.
+    Core.EVar n
+      | Set.member n (_makers env) ->
+          let arity = case Core.typeOf fn of
+                Core.TFun ps _ -> length ps
+                _ -> length args
+              (now, later) = splitAt arity (map (jsExpr env) args)
+              made = JS.Call (JS.Ref (JsName.fromLocal n)) now
+           in if null later then made else normalCall env pos made later
     _ ->
       normalCall env pos (jsExpr env fn) (map (jsExpr env) args)
 
@@ -789,29 +807,210 @@ joins env binds body =
   case binds of
     [] -> codeToStmtList (generate env body)
     bind : rest ->
-      let (name, params, joinBody) = split bind
+      let (name, params, joinBody0) = split bind
           enterLabel = JsName.fromLocal name
           loopLabel = JsName.makeLabel name 0
-          selfJumps = jumpsTo name joinBody
+          selfJumps = jumpsTo name joinBody0
+          (joinBody, makers)
+            | selfJumps = lifted name params joinBody0
+            | otherwise = (joinBody0, [])
+          makerEnv = env {_makers = foldr (Set.insert . fst) (_makers env) makers}
           bodyEnv = withJoin name (Join enterLabel params JumpBreak) env
-          joinEnv = withJoin name (Join loopLabel params JumpContinue) env
+          joinEnv = withJoin name (Join loopLabel params JumpContinue) makerEnv
           joinStmts = codeToStmtList (generate joinEnv joinBody)
+          makerStmts =
+            [ JS.Vars [(JsName.fromLocal mk, JS.Function Nothing (map JsName.fromLocal fvs) (maker env stmts))]
+            | (mk, (fvs, stmts)) <- makers
+            ]
           loop
             | selfJumps = JS.Labelled loopLabel (JS.While (JS.Bool True) (JS.Block joinStmts))
             | otherwise = JS.Block joinStmts
        in case entryJump name rest body of
             -- The body is nothing but the jump that enters the join, so there is
             -- nothing to break out of: bind the parameters and fall in.
-            Just args -> assign bodyEnv params args ++ [loop]
+            Just args -> assign bodyEnv params args ++ makerStmts ++ [loop]
             Nothing ->
               declare params
                 ++ [JS.Labelled enterLabel (JS.While (JS.Bool True) (JS.Block (joins bodyEnv rest body)))]
+                ++ makerStmts
                 ++ [loop]
   where
     split (Core.Bind binder value) =
       case Core._exprValue value of
         Core.ELam ps inner -> (Core._binderName binder, map Core._binderName ps, inner)
         _ -> (Core._binderName binder, [], value)
+
+-- | What a maker builds: one lambda, or one member of a recursive group.
+data Made
+  = MadeLam Core.Expr
+  | MadeRec [Core.Bind] Name
+
+maker :: Env -> Made -> [JS.Stmt]
+maker env made =
+  case made of
+    MadeLam lam -> [JS.Return (jsExpr env lam)]
+    MadeRec binds member -> map (localBind env) binds ++ [JS.Return (JS.Ref (JsName.fromLocal member))]
+
+-- | A closure made in a loop, made by a function of what it captures (D580,
+-- geng-lang @m3-fold.md@ §FL6; gren-lang/compiler#90).
+--
+-- A self tail call is a @while (true)@ whose body's bindings are @var@s of the
+-- enclosing function and whose parameters are reassigned at each jump, so a
+-- closure made in the body captures the one variable, not that time round's
+-- value: @go i acc = … go (i + 1) (pushLast (\_ -> i) acc)@ answered the last
+-- @i@ from every closure. So a lambda in the loop's body that names a variable
+-- the loop binds is made instead by a function declared before the loop,
+-- @var $t0$mk0 = function (i, y) { return function (_) { …i…y… }; }@, called
+-- with what the lambda captures, which gives the closure variables of its own.
+-- That is the least a correct closure costs (one context each time round), and
+-- measured cheaper on V8 than a function made and called on the spot or @let@
+-- bindings per iteration (+32%, +44% and +68% over the wrong code, on a loop
+-- that does nothing but make closures). A loop that makes no such closure is
+-- written as it was.
+--
+-- A recursive group bound in the loop is the same, once per member: the
+-- member's maker binds the whole group and answers that member, so two
+-- members of one time round are two copies of the group, which a pure
+-- function cannot tell apart.
+--
+-- Nothing inside a lambda is looked at: a lambda is made whole, and a loop in
+-- its body is that function's own.
+lifted :: Name -> [Name] -> Core.Expr -> (Core.Expr, [(Name, ([Name], Made))])
+lifted join params body =
+  let scoped = Set.union (Set.fromList params) (boundIn body)
+      captures e = Set.toAscList (freeIn e)
+      needs e = not (Set.null (Set.intersection scoped (freeIn e)))
+      fresh k = Name.fromChars (Name.toChars join ++ "$mk" ++ show k)
+      call_ mk fvs e =
+        Core.Expr
+          (Core.EApp (Core.Expr (Core.EVar mk) (Core.TFun (map snd fvs) (Core.typeOf e)) (Core.spanOf e)) [Core.Expr (Core.EVar v) t (Core.spanOf e) | (v, t) <- fvs])
+          (Core.typeOf e)
+          (Core.spanOf e)
+      typed e = [(v, Map.findWithDefault (Core.typeOf e) v (varTypes e)) | v <- captures e]
+      -- A lambda applied on the spot runs this time round and is kept by
+      -- nothing, so it stays where it is; what its body makes is looked at.
+      inPlace k lam =
+        case Core._exprValue lam of
+          Core.ELam ps b -> let (b', k', m) = go k b in (lam {Core._exprValue = Core.ELam ps b'}, k', m)
+          _ -> go k lam
+      goAll k es = foldl (\(done, kk, ms) x -> let (x', kk', m) = go kk x in (done ++ [x'], kk', ms ++ m)) ([], k, []) es
+      go k e =
+        case Core._exprValue e of
+          Core.EApp fn@(Core.Expr (Core.ELam _ _) _ _) args ->
+            let (fn', k1, m1) = inPlace k fn
+                (args', k2, m2) = goAll k1 args
+             in (e {Core._exprValue = Core.EApp fn' args'}, k2, m1 ++ m2)
+          Core.EApp g@(Core.Expr (Core.EGlobal q) _ _) [x, y]
+            | Just pipe <- pipeOf q ->
+                let (x', k1, m1) = if pipe == "apL" then inPlace k x else go k x
+                    (y', k2, m2) = if pipe == "apR" then inPlace k1 y else go k1 y
+                 in (e {Core._exprValue = Core.EApp g [x', y']}, k2, m1 ++ m2)
+          Core.ELam _ _
+            | needs e ->
+                let mk = fresh k
+                    fvs = typed e
+                 in (call_ mk fvs e, k + 1, [(mk, (map fst fvs, MadeLam e))])
+            | otherwise -> (e, k, [])
+          Core.ELetRec binds inner
+            | needs e {Core._exprValue = Core.ELetRec binds (Core.Expr (Core.ERecord []) (Core.typeOf inner) (Core.spanOf inner))} ->
+                let group = Core.Expr (Core.ELetRec binds (Core.Expr (Core.ERecord []) (Core.typeOf inner) (Core.spanOf inner))) (Core.typeOf e) (Core.spanOf e)
+                    fvs = typed group
+                    members = [Core._bindBinder b | b <- binds]
+                    made =
+                      [ (fresh (k + i), (map fst fvs, MadeRec binds (Core._binderName m)))
+                      | (i, m) <- zip [0 ..] members
+                      ]
+                    binds' =
+                      [ Core.Bind m (call_ mk fvs (Core.Expr (Core.EVar (Core._binderName m)) (Core._binderType m) (Core._binderSpan m)))
+                      | (m, (mk, _)) <- zip members made
+                      ]
+                    (inner', k', more) = go (k + length members) inner
+                 in (e {Core._exprValue = Core.ELet binds' inner'}, k', made ++ more)
+          _ ->
+            let (e', (k', acc)) =
+                  runChildren
+                    ( \c (kk, acc0) ->
+                        let (c', kk', m) = go kk c
+                         in (c', (kk', acc0 ++ m))
+                    )
+                    e
+                    (k, [])
+             in (e', k', acc)
+      (body', _, makers) = go (0 :: Int) body
+   in (body', makers)
+
+-- | @Basics.apR@ or @Basics.apL@, which 'apply' writes as the application
+-- they spell.
+pipeOf :: Core.QualName -> Maybe String
+pipeOf (Core.QualName (ModuleName.Canonical pkg raw) name)
+  | pkg == Pkg.core && raw == Name.basics && (name == "apR" || name == "apL") = Just (Name.toChars name)
+  | otherwise = Nothing
+
+-- | Every immediate subexpression rebuilt left to right, threading a state:
+-- "Core.Pass.Specialize"'s child walk, so a node added to Core is handled here
+-- when it is there.
+runChildren :: (Core.Expr -> s -> (Core.Expr, s)) -> Core.Expr -> s -> (Core.Expr, s)
+runChildren f e = runState (Specialize.childrenA (\c -> state (f c)) e)
+
+-- | The locals an expression names and does not bind, exactly: a @let@'s
+-- bindings are sequential, so a later one naming an earlier one names nothing
+-- free. 'Refs.freeLocals' counts that earlier name as free, which is enough for
+-- the passes that ask it whether something is closed, and too much here,
+-- where each name is an argument at the maker's call and must be in scope
+-- there.
+freeIn :: Core.Expr -> Set Name
+freeIn e =
+  case Core._exprValue e of
+    Core.EVar n -> Set.singleton n
+    Core.ELam bs b -> Set.difference (freeIn b) (names bs)
+    Core.EWitLam bs b -> Set.difference (freeIn b) (names bs)
+    Core.ELet bs b ->
+      foldr
+        (\(Core.Bind x v) rest -> Set.union (freeIn v) (Set.delete (Core._binderName x) rest))
+        (freeIn b)
+        bs
+    Core.ELetRec bs b -> Set.difference (Set.unions (freeIn b : map (freeIn . Core._bindValue) bs)) (names (map Core._bindBinder bs))
+    Core.EJoin bs b -> Set.difference (Set.unions (freeIn b : map (freeIn . Core._bindValue) bs)) (names (map Core._bindBinder bs))
+    Core.ECase scrut alts fb ->
+      Set.unions
+        ( freeIn scrut
+            : maybe Set.empty freeIn fb
+            : [Set.difference (freeIn body) (Refs.patternBinders p) | Core.Alt p body <- alts]
+        )
+    _ -> snd (runChildren (\c acc -> (c, Set.union acc (freeIn c))) e Set.empty)
+  where
+    names = Set.fromList . map Core._binderName
+
+-- | The names an expression binds outside any lambda in it: what a loop's body
+-- rebinds each time round.
+boundIn :: Core.Expr -> Set Name
+boundIn e =
+  case Core._exprValue e of
+    Core.ELam _ _ -> Set.empty
+    _ ->
+      Set.union
+        (here (Core._exprValue e))
+        (snd (runChildren (\c acc -> (c, Set.union acc (boundIn c))) e Set.empty))
+  where
+    here v =
+      case v of
+        Core.ELet bs _ -> Set.fromList (map (Core._binderName . Core._bindBinder) bs)
+        Core.ELetRec bs _ -> Set.fromList (map (Core._binderName . Core._bindBinder) bs)
+        Core.EJoin bs _ ->
+          Set.fromList
+            ( concat
+                [ Core._binderName b : [Core._binderName p | Core.ELam ps _ <- [Core._exprValue v'], p <- ps]
+                | Core.Bind b v' <- bs
+                ]
+            )
+        Core.ECase _ alts _ -> Set.unions [Refs.patternBinders p | Core.Alt p _ <- alts]
+        _ -> Set.empty
+
+varTypes :: Core.Expr -> Map Name Core.Type
+varTypes e =
+  case Core._exprValue e of
+    Core.EVar n -> Map.singleton n (Core.typeOf e)
+    _ -> snd (runChildren (\c acc -> (c, Map.union acc (varTypes c))) e Map.empty)
 
 withJoin :: Name -> Join -> Env -> Env
 withJoin name join env =
