@@ -558,7 +558,7 @@ bindAll pairs body tipe sp =
                   if Core._spanFile (Core.spanOf body') == Core._spanFile sp
                     then Core.spanOf body'
                     else sp
-                typed = body' {Core._exprType = refine (Core.typeOf body') tipe, Core._exprSpan = at}
+                typed = (refineTails tipe body') {Core._exprSpan = at}
             return (foldr (\b acc -> Core.Expr (Core.ELet [b] acc) tipe sp) typed (reverse lets))
         (binder, arg) : more
           | atomic arg ->
@@ -578,6 +578,29 @@ bindAll pairs body tipe sp =
                     binder' = binder {Core._binderName = n, Core._binderType = known}
                     var = Core.Expr (Core.EVar n) known (Core._binderSpan binder)
                 go more (Map.insert (Core._binderName binder) var env) (Core.Bind binder' arg : lets)
+
+-- | The call's type refined into the inlined body and each of its tails: a
+-- @let@'s body, a @case@'s alternatives and fallback, a join's body. A later
+-- pass that floats the body's lets out of a scrutinee binds what is left by its
+-- own type, and a copy "Core.Pass.Mono" made types it by shape: @Array.get@
+-- inlined at a call typed @Maybe Piece@ left its inner @case@ typed
+-- @Maybe $P@, the case pass typed @Just@'s field @$P@ from it, and the C
+-- backend, not knowing the field was a @Piece@, switched on the pointer
+-- (geng-lang @m3-array.md@ §AR13).
+refineTails :: Core.Type -> Core.Expr -> Core.Expr
+refineTails tipe e =
+  let value =
+        case Core._exprValue e of
+          Core.ELet binds body -> Core.ELet binds (refineTails tipe body)
+          Core.ELetRec binds body -> Core.ELetRec binds (refineTails tipe body)
+          Core.ECase scrut alts fallback ->
+            Core.ECase
+              scrut
+              [alt {Core._altBody = refineTails tipe (Core._altBody alt)} | alt <- alts]
+              (fmap (refineTails tipe) fallback)
+          Core.EJoin joins body -> Core.EJoin joins (refineTails tipe body)
+          other -> other
+   in e {Core._exprValue = value, Core._exprType = refine (Core.typeOf e) tipe}
 
 -- | Two types of one value, as one: where one is a shape type ("Core.Pass.Mono"'s
 -- @$P@, @$I4@ and the rest) and the other is not, the other; where both have
