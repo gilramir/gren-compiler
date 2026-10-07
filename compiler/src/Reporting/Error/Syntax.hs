@@ -498,6 +498,7 @@ data String
   | StringEscape Escape
   | StringMultilineWithoutLeadingNewline
   | StringInvalidNewline
+  | StringMultilineMisaligned
   deriving (Show)
 
 data Escape
@@ -3033,6 +3034,24 @@ toStringReport source string row col =
               ( D.reflow "New lines in multiline strings must be either \\n or \\r\\n",
                 D.stack
                   [ D.reflow "Make sure newlines are set to either Windows (\\r\\n) or Unix (\\n)."
+                  ]
+              )
+
+    StringMultilineMisaligned ->
+      let region = toRegion row col
+       in Report.Report "MISALIGNED MULTILINE STRING" region [] $
+            Code.toSnippet
+              source
+              region
+              Nothing
+              ( D.reflow "This multiline string is not lined up with its opening quotes:",
+                D.stack
+                  [ D.reflow
+                      "Every line of a multiline string is indented at least as far as its opening\
+                      \ quotes, and the closing quotes are in the same column as the opening ones.\
+                      \ That indentation is not part of the string. A blank line may be shorter.",
+                    D.toSimpleNote "Here is a valid multi-line string for reference:",
+                    D.dullyellow $ D.indent 4 validMultilineStringExample
                   ]
               )
 

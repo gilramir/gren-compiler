@@ -180,10 +180,11 @@ multiString pos end row _ _ sr sc =
     then Err sr sc E.StringEndless_Multi
     else
       let !word = P.unsafeIndex pos
+          !indent = fromIntegral sc - 1
        in if word == 0x0A {- \n -}
             then
               let !pos1 = plusPtr pos 1
-               in countLeadingWhiteSpaceThenMultiString 0 pos1 end (row + 1) 1 pos1 sr sc
+               in dropIndentationThenMultiString 0 indent pos1 end (row + 1) 1 sr sc mempty
             else
               if word == 0x0D {- \r -}
                 then
@@ -194,33 +195,27 @@ multiString pos end row _ _ sr sc =
                        in if word1 == 0x0A {- \n -}
                             then
                               let !pos2 = plusPtr pos 2
-                               in countLeadingWhiteSpaceThenMultiString 0 pos2 end (row + 1) 1 pos2 sr sc
+                               in dropIndentationThenMultiString 0 indent pos2 end (row + 1) 1 sr sc mempty
                             else Err sr sc E.StringInvalidNewline
                 else Err sr sc E.StringMultilineWithoutLeadingNewline
 
-countLeadingWhiteSpaceThenMultiString :: Int -> Ptr Word8 -> Ptr Word8 -> Row -> Col -> Ptr Word8 -> Row -> Col -> StringResult
-countLeadingWhiteSpaceThenMultiString count pos end row col initialPos sr sc =
+-- | A line of a multi-line string starts with as many spaces as there are
+-- columns before its opening quotes, and they are not part of the string
+-- (geng-lang D603). They are counted in the source, so an escape is never
+-- indentation. A blank line may have fewer; any other line, and closing quotes,
+-- may not.
+dropIndentationThenMultiString :: Int -> Int -> Ptr Word8 -> Ptr Word8 -> Row -> Col -> Row -> Col -> [ES.Chunk] -> StringResult
+dropIndentationThenMultiString count indent pos end row col sr sc revChunks =
   if pos >= end
     then Err sr sc E.StringEndless_Multi
     else
       let !word = P.unsafeIndex pos
-       in if word == 0x20 {- -}
-            then
-              let !pos1 = plusPtr pos 1
-               in countLeadingWhiteSpaceThenMultiString (count + 1) pos1 end row (col + 1) pos1 sr sc
-            else multiStringBody count pos end row col initialPos sr sc mempty
-
-dropLeadingWhiteSpaceThenMultiString :: Int -> Int -> Ptr Word8 -> Ptr Word8 -> Row -> Col -> Ptr Word8 -> Row -> Col -> [ES.Chunk] -> StringResult
-dropLeadingWhiteSpaceThenMultiString count maxCount pos end row col initialPos sr sc revChunks =
-  if pos >= end
-    then Err sr sc E.StringEndless_Multi
-    else
-      let !word = P.unsafeIndex pos
-       in if count < maxCount && word == 0x20 {- -}
-            then
-              let !pos1 = plusPtr pos 1
-               in dropLeadingWhiteSpaceThenMultiString (count + 1) maxCount pos1 end row (col + 1) pos1 sr sc revChunks
-            else multiStringBody maxCount pos end row col initialPos sr sc revChunks
+       in if count < indent && word == 0x20 {- -}
+            then dropIndentationThenMultiString (count + 1) indent (plusPtr pos 1) end row (col + 1) sr sc revChunks
+            else
+              if count == indent || word == 0x0A {- \n -} || word == 0x0D {- \r -}
+                then multiStringBody indent pos end row col pos sr sc revChunks
+                else Err row col E.StringMultilineMisaligned
 
 multiStringBody :: Int -> Ptr Word8 -> Ptr Word8 -> Row -> Col -> Ptr Word8 -> Row -> Col -> [ES.Chunk] -> StringResult
 multiStringBody leadingWhitespace pos end row col initialPos sr sc revChunks =
@@ -230,8 +225,14 @@ multiStringBody leadingWhitespace pos end row col initialPos sr sc revChunks =
       let !word = P.unsafeIndex pos
        in if word == 0x22 {- " -} && isDoubleQuote (plusPtr pos 1) end && isDoubleQuote (plusPtr pos 2) end
             then
-              Ok (plusPtr pos 3) row (col + 3) ES.MultilineString $
-                finalizeMultiString initialPos pos revChunks
+              -- The closing quotes are in the opening ones' column, which puts
+              -- them right after a line's indentation: the string ends with
+              -- the line break before them (geng-lang D603).
+              if col /= sc
+                then Err row col E.StringMultilineMisaligned
+                else
+                  Ok (plusPtr pos 3) row (col + 3) ES.MultilineString $
+                    finalizeMultiString initialPos pos revChunks
             else
               if word == 0x27 {- ' -}
                 then
@@ -242,7 +243,7 @@ multiStringBody leadingWhitespace pos end row col initialPos sr sc revChunks =
                   if word == 0x0A {- \n -}
                     then
                       let !pos1 = plusPtr pos 1
-                       in dropLeadingWhiteSpaceThenMultiString 0 leadingWhitespace pos1 end (row + 1) 1 pos1 sr sc $
+                       in dropIndentationThenMultiString 0 leadingWhitespace pos1 end (row + 1) 1 sr sc $
                             addEscape newline initialPos pos revChunks
                     else
                       if word == 0x0D {- \r -}
@@ -254,7 +255,7 @@ multiStringBody leadingWhitespace pos end row col initialPos sr sc revChunks =
                                in if word1 == 0x0A {- \n -}
                                     then
                                       let !pos2 = plusPtr pos 2
-                                       in dropLeadingWhiteSpaceThenMultiString 0 leadingWhitespace pos2 end (row + 1) 1 pos2 sr sc $
+                                       in dropIndentationThenMultiString 0 leadingWhitespace pos2 end (row + 1) 1 sr sc $
                                             addEscape newline initialPos pos revChunks
                                     else Err row col E.StringInvalidNewline
                         else

@@ -16,70 +16,68 @@ import Test.Hspec (Spec, describe, it)
 spec :: Spec
 spec = do
   describe "Multiline String" $ do
+    -- Each source starts at column 1, so its indentation is none: a line's
+    -- leading spaces are part of the string (geng-lang D603).
+    -- `corpus/accept/multiline-string-indentation` holds the column rule.
     it "regression test" $
       parse
         "normal string"
-        "\"\"\"\nnormal string\"\"\""
+        "\"\"\"\nnormal string\n\"\"\""
 
     it "crlf regression test" $ do
       parse
         "normal string"
-        "\"\"\"\r\nnormal string\"\"\""
+        "\"\"\"\r\nnormal string\r\n\"\"\""
 
-    it "no ending newline works" $ do
+    it "the line break before the closing quotes ends the string" $ do
       parse
         "this is \\na test \\nfor newlines"
-        "\"\"\"\nthis is \na test \nfor newlines\"\"\""
+        "\"\"\"\nthis is \na test \nfor newlines\n\"\"\""
 
     it "crlfs work" $ do
       parse
-        "this is\\na test"
+        "   this is\\n   a test"
         "\"\"\"\r\n   this is\r\n   a test\r\n\"\"\""
 
     it "mixing quotes work" $ do
       parse
         "string with \" in it"
-        "\"\"\"\nstring with \" in it\"\"\""
+        "\"\"\"\nstring with \" in it\n\"\"\""
 
     it "single quotes don't eat spaces" $ do
       parse
-        "quote followed by spaces: \\'    "
-        "\"\"\"\n  quote followed by spaces: \'    \"\"\""
+        "  quote followed by spaces: \\'    "
+        "\"\"\"\n  quote followed by spaces: \'    \n\"\"\""
 
     it "escapes don't eat spaces" $ do
       parse
-        "quote followed by spaces: \\'    "
-        "\"\"\"\n  quote followed by spaces: \\'    \"\"\""
+        "  quote followed by spaces: \\'    "
+        "\"\"\"\n  quote followed by spaces: \\'    \n\"\"\""
 
     it "unicode escapes don't eat spaces" $ do
       parse
-        "quote followed by spaces: \\u0020    "
-        "\"\"\"\n  quote followed by spaces: \\u{0020}    \"\"\""
+        "  quote followed by spaces: \\u0020    "
+        "\"\"\"\n  quote followed by spaces: \\u{0020}    \n\"\"\""
 
-    it "first newline, and leading whitespace, is dropped" $ do
+    it "a trailing blank line is kept" $ do
       parse
-        "this is\\na test"
-        "\"\"\"\n   this is\n   a test\n\"\"\""
+        "one  \\n"
+        "\"\"\"\none  \n\n\"\"\""
 
-    it "First proper line decides how many spaces to drop" $ do
+    it "an empty string" $ do
       parse
-        "this is\\n a test"
-        "\"\"\"\n   this is\n    a test\n\"\"\""
+        ""
+        "\"\"\"\n\"\"\""
 
-    it "First proper line decides how many spaces to drop for crlf" $ do
-      parse
-        "this is\\n a test"
-        "\"\"\"\r\n   this is\r\n    a test\r\n\"\"\""
+    it "does not allow closing quotes after content" $ do
+      let isCorrectError ((Error.Syntax.String Error.Syntax.StringMultilineMisaligned _ _)) = True
+          isCorrectError _ = False
+      Helpers.checkParseError Expression.expression ExpressionBadEnd isCorrectError "\"\"\"\nnormal string\"\"\""
 
-    it "Works with differing lines" $ do
-      parse
-        "this is\\n a test"
-        "\"\"\"\n   this is\r\n    a test\n\"\"\""
-
-    it "Only leading spaces are dropped" $ do
-      parse
-        "this is\\na test"
-        "\"\"\"\n   this is\n a test\n\"\"\""
+    it "does not allow closing quotes right of the opening ones" $ do
+      let isCorrectError ((Error.Syntax.String Error.Syntax.StringMultilineMisaligned _ _)) = True
+          isCorrectError _ = False
+      Helpers.checkParseError Expression.expression ExpressionBadEnd isCorrectError "\"\"\"\nnormal string\n  \"\"\""
 
     it "does not allow non-newline characters on the first line" $ do
       let isCorrectError ((Error.Syntax.String Error.Syntax.StringMultilineWithoutLeadingNewline _ _)) = True
