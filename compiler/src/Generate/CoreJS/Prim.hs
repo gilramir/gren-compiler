@@ -941,7 +941,25 @@ function _TaskPrim_map(callback, task) {
   }, task);
 }
 
+// D606 (geng-lang m3-sweep.md §SW15): an argument that is already settled
+// needs no scope. A `succeed` on either side makes this a `map` of the other,
+// run in this process, and a `fail` first is that failure, since the scope
+// cancelled the second before it ran. A `fail` second keeps the scope: there
+// the first runs until it waits, and what it does by then is observable.
 function _TaskPrim_map2(callback, taskA, taskB) {
+  if (taskA.$ === 0) {
+    return _TaskPrim_map(function (resB) {
+      return A2(callback, taskA.value, resB);
+    }, taskB);
+  }
+  if (taskA.$ === 1) {
+    return taskA;
+  }
+  if (taskB.$ === 0) {
+    return _TaskPrim_map(function (resA) {
+      return A2(callback, resA, taskB.value);
+    }, taskA);
+  }
   function combine([resA, resB]) {
     return _TaskPrim_succeed(A2(callback, resA, resB));
   }
