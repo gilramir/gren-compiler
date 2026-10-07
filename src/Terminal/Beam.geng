@@ -765,7 +765,8 @@ distinctExterns : Config -> Array Path -> Task Report {}
 distinctExterns config externs =
     let
         runtime =
-            Array.pushFirst "geng_main" (Array.map (\file -> String.dropLast 4 file.name) Runtime.sources)
+            -- `geng_main` and `geng_limits` are emitted, the rest carried.
+            [ "geng_main", "geng_limits" ] ++ Array.map (\file -> String.dropLast 4 file.name) Runtime.sources
 
         clashes =
             externs
