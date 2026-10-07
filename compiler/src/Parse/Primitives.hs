@@ -27,6 +27,7 @@ module Parse.Primitives
     unsafeIndex,
     isWord,
     getCharWidth,
+    bidiControl,
     Snippet (..),
     fromSnippet,
     snippetToBuilder,
@@ -36,11 +37,12 @@ where
 import Control.Applicative qualified as Applicative (Applicative (..))
 import Data.ByteString.Builder (Builder)
 import Data.ByteString.Builder qualified as Builder
+import Data.Bits ((.&.))
 import Data.ByteString.Internal qualified as B
 import Data.Word (Word16, Word8)
 import Foreign.ForeignPtr (ForeignPtr, touchForeignPtr)
 import Foreign.ForeignPtr.Unsafe (unsafeForeignPtrToPtr)
-import Foreign.Ptr (Ptr, plusPtr)
+import Foreign.Ptr (Ptr, minusPtr, plusPtr)
 import Foreign.Storable (peek)
 import Reporting.Annotation qualified as A
 import Prelude hiding (length)
@@ -332,6 +334,23 @@ unsafeIndex ptr =
 isWord :: Ptr Word8 -> Ptr Word8 -> Word8 -> Bool
 isWord pos end word =
   pos < end && unsafeIndex pos == word
+
+-- | The direction control that starts at `pos`, if one does: U+202A to U+202E
+-- (LRE, RLE, PDF, LRO, RLO) and U+2066 to U+2069 (LRI, RLI, FSI, PDI). Each
+-- changes the order the text after it is displayed in, so a line can read
+-- differently from what the compiler reads, and none may be written as itself
+-- in a literal or a comment (geng-lang D604). In UTF-8 each is three bytes,
+-- E2 80 AA to AE or E2 81 A6 to A9.
+bidiControl :: Ptr Word8 -> Ptr Word8 -> Maybe Int
+bidiControl pos end =
+  if minusPtr end pos >= 3 && unsafeIndex pos == 0xE2
+    then
+      let !b1 = unsafeIndex (plusPtr pos 1)
+          !b2 = unsafeIndex (plusPtr pos 2)
+       in if (b1 == 0x80 && b2 >= 0xAA && b2 <= 0xAE) || (b1 == 0x81 && b2 >= 0xA6 && b2 <= 0xA9)
+            then Just (0x2000 + fromIntegral (b1 .&. 0x3F) * 64 + fromIntegral (b2 .&. 0x3F))
+            else Nothing
+    else Nothing
 
 getCharWidth :: Word8 -> Int
 getCharWidth word

@@ -313,6 +313,7 @@ Test-Suite gren-tests
         Parse.SpaceSpec
         Parse.UnderscorePatternSpec
         Parse.MultilineStringSpec
+        Parse.BidiControlSpec
         Parse.DeclSpec
         Parse.ModuleHeaderSpec
         Reporting.Error.ImportSpec

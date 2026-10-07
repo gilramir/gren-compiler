@@ -490,6 +490,7 @@ data Char
   = CharEndless
   | CharEscape Escape
   | CharNotString Word16
+  | CharBidiControl Int
   deriving (Show)
 
 data String
@@ -499,6 +500,7 @@ data String
   | StringMultilineWithoutLeadingNewline
   | StringInvalidNewline
   | StringMultilineMisaligned
+  | StringBidiControl Int
   deriving (Show)
 
 data Escape
@@ -526,6 +528,7 @@ data WildCard
 data Space
   = HasTab
   | EndlessMultiComment
+  | HasBidiControl Int
   deriving (Show)
 
 -- TO REPORT
@@ -1314,6 +1317,8 @@ toSpaceReport source space row col =
                 D.reflow $
                   "Replace the tab with spaces."
               )
+    HasBidiControl code ->
+      toBidiControlReport source "comment" False code row col
     EndlessMultiComment ->
       let region = toWiderRegion row col 2
        in Report.Report "ENDLESS COMMENT" region [] $
@@ -2930,6 +2935,8 @@ toCharReport source char row col =
               )
     CharEscape escape ->
       toEscapeReport source escape row col
+    CharBidiControl code ->
+      toBidiControlReport source "character" True code row col
     CharNotString width ->
       let region = toWiderRegion row col width
        in Report.Report "NEEDS DOUBLE QUOTES" region [] $
@@ -3010,6 +3017,8 @@ toStringReport source string row col =
               )
     StringEscape escape ->
       toEscapeReport source escape row col
+    StringBidiControl code ->
+      toBidiControlReport source "string" True code row col
     StringMultilineWithoutLeadingNewline ->
       let region = toRegion row col
        in Report.Report "MULTILINE STRING WITHOUT LEADING NEWLINE" region [] $
@@ -3067,6 +3076,46 @@ validMultilineStringExample =
       "- end with triple double quotes",
       "\"\"\""
     ]
+
+-- DIRECTION CONTROLS
+
+-- | A direction control written as itself in a literal or a comment
+-- (geng-lang D604). In a literal the escape is the way to write one.
+toBidiControlReport :: Code.Source -> [Char.Char] -> Bool -> Int -> Row -> Col -> Report.Report
+toBidiControlReport source what canEscape code row col =
+  let region = toRegion row col
+      hex = replicate (4 - length (showHex code "")) '0' ++ map Char.toUpper (showHex code "")
+      name = bidiControlName code
+   in Report.Report "DIRECTION CONTROL CHARACTER" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This " ++ what ++ " has a U+" ++ hex ++ " " ++ name ++ " written as itself:",
+            D.stack
+              [ D.reflow
+                  "It is invisible, and it changes the order the text after it is displayed in,\
+                  \ so a line can read differently in an editor from what the compiler reads.",
+                if canEscape
+                  then D.reflow ("If you mean to have it here, write it as \\u{" ++ hex ++ "}.")
+                  else D.reflow "Take it out of the comment."
+              ]
+          )
+
+bidiControlName :: Int -> [Char.Char]
+bidiControlName code =
+  case code of
+    0x202A -> "LEFT-TO-RIGHT EMBEDDING"
+    0x202B -> "RIGHT-TO-LEFT EMBEDDING"
+    0x202C -> "POP DIRECTIONAL FORMATTING"
+    0x202D -> "LEFT-TO-RIGHT OVERRIDE"
+    0x202E -> "RIGHT-TO-LEFT OVERRIDE"
+    0x2066 -> "LEFT-TO-RIGHT ISOLATE"
+    0x2067 -> "RIGHT-TO-LEFT ISOLATE"
+    0x2068 -> "FIRST STRONG ISOLATE"
+    0x2069 -> "POP DIRECTIONAL ISOLATE"
+    _ -> "DIRECTION CONTROL"
 
 -- ESCAPES
 

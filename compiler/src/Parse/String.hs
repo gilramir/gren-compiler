@@ -37,11 +37,14 @@ character toExpectation toError =
           cerr row newCol (toError E.CharEndless)
         CharEscape r c escape ->
           cerr r c (toError (E.CharEscape escape))
+        CharBidi c code ->
+          cerr row c (toError (E.CharBidiControl code))
 
 data CharResult
   = Good (Ptr Word8) Col Word16 ES.Chunk
   | CharEndless Col
   | CharEscape Row Col E.Escape
+  | CharBidi Col Int
 
 chompChar :: Ptr Word8 -> Ptr Word8 -> Row -> Col -> Word16 -> ES.Chunk -> CharResult
 chompChar pos end row col numChars mostRecent =
@@ -68,10 +71,13 @@ chompChar pos end row col numChars mostRecent =
                             CharEscape r c badEscape
                           EscapeEndOfFile ->
                             CharEndless col
-                        else
-                          let !width = P.getCharWidth word
-                              !newPos = plusPtr pos width
-                           in chompChar newPos end row (col + 1) (numChars + 1) (ES.Slice pos width)
+                        else case P.bidiControl pos end of
+                          Just code ->
+                            CharBidi col code
+                          Nothing ->
+                            let !width = P.getCharWidth word
+                                !newPos = plusPtr pos width
+                             in chompChar newPos end row (col + 1) (numChars + 1) (ES.Slice pos width)
 
 -- STRINGS
 
@@ -168,9 +174,12 @@ singleString pos end row col initialPos revChunks =
                             Err r c (E.StringEscape x)
                           EscapeEndOfFile ->
                             Err row (col + 1) E.StringEndless_Single
-                        else
-                          let !newPos = plusPtr pos (P.getCharWidth word)
-                           in singleString newPos end row (col + 1) initialPos revChunks
+                        else case P.bidiControl pos end of
+                          Just code ->
+                            Err row col (E.StringBidiControl code)
+                          Nothing ->
+                            let !newPos = plusPtr pos (P.getCharWidth word)
+                             in singleString newPos end row (col + 1) initialPos revChunks
 
 -- MULTI STRINGS
 
@@ -271,9 +280,12 @@ multiStringBody leadingWhitespace pos end row col initialPos sr sc revChunks =
                                 Err r c (E.StringEscape x)
                               EscapeEndOfFile ->
                                 Err sr sc E.StringEndless_Multi
-                            else
-                              let !newPos = plusPtr pos (P.getCharWidth word)
-                               in multiStringBody leadingWhitespace newPos end row (col + 1) initialPos sr sc revChunks
+                            else case P.bidiControl pos end of
+                              Just code ->
+                                Err row col (E.StringBidiControl code)
+                              Nothing ->
+                                let !newPos = plusPtr pos (P.getCharWidth word)
+                                 in multiStringBody leadingWhitespace newPos end row (col + 1) initialPos sr sc revChunks
 
 -- ESCAPE CHARACTERS
 

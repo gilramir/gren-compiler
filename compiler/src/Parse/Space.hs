@@ -48,6 +48,7 @@ chompIndentedMoreThan requiredIndent toError =
              in cok comments newState
           HasTab -> cerr newRow newCol (toError E.HasTab)
           EndlessMultiComment -> cerr newRow newCol (toError E.EndlessMultiComment)
+          HasBidiControl code -> cerr newRow newCol (toError (E.HasBidiControl code))
 
 -- CHECKS -- to be called right after a `chomp`
 
@@ -87,6 +88,7 @@ chompAndCheckIndent toSpaceError toIndentError =
               else cerr row col toIndentError
           HasTab -> cerr newRow newCol (toSpaceError E.HasTab)
           EndlessMultiComment -> cerr newRow newCol (toSpaceError E.EndlessMultiComment)
+          HasBidiControl code -> cerr newRow newCol (toSpaceError (E.HasBidiControl code))
 
 -- EAT SPACES
 
@@ -94,6 +96,7 @@ data Status
   = Good [Src.Comment]
   | HasTab
   | EndlessMultiComment
+  | HasBidiControl Int
 
 eatSpacesIndentedMoreThan :: Col -> Ptr Word8 -> Ptr Word8 -> Row -> Col -> [Src.Comment] -> (# Status, Ptr Word8, Row, Col #)
 eatSpacesIndentedMoreThan indent pos end row col comments =
@@ -142,9 +145,12 @@ eatLineComment indent start pos end row startCol col comments =
                   !comment = A.At (A.Region (A.Position row startCol) (A.Position row col)) comment_
                   !newComments = comment : comments
                in eatSpacesIndentedMoreThan indent (plusPtr pos 1) end (row + 1) 1 newComments
-            else
-              let !newPos = plusPtr pos (P.getCharWidth word)
-               in eatLineComment indent start newPos end row startCol (col + 1) comments
+            else case P.bidiControl pos end of
+              Just code ->
+                (# HasBidiControl code, pos, row, col #)
+              Nothing ->
+                let !newPos = plusPtr pos (P.getCharWidth word)
+                 in eatLineComment indent start newPos end row startCol (col + 1) comments
 
 -- MULTI COMMENTS
 
@@ -169,12 +175,14 @@ eatMultiComment indent pos end row col comments =
                               !newComments = comment : comments
                            in eatSpacesIndentedMoreThan indent newPos end newRow newCol newComments
                         MultiTab -> (# HasTab, newPos, newRow, newCol #)
+                        MultiBidi code -> (# HasBidiControl code, newPos, newRow, newCol #)
                         MultiEndless -> (# EndlessMultiComment, pos, row, col #)
             else (# Good (reverse comments), pos, row, col #)
 
 data MultiStatus
   = MultiGood !(Utf8.Utf8 Src.GREN_COMMENT)
   | MultiTab
+  | MultiBidi Int
   | MultiEndless
 
 eatMultiCommentHelp :: Ptr Word8 -> Ptr Word8 -> Ptr Word8 -> Row -> Col -> Word16 -> (# MultiStatus, Ptr Word8, Row, Col #)
@@ -199,9 +207,12 @@ eatMultiCommentHelp start pos end row col openComments =
                     else
                       if word == 0x7B {- { -} && P.isWord (plusPtr pos 1) end 0x2D {- - -}
                         then eatMultiCommentHelp start (plusPtr pos 2) end row (col + 2) (openComments + 1)
-                        else
-                          let !newPos = plusPtr pos (P.getCharWidth word)
-                           in eatMultiCommentHelp start newPos end row (col + 1) openComments
+                        else case P.bidiControl pos end of
+                          Just code ->
+                            (# MultiBidi code, pos, row, col #)
+                          Nothing ->
+                            let !newPos = plusPtr pos (P.getCharWidth word)
+                             in eatMultiCommentHelp start newPos end row (col + 1) openComments
 
 -- DOCUMENTATION COMMENT
 
@@ -227,5 +238,6 @@ docComment toExpectation toSpaceError =
                         !newState = P.State src newPos end indent newRow newCol
                      in cok comment newState
                   MultiTab -> cerr newRow newCol (toSpaceError E.HasTab)
+                  MultiBidi code -> cerr newRow newCol (toSpaceError (E.HasBidiControl code))
                   MultiEndless -> cerr row col (toSpaceError E.EndlessMultiComment)
           else eerr row col toExpectation
