@@ -49,9 +49,18 @@ and library are when its compiler does not know. It comes after the
 optimization level, so an `-O` in it is the one the compiler takes.
 
 A native build with no `main` is a library, `runtime = "host"` (geng-lang
-`m3-embed.md` D619). The backend roots it at the values its module exposes and
-holds each to what crosses to C; writing the library and its header is
-§EM13's third step, and the build is refused after the link until then.
+`m3-embed.md` D619, §EM17). The backend roots it at the values its module
+exposes, holds each to what crosses to C, and writes the C each is entered by
+and a header. The library's name is the output's file name less a leading
+`lib` and everything from its first dot, so `--output=libprobe.so` builds the
+library `probe`, whose functions are `probe_init` and the rest, and writes
+`probe.h` beside it (D617). Its runtime is the executable's with `geng_embed.c`
+beside it, compiled with `GENG_LIBRARY` defined to the name, and it carries
+its own Boehm, single-threaded and hidden (D616): Boehm's source is carried in
+this compiler compressed (D627), and is written out and compiled first, on its
+own, into an object the library links. The library is linked `-z nodelete`,
+since the fault handler it installs and the collector's roots point into it
+(§EM11), and links nothing but libc and libm.
 
 -}
 
@@ -293,24 +302,129 @@ buildStage config thePlan =
                             |> Task.map (\_ -> 1)
 
                     Ok out ->
-                        if out.noEntry /= Nothing then
-                            abandon config.fs thePlan
-                                |> Task.andThen
-                                    (\_ ->
-                                        Task.fail <|
-                                            Report.create
-                                                "A NATIVE LIBRARY IS NOT BUILT YET"
-                                                Nothing
-                                                (PP.words "This application's runtime is host, so it is a library, and its exports have been checked and linked. Writing the library and its header for C, Go or Python to load is the embedding ABI's generator (m3-embed.md §EM13 step 3), which is not built yet.")
-                                    )
+                        when out.header is
+                            Just header ->
+                                buildLibrary config thePlan out.text header
 
-                        else
-                            write config.fs thePlan.work (Array.pushFirst { name = "program.c", text = out.text } Runtime.sources)
-                                |> Task.andThen (\_ -> externSources config)
-                                |> Task.andThen (\externs -> compile config thePlan externs)
-                                |> Task.andThen (\_ -> finish config thePlan)
-                                |> Task.map (\_ -> 0)
+                            Nothing ->
+                                when out.noEntry is
+                                    Just why ->
+                                        abandon config.fs thePlan
+                                            |> Task.andThen
+                                                (\_ ->
+                                                    Task.fail <|
+                                                        Report.create
+                                                            "THIS PROGRAM HAS NOTHING TO RUN"
+                                                            Nothing
+                                                            (PP.words ("The backend printed no main for it: " ++ why ++ "."))
+                                                )
+
+                                    Nothing ->
+                                        write config.fs thePlan.work (Array.pushFirst { name = "program.c", text = out.text } Runtime.sources)
+                                            |> Task.andThen (\_ -> externSources config)
+                                            |> Task.andThen (\externs -> compile config thePlan externs)
+                                            |> Task.andThen (\_ -> finish config thePlan)
+                                            |> Task.map (\_ -> 0)
             )
+
+
+{-| A library (geng-lang `m3-embed.md` §EM17): the C, the runtime with the
+boundary, Boehm's source and the header written, then Boehm compiled and the
+library linked against it. -}
+buildLibrary : Config -> Plan -> String -> (String -> String) -> Task Report Int
+buildLibrary config thePlan text header =
+    when libraryName thePlan.exe is
+        Err report ->
+            abandon config.fs thePlan
+                |> Task.andThen (\_ -> Task.fail report)
+
+        Ok name ->
+            boehmSources {}
+                |> Task.andThen
+                    (\boehm ->
+                        write config.fs thePlan.work (Array.pushFirst { name = "program.c", text = text } (Runtime.sources ++ Runtime.library))
+                            |> Task.andThen (\_ -> write config.fs (boehmDirectory thePlan) boehm)
+                            |> Task.andThen (\_ -> write config.fs (Path.parentPath thePlan.exe |> Maybe.withDefault Path.empty) [ { name = name ++ ".h", text = header name } ])
+                    )
+                |> Task.andThen (\_ -> externSources config)
+                |> Task.andThen
+                    (\externs ->
+                        compileBoehm config thePlan
+                            |> Task.andThen (\_ -> compileLibrary config thePlan name externs)
+                    )
+                |> Task.andThen (\_ -> finish config thePlan)
+                |> Task.map (\_ -> 0)
+
+
+{-| The output's file name less a leading `lib` and everything from its first
+dot, which must be a C identifier, since every name the library has starts with
+it. -}
+libraryName : Path -> Result Report String
+libraryName exe =
+    let
+        file =
+            Path.filenameWithExtension exe
+
+        unprefixed =
+            if String.startsWith "lib" file && file /= "lib" then
+                String.dropFirst 3 file
+
+            else
+                file
+
+        name =
+            String.split "." unprefixed
+                |> Array.first
+                |> Maybe.withDefault ""
+
+        identifier c =
+            (Char.toCode c < 128 && Char.isAlphaNum c) || c == '_'
+    in
+    if name /= "" && String.all identifier name && not (String.any Char.isDigit (String.takeFirst 1 name)) then
+        Ok name
+
+    else
+        Err <|
+            Report.create
+                "THAT IS NOT A LIBRARY'S NAME"
+                Nothing
+                (PP.verticalBlock
+                    [ PP.words ("This application's runtime is host, so it is a library, and its name comes from --output: " ++ file ++ " less a leading lib and everything from its first dot, which is \"" ++ name ++ "\". Every function the library has starts with that name, so it has to be a C identifier: letters, digits and underscores, not starting with a digit.")
+                    , PP.empty
+                    , PP.words "Give me an output like libmylib.so, which builds the library mylib."
+                    ]
+                )
+
+
+{-| Boehm's source, out of this compiler (D627): a function, so that it is
+decoded only by a build that needs it, and not each time the compiler starts. -}
+boehmSources : {} -> Task Report (Array { name : String, text : String })
+boehmSources {} =
+    Stream.fromArray [ Build.base64 Runtime.boehm ]
+        |> Task.andThen (Stream.awaitAndPipeThrough Stream.gzipDecompression)
+        |> Task.andThen (Stream.readUntilClosed (\chunk chunks -> Ok (Array.pushLast chunk chunks)) [])
+        |> Task.mapError (\_ -> "it would not decompress")
+        |> Task.andThen
+            (\chunks ->
+                when Bytes.toString (Bytes.flatten chunks) |> Result.fromMaybe "it is not UTF-8" |> Result.andThen Build.boehm is
+                    Ok files ->
+                        Task.succeed files
+
+                    Err why ->
+                        Task.fail why
+            )
+        |> Task.mapError
+            (\why ->
+                Report.create
+                    "THIS COMPILER'S BOEHM IS BROKEN"
+                    Nothing
+                    (PP.words ("A library carries its own Boehm, whose source this compiler carries, and " ++ why ++ ". That is a defect in the compiler."))
+            )
+
+
+boehmDirectory : Plan -> Path
+boehmDirectory thePlan =
+    Path.append (Path.fromPosixString "boehm") thePlan.work
 
 
 {-| A built program's scratch directory: gone, or with debug information kept
@@ -332,7 +446,12 @@ write fs directory files =
     files
         |> Array.map
             (\file ->
-                FileSystem.writeFile fs (Bytes.fromString file.text) (Path.append (Path.fromPosixString file.name) directory)
+                let
+                    path =
+                        Path.append (Path.fromPosixString file.name) directory
+                in
+                FileSystem.makeDirectory fs { recursive = True } (Path.parentPath path |> Maybe.withDefault directory)
+                    |> Task.andThen (\_ -> FileSystem.writeFile fs (Bytes.fromString file.text) path)
                     |> Task.mapError (failure "I cannot write the C")
             )
         |> Task.sequence
@@ -380,28 +499,89 @@ compile config thePlan externs =
     let
         in_ name =
             config.toString (Path.append (Path.fromPosixString name) thePlan.work)
+    in
+    cc config
+        (programFlags config thePlan
+            ++ config.tools.flags
+            ++ [ "-I", config.toString thePlan.work, "-o", config.toString thePlan.exe ]
+            ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c" ]
+            ++ Array.map config.toString externs
+            ++ [ "-lgc", "-lpthread", "-lm" ]
+        )
+
+
+{-| D490's flags, the optimization, `-g` when asked for, and the `#line` names
+mapped to the files (D513), which a program and a library are compiled with. -}
+programFlags : Config -> Plan -> Array String
+programFlags config thePlan =
+    let
+        in_ name =
+            config.toString (Path.append (Path.fromPosixString name) thePlan.work)
 
         -- The names `#line` gives, mapped to the files (D513); `program.c` is
         -- what the C calls itself where the Geng code ends.
         maps =
             Array.pushFirst { name = "program.c", path = in_ "program.c" } config.sources
                 |> Array.map (\m -> "-ffile-prefix-map=" ++ m.name ++ "=" ++ m.path)
-
-        args =
-            [ "-std=c11", config.optimization, "-ffp-contract=off", "-fno-fast-math", "-fstack-clash-protection" ]
-                ++ (if config.debugInfo then
-                        [ "-g" ]
-
-                    else
-                        []
-                   )
-                ++ maps
-                ++ config.tools.flags
-                ++ [ "-I", config.toString thePlan.work, "-o", config.toString thePlan.exe ]
-                ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c" ]
-                ++ Array.map config.toString externs
-                ++ [ "-lgc", "-lpthread", "-lm" ]
     in
+    [ "-std=c11", config.optimization, "-ffp-contract=off", "-fno-fast-math", "-fstack-clash-protection" ]
+        ++ debugFlags config
+        ++ maps
+
+
+debugFlags : Config -> Array String
+debugFlags config =
+    if config.debugInfo then
+        [ "-g" ]
+
+    else
+        []
+
+
+{-| Boehm, on its own: the release's flags for a library, with nothing of the
+program's, since it is the release's C and not the backend's (D626). Its headers
+come first, ahead of any `GENG_CFLAGS` names, so that a machine's own Boehm is
+not the one compiled against. -}
+compileBoehm : Config -> Plan -> Task Report {}
+compileBoehm config thePlan =
+    let
+        boehm name =
+            config.toString (Path.append (Path.fromPosixString name) (boehmDirectory thePlan))
+    in
+    cc config
+        ([ "-c", config.optimization, "-fPIC", "-fvisibility=hidden" ]
+            ++ debugFlags config
+            ++ [ "-I", boehm "include/gc" ]
+            ++ config.tools.flags
+            ++ [ "-o", boehm "gc.o", boehm "geng_gc.c" ]
+        )
+
+
+{-| The library: the program and the runtime with the boundary, under its name,
+every symbol hidden but the ones the header names, and Boehm's object. -}
+compileLibrary : Config -> Plan -> String -> Array Path -> Task Report {}
+compileLibrary config thePlan name externs =
+    let
+        in_ file =
+            config.toString (Path.append (Path.fromPosixString file) thePlan.work)
+
+        boehm file =
+            config.toString (Path.append (Path.fromPosixString file) (boehmDirectory thePlan))
+    in
+    cc config
+        (programFlags config thePlan
+            ++ [ "-fPIC", "-shared", "-fvisibility=hidden", "-Wl,-z,nodelete", "-DGENG_LIBRARY=" ++ name ]
+            ++ [ "-I", config.toString thePlan.work, "-I", boehm "include/gc", "-I", boehm "include" ]
+            ++ config.tools.flags
+            ++ [ "-o", config.toString thePlan.exe ]
+            ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c", in_ "geng_embed.c", boehm "gc.o" ]
+            ++ Array.map config.toString externs
+            ++ [ "-lm" ]
+        )
+
+
+cc : Config -> Array String -> Task Report {}
+cc config args =
     { (ChildProcess.defaultSpawnOptions ChildProcess.Integrated)
         | shell = ChildProcess.NoShell
         , environmentVariables = ChildProcess.MergeWithEnvironmentVariables (Dict.singleton "NIX_HARDENING_ENABLE" "")
