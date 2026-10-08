@@ -208,7 +208,7 @@ spec = do
               ]
               2
               Can.Normal
-       in lowerUnion home "Maybe" union
+       in lowerUnion Core.Transparent home "Maybe" union
             `shouldBe` Core.DataDecl
               { Core._dataName = qual "Maybe",
                 Core._dataParams = ["a"],

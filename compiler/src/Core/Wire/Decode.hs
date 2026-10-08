@@ -937,7 +937,7 @@ methodImplP =
 
 moduleP :: P Module
 moduleP =
-  message "Module" 15 $
+  message "Module" 17 $
     do
       strings <- stringTable
       withTable strings $
@@ -984,6 +984,16 @@ moduleBodyP =
     if List.sort inline /= inline || length (List.nub inline) /= length inline
       then failAt there "inline is not sorted by name, or names one binding twice"
       else pure ()
+    aliasesAt <- offset
+    aliases <- rep "aliases" 17 aliasP
+    let aliasNames = map _aliasName aliases
+    case [q | q@(QualName home _) <- aliasNames, home /= name] of
+      [] -> pure ()
+      QualName _ n : _ ->
+        failAt aliasesAt ("the alias " ++ Name.toChars n ++ " is not this module's")
+    if List.sort aliasNames /= aliasNames || length (List.nub aliasNames) /= length aliasNames
+      then failAt aliasesAt "aliases is not sorted by name, or names one alias twice"
+      else pure ()
     pure
       Module
         { _moduleName = name,
@@ -996,8 +1006,18 @@ moduleBodyP =
           _moduleExports = exports,
           _moduleMain = main_,
           _moduleExterns = externs,
-          _moduleInline = inline
+          _moduleInline = inline,
+          _moduleAliases = aliases
         }
+
+aliasP :: P Alias
+aliasP =
+  message "Alias" 3 $
+    do
+      name <- qual "name" 1
+      params <- repText "params" 2
+      tipe <- typ "type" 3
+      pure (Alias name params tipe)
 
 -- THE PROGRAM
 

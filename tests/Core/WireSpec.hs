@@ -115,6 +115,15 @@ spec = do
         refused ((moduleWith [bindOf (lit (LInt 1)), Bind (binder "c") (lit (LInt 2))]) {_moduleInline = [qual "c", qual "b"]})
         refused ((moduleWith [bindOf (lit (LInt 1))]) {_moduleInline = [qual "b", qual "b"]})
 
+    it "carries the record aliases a module declares (D630)" $
+      roundTrip ((moduleWith []) {_moduleAliases = [Alias (qual "Pair") ["a"] (TRecord [("x", TVar "a"), ("y", intType)] Nothing), Alias (qual "Point") [] (TRecord [("x", intType)] Nothing)]})
+
+    it "refuses aliases out of order" $
+      refused ((moduleWith []) {_moduleAliases = [Alias (qual "Point") [] (TRecord [("x", intType)] Nothing), Alias (qual "Pair") [] (TRecord [("x", intType)] Nothing)]})
+
+    it "refuses another module's alias" $
+      refused ((moduleWith []) {_moduleAliases = [Alias (QualName otherHome "Point") [] (TRecord [("x", intType)] Nothing)]})
+
     it "carries each kind of main" $
       mapM_ (\m -> roundTrip ((moduleWith []) {_moduleMain = Just m})) everyMain
 
@@ -358,7 +367,8 @@ moduleWith defs =
       _moduleExports = [qual "b"],
       _moduleMain = Nothing,
       _moduleExterns = [],
-      _moduleInline = []
+      _moduleInline = [],
+      _moduleAliases = []
     }
 
 -- | All 21 of them (C2). The list is the point: adding a node to 'Expr_' and

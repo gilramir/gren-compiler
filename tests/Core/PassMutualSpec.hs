@@ -174,5 +174,6 @@ modul defs =
       Core._moduleMain = Nothing,
       Core._moduleExports = [],
       Core._moduleExterns = [],
-      Core._moduleInline = []
+      Core._moduleInline = [],
+      Core._moduleAliases = []
     }

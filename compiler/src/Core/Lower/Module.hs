@@ -39,7 +39,7 @@ import AST.Utils.Type qualified as Type
 import Core.AST qualified as Core
 import Core.Lower.Expression qualified as Expr
 import Core.Lower.Literal qualified as Literal
-import Core.Lower.Type (lowerAnnotation, lowerClass, lowerType, lowerUnion)
+import Core.Lower.Type (lowerAlias, lowerAnnotation, lowerClass, lowerType, lowerUnion)
 import Core.Order qualified as Order
 import Core.Refs qualified as Refs
 import Data.List qualified as List
@@ -81,7 +81,13 @@ lower platform annotations types elaboration modul =
         { Core._moduleName = home,
           Core._moduleFiles = Map.singleton selfFile home,
           Core._moduleData =
-            [lowerUnion home name union | (name, union) <- Map.toAscList (Can._unions modul)],
+            [ lowerUnion
+                (if Can.isAbstract (Can._exports modul) name then Core.Abstract else Core.Transparent)
+                home
+                name
+                union
+            | (name, union) <- Map.toAscList (Can._unions modul)
+            ],
           Core._moduleClasses =
             [lowerClass home name decl | (name, decl) <- Map.toAscList (Can._classes modul)],
           Core._moduleInstances =
@@ -95,7 +101,9 @@ lower platform annotations types elaboration modul =
             List.sortOn
               (Core._binderName . Core._externBinder)
               (map (externOf env) externDefs ++ concatMap (externWithBody env annotations (Can._externBodies modul)) valueDefs),
-          Core._moduleInline = map (Core.QualName home) (Set.toAscList (Can._inlines modul))
+          Core._moduleInline = map (Core.QualName home) (Set.toAscList (Can._inlines modul)),
+          Core._moduleAliases =
+            [a | (name, alias) <- Map.toAscList (Can._aliases modul), Just a <- [lowerAlias home name alias]]
         }
 
 -- EXTERNS

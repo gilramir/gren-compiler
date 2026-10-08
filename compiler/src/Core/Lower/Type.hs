@@ -25,6 +25,7 @@ module Core.Lower.Type
   ( lowerType,
     lowerAnnotation,
     lowerUnion,
+    lowerAlias,
     lowerClass,
   )
 where
@@ -122,19 +123,31 @@ lowerClass home name (Can.ClassDecl param methods) =
 
 -- | A custom type declaration.
 --
--- Everything is `Core.Transparent` and every class set is empty at M1a.
--- Abstract types and published class sets are @classes.md@ §2.5, which lands
--- with the classes themselves at M1b; recording a guess here would be a
--- fabricated answer in a field a backend reads for layout.
-lowerUnion :: ModuleName.Canonical -> Name -> Can.Union -> Core.DataDecl
-lowerUnion home name (Can.Union vars ctors _ _) =
+-- 'Core.Abstract' when its module exposes it without its constructors
+-- (@Can.isAbstract@), which a native library's header reads to decide whether
+-- a host may look inside one (geng-lang @m3-embed.md@ D631); 'Core.Transparent'
+-- otherwise. Every class set is empty: published class sets are @classes.md@
+-- §2.5, and recording a guess here would be a fabricated answer.
+lowerUnion :: Core.Transparency -> ModuleName.Canonical -> Name -> Can.Union -> Core.DataDecl
+lowerUnion transparency home name (Can.Union vars ctors _ _) =
   Core.DataDecl
     { Core._dataName = Core.QualName home name,
       Core._dataParams = vars,
-      Core._dataTransparency = Core.Transparent,
+      Core._dataTransparency = transparency,
       Core._dataCtors = map (lowerCtor home) ctors,
       Core._dataClasses = []
     }
+
+-- | A type alias whose body is a closed record, for a native library's header
+-- to name the record by (geng-lang @m3-embed.md@ D630); any other alias has
+-- nothing to name there.
+lowerAlias :: ModuleName.Canonical -> Name -> Can.Alias -> Maybe Core.Alias
+lowerAlias home name (Can.Alias vars body) =
+  case lowerType body of
+    tipe@(Core.TRecord (_ : _) Nothing) ->
+      Just (Core.Alias (Core.QualName home name) vars tipe)
+    _ ->
+      Nothing
 
 lowerCtor :: ModuleName.Canonical -> Can.Ctor -> Core.Ctor
 lowerCtor home (Can.Ctor name index _ argTypes) =

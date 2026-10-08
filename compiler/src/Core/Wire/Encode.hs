@@ -699,6 +699,13 @@ moduleEnc m =
     <> optMsg 14 mainEnc (_moduleMain m)
     <> rep 15 externEnc (_moduleExterns m)
     <> repQual 16 (_moduleInline m)
+    <> rep 17 aliasEnc (_moduleAliases m)
+
+aliasEnc :: Alias -> Enc
+aliasEnc (Alias name params tipe) =
+  qual 1 name
+    <> repText 2 params
+    <> typ 3 tipe
 
 recGroupEnc :: [QualName] -> Enc
 recGroupEnc names = repQual 1 names

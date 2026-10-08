@@ -56,6 +56,7 @@ moduleToBuilder opts m =
     [ "module " <> canonical (_moduleName m) <> "\n",
       section "exports" (map qual (_moduleExports m)),
       section "inline" (map qual (_moduleInline m)),
+      section "aliases" (map (alias opts) (_moduleAliases m)),
       section "files" (map fileEntry (Map.toList (_moduleFiles m))),
       block (map (dataDecl opts) (_moduleData m)),
       block (map (classDecl opts) (_moduleClasses m)),
@@ -109,6 +110,11 @@ section label items =
 block :: [B.Builder] -> B.Builder
 block [] = ""
 block items = "\n" <> mconcat (map (<> "\n") items)
+
+-- | A record alias (D630): its name, its parameters and its body.
+alias :: Options -> Alias -> B.Builder
+alias opts (Alias n params tipe) =
+  qual n <> mconcat [" " <> name p | p <- params] <> " = " <> typeToBuilder opts tipe
 
 dataDecl :: Options -> DataDecl -> B.Builder
 dataDecl opts d =

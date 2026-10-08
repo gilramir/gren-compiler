@@ -31,6 +31,7 @@ module Core.AST
   ( -- * Modules
     Module (..),
     DataDecl (..),
+    Alias (..),
     Ctor (..),
     Transparency (..),
     ClassDecl (..),
@@ -255,7 +256,22 @@ data Module = Module
     -- @m3-bytes-access.md@ §BA13), sorted by name: "Core.Pass.Inline" opens
     -- them, and the copies "Core.Pass.Specialize" and "Core.Pass.Mono" make
     -- of them, whatever their size.
-    _moduleInline :: ![QualName]
+    _moduleInline :: ![QualName],
+    -- | The type aliases this module declares whose body is a closed record,
+    -- sorted by name (geng-lang @m3-embed.md@ D630). Every type in Core has
+    -- its aliases expanded; these are kept only so that a native library's
+    -- header can name a record that crosses into C by the name its author
+    -- gave it. No pass reads them.
+    _moduleAliases :: ![Alias]
+  }
+  deriving (Eq, Show)
+
+-- | A type alias whose body is a closed record: @type alias Point = { x :
+-- Int, y : Float }@, its body lowered as every Core type is.
+data Alias = Alias
+  { _aliasName :: !QualName,
+    _aliasParams :: ![Name],
+    _aliasType :: !Type
   }
   deriving (Eq, Show)
 
