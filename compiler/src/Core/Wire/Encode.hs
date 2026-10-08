@@ -744,6 +744,7 @@ runtimeCode runtime =
     Whole.Common -> 0
     Whole.Browser -> 1
     Whole.Node -> 2
+    Whole.Host -> 3
 
 mainEnc :: Main -> Enc
 mainEnc main_ =

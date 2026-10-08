@@ -51,9 +51,12 @@ data Mode
   deriving (Eq, Show, Enum, Bounded)
 
 -- | The runtime the application declares. A package declares @common@, and an
--- application that does not say otherwise is @node@.
+-- application that does not say otherwise is @node@. @Host@ is a library a C,
+-- Go or Python program loads (geng-lang @m3-embed.md@ D619), whose roots are
+-- the values its module exposes rather than a @main@.
 data Runtime
   = Common
   | Browser
   | Node
+  | Host
   deriving (Eq, Show, Enum, Bounded)

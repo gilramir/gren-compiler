@@ -95,6 +95,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                       Just bundle -> writeToDisk style path bundle names
             case maybeOutput of
               _ | Target.Beam <- targetOf outline -> beamBuild artifacts mains maybeOutput (generate Generate.Bare)
+              _ | Platform.Host <- platform -> hostBuild artifacts maybeOutput (generate Generate.Bare)
               Nothing ->
                 case (platform, mains) of
                   (_, []) ->
@@ -165,6 +166,29 @@ beamBuild artifacts mains maybeOutput generate =
               | length (name : names) == length (NE.toList (Build.getRootNames artifacts)) ->
                   Task.throw (Exit.MakeBeamNothingToCall name names)
             _ -> () <$ generate
+
+-- | A build for @runtime = "host"@, a library a C, Go or Python program loads
+-- (geng-lang @m3-embed.md@ D619). Like 'beamBuild' it is never written here:
+-- only the @native@ target reaches @host@, and a @native@ build stops at the
+-- passed Core for the front end to finish.
+--
+-- __A library is one module__, and its exports are the values that module
+-- exposes ('Generate.coreRoots'), each held to what can cross to C by
+-- 'Generate.checkRoots'. Two modules would be two sets of names in one
+-- header with nothing to say which a value came from, and a module that
+-- exposes no value would be a library with nothing to call. A @main@ is
+-- refused before this, by "Nitpick.Main".
+hostBuild :: Build.Artifacts -> Maybe Output -> Task (Maybe B.Builder) -> Task ()
+hostBuild artifacts maybeOutput generate =
+  case maybeOutput of
+    Just DevNull -> return ()
+    _ ->
+      case NE.toList (Build.getRootNames artifacts) of
+        first : second : more -> Task.throw (Exit.MakeHostManyModules first second more)
+        _ ->
+          case getNothingToCall artifacts of
+            name : _ -> Task.throw (Exit.MakeHostNothingToExport name)
+            [] -> () <$ generate
 
 -- | The root modules that have neither a @main@ nor an exposed value, which a
 -- @beam@ build has no root in.

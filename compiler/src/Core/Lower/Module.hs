@@ -284,6 +284,10 @@ data MainOf
     -- @Reporting.Error.Main.BadTask@: whether its error type is the wrong one,
     -- and whether its answer is.
     BadTask Can.Type Bool Bool
+  | -- | A @main@ in a library for @runtime = "host"@, which has none: its
+    -- exports are the values its module exposes (geng-lang @m3-embed.md@
+    -- D619).
+    MainOnHost
 
 -- | The classification, from the module's annotations and the platform.
 --
@@ -294,6 +298,7 @@ mainOf :: P.Platform -> Map.Map Name Can.Annotation -> MainOf
 mainOf platform annotations =
   case Map.lookup Name._main annotations of
     Nothing -> NoMain
+    Just _ | platform == P.Host -> MainOnHost
     Just (Can.Forall freeVars tipe) ->
       case Type.deepDealias tipe of
         Can.TType hm nm [err, answer]
@@ -335,6 +340,7 @@ runnableOn platform =
     P.Browser -> []
     P.Node -> ["Task Never {}"]
     P.Common -> []
+    P.Host -> []
 
 -- | What 'lower' keeps. A module that is not rejected has no other answer.
 mainFrom :: MainOf -> Maybe Core.Main
@@ -344,6 +350,7 @@ mainFrom m =
     NoMain -> Nothing
     NotRunnable _ _ -> Nothing
     BadTask {} -> Nothing
+    MainOnHost -> Nothing
 
 -- | The module's definitions, grouped and ordered by C14.
 --

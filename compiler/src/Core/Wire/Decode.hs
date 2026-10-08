@@ -1038,6 +1038,7 @@ runtimeOf :: Word32 -> Maybe Whole.Runtime
 runtimeOf 0 = Just Whole.Common
 runtimeOf 1 = Just Whole.Browser
 runtimeOf 2 = Just Whole.Node
+runtimeOf 3 = Just Whole.Host
 runtimeOf _ = Nothing
 
 -- | D196, and three rules the schema cannot state: an extern has at least one

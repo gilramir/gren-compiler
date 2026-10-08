@@ -220,7 +220,7 @@ wholeProgram :: Target.Target -> Details.Details -> Build.Artifacts -> Request -
 wholeProgram target details artifacts request cores =
   Whole.Program
     { Whole._programRoots =
-        [Whole.Root home name | Core.QualName home name <- coreRoots target artifacts cores],
+        [Whole.Root home name | Core.QualName home name <- coreRoots target (runtimeOf details) artifacts cores],
       Whole._programTarget = target,
       Whole._programMode =
         case _requestMode request of
@@ -235,6 +235,7 @@ runtimeOf (Details.Details _ validOutline _ _ _ _) =
     Platform.Common -> Whole.Common
     Platform.Browser -> Whole.Browser
     Platform.Node -> Whole.Node
+    Platform.Host -> Whole.Host
   where
     platform =
       case validOutline of
@@ -553,8 +554,8 @@ kernelChunks details =
 -- a named module is. Only the project's own: 'cores' holds every module of
 -- every dependency, reached or not, and a dependency's callback module is not
 -- one this covers.
-coreRoots :: Target.Target -> Build.Artifacts -> Map.Map ModuleName.Canonical Core.Module -> [Core.QualName]
-coreRoots target (Build.Artifacts pkg _ roots _) cores =
+coreRoots :: Target.Target -> Whole.Runtime -> Build.Artifacts -> Map.Map ModuleName.Canonical Core.Module -> [Core.QualName]
+coreRoots target runtime (Build.Artifacts pkg _ roots _) cores =
   [ Core.QualName home name
   | home <- Set.toAscList (Set.fromList (named ++ called)),
     Just modul <- [Map.lookup home cores],
@@ -574,8 +575,9 @@ coreRoots target (Build.Artifacts pkg _ roots _) cores =
     rootsOf modul =
       Set.toAscList . Set.fromList $
         [N._main | Maybe.isJust (Core._moduleMain modul)]
-          ++ case target of
-            Target.Beam -> [name | Core.QualName _ name <- Core._moduleExports modul]
+          ++ case (target, runtime) of
+            (Target.Beam, _) -> [name | Core.QualName _ name <- Core._moduleExports modul]
+            (_, Whole.Host) -> [name | Core.QualName _ name <- Core._moduleExports modul]
             _ -> []
     rootName root =
       case root of
@@ -630,20 +632,40 @@ callbackModule modul =
 -- It is asked of the front end's Core, which is the Core the declared types
 -- are in. A build resumed from a stage was checked by the process that wrote
 -- the stage, and 'resumed' holds the roots it read to the roots it would have.
+--
+-- __A library's exports are asked more__ (geng-lang @m3-embed.md@ D619, D620),
+-- since each is to be one C function with one signature: no type variable,
+-- constrained or not, and nothing that needs a scheduler ('crossesToC').
 checkRoots :: Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> Task ()
 checkRoots whole cores =
-  case [problem | Core.QualName home name <- wholeRoots whole, Just problem <- [constrained home name]] of
-    [] -> return ()
-    problems -> Task.throw (Exit.GenerateConstrainedRoots problems)
+  case Whole._programRuntime whole of
+    Whole.Host ->
+      case [problem | Core.QualName home name <- wholeRoots whole, Just problem <- [crossesToC home name]] of
+        [] -> return ()
+        problems -> Task.throw (Exit.GenerateExportsDoNotCross problems)
+    _ ->
+      case [problem | Core.QualName home name <- wholeRoots whole, Just problem <- [constrained home name]] of
+        [] -> return ()
+        problems -> Task.throw (Exit.GenerateConstrainedRoots problems)
   where
-    constrained home name =
+    rootType home name =
       do
         modul <- Map.lookup home cores
         binder <-
           List.find ((== name) . Core._binderName) $
             map Core._bindBinder (Core._moduleDefs modul)
               ++ map Core._externBinder (Core._moduleExterns modul)
-        case Core._binderType binder of
+        return (Core._binderType binder)
+    crossesToC home name =
+      do
+        tipe <- rootType home name
+        case exportProblems tipe of
+          [] -> Nothing
+          problems -> Just (ModuleName._module home, name, problems)
+    constrained home name =
+      do
+        tipe <- rootType home name
+        case tipe of
           Core.TForall _ constraints@(_ : _) _ ->
             Just
               ( ModuleName._module home,
@@ -651,6 +673,57 @@ checkRoots whole cores =
                 List.nub [className | Core.CClass (Core.QualName _ className) _ <- constraints]
               )
           _ -> Nothing
+
+-- | Why an export of a library cannot be one C function, in the order the
+-- type mentions each, or nothing when it can (geng-lang @m3-embed.md@ D619,
+-- D620, @ffi.md@ F2).
+--
+-- __A type variable__, constrained or not, an open record's row among them:
+-- F2 gives every type one C shape, and a variable is none, so an export is
+-- monomorphic. A constrained one is named with its classes, as the @beam@
+-- refusal names them. __A @Task@__, a @Source@ or a @Process.Id@ anywhere in
+-- the type, an argument's or a field's as much as the answer: a library runs
+-- no scheduler (D15, D620), so each of the three is a value nothing in it can
+-- use. Everything else crosses, a scalar by value and the rest as a handle.
+--
+-- It is the type as written that is asked. What a custom type holds is the
+-- generator's question, since the header exposes it through accessors it
+-- writes (@m3-embed.md@ §EM13 step 3).
+exportProblems :: Core.Type -> [Exit.ExportProblem]
+exportProblems tipe =
+  filter (not . shadowed) found
+  where
+    found = List.nub (go tipe)
+    -- A constrained variable is named once, with its classes.
+    shadowed problem =
+      case problem of
+        Exit.ExportVariable name -> any (isConstrained name) found
+        _ -> False
+    isConstrained name problem =
+      case problem of
+        Exit.ExportConstrained v _ -> v == name
+        _ -> False
+    go t =
+      case t of
+        Core.TVar name -> [Exit.ExportVariable name]
+        Core.TCon qual args -> [Exit.ExportRuntimeType (runtimeType qual) | isRuntimeType qual] ++ concatMap go args
+        Core.TFun args result -> concatMap go args ++ go result
+        Core.TRecord fields row -> concatMap (go . snd) fields ++ [Exit.ExportVariable r | Just r <- [row]]
+        Core.TForall names constraints body ->
+          [ Exit.ExportConstrained name [className | Core.CClass (Core.QualName _ className) (Core.TVar v) <- constraints, v == name]
+          | name <- names,
+            any (\(Core.CClass _ c) -> c == Core.TVar name) constraints
+          ]
+            ++ go body
+    isRuntimeType qual =
+      Maybe.isJust (lookup qual runtimeTypes)
+    runtimeType qual =
+      Maybe.fromMaybe "" (lookup qual runtimeTypes)
+    runtimeTypes =
+      [ (Core.QualName ModuleName.taskInternal (N.fromChars "Task"), "Task"),
+        (Core.QualName ModuleName.source (N.fromChars "Source"), "Source"),
+        (Core.QualName ModuleName.process (N.fromChars "Id"), "Process.Id")
+      ]
 
 -- | @GENG_DUMP_PROGRAM_CORE@: the program's Core, module by module, with the
 -- same file names as "Compile"'s per-module dump so that the two are comparable

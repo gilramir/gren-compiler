@@ -15,10 +15,17 @@ import Data.Utf8 qualified as Utf8
 import Json.Decode qualified as D
 import Json.Encode qualified as E
 
+-- | @Host@ is a library a C, Go or Python program loads (geng-lang
+-- @m3-embed.md@ D619): an application with no @main@, whose exports are the
+-- values the one module it is built from exposes. It is a platform rather
+-- than @Common@ told otherwise, as @beam@ and @os@ are told @Node@, because the
+-- backend's answer differs: its roots are those values, each held to what can
+-- cross to C ('Generate.checkRoots').
 data Platform
   = Common
   | Browser
   | Node
+  | Host
   deriving (Show, Eq)
 
 -- COMPATIBILITY
@@ -35,6 +42,7 @@ encode platform =
     Common -> E.chars "common"
     Browser -> E.chars "browser"
     Node -> E.chars "node"
+    Host -> E.chars "host"
 
 decoder :: a -> D.Decoder a Platform
 decoder badPlatformError =
@@ -50,6 +58,7 @@ fromChars value =
     "common" -> Just Common
     "browser" -> Just Browser
     "node" -> Just Node
+    "host" -> Just Host
     _ -> Nothing
 
 toChars :: Platform -> [Char]
@@ -58,6 +67,7 @@ toChars value =
     Common -> "common"
     Browser -> "browser"
     Node -> "node"
+    Host -> "host"
 
 -- BINARY
 
@@ -67,6 +77,7 @@ instance Binary Platform where
       Common -> putWord8 0
       Browser -> putWord8 1
       Node -> putWord8 2
+      Host -> putWord8 3
 
   get =
     do
@@ -75,4 +86,5 @@ instance Binary Platform where
         0 -> return Common
         1 -> return Browser
         2 -> return Node
+        3 -> return Host
         _ -> fail "binary encoding of Platform was corrupted"

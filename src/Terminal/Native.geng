@@ -48,8 +48,10 @@ command line, split on spaces, which is how a machine says where Boehm's header
 and library are when its compiler does not know. It comes after the
 optimization level, so an `-O` in it is the one the compiler takes.
 
-A native build of modules none of which has a `main` would be a library, which
-is the embedding ABI's (§NA16 step 10), and is refused until then.
+A native build with no `main` is a library, `runtime = "host"` (geng-lang
+`m3-embed.md` D619). The backend roots it at the values its module exposes and
+holds each to what crosses to C; writing the library and its header is
+§EM13's third step, and the build is refused after the link until then.
 
 -}
 
@@ -299,7 +301,7 @@ buildStage config thePlan =
                                             Report.create
                                                 "A NATIVE LIBRARY IS NOT BUILT YET"
                                                 Nothing
-                                                (PP.words "A native build needs a module with a main. A library for C to call is the embedding ABI, which is not built yet.")
+                                                (PP.words "This application's runtime is host, so it is a library, and its exports have been checked and linked. Writing the library and its header for C, Go or Python to load is the embedding ABI's generator (m3-embed.md §EM13 step 3), which is not built yet.")
                                     )
 
                         else

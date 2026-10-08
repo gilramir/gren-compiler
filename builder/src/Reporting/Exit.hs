@@ -22,6 +22,7 @@ module Reporting.Exit
     BuildProjectProblem (..),
     DocsProblem (..),
     Generate (..),
+    ExportProblem (..),
     --
     toString,
     toStderr,
@@ -1022,6 +1023,8 @@ data Make
   | MakeExeOnlyForNodePlatform
   | MakeBeamManyMains ModuleName.Raw ModuleName.Raw [ModuleName.Raw]
   | MakeBeamNothingToCall ModuleName.Raw [ModuleName.Raw]
+  | MakeHostManyModules ModuleName.Raw ModuleName.Raw [ModuleName.Raw]
+  | MakeHostNothingToExport ModuleName.Raw
 
 makeToReport :: Make -> Help.Report
 makeToReport make =
@@ -1154,6 +1157,30 @@ makeToReport make =
             "Add the values Erlang is to call to the module's `exposing`, or a `main`, or\
             \ switch to --output=/dev/null to check that it compiles without building\
             \ anything (m2-interop.md D399)."
+        ]
+    MakeHostManyModules m1 m2 ms ->
+      Help.report
+        "A LIBRARY IS ONE MODULE"
+        Nothing
+        "This application's runtime is host, so it is a library, and its exports are the\
+        \ values one module exposes. I was given these:"
+        [ D.indent 4 $ D.red $ D.vcat $ map D.fromName (m1 : m2 : ms),
+          D.reflow
+            "Name one of them. A module the library needs is built with it whatever it\
+            \ exposes; what the one named module exposes is what C, Go or Python may call\
+            \ (m3-embed.md D619)."
+        ]
+    MakeHostNothingToExport m ->
+      Help.report
+        "NOTHING TO EXPORT"
+        Nothing
+        "This application's runtime is host, so it is a library, and its exports are the\
+        \ values the module it is built from exposes. This one exposes none:"
+        [ D.indent 4 $ D.red $ D.fromName m,
+          D.reflow
+            "Add the functions C, Go or Python is to call to the module's `exposing`, or\
+            \ switch to --output=/dev/null to check that it compiles without building\
+            \ anything (m3-embed.md D619)."
         ]
     MakeMultipleFiles ->
       Help.report
@@ -1554,6 +1581,25 @@ data Generate
   | GenerateTargetRefused Target.Target [Target.Refusal]
   | GenerateNoBackend Target.Target
   | GenerateConstrainedRoots [(ModuleName.Raw, N.Name, [N.Name])]
+  | GenerateExportsDoNotCross [(ModuleName.Raw, N.Name, [ExportProblem])]
+
+-- | Why a library's export cannot be one C function (geng-lang
+-- @m3-embed.md@ D619, D620), as 'Generate.checkRoots' finds it.
+data ExportProblem
+  = -- | A type variable, an open record's row among them.
+    ExportVariable N.Name
+  | -- | A constrained type variable, with its classes.
+    ExportConstrained N.Name [N.Name]
+  | -- | A @Task@, @Source@ or @Process.Id@, by the name a reader writes.
+    ExportRuntimeType String
+  deriving (Eq, Ord)
+
+exportProblemChars :: ExportProblem -> String
+exportProblemChars problem =
+  case problem of
+    ExportVariable name -> "the type variable " ++ N.toChars name
+    ExportConstrained name classes -> "the type variable " ++ N.toChars name ++ ", constrained by " ++ List.intercalate ", " (map N.toChars classes)
+    ExportRuntimeType name -> "a " ++ name
 
 toGenerateReport :: Generate -> Help.Report
 toGenerateReport problem =
@@ -1620,6 +1666,25 @@ toGenerateReport problem =
             \ it, which nothing outside Geng can build. Expose a wrapper at one type instead,\
             \ such as `sumInts : Array Int -> Int` for `sumAll : Num a => Array a -> a`, and\
             \ leave the constrained value out of the module's `exposing` (m2-interop.md D400)."
+        ]
+    GenerateExportsDoNotCross problems ->
+      Help.report
+        "EXPORT DOES NOT CROSS"
+        Nothing
+        "This application's runtime is host, so it is a library, and every value the\
+        \ module it is built from exposes is exported for C, Go or Python to call by its\
+        \ name. These have types that cannot cross:"
+        [ D.indent 4 $
+            D.vcat
+              [ D.fromChars (ModuleName.toChars m ++ "." ++ N.toChars name ++ ": " ++ List.intercalate "; " (map exportProblemChars why))
+              | (m, name, why) <- List.sort problems
+              ],
+          D.reflow
+            "An export is one C function, so its type is one type, with no type variable\
+            \ and no constraint: expose a wrapper at one type instead, such as\
+            \ `sumInts : Array Int -> Int` for `sumAll : Num a => Array a -> a`. And a library\
+            \ runs no scheduler, so no Task, Source or Process.Id crosses: the host acts, and\
+            \ Geng computes (m3-embed.md D619, D620)."
         ]
     GenerateCannotOptimizeDebugValues m ms ->
       Help.report

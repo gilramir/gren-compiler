@@ -148,6 +148,9 @@ dependenciesForPlatform platform =
     Platform.Common ->
         []
 
+    Platform.Host ->
+        []
+
     Platform.Browser ->
         [ PackageName.browser ]
 

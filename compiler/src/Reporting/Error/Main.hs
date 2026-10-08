@@ -24,6 +24,8 @@ data Error
   | -- | A @main : Task e a@ that is not a @Task Never {}@ (D72): whether @e@ is
     -- the wrong type, and whether @a@ is.
     BadTask A.Region Can.Type Bool Bool
+  | -- | A @main@ in a library for @runtime = "host"@ (geng-lang D619).
+    MainOnHost A.Region
 
 -- TO REPORT
 
@@ -86,4 +88,16 @@ toReport localizer source err =
                        \ with, so say that it is thrown away, with `Task.map (\\_ -> {})`."
                    | badAnswer
                    ]
+          )
+    MainOnHost region ->
+      Report.Report "MAIN IN A LIBRARY" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( "This application is a library, since its runtime is host, and has no `main`:",
+            D.reflow $
+              "A C, Go or Python program loads it and calls the values this module exposes,\
+              \ each by its name, and nothing runs a `main`. Expose the functions to call and\
+              \ remove `main`, or build a program with runtime = \"os\" (m3-embed.md D619)."
           )

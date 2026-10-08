@@ -8,7 +8,9 @@
 -- D72's. A fourth, flags a @Program@ could not decode, left with @Platform@
 -- (@m1b-source.md@ §SO19). Retiring that pipeline meant giving them a home that is
 -- about the question rather than about the graph, which is this one, beside
--- `Nitpick.PatternMatches` and `Nitpick.Debug`.
+-- `Nitpick.PatternMatches` and `Nitpick.Debug`. And a fourth that is about
+-- the platform rather than the type: a library for @runtime = "host"@ has no
+-- @main@ at all (geng-lang @m3-embed.md@ D619).
 --
 -- The classification is not repeated here. `Core.Lower.Module.mainOf` is the one
 -- statement of what a @main@ may be (C19); this reads its answer and supplies
@@ -60,6 +62,7 @@ check platform annotations modul =
         Lower.NotRunnable tipe allowed -> Left (E.BadType region tipe allowed)
         Lower.BadTask tipe badErr badAnswer ->
           Left (E.BadTask region tipe badErr badAnswer)
+        Lower.MainOnHost -> Left (E.MainOnHost region)
 
 defName :: Can.Def -> Name
 defName def =

@@ -341,6 +341,9 @@ runForPlatform config =
             Platform.Common ->
                 Task.fail NotAnApplication
 
+            Platform.Host ->
+                Task.fail NotAnApplication
+
             Platform.Browser ->
                 when systemPlatform is
                     Node.Win32 ->
@@ -397,6 +400,8 @@ getOutputPath exeName projectOutline =
         Platform.Browser ->
             Just (getPath Backend.Html "app.html")
         Platform.Common ->
+            Nothing
+        Platform.Host ->
             Nothing
 
 
