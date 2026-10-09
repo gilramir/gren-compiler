@@ -87,7 +87,9 @@ primType op =
     TransientOp p -> Just (transientType p)
     TaskOp p -> taskType p
     DictOp p -> Just (dictType p)
-    _ -> Nothing
+    -- S8's barrier, handed the finished line (D158): @Debug.log@ renders with
+    -- @inspect@ in Geng and is the one binding at it.
+    DebugLog -> Just (fn [tString, Can.TVar "a"] (Can.TVar "a"))
 
 -- INTEGERS
 

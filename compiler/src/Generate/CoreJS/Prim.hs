@@ -90,6 +90,7 @@ prim op args =
     (TransientOp p, _) -> transient p args
     (TaskOp p, _) -> task p args
     (DictOp p, _) -> dict p args
+    (DebugLog, [_, _]) -> JS.Call (JS.Ref (JsName.fromLocalHumanReadable "_Debug_log")) args
     _ ->
       error $
         "Generate.CoreJS.Prim: no JavaScript for "
@@ -1328,12 +1329,20 @@ function _Record_update(oldRecord, updatedFields) {
 -- | @Debug.todo@ (D335, @m1a-lowering.md@ §L4). The lowering renders where it
 -- was written, in stock's words, and the message is the expression it was
 -- handed; this puts them together the way stock's @_Debug_crash@ did for its
--- eighth identifier, and throws.
+-- eighth identifier, and throws. And @debug_log@ (S8, D640): the line
+-- @Debug.log@ rendered, on standard error, where stock's @console.log@ wrote
+-- it on standard output, so that a log never mixes with a program's output,
+-- as on the BEAM and natively.
 crashHelpers :: B.Builder
 crashHelpers =
   [r|
 function _Crash_todo(place, message) {
   throw new Error(place + "\n\n" + message);
+}
+
+function _Debug_log(line, value) {
+  console.error(line);
+  return value;
 }
 |]
 
