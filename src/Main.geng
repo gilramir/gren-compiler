@@ -14,6 +14,7 @@ import Dict exposing (Dict)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Git
+import Json.Decode as Decode
 import Json.Encode as Json
 import Meta
 import Node
@@ -22,6 +23,7 @@ import Stream
 import Stream.Log
 import Task exposing (Task)
 import Terminal
+import Terminal.BackendWorker
 import Terminal.Beam
 import Terminal.Format
 import Terminal.Help
@@ -47,9 +49,45 @@ ever carried the next command (geng-lang `m1b-source.md` §SO18).
 -}
 main : Task Never {}
 main =
-    Node.getEnvironment
-        |> Task.andThen start
-        |> Task.andThen Node.setExitCode
+    Terminal.BackendWorker.request
+        |> Task.andThen
+            (\request ->
+                if request == "" then
+                    Node.getEnvironment
+                        |> Task.andThen start
+                        |> Task.andThen Node.setExitCode
+
+                else
+                    serveBackend request
+                        |> Task.andThen Terminal.BackendWorker.answer
+            )
+
+
+{-| A backend's part of a build, on the thread a build started for it (D645,
+`Terminal.BackendWorker`): the request is the one `Terminal.Native.buildStage`
+or `Terminal.Beam.buildStage` wrote, and the answer is the one it reads.
+-}
+serveBackend : String -> Task Never String
+serveBackend request =
+    Task.await FileSystem.initialize <| \fsPermission ->
+    Task.await Node.getPlatform <| \platform ->
+        let
+            fromString =
+                if platform == Node.Win32 then
+                    Path.fromWin32String
+
+                else
+                    Path.fromPosixString
+        in
+        when Decode.decodeString (Decode.field "target" Decode.string |> Decode.andThen (\target -> Decode.map (\value -> { target = target, value = value }) Decode.value)) request is
+            Ok { target = "native", value = value } ->
+                Terminal.Native.serve fsPermission fromString value
+
+            Ok { target = "beam", value = value } ->
+                Terminal.Beam.serve fsPermission fromString value
+
+            _ ->
+                Task.succeed (Json.encode 0 (Json.object [ { key = "refused", value = Json.string ("The backend's request was not one it reads: " ++ request) } ]))
 
 
 type alias Context =

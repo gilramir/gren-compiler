@@ -30,7 +30,7 @@
 -- __The pass is allowed to give up__ (§G27.3). A site it does not specialize
 -- keeps its 'Core.AST.EWitApp' and runs, because the witness path is a correct
 -- one and not a fallback invented here — which is the whole reason §G26 built
--- witnesses first. So the depth cap below is a budget rather than a
+-- witnesses first. So the growth rule below ('grows') is a budget rather than a
 -- correctness condition, and a shape this pass does not recognize costs speed
 -- and not meaning.
 --
@@ -114,21 +114,50 @@ instance Ord Wit where
 -- copy, and it is the copy's name.
 type Key = (Core.QualName, [Wit])
 
--- | How deep a witness tree may be before the pass leaves the site alone.
+-- | Whether a key is polymorphic recursion: a binding asked for, along the
+-- chain of copies that reached it, at a row larger than the same binding was
+-- asked for further up. There the demand set is infinite and no whole-program
+-- pass can enumerate it, so the site is left alone, which leaves a working
+-- program per the header. The type checker refuses a definition that calls
+-- itself at a larger type, but not an instance that does: the derived @Eq@ of
+-- @type Nest a = Leaf a | Deeper (Nest (Array a))@ is one (geng-lang
+-- @m3-sweep.md@ D649).
 --
--- A witness for @Eq (Array (Array Int))@ is three deep, so real programs are
--- nowhere near this. What the cap is for is polymorphic recursion — a
--- constrained definition that calls itself at a /larger/ witness — where the
--- demand set is infinite and no whole-program pass can enumerate it. Giving up
--- there leaves a working program, per the header.
-depthCap :: Int
-depthCap = 16
+-- It was a cap of 16 on a witness's depth, which also gave up on @==@ at a
+-- type 17 deep, where every row is /smaller/ than the one before it, and the C
+-- backend, which has no dictionaries, refused the program (§SW30 item 4). An
+-- infinite chain of distinct keys over finitely many bindings has to ask for one
+-- of them at a larger row than before, so the demand still ends.
+grows :: (Ord n) => Map n Int -> (n, [Wit]) -> Bool
+grows above (name, wits) =
+  case Map.lookup name above of
+    Just smallest -> rowSize wits > smallest
+    Nothing -> False
 
-depth :: Wit -> Int
-depth w =
-  case w of
-    Wit _ args -> 1 + maximum (0 : map depth args)
-    Built _ _ -> 1
+-- | The chain a key was reached by: each binding on it, at the smallest row it
+-- was asked for.
+below :: (Ord n) => Map n Int -> (n, [Wit]) -> Map n Int
+below above (name, wits) =
+  Map.insertWith min name (rowSize wits) above
+
+-- | A row's size, counting a record's witness by its type: a record has no
+-- instance to name, so polymorphic recursion through one, @Deeper (Nest { x :
+-- a })@, grows only its type, and counted as one it never grew and the demand
+-- ran until memory did.
+rowSize :: [Wit] -> Int
+rowSize = sum . map size
+  where
+    size w =
+      case w of
+        Wit _ args -> 1 + sum (map size args)
+        Built tipe _ -> typeSize tipe
+    typeSize t =
+      case t of
+        Core.TVar _ -> 1
+        Core.TCon _ args -> 1 + sum (map typeSize args)
+        Core.TFun args result -> 1 + sum (map typeSize (result : args))
+        Core.TRecord fields _ -> 1 + sum (map (typeSize . snd) fields)
+        Core.TForall _ _ inner -> 1 + typeSize inner
 
 -- THE PASS
 
@@ -196,7 +225,7 @@ bindingTypes cores =
 -- read for the keys /it/ asks for, which is how @Eq (Array Int)@ reaches
 -- @Eq Int@ and how a recursive constrained definition reaches itself. A key
 -- already in the set is not expanded twice, so a self-recursive definition
--- terminates on the first repeat and only 'depthCap' stands between the pass
+-- terminates on the first repeat and only 'grows' stands between the pass
 -- and polymorphic recursion.
 --
 -- A body is read 'instantiated', with its types fixed, and not merely
@@ -206,14 +235,16 @@ bindingTypes cores =
 -- two got the name.
 demand :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Map ModuleName.Canonical Core.Module -> Set Key
 demand gens tys cores =
-  go Set.empty (concatMap (sites gens) (concatMap exprsOf (Map.elems cores)))
+  go Set.empty [(key, Map.empty) | key <- concatMap (sites gens) (concatMap exprsOf (Map.elems cores))]
   where
     go seen [] = seen
-    go seen (key : rest)
+    go seen ((key, above) : rest)
       | key `Set.member` seen = go seen rest
+      | grows above key = go seen rest
       | otherwise =
           let seen' = Set.insert key seen
-           in go seen' (sites gens (instantiated gens tys key) ++ twinOf key ++ rest)
+              chain = below above key
+           in go seen' ([(next, chain) | next <- sites gens (instantiated gens tys key)] ++ [(twin, above) | twin <- twinOf key] ++ rest)
     twinOf (name, wits) =
       [(twin, wits) | Just twin <- [Map.lookup name twins], Map.member twin gens]
 
@@ -244,13 +275,10 @@ keyOf gens fn args =
       | Map.member name gens -> (,) name <$> closedRow args
     _ -> Nothing
 
--- | A row of witness arguments read as a key's, when every one is closed and
--- none is past 'depthCap'.
+-- | A row of witness arguments read as a key's, when every one is closed.
 closedRow :: [Core.Expr] -> Maybe [Wit]
 closedRow args =
-  do
-    wits <- traverse witOf args
-    if any ((> depthCap) . depth) wits then Nothing else Just wits
+  traverse witOf args
 
 -- | Read a witness expression, or fail because it is a parameter.
 witOf :: Core.Expr -> Maybe Wit
@@ -616,13 +644,17 @@ localize gens tys = go
                     let (params, inner, _) = locals Map.! name
                         env = Map.fromList (zip (map Core._binderName params) (zipWith canonical params wits))
                      in go (retype (substituteT (fixedBy gens tys params wits)) (subst env inner))
+                  -- 'grows' as 'demand' has it, though a local that calls
+                  -- itself at a larger type is refused by the type checker.
                   close acc [] = acc
-                  close acc (key : rest)
+                  close acc ((key, above) : rest)
                     | Map.member key acc = close acc rest
+                    | grows above key = close acc rest
                     | otherwise =
                         let copyBody = instance_ key
-                         in close (Map.insert key copyBody acc) (localSites live copyBody ++ rest)
-                  seeds = concatMap (localSites live) (body : map Core._bindValue binds)
+                            chain = below above key
+                         in close (Map.insert key copyBody acc) ([(next, chain) | next <- localSites live copyBody] ++ rest)
+                  seeds = [(key, Map.empty) | key <- concatMap (localSites live) (body : map Core._bindValue binds)]
                   found = close Map.empty seeds
                   names = localNames (Map.keysSet found)
                   rw = rewriteLocal live names

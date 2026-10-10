@@ -16,6 +16,7 @@ module Terminal.Beam exposing
     , release
     , releaseIdentity
     , requireProgram
+    , serve
     , stageEnvironment
     , toolchain
     )
@@ -38,6 +39,10 @@ seam `m2-seam.md` §DS5 built underneath (geng-lang `m2-beam.md` §BM23, §BM24)
       app.otp/ebin/<name>.app       the OTP application resource file
       app.otp/rebar.config          so rebar3 and mix can build it from src
       app                           the escript, which is what a person runs
+
+The linking and emitting are done by a worker thread with a stack of its own,
+since the backend recurses once for each level of the Core it reads (geng-lang
+`m3-sweep.md` D645, `Terminal.BackendWorker`).
 
 A build of modules none of which has a `main` is a library, and stops at
 `app.otp/`: its roots are the modules' exposed values, for Erlang to call
@@ -67,10 +72,13 @@ import FileSystem.Path as Path exposing (Path)
 import Geng.Beam.Build as Build
 import Geng.Beam.Runtime as Runtime
 import Geng.Core as Core
+import Json.Decode as Decode
+import Json.Encode as Encode
 import SemanticVersion
 import Stream
 import Stream.Log
 import Task exposing (Task)
+import Terminal.BackendWorker as BackendWorker
 
 
 {-| Whether this project is built for the `beam` target, which is what sends
@@ -429,13 +437,18 @@ archive, or listed in its `.app`. The `geng-build` directory beside them is the
 build's own and is left alone here.
 -}
 clear : FileSystem.Permission -> Array String -> Path -> Task Report {}
-clear fs endings directory =
+clear =
+    clearWith failure
+
+
+clearWith : (String -> FileSystem.Error -> e) -> FileSystem.Permission -> Array String -> Path -> Task e {}
+clearWith refuse fs endings directory =
     FileSystem.makeDirectory fs { recursive = True } directory
-        |> Task.mapError (failure "I cannot make the output directory")
+        |> Task.mapError (refuse "I cannot make the output directory")
         |> Task.andThen
             (\_ ->
                 FileSystem.listDirectory fs directory
-                    |> Task.mapError (failure "I cannot read the output directory")
+                    |> Task.mapError (refuse "I cannot read the output directory")
             )
         |> Task.andThen
             (\entries ->
@@ -447,7 +460,7 @@ clear fs endings directory =
                             FileSystem.remove fs
                                 { recursive = False }
                                 (Path.append (Path.fromPosixString name) directory)
-                                |> Task.mapError (failure "I cannot clear the output directory")
+                                |> Task.mapError (refuse "I cannot clear the output directory")
                         )
                     |> Task.sequence
             )
@@ -596,39 +609,45 @@ build config thePlan =
 
 buildStage : Config -> Plan -> Task Report Int
 buildStage config thePlan =
-    read config.fs thePlan.stage
-        |> Task.andThen (\files -> Task.map (\direct -> { files = files, direct = direct }) (directRows config))
+    directRows config
         |> Task.andThen
-            (\found ->
-                when
-                    Build.link Core.ExternErlang found.files
-                        |> Result.andThen (\program -> Result.map (\emitted -> { program = program, emitted = emitted }) (Build.emitWith found.direct program))
-                is
-                    Err why ->
+            (\direct ->
+                BackendWorker.call
+                    (Encode.object
+                        [ { key = "target", value = Encode.string "beam" }
+                        , { key = "escript", value = Encode.string (config.toString thePlan.escript) }
+                        , { key = "direct", value = Encode.dict (\name -> name) Encode.string direct }
+                        ]
+                    )
+                    emittedDecoder
+            )
+        |> Task.andThen
+            (\emitted ->
+                when emitted is
+                    Refused why ->
                         Stream.Log.string config.stderr why
                             |> Task.onError (\_ -> Task.succeed {})
                             |> Task.andThen (\_ -> abandon config.fs thePlan)
                             |> Task.map (\_ -> 1)
 
-                    Ok built ->
-                        clear config.fs [ ".beam", ".app" ] thePlan.ebin
-                            |> Task.andThen (\_ -> clear config.fs [ ".erl", ".app.src" ] thePlan.src)
-                            |> Task.andThen (\_ -> clear config.fs [ ".erl" ] (extCopies thePlan))
-                            |> Task.andThen (\_ -> write config.fs thePlan.src (built.emitted ++ Runtime.sources))
-                            |> Task.andThen (\_ -> requireLibraries config)
+                    Trouble t ->
+                        Task.fail (failureText t.what t.why)
+
+                    Emitted built ->
+                        requireLibraries config
                             |> Task.andThen (\_ -> externSources config)
                             |> Task.andThen
                                 (\externs ->
                                     distinctExterns config externs
                                         |> Task.andThen (\_ -> erlc config thePlan externs)
-                                        |> Task.andThen (\_ -> checkExterns config thePlan externs (Build.erlangCalls built.program))
+                                        |> Task.andThen (\_ -> checkExterns config thePlan externs built.calls)
                                         |> Task.andThen (\_ -> copyExterns config thePlan externs)
                                 )
                             |> Task.andThen
                                 (\_ ->
                                     application config
                                         thePlan
-                                        (if Array.length built.program.mains == 0 then
+                                        (if built.mains == 0 then
                                             "library"
 
                                          else
@@ -637,7 +656,7 @@ buildStage config thePlan =
                                 )
                             |> Task.andThen
                                 (\_ ->
-                                    if Array.length built.program.mains == 0 then
+                                    if built.mains == 0 then
                                         Task.succeed {}
 
                                     else
@@ -652,15 +671,125 @@ buildStage config thePlan =
             )
 
 
+{-| What the backend's part of a build answered (D645): the backend's
+refusal, written as it is; a file it could not read or write; or the program,
+emitted into `src` with the runtime's modules, and what is left to check of it.
+-}
+type Emitted
+    = Refused String
+    | Trouble { what : String, why : String }
+    | Emitted { mains : Int, calls : Array { extern : String, module_ : String, fn : String, arity : Int } }
+
+
+emittedDecoder : Decode.Decoder Emitted
+emittedDecoder =
+    Decode.oneOf
+        [ Decode.field "refused" Decode.string |> Decode.map Refused
+        , Decode.map2 (\what why -> Trouble { what = what, why = why })
+            (Decode.field "cannot" Decode.string)
+            (Decode.field "because" Decode.string)
+        , Decode.map2 (\mains calls -> Emitted { mains = mains, calls = calls })
+            (Decode.field "mains" Decode.int)
+            (Decode.field "calls"
+                (Decode.array
+                    (Decode.map4 (\extern module_ fn arity -> { extern = extern, module_ = module_, fn = fn, arity = arity })
+                        (Decode.field "extern" Decode.string)
+                        (Decode.field "module" Decode.string)
+                        (Decode.field "fn" Decode.string)
+                        (Decode.field "arity" Decode.int)
+                    )
+                )
+            )
+        ]
+
+
+{-| The backend's part, on the worker's thread: a request `buildStage` wrote,
+answered as `emittedDecoder` reads it. The output directories are cleared only
+once the program is emitted, so a refused build leaves the last good one's. -}
+serve : FileSystem.Permission -> (String -> Path) -> Decode.Value -> Task Never String
+serve fs fromString request =
+    when
+        Decode.decodeValue
+            (Decode.map2 (\script direct -> { escript = script, direct = direct })
+                (Decode.field "escript" Decode.string)
+                (Decode.field "direct" (Decode.dict Decode.string))
+            )
+            request
+    is
+        Err e ->
+            Task.succeed (answer "refused" (Encode.string ("The backend's request was not one it reads: " ++ Decode.errorToString e)))
+
+        Ok asked ->
+            let
+                thePlan =
+                    paths (fromString asked.escript)
+            in
+            read trouble fs thePlan.stage
+                |> Task.andThen
+                    (\files ->
+                        when
+                            Build.link Core.ExternErlang files
+                                |> Result.andThen (\program -> Result.map (\emitted -> { program = program, emitted = emitted }) (Build.emitWith asked.direct program))
+                        is
+                            Err why ->
+                                Task.succeed (answer "refused" (Encode.string why))
+
+                            Ok built ->
+                                clearWith trouble fs [ ".beam", ".app" ] thePlan.ebin
+                                    |> Task.andThen (\_ -> clearWith trouble fs [ ".erl", ".app.src" ] thePlan.src)
+                                    |> Task.andThen (\_ -> clearWith trouble fs [ ".erl" ] (extCopies thePlan))
+                                    |> Task.andThen (\_ -> writeWith trouble fs thePlan.src (built.emitted ++ Runtime.sources))
+                                    |> Task.map
+                                        (\_ ->
+                                            Encode.encode 0 <|
+                                                Encode.object
+                                                    [ { key = "mains", value = Encode.int (Array.length built.program.mains) }
+                                                    , { key = "calls"
+                                                      , value =
+                                                            Encode.array
+                                                                (\c ->
+                                                                    Encode.object
+                                                                        [ { key = "extern", value = Encode.string c.extern }
+                                                                        , { key = "module", value = Encode.string c.module_ }
+                                                                        , { key = "fn", value = Encode.string c.fn }
+                                                                        , { key = "arity", value = Encode.int c.arity }
+                                                                        ]
+                                                                )
+                                                                (Build.erlangCalls built.program)
+                                                      }
+                                                    ]
+                                        )
+                    )
+                |> Task.onError
+                    (\t ->
+                        Task.succeed <|
+                            Encode.encode 0 <|
+                                Encode.object
+                                    [ { key = "cannot", value = Encode.string t.what }
+                                    , { key = "because", value = Encode.string t.why }
+                                    ]
+                    )
+
+
+answer : String -> Encode.Value -> String
+answer key value =
+    Encode.encode 0 (Encode.object [ { key = key, value = value } ])
+
+
 write : FileSystem.Permission -> Path -> Array { name : String, text : String } -> Task Report {}
-write fs directory files =
+write =
+    writeWith failure
+
+
+writeWith : (String -> FileSystem.Error -> e) -> FileSystem.Permission -> Path -> Array { name : String, text : String } -> Task e {}
+writeWith refuse fs directory files =
     files
         |> Array.map
             (\file ->
                 FileSystem.writeFile fs
                     (Bytes.fromString file.text)
                     (Path.append (Path.fromPosixString (erlName file.name)) directory)
-                    |> Task.mapError (failure "I cannot write the Erlang")
+                    |> Task.mapError (refuse "I cannot write the Erlang")
             )
         |> Task.sequence
         |> Task.map (\_ -> {})
@@ -1149,10 +1278,10 @@ toolchainRefused program exitCode =
         )
 
 
-read : FileSystem.Permission -> Path -> Task Report (Array Build.File)
-read fs directory =
+read : (String -> FileSystem.Error -> e) -> FileSystem.Permission -> Path -> Task e (Array Build.File)
+read refuse fs directory =
     FileSystem.listDirectory fs directory
-        |> Task.mapError (failure "I cannot read the stage directory")
+        |> Task.mapError (refuse "I cannot read the stage directory")
         |> Task.andThen
             (\entries ->
                 entries
@@ -1162,7 +1291,7 @@ read fs directory =
                     |> Array.map
                         (\name ->
                             FileSystem.readFile fs (Path.append (Path.fromPosixString name) directory)
-                                |> Task.mapError (failure "I cannot read the stage directory")
+                                |> Task.mapError (refuse "I cannot read the stage directory")
                                 |> Task.map (\data -> { name = name, data = data })
                         )
                     |> Task.sequence
@@ -1171,12 +1300,24 @@ read fs directory =
 
 failure : String -> FileSystem.Error -> Report
 failure what error =
+    failureText what (FileSystem.errorToString error)
+
+
+failureText : String -> String -> Report
+failureText what why =
     Report.create
         "CANNOT BUILD FOR THE BEAM"
         Nothing
         (PP.verticalBlock
             [ PP.words (what ++ ":")
             , PP.empty
-            , PP.words (FileSystem.errorToString error)
+            , PP.words why
             ]
         )
+
+
+{-| A file the backend's part of a build could not read or write, on the
+worker's thread, where a `Report` cannot be sent back (D645). -}
+trouble : String -> FileSystem.Error -> { what : String, why : String }
+trouble what error =
+    { what = what, why = FileSystem.errorToString error }

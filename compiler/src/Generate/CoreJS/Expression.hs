@@ -1217,14 +1217,37 @@ chain env root alts fallback =
           branch env root alt
     alt@(Core.Alt pattern _) : rest ->
       let (tests, _) = match env root pattern
+          test = List.foldl1' (JS.Infix JS.OpAnd) tests
+          taken = branch env root alt
        in if null tests
-            then branch env root alt
+            then taken
             else
-              [ JS.IfStmt
-                  (List.foldl1' (JS.Infix JS.OpAnd) tests)
-                  (JS.Block (branch env root alt))
-                  (JS.Block (chain env root rest fallback))
-              ]
+              if ends taken
+                then JS.IfStmt test (JS.Block taken) JS.EmptyStmt : chain env root rest fallback
+                else [JS.IfStmt test (JS.Block taken) (JS.Block (chain env root rest fallback))]
+
+-- | Whether statements never run on past their last: a @return@, a @throw@, a
+-- jump, or an @if@ whose arms both end. A branch that ends is followed by the
+-- next alternative's test rather than holding it in its @else@, so a chain of
+-- @n@ alternatives is @n@ statements and not @n@ nested blocks, which V8's
+-- parser recursed on and refused past about 4,000 (geng-lang @m3-sweep.md@
+-- D651, §SW30 item 2). 'conditional' reads either shape as the same
+-- conditional expression.
+ends :: [JS.Stmt] -> Bool
+ends stmts =
+  case reverse stmts of
+    [] -> False
+    final : _ -> endsStmt final
+  where
+    endsStmt stmt =
+      case stmt of
+        JS.Return _ -> True
+        JS.Throw _ -> True
+        JS.Break (Just _) -> True
+        JS.Continue (Just _) -> True
+        JS.Block inner -> ends inner
+        JS.IfStmt _ yes no -> endsStmt yes && endsStmt no
+        _ -> False
 
 branch :: Env -> JS.Expr -> Core.Alt -> [JS.Stmt]
 branch env root (Core.Alt pattern body) =

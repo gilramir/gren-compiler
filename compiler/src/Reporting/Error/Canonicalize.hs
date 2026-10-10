@@ -53,7 +53,7 @@ data Error
   | DeriveMethodMissing A.Region Name.Name Name.Name
   | DeriveMethodShape A.Region Name.Name Name.Name
   | DeriveNotStructural A.Region Name.Name Name.Name
-  | DeriveOnTransparent A.Region Name.Name Name.Name
+  | DeriveOnTransparent A.Region Name.Name Name.Name Bool
   | DeriveTwice A.Region Name.Name Name.Name
   | InstanceDeclThirdParty A.Region Name.Name
   | InstanceHeadNotApplied A.Region
@@ -427,7 +427,10 @@ toReport source err =
               \ variable that does not appear says nothing at all. Either use it in the type\
               \ or drop the constraint."
           )
-    DeriveOnTransparent region typeName className ->
+    -- Which of the two transparent cases it is (geng-lang @m1b-classes.md@
+    -- §G25.2, @classes.md@ §2.5): exposed with its constructors, or not exposed
+    -- at all. The message said the first for both (@m3-sweep.md@ D653).
+    DeriveOnTransparent region typeName className exposed ->
       Report.Report "REDUNDANT DERIVE" region [] $
         Code.toSnippet
           source
@@ -439,12 +442,21 @@ toReport source err =
                 ++ "` does not have to ask to derive `"
                 ++ Name.toChars className
                 ++ "`:",
-            D.reflow
-              "`@derive` is for an abstract type — one whose constructors its module does not\
-              \ expose, so that nobody outside can see what it is made of and it means\
-              \ nothing to derive from. This type exposes its constructors, so its structure\
-              \ is already public and deriving from it is what that structure means. Expose\
-              \ fewer constructors, or drop the attribute."
+            D.reflow $
+              "`@derive` is for an abstract type — one its module exposes without its\
+              \ constructors, so that nobody outside can see what it is made of and it means\
+              \ nothing to derive from. "
+                ++ ( if exposed
+                       then
+                         "This type exposes its constructors, so its structure is already\
+                         \ public and deriving from it is what that structure means. Expose it\
+                         \ without its constructors, or drop the attribute."
+                       else
+                         "This module does not expose this type at all, so the only code that can\
+                         \ name it is here, where its constructors are in view, and it derives\
+                         \ from its structure already. Drop the attribute, or expose the type\
+                         \ without its constructors."
+                   )
           )
     DeriveNotStructural region typeName className ->
       Report.Report "CANNOT DERIVE THIS" region [] $

@@ -1,0 +1,79 @@
+module Terminal.BackendWorker exposing
+    ( answer
+    , call
+    , request
+    , stackMb
+    )
+
+{-| The C and BEAM backends on a stack of their own (geng-lang `m3-sweep.md`
+D645).
+
+Each backend is Geng in this front end, and it recurses once for each level of
+the Core it reads, lowers and prints, so on node's default stack a native or
+BEAM build refused any Core term about 1,000 deep: an `else if` chain, a sum, a
+`let` of 1,000 definitions (§SW30 item 1). A build therefore hands the
+backend's part, the stage read and the program written, to a worker thread on
+this same program with a stack of `stackMb`, as a request in JSON; `main` sees
+the request, does that part, and answers in JSON. Everything else, the command
+line, the terminal, the C compiler or `erlc`, and every report, stays on the
+main thread. See `src/Ext/BackendWorker.js`.
+-}
+
+import Cli.PrettyPrinter as PP
+import Cli.Report as Report exposing (Report)
+import Json.Decode as Decode
+import Json.Encode as Encode
+import Task exposing (Task)
+
+
+{-| A native program runs on a 1 GiB stack (geng-lang `m3-native.md`, D19), and
+the backend gets the same. -}
+stackMb : Int
+stackMb =
+    1024
+
+
+{-| The request, run on a worker, and its answer read; or a report that the
+worker ended without one, which it has said why on standard error. -}
+call : Encode.Value -> Decode.Decoder a -> Task Report a
+call request_ decoder =
+    run stackMb (Encode.encode 0 request_)
+        |> Task.andThen
+            (\text ->
+                when Decode.decodeString decoder text is
+                    Ok answered ->
+                        Task.succeed answered
+
+                    Err e ->
+                        Task.fail ("its answer was not one I read: " ++ Decode.errorToString e)
+            )
+        |> Task.mapError stopped
+
+
+stopped : String -> Report
+stopped why =
+    Report.create
+        "THE BACKEND STOPPED"
+        Nothing
+        (PP.verticalBlock
+            [ PP.words ("The backend runs on a thread of its own, with a stack of " ++ String.fromInt stackMb ++ " MiB, and " ++ why ++ ".")
+            , PP.empty
+            , PP.words "What it wrote on standard error, above, says why. Running out of memory, or out of that stack on a program nested deeper than it holds, is a limit of this compiler; anything else is a defect in it."
+            ]
+        )
+
+
+{-| The request this thread was started with, or `""` on the main thread. -}
+@extern(js, "BackendWorker", "request")
+request : Task x String
+
+
+{-| A worker with a stack of the given MiB, handed the request; the task fails
+with why if it ends without an answer. -}
+@extern(js, "BackendWorker", "run")
+run : Int -> String -> Task String String
+
+
+{-| The answer, to the thread that started this one. -}
+@extern(js, "BackendWorker", "answer")
+answer : String -> Task x {}

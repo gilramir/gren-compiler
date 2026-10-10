@@ -263,7 +263,11 @@ body ctx verb union@(Can.Union _ ctors _ _) args =
     [left, right] ->
       do
         branches <- traverse (branch ctx verb union) ctors
-        Result.ok (at ctx (Can.Case (local ctx left) (map (\mk -> mk right) branches)))
+        let walk = at ctx (Can.Case (local ctx left) (map (\mk -> mk left right) branches))
+        Result.ok $
+          if byIndex verb union
+            then at ctx (Can.Let (indexDef ctx union) walk)
+            else walk
     _ ->
       Result.throw (Error.DeriveMethodShape (_region ctx) (_typeName ctx) (_v_method verb))
 
@@ -274,14 +278,14 @@ body ctx verb union@(Can.Union _ ctors _ _) args =
 -- constructor, because §2.2 orders them by declaration, so it lists the ones
 -- declared __before__ this one explicitly and lets the wildcard cover the ones
 -- declared after. That is @i + 2@ inner branches for the @i@th constructor and
--- so quadratically many for the type, which is the price of deriving an
--- ordering without a primitive that reads a constructor's index. Gren custom
--- types are small and this generator is the only thing that pays it.
-branch :: Ctx -> Verb -> Can.Union -> Can.Ctor -> Result i w (Name.Name -> Can.CaseBranch)
+-- so quadratically many for the type. Past 'indexedAbove' constructors the
+-- listing is not written: one wildcard compares the two constructors' indices,
+-- which a local function of one branch per constructor answers ('byIndex').
+branch :: Ctx -> Verb -> Can.Union -> Can.Ctor -> Result i w (Name.Name -> Name.Name -> Can.CaseBranch)
 branch ctx verb union ctor@(Can.Ctor _ index _ argTypes) =
   do
     comparisons <- traverse (field ctx verb []) (zip [0 :: Int ..] argTypes)
-    Result.ok $ \right ->
+    Result.ok $ \left right ->
       let lefts = [Name.fromChars ("$l" ++ show i) | i <- [0 .. length argTypes - 1]]
           rights = [Name.fromChars ("$r" ++ show i) | i <- [0 .. length argTypes - 1]]
           matched =
@@ -291,22 +295,71 @@ branch ctx verb union ctor@(Can.Ctor _ index _ argTypes) =
               [ compare_ (local ctx l) (local ctx r)
               | (compare_, l, r) <- recursiveLast ctx verb (zip argTypes (zip3 comparisons lefts rights))
               ]
+          indexed = byIndex verb union
           earlier =
             [ Can.CaseBranch (anonymousPattern ctx union other) (_v_mismatch verb ctx LT)
             | other@(Can.Ctor _ otherIndex _ _) <- namedCtors union,
               Index.toMachine otherIndex < Index.toMachine index,
-              distinguishesCtors verb
+              distinguishesCtors verb,
+              not indexed
             ]
-          wildcard =
-            [ Can.CaseBranch (A.At (_region ctx) Can.PAnything) (_v_mismatch verb ctx GT)
-            | Index.toMachine index < numCtors union - 1 || not (distinguishesCtors verb),
-              numCtors union > 1
-            ]
+          indexOf side =
+            call ctx (local ctx nameIndex) [local ctx side]
+          wildcard
+            | indexed =
+                [ Can.CaseBranch
+                    (A.At (_region ctx) Can.PAnything)
+                    (call ctx (method ctx verb) [indexOf left, indexOf right])
+                ]
+            | otherwise =
+                [ Can.CaseBranch (A.At (_region ctx) Can.PAnything) (_v_mismatch verb ctx GT)
+                | Index.toMachine index < numCtors union - 1 || not (distinguishesCtors verb),
+                  numCtors union > 1
+                ]
           inner =
             Can.Case
               (local ctx right)
               (Can.CaseBranch (ctorPattern ctx union ctor rights) matched : earlier ++ wildcard)
        in Can.CaseBranch (ctorPattern ctx union ctor lefts) (at ctx inner)
+
+-- | Whether @compare@ is written over the constructors' indices rather than
+-- by listing, for each constructor, the ones declared before it: the listing is
+-- n²/2 branches, which a private type of 1,000 constructors took the front end
+-- past 4 GB to check, since every type a module does not expose derives @Ord@
+-- (geng-lang @m3-sweep.md@ D650, §SW30 item 3). A type of up to 'indexedAbove'
+-- constructors keeps the listing, at most 152 branches, which decides a
+-- mismatch with no call.
+byIndex :: Verb -> Can.Union -> Bool
+byIndex verb union =
+  distinguishesCtors verb && numCtors union > indexedAbove
+
+indexedAbove :: Int
+indexedAbove =
+  16
+
+-- | @$index : T a -> Int@, local to the method: the constructor's position in
+-- the declaration, which is §2.2's order. It is annotated because an @Int@
+-- literal on its own is any number.
+indexDef :: Ctx -> Can.Union -> Can.Def
+indexDef ctx union@(Can.Union vars ctors _ _) =
+  let subject = Name.fromChars "$v"
+      self = Can.TType (_home ctx) (_typeName ctx) (map Can.TVar vars)
+   in Can.TypedDef
+        (A.At (_region ctx) nameIndex)
+        (Map.fromList [(var, []) | var <- vars])
+        [(A.At (_region ctx) (Can.PVar subject), self)]
+        ( at ctx $
+            Can.Case
+              (local ctx subject)
+              [ Can.CaseBranch (anonymousPattern ctx union ctor) (at ctx (Can.Int (fromIntegral (Index.toMachine index))))
+              | ctor@(Can.Ctor _ index _ _) <- ctors
+              ]
+        )
+        (Can.TType ModuleName.basics Name.int [])
+
+nameIndex :: Name.Name
+nameIndex =
+  Name.fromChars "$index"
 
 -- | Whether the mismatch answer depends on /which/ other constructor it is.
 --

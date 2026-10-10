@@ -48,6 +48,7 @@ module AST.Canonical
     contextOrder,
     Origin (..),
     isAbstract,
+    isExposed,
     Union (..),
     Ctor (..),
     Exports (..),
@@ -570,6 +571,15 @@ isAbstract exports name =
       case Map.lookup name dict of
         Just (A.At _ ExportUnionClosed) -> True
         _ -> False
+
+-- | Whether a module exposes a name at all, with its constructors or without.
+isExposed :: Exports -> Name -> Bool
+isExposed exports name =
+  case exports of
+    ExportEverything _ ->
+      True
+    Export dict ->
+      Map.member name dict
 
 data Export
   = ExportValue

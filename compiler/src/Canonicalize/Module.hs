@@ -223,7 +223,7 @@ deriveClass ::
   Result i w (Map.Map Can.InstanceKey Can.Instance)
 deriveClass home ifaces env exports cunions typeName union sofar (A.At region className) =
   if not (Can.isAbstract exports typeName)
-    then Result.throw (Error.DeriveOnTransparent region typeName className)
+    then Result.throw (Error.DeriveOnTransparent region typeName className (Can.isExposed exports typeName))
     else do
       (cls, decl) <- Env.findClassDecl region env className
       let key = Can.InstanceKey cls home typeName

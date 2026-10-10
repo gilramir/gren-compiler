@@ -7,6 +7,7 @@ module Terminal.Native exposing
     , plan
     , prepare
     , requireProgram
+    , serve
     , sourceMaps
     , stageEnvironment
     , toolchain
@@ -24,17 +25,21 @@ the binary with `GENG_STAGE_WRITE=passed:dir`, then:
     <output>                            the C compiler over those and each
                                         package's src/Ext/*.c, with Boehm
 
-and the scratch directory goes when the build succeeds, unless the build asked
-for debug information (`--debug-info`, D512), which compiles with `-g` and
-keeps the directory, less the stage, since it holds the C and the runtime's
-sources a debugger shows for the frames that are not Geng's (§NA30).
+where the C is written by a worker thread with a stack of its own, since the
+backend recurses once for each level of the Core it reads (geng-lang D645,
+`Terminal.BackendWorker`); and the scratch directory goes when the build
+succeeds, unless the build asked for debug information (`--debug-info`, D512),
+which compiles with `-g` and keeps the directory, less the stage, since it
+holds the C and the runtime's sources a debugger shows for the frames that are
+not Geng's (§NA30).
 
 **The debug information names real files whatever the flags** (D513). The C's
 `#line`s name a Geng module by its package and path, as C5 keeps them
 (`app/Main.geng`, `core/Basics.geng`), and the compile maps each of those to
-the file on this machine with `-ffile-prefix-map`: every module of the project
-by its own path, and every package by its `src/`, each ending in `/` since the
-map is a plain prefix of the name. So the C is the same on every machine and
+the file on this machine with `-ffile-prefix-map`: the project's modules by the
+source directory most of them are in and any other by its own path (D646), and
+every package by its `src/`, each ending in `/` since the map is a plain prefix
+of the name. So the C is the same on every machine and
 only the command line carries this one's paths. The program is
 compiled with D490's flags, `-ffp-contract=off -fno-fast-math
 -fstack-clash-protection` whatever else is asked, at `-O2` for `geng make` and
@@ -79,9 +84,12 @@ import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Geng.C.Build as Build
 import Geng.C.Runtime as Runtime
+import Json.Decode as Decode
+import Json.Encode as Encode
 import Stream
 import Stream.Log
 import Task exposing (Task)
+import Terminal.BackendWorker as BackendWorker
 
 
 {-| Whether this project is built for the `native` target. -}
@@ -122,19 +130,87 @@ type alias Config =
     }
 
 
-{-| What the C's `#line`s name, mapped to the files: a module of the project by
-itself, since its source directories are the project's to choose, and a package
-by its `src/`. `name` is C5's (`Geng.C.Low.sourceName`), which is
-`app` for the project's own modules.
+{-| What the C's `#line`s name, mapped to the files: the project's modules by
+the source directory most of them are in, and each of the others by its own
+path, since its source directories are the project's to choose; and a package
+by its `src/`. `name` is C5's (`Geng.C.Low.sourceName`), which is `app` for the
+project's own modules.
+
+One map for the directory, and not one for each module as D513 had it, because
+gcc hands its options to `cc1` in one environment string that Linux refuses
+past 128 KB, which a project of 1,024 modules passed (geng-lang `m3-sweep.md`
+D646). A module outside that directory is mapped after it, since gcc and clang
+both take the last map that matches.
 -}
 sourceMaps :
     (Path -> String)
     -> { modules : Array { module_ : String, path : Path }, packages : Array { name : String, root : Path } }
     -> Array { name : String, path : String }
 sourceMaps toString project =
-    Array.map
-        (\m -> { name = "app/" ++ String.join "/" (String.split "." m.module_) ++ ".geng", path = toString m.path })
-        project.modules
+    let
+        located =
+            Array.map
+                (\m ->
+                    let
+                        relative =
+                            String.join "/" (String.split "." m.module_) ++ ".geng"
+
+                        file =
+                            toString m.path
+                    in
+                    { name = "app/" ++ relative
+                    , file = file
+                    , directory =
+                        if String.endsWith ("/" ++ relative) file then
+                            Just (String.dropLast (String.count relative) file)
+
+                        else
+                            Nothing
+                    }
+                )
+                project.modules
+
+        mostUsed =
+            located
+                |> Array.foldl
+                    (\m counts ->
+                        when m.directory is
+                            Just directory ->
+                                Dict.update directory (\n -> Just (Maybe.withDefault 0 n + 1)) counts
+
+                            Nothing ->
+                                counts
+                    )
+                    Dict.empty
+                |> Dict.foldl
+                    (\directory n best ->
+                        when best is
+                            Just b ->
+                                if n > b.n then
+                                    Just { directory = directory, n = n }
+
+                                else
+                                    best
+
+                            Nothing ->
+                                Just { directory = directory, n = n }
+                    )
+                    Nothing
+                |> Maybe.map .directory
+
+        modules =
+            when mostUsed is
+                Just directory ->
+                    Array.pushFirst { name = "app/", path = directory }
+                        (located
+                            |> Array.keepIf (\m -> m.directory /= Just directory)
+                            |> Array.map (\m -> { name = m.name, path = m.file })
+                        )
+
+                Nothing ->
+                    Array.map (\m -> { name = m.name, path = m.file }) located
+    in
+    modules
         ++ Array.map
             (\p -> { name = p.name ++ "/", path = toString (Path.append (Path.fromPosixString "src") p.root) ++ "/" })
             project.packages
@@ -293,59 +369,153 @@ build config thePlan =
             )
 
 
+{-| The backend's part, the stage linked and printed as C, runs on a thread of
+its own with a large stack (D645, `Terminal.BackendWorker`): it writes
+`program.c` and answers what it printed. -}
 buildStage : Config -> Plan -> Task Report Int
 buildStage config thePlan =
-    read config.fs thePlan.stage
+    BackendWorker.call
+        (Encode.object
+            [ { key = "target", value = Encode.string "native" }
+            , { key = "exe", value = Encode.string (config.toString thePlan.exe) }
+            ]
+        )
+        printedDecoder
         |> Task.andThen
-            (\files ->
-                when Build.link files |> Result.andThen (Build.generate { primPrototypes = False }) is
-                    Err why ->
+            (\printed ->
+                when printed is
+                    Refused why ->
                         Stream.Log.string config.stderr why
                             |> Task.onError (\_ -> Task.succeed {})
                             |> Task.andThen (\_ -> abandon config.fs thePlan)
                             |> Task.map (\_ -> 1)
 
-                    Ok out ->
-                        when out.header is
-                            Just header ->
-                                buildLibrary config thePlan out.text header
+                    Trouble trouble ->
+                        Task.fail (failureText trouble.what trouble.why)
 
-                            Nothing ->
-                                when out.noEntry is
-                                    Just why ->
-                                        abandon config.fs thePlan
-                                            |> Task.andThen
-                                                (\_ ->
-                                                    Task.fail <|
-                                                        Report.create
-                                                            "THIS PROGRAM HAS NOTHING TO RUN"
-                                                            Nothing
-                                                            (PP.words ("The backend printed no main for it: " ++ why ++ "."))
-                                                )
+                    Library header ->
+                        buildLibrary config thePlan header
 
-                                    Nothing ->
-                                        boehmSources {}
-                                            |> Task.andThen
-                                                (\boehm ->
-                                                    write config.fs thePlan.work (Array.pushFirst { name = "program.c", text = out.text } Runtime.sources)
-                                                        |> Task.andThen (\_ -> write config.fs (boehmDirectory thePlan) boehm)
-                                                )
-                                            |> Task.andThen (\_ -> externSources config)
-                                            |> Task.andThen
-                                                (\externs ->
-                                                    compileBoehm config thePlan [ "-DGC_THREADS" ]
-                                                        |> Task.andThen (\_ -> compile config thePlan externs)
-                                                )
-                                            |> Task.andThen (\_ -> finish config thePlan)
-                                            |> Task.map (\_ -> 0)
+                    NoEntry why ->
+                        abandon config.fs thePlan
+                            |> Task.andThen
+                                (\_ ->
+                                    Task.fail <|
+                                        Report.create
+                                            "THIS PROGRAM HAS NOTHING TO RUN"
+                                            Nothing
+                                            (PP.words ("The backend printed no main for it: " ++ why ++ "."))
+                                )
+
+                    Executable ->
+                        boehmSources {}
+                            |> Task.andThen
+                                (\boehm ->
+                                    write config.fs thePlan.work Runtime.sources
+                                        |> Task.andThen (\_ -> write config.fs (boehmDirectory thePlan) boehm)
+                                )
+                            |> Task.andThen (\_ -> externSources config)
+                            |> Task.andThen
+                                (\externs ->
+                                    compileBoehm config thePlan [ "-DGC_THREADS" ]
+                                        |> Task.andThen (\_ -> compile config thePlan externs)
+                                )
+                            |> Task.andThen (\_ -> finish config thePlan)
+                            |> Task.map (\_ -> 0)
             )
 
 
-{-| A library (geng-lang `m3-embed.md` §EM17): the C, the runtime with the
-boundary, Boehm's source and the header written, then Boehm compiled and the
-library linked against it. -}
-buildLibrary : Config -> Plan -> String -> (String -> String) -> Task Report Int
-buildLibrary config thePlan text header =
+{-| What the backend's part of a build answered (D645): the backend's refusal,
+written as it is; a file it could not read or write; a library, with its header
+if `--output` names one; a program with no `main`; or an executable. Each but
+the first two has written `program.c`. -}
+type Printed
+    = Refused String
+    | Trouble { what : String, why : String }
+    | Library (Maybe String)
+    | NoEntry String
+    | Executable
+
+
+printedDecoder : Decode.Decoder Printed
+printedDecoder =
+    Decode.oneOf
+        [ Decode.field "refused" Decode.string |> Decode.map Refused
+        , Decode.map2 (\what why -> Trouble { what = what, why = why })
+            (Decode.field "cannot" Decode.string)
+            (Decode.field "because" Decode.string)
+        , Decode.field "library" (Decode.nullable Decode.string) |> Decode.map Library
+        , Decode.field "noEntry" Decode.string |> Decode.map NoEntry
+        , Decode.field "executable" Decode.bool |> Decode.map (\_ -> Executable)
+        ]
+
+
+{-| The backend's part, on the worker's thread: a request `buildStage` wrote,
+answered as `printedDecoder` reads it. -}
+serve : FileSystem.Permission -> (String -> Path) -> Decode.Value -> Task Never String
+serve fs fromString request =
+    when Decode.decodeValue (Decode.field "exe" Decode.string) request is
+        Err e ->
+            Task.succeed (answer "refused" (Encode.string ("The backend's request was not one it reads: " ++ Decode.errorToString e)))
+
+        Ok exe ->
+            let
+                thePlan =
+                    paths (fromString exe)
+            in
+            readStage fs thePlan.stage
+                |> Task.andThen
+                    (\files ->
+                        when Build.link files |> Result.andThen (Build.generate { primPrototypes = False }) is
+                            Err why ->
+                                Task.succeed (answer "refused" (Encode.string why))
+
+                            Ok out ->
+                                FileSystem.writeFile fs (Bytes.fromString out.text) (Path.append (Path.fromPosixString "program.c") thePlan.work)
+                                    |> Task.mapError (\e -> { what = "I cannot write the C", why = FileSystem.errorToString e })
+                                    |> Task.map
+                                        (\_ ->
+                                            when out.header is
+                                                Just header ->
+                                                    when libraryName thePlan.exe is
+                                                        Ok name ->
+                                                            answer "library" (Encode.string (header name))
+
+                                                        Err _ ->
+                                                            answer "library" Encode.null
+
+                                                Nothing ->
+                                                    when out.noEntry is
+                                                        Just why ->
+                                                            answer "noEntry" (Encode.string why)
+
+                                                        Nothing ->
+                                                            answer "executable" (Encode.bool True)
+                                        )
+                    )
+                |> Task.onError
+                    (\trouble ->
+                        Task.succeed <|
+                            Encode.encode 0 <|
+                                Encode.object
+                                    [ { key = "cannot", value = Encode.string trouble.what }
+                                    , { key = "because", value = Encode.string trouble.why }
+                                    ]
+                    )
+
+
+answer : String -> Encode.Value -> String
+answer key value =
+    Encode.encode 0 (Encode.object [ { key = key, value = value } ])
+
+
+{-| A library (geng-lang `m3-embed.md` §EM17): the runtime with the boundary,
+Boehm's source and the header written beside the C, then Boehm compiled and the
+library linked against it. The header is the backend's for the name `--output`
+gives, which the worker found as `libraryName` does here, so it is there
+whenever the name is. -}
+buildLibrary : Config -> Plan -> Maybe String -> Task Report Int
+buildLibrary config thePlan header =
     when libraryName thePlan.exe is
         Err report ->
             abandon config.fs thePlan
@@ -355,9 +525,9 @@ buildLibrary config thePlan text header =
             boehmSources {}
                 |> Task.andThen
                     (\boehm ->
-                        write config.fs thePlan.work (Array.pushFirst { name = "program.c", text = text } (Runtime.sources ++ Runtime.library))
+                        write config.fs thePlan.work (Runtime.sources ++ Runtime.library)
                             |> Task.andThen (\_ -> write config.fs (boehmDirectory thePlan) boehm)
-                            |> Task.andThen (\_ -> write config.fs (Path.parentPath thePlan.exe |> Maybe.withDefault Path.empty) [ { name = name ++ ".h", text = header name } ])
+                            |> Task.andThen (\_ -> write config.fs (Path.parentPath thePlan.exe |> Maybe.withDefault Path.empty) [ { name = name ++ ".h", text = Maybe.withDefault "" header } ])
                     )
                 |> Task.andThen (\_ -> externSources config)
                 |> Task.andThen
@@ -640,10 +810,15 @@ cc config args =
             )
 
 
-read : FileSystem.Permission -> Path -> Task Report (Array Build.File)
-read fs directory =
+{-| The stage's Core files, in order of name, or the trouble reading them. -}
+readStage : FileSystem.Permission -> Path -> Task { what : String, why : String } (Array Build.File)
+readStage fs directory =
+    let
+        cannot e =
+            { what = "I cannot read the stage directory", why = FileSystem.errorToString e }
+    in
     FileSystem.listDirectory fs directory
-        |> Task.mapError (failure "I cannot read the stage directory")
+        |> Task.mapError cannot
         |> Task.andThen
             (\entries ->
                 entries
@@ -653,7 +828,7 @@ read fs directory =
                     |> Array.map
                         (\name ->
                             FileSystem.readFile fs (Path.append (Path.fromPosixString name) directory)
-                                |> Task.mapError (failure "I cannot read the stage directory")
+                                |> Task.mapError cannot
                                 |> Task.map (\data -> { name = name, data = data })
                         )
                     |> Task.sequence
@@ -662,12 +837,17 @@ read fs directory =
 
 failure : String -> FileSystem.Error -> Report
 failure what error =
+    failureText what (FileSystem.errorToString error)
+
+
+failureText : String -> String -> Report
+failureText what why =
     Report.create
         "CANNOT BUILD FOR NATIVE"
         Nothing
         (PP.verticalBlock
             [ PP.words (what ++ ":")
             , PP.empty
-            , PP.words (FileSystem.errorToString error)
+            , PP.words why
             ]
         )
