@@ -44,9 +44,15 @@ them (D500).
 
 **The C compiler is the machine's**, found as `Terminal.Beam` finds `erlc`
 (D390): `GENG_CC`, then `clang` on `PATH` (D496). `GENG_CFLAGS` is added to its
-command line, split on spaces, which is how a machine says where Boehm's header
-and library are when its compiler does not know. It comes after the
-optimization level, so an `-O` in it is the one the compiler takes.
+command line, split on spaces. It comes after the optimization level, so an
+`-O` in it is the one the compiler takes.
+
+**Every build carries its own Boehm** (geng-lang `m3-sweep.md` D644): its
+source is carried in this compiler compressed (D627), and is written out and
+compiled first, on its own, into an object the program links, so that a
+machine needs no Boehm of its own and its configuration is this compiler's.
+An executable's is threaded, as the release's configure builds it; its black
+list is larger than the release's default, which a deep stack filled (§SW28).
 
 A native build with no `main` is a library, `runtime = "host"` (geng-lang
 `m3-embed.md` D619, §EM17). The backend roots it at the values its module
@@ -55,10 +61,8 @@ and a header. The library's name is the output's file name less a leading
 `lib` and everything from its first dot, so `--output=libprobe.so` builds the
 library `probe`, whose functions are `probe_init` and the rest, and writes
 `probe.h` beside it (D617). Its runtime is the executable's with `geng_embed.c`
-beside it, compiled with `GENG_LIBRARY` defined to the name, and it carries
-its own Boehm, single-threaded and hidden (D616): Boehm's source is carried in
-this compiler compressed (D627), and is written out and compiled first, on its
-own, into an object the library links. The library is linked `-z nodelete`,
+beside it, compiled with `GENG_LIBRARY` defined to the name, and its Boehm is
+single-threaded and hidden (D616). The library is linked `-z nodelete`,
 since the fault handler it installs and the collector's roots point into it
 (§EM11), and links nothing but libc and libm.
 
@@ -320,9 +324,18 @@ buildStage config thePlan =
                                                 )
 
                                     Nothing ->
-                                        write config.fs thePlan.work (Array.pushFirst { name = "program.c", text = out.text } Runtime.sources)
+                                        boehmSources {}
+                                            |> Task.andThen
+                                                (\boehm ->
+                                                    write config.fs thePlan.work (Array.pushFirst { name = "program.c", text = out.text } Runtime.sources)
+                                                        |> Task.andThen (\_ -> write config.fs (boehmDirectory thePlan) boehm)
+                                                )
                                             |> Task.andThen (\_ -> externSources config)
-                                            |> Task.andThen (\externs -> compile config thePlan externs)
+                                            |> Task.andThen
+                                                (\externs ->
+                                                    compileBoehm config thePlan [ "-DGC_THREADS" ]
+                                                        |> Task.andThen (\_ -> compile config thePlan externs)
+                                                )
                                             |> Task.andThen (\_ -> finish config thePlan)
                                             |> Task.map (\_ -> 0)
             )
@@ -349,7 +362,7 @@ buildLibrary config thePlan text header =
                 |> Task.andThen (\_ -> externSources config)
                 |> Task.andThen
                     (\externs ->
-                        compileBoehm config thePlan
+                        compileBoehm config thePlan []
                             |> Task.andThen (\_ -> compileLibrary config thePlan name externs)
                     )
                 |> Task.andThen (\_ -> finish config thePlan)
@@ -397,7 +410,7 @@ libraryName exe =
 
 
 {-| Boehm's source, out of this compiler (D627): a function, so that it is
-decoded only by a build that needs it, and not each time the compiler starts. -}
+decoded only by a native build, and not each time the compiler starts. -}
 boehmSources : {} -> Task Report (Array { name : String, text : String })
 boehmSources {} =
     Stream.fromArray [ Build.base64 Runtime.boehm ]
@@ -418,7 +431,7 @@ boehmSources {} =
                 Report.create
                     "THIS COMPILER'S BOEHM IS BROKEN"
                     Nothing
-                    (PP.words ("A library carries its own Boehm, whose source this compiler carries, and " ++ why ++ ". That is a defect in the compiler."))
+                    (PP.words ("A native build carries its own Boehm, whose source this compiler carries, and " ++ why ++ ". That is a defect in the compiler."))
             )
 
 
@@ -494,19 +507,25 @@ externSources config =
             )
 
 
+{-| The executable: the program and the runtime, and Boehm's object, its
+headers ahead of any `GENG_CFLAGS` names, as a library's are. -}
 compile : Config -> Plan -> Array Path -> Task Report {}
 compile config thePlan externs =
     let
         in_ name =
             config.toString (Path.append (Path.fromPosixString name) thePlan.work)
+
+        boehm file =
+            config.toString (Path.append (Path.fromPosixString file) (boehmDirectory thePlan))
     in
     cc config
         (programFlags config thePlan
+            ++ [ "-I", boehm "include/gc", "-I", boehm "include" ]
             ++ config.tools.flags
             ++ [ "-I", config.toString thePlan.work, "-o", config.toString thePlan.exe ]
-            ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c" ]
+            ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c", boehm "gc.o" ]
             ++ Array.map config.toString externs
-            ++ [ "-lgc", "-lpthread", "-lm" ]
+            ++ [ "-lpthread", "-lm" ]
         )
 
 
@@ -538,18 +557,20 @@ debugFlags config =
         []
 
 
-{-| Boehm, on its own: the release's flags for a library, with nothing of the
-program's, since it is the release's C and not the backend's (D626). Its headers
-come first, ahead of any `GENG_CFLAGS` names, so that a machine's own Boehm is
-not the one compiled against. -}
-compileBoehm : Config -> Plan -> Task Report {}
-compileBoehm config thePlan =
+{-| Boehm, on its own: the release's flags, with nothing of the program's,
+since it is the release's C and not the backend's (D626), and `GC_THREADS` for
+an executable, which `geng_gc.c` builds as the release's configure does (D644).
+Its headers come first, ahead of any `GENG_CFLAGS` names, so that a machine's
+own Boehm is not the one compiled against. -}
+compileBoehm : Config -> Plan -> Array String -> Task Report {}
+compileBoehm config thePlan defines =
     let
         boehm name =
             config.toString (Path.append (Path.fromPosixString name) (boehmDirectory thePlan))
     in
     cc config
         ([ "-c", config.optimization, "-fPIC", "-fvisibility=hidden" ]
+            ++ defines
             ++ debugFlags config
             ++ [ "-I", boehm "include/gc" ]
             ++ config.tools.flags
@@ -613,7 +634,7 @@ cc config args =
                             (PP.verticalBlock
                                 [ PP.words (config.tools.cc ++ " exited with status " ++ String.fromInt exitCode ++ ", and what it printed is above.")
                                 , PP.empty
-                                , PP.words "What is left for it to refuse once the backend has printed every binding is a src/Ext/*.c file of one of your packages, a missing Boehm (set GENG_CFLAGS to where its header and library are), or a defect in the backend."
+                                , PP.words "What is left for it to refuse once the backend has printed every binding is a src/Ext/*.c file of one of your packages, or a defect in the backend."
                                 ]
                             )
             )
