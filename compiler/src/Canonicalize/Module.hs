@@ -187,7 +187,7 @@ deriveInstances ::
   [A.Located Src.Union] ->
   Result i w (Map.Map Can.InstanceKey Can.Instance)
 deriveInstances home ifaces env exports cunions unions =
-  foldM (deriveOne home ifaces env exports cunions) Map.empty $
+  fmap fst . foldM (deriveOne home ifaces env exports cunions) (Map.empty, Set.empty) $
     [ (region, name, classes)
     | A.At region (Src.Union (A.At _ name) _ _ classes@(_ : _) _) <- unions
     ]
@@ -198,9 +198,9 @@ deriveOne ::
   Env.Env ->
   Can.Exports ->
   Map.Map Name.Name Can.Union ->
-  Map.Map Can.InstanceKey Can.Instance ->
+  (Map.Map Can.InstanceKey Can.Instance, Set.Set Name.Name) ->
   (A.Region, Name.Name, [A.Located Name.Name]) ->
-  Result i w (Map.Map Can.InstanceKey Can.Instance)
+  Result i w (Map.Map Can.InstanceKey Can.Instance, Set.Set Name.Name)
 deriveOne home ifaces env exports cunions sofar (_, typeName, classNames) =
   case Map.lookup typeName cunions of
     Nothing ->
@@ -218,10 +218,10 @@ deriveClass ::
   Map.Map Name.Name Can.Union ->
   Name.Name ->
   Can.Union ->
-  Map.Map Can.InstanceKey Can.Instance ->
+  (Map.Map Can.InstanceKey Can.Instance, Set.Set Name.Name) ->
   A.Located Name.Name ->
-  Result i w (Map.Map Can.InstanceKey Can.Instance)
-deriveClass home ifaces env exports cunions typeName union sofar (A.At region className) =
+  Result i w (Map.Map Can.InstanceKey Can.Instance, Set.Set Name.Name)
+deriveClass home ifaces env exports cunions typeName union (sofar, taken) (A.At region className) =
   if not (Can.isAbstract exports typeName)
     then Result.throw (Error.DeriveOnTransparent region typeName className (Can.isExposed exports typeName))
     else do
@@ -230,10 +230,10 @@ deriveClass home ifaces env exports cunions typeName union sofar (A.At region cl
       if Map.member key sofar
         then Result.throw (Error.DeriveTwice region typeName className)
         else do
-          let witness = Instance.witnessNameOf sofar className typeName
+          let witness = Instance.witnessNameOf taken className typeName
           instance_ <-
             Derive.derive home (boolUnion home ifaces cunions) (orderUnion home ifaces cunions) region typeName union cls decl witness
-          Result.ok (Map.insert key instance_ sofar)
+          Result.ok (Map.insert key instance_ sofar, Set.insert witness taken)
 
 -- | `Basics.Bool`, which a derived `eq` answers with, and `Basics.Order`,
 -- which a derived `compare` answers with.

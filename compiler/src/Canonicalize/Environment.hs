@@ -149,7 +149,10 @@ addLocals names (Env home vars ts cs bs cls ms qvs qts qcs qcls qms) =
     newVars <-
       Map.mergeA
         (Map.mapMissing addLocalLeft)
-        (Map.mapMissing (\_ homes -> homes))
+        -- Kept as it is, which "Data.Map" can do a whole subtree at a time;
+        -- @mapMissing@ with the identity rebuilt every name in scope for each
+        -- function's arguments (D689, @m3-sweep.md@ §SW40).
+        Map.preserveMissing
         (Map.zipWithAMatched addLocalBoth)
         names
         vars

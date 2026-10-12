@@ -66,12 +66,24 @@ groups names deps =
       -- the smallest element can be taken from.
       key i = (minimum (byIndex Map.! i), i)
 
+      -- Each group waits on a count of the groups it depends on, and a group
+      -- emitted counts down the ones that depend on it (D687, @m3-sweep.md@
+      -- §SW40). The ready set is the one the rule names at every step; what a
+      -- step costs is the emitted group's dependents, where it was every group
+      -- still waiting, n² over a chain of n bindings.
+      dependents = Map.fromListWith (++) [(j, [i]) | (i, ds) <- Map.toList groupDeps, j <- Set.toList ds]
+
       kahn ready waiting =
         case Set.minView ready of
           Nothing -> []
           Just ((_, i), rest) ->
-            let (freed, stillWaiting) = Map.partition Set.null (Map.map (Set.delete i) waiting)
-             in (byIndex Map.! i) : kahn (Set.union rest (Set.fromList (map key (Map.keys freed)))) stillWaiting
+            let release (r, w) d =
+                  case Map.lookup d w of
+                    Just 1 -> (Set.insert (key d) r, Map.delete d w)
+                    Just n -> (r, Map.insert d (n - 1) w)
+                    Nothing -> (r, w)
+                (ready', waiting') = List.foldl' release (rest, waiting) (Map.findWithDefault [] i dependents)
+             in (byIndex Map.! i) : kahn ready' waiting'
 
       (initial, blocked) = Map.partition Set.null groupDeps
-   in kahn (Set.fromList (map key (Map.keys initial))) blocked
+   in kahn (Set.fromList (map key (Map.keys initial))) (Map.map Set.size blocked)

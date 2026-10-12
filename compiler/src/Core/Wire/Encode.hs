@@ -81,7 +81,7 @@ str = Coerce.coerce
 -- encode time or, worse, a table that a second frontend would not reproduce.
 data Table
   = Collecting
-  | Resolved !(Map.Map Str Int) !(Map.Map QualName Int) !(Map.Map Type Int)
+  | Resolved !(Map.Map Str Int) !(Map.Map QualName Int) !(Map.Map Tall Int)
 
 -- | Bytes and how many of them there are — or the strings they would need, or
 -- the reasons there are none.
@@ -94,8 +94,13 @@ data Table
 -- (@docs\/m1b-int.md@ §I20). Accumulating the messages rather than stopping at
 -- the first is kept: it costs nothing and the two remaining producers are the
 -- kind of bug one wants all of.
+--
+-- What the collecting pass reports is sets, not lists (D686, @m3-sweep.md@
+-- §SW40). Every table is built from a set anyway, and a list joined with @++@
+-- copied everything under an expression once for each expression above it, so
+-- an @else if@ chain or an operator chain n long cost n² in this one function.
 data Piece
-  = Piece !Int B.Builder ![Str] ![QualName] ![Type]
+  = Piece !Int B.Builder !(Set.Set Str) !(Set.Set QualName) !(Set.Set Tall)
   | Bad [String]
 
 instance Semigroup Piece where
@@ -103,10 +108,10 @@ instance Semigroup Piece where
   Bad a <> _ = Bad a
   _ <> Bad b = Bad b
   Piece n1 b1 s1 q1 t1 <> Piece n2 b2 s2 q2 t2 =
-    Piece (n1 + n2) (b1 <> b2) (s1 ++ s2) (q1 ++ q2) (t1 ++ t2)
+    Piece (n1 + n2) (b1 <> b2) (Set.union s1 s2) (Set.union q1 q2) (Set.union t1 t2)
 
 instance Monoid Piece where
-  mempty = Piece 0 mempty [] [] []
+  mempty = Piece 0 mempty Set.empty Set.empty Set.empty
 
 -- | What an encoder reads: the module's tables, and where it is.
 --
@@ -161,13 +166,36 @@ run :: Enc -> Either [String] B.Builder
 run enc =
   case runEnc enc (Env Collecting Nothing) of
     Bad problems -> Left problems
-    Piece _ _ strings quals types ->
-      let stringTbl = Map.fromList (zip (Set.toAscList (Set.fromList strings)) [1 ..])
-          qualTbl = Map.fromList (zip (List.sortBy qualOrder (Set.toList (Set.fromList quals))) [1 ..])
-          typeTbl = buildTypes stringTbl qualTbl types
-       in case runEnc enc (Env (Resolved stringTbl qualTbl typeTbl) Nothing) of
-            Bad problems -> Left problems
-            Piece _ builder _ _ _ -> Right builder
+    Piece _ _ strings0 quals0 roots ->
+      case closeTypes roots of
+        Left problems -> Left problems
+        Right (types, typeStrings, typeQuals) ->
+          let stringTbl = Map.fromDistinctAscList (zip (Set.toAscList (Set.union strings0 typeStrings)) [1 ..])
+              qualTbl = Map.fromList (zip (List.sortBy qualOrder (Set.toList (Set.union quals0 typeQuals))) [1 ..])
+              typeTbl = buildTypes stringTbl qualTbl (Set.toList types)
+           in case runEnc enc (Env (Resolved stringTbl qualTbl typeTbl) Nothing) of
+                Bad problems -> Left problems
+                Piece _ builder _ _ _ -> Right builder
+
+-- | Every type inside the ones a module names, and the strings and qualified
+-- names those mention, each distinct type walked once (D686).
+--
+-- The collecting pass reports a type and not what is inside it, since a
+-- module's expressions name the same few types thousands of times over: walking
+-- each occurrence made the pass cost the sum of their sizes, n² for an update
+-- of an n-field record and n³ for a type n deep. Running 'typeEnc' collecting
+-- reports a type's children, because it writes each through 'typ' or
+-- 'repType', and a child already in the set has had its own children found.
+closeTypes :: Set.Set Tall -> Either [String] (Set.Set Tall, Set.Set Str, Set.Set QualName)
+closeTypes roots = go (Set.toList roots) roots Set.empty Set.empty
+  where
+    go [] seen strings quals = Right (seen, strings, quals)
+    go (Tall _ t : rest) seen strings quals =
+      case runEnc (typeEnc t) (Env Collecting Nothing) of
+        Bad problems -> Left problems
+        Piece _ _ strings' quals' children ->
+          let new = Set.difference children seen
+           in go (Set.toList new ++ rest) (Set.union seen new) (Set.union strings strings') (Set.union quals quals')
 
 -- | The order D93 states, and it is __not__ the derived one.
 --
@@ -213,18 +241,34 @@ qualOrder (QualName (ModuleName.Canonical p1 m1) n1) (QualName (ModuleName.Canon
 -- @Set.toList@ happened to produce: the tag says which constructor, the counted
 -- lists say where each field ends, and an index determines its entry, so two
 -- types with the same key are the same type.
-buildTypes :: Map.Map Str Int -> Map.Map QualName Int -> [Type] -> Map.Map Type Int
+buildTypes :: Map.Map Str Int -> Map.Map QualName Int -> [Tall] -> Map.Map Tall Int
 buildTypes strings quals types =
   List.foldl' assign Map.empty (Map.elems byHeight)
   where
-    byHeight :: Map.Map Int [Type]
-    byHeight = Map.fromListWith (++) [(typeHeight t, [t]) | t <- Set.toList (Set.fromList types)]
+    byHeight :: Map.Map Int [Tall]
+    byHeight = Map.fromListWith (++) [(h, [k]) | k@(Tall h _) <- Set.toList (Set.fromList types)]
 
     assign table group =
       List.foldl'
-        (\m (i, t) -> Map.insert t i m)
+        (\m (i, k) -> Map.insert k i m)
         table
-        (zip [Map.size table + 1 ..] (List.sortOn (typeSortKey strings quals table) group))
+        (zip [Map.size table + 1 ..] (List.sortOn (\(Tall _ t) -> typeSortKey strings quals table t) group))
+
+-- | A type and its height, which is the order every set and table of types in
+-- this module keeps (D690, @m3-sweep.md@ §SW40).
+--
+-- The derived order on 'Type' compares two types until they differ, and two
+-- types of a module are most often a type and one a level shorter or taller
+-- that agree all the way down to where it ends: @Maybe (Maybe Int)@ and
+-- @Maybe Int@, an array's element and the array. Compared height first, they
+-- differ at the first field, where a type n deep made every comparison cost n
+-- and a module of such types n³. Two types of different heights are never
+-- equal, so the order is still one in which equal means the same type.
+data Tall = Tall !Int Type
+  deriving (Eq, Ord)
+
+tall :: Type -> Tall
+tall t = Tall (typeHeight t) t
 
 -- | One more than the tallest type inside it; a 'TVar' is 1.
 typeHeight :: Type -> Int
@@ -240,7 +284,7 @@ typeHeight t =
 
 -- | The rest of 'buildTypes'\' key, over a table that already holds every type
 -- shorter than this one.
-typeSortKey :: Map.Map Str Int -> Map.Map QualName Int -> Map.Map Type Int -> Type -> [Int]
+typeSortKey :: Map.Map Str Int -> Map.Map QualName Int -> Map.Map Tall Int -> Type -> [Int]
 typeSortKey strings quals table = keyOf
   where
     keyOf t =
@@ -260,12 +304,12 @@ typeSortKey strings quals table = keyOf
 
     strIx s = fromIntegral (indexOf strings (str s))
     qualIx q = Map.findWithDefault 0 q quals
-    typeIx t = Map.findWithDefault 0 t table
+    typeIx t = Map.findWithDefault 0 (tall t) table
 
 -- PRIMITIVES
 
 varintP :: Word64 -> Piece
-varintP n = Piece (varintSize n) (go n) [] [] []
+varintP n = Piece (varintSize n) (go n) Set.empty Set.empty Set.empty
   where
     go w =
       if w < 0x80
@@ -282,7 +326,7 @@ key :: Word32 -> WireType -> Enc
 key tag wire = lift (keyP tag wire)
 
 bytes :: Int -> B.Builder -> Enc
-bytes n b = lift (Piece n b [] [] [])
+bytes n b = lift (Piece n b Set.empty Set.empty Set.empty)
 
 -- FIELDS
 --
@@ -342,10 +386,10 @@ withIndex s0 what =
    in Enc $ \env ->
         case _table env of
           Collecting ->
-            let collected = if Utf8.size s == 0 then [] else [s]
-             in case runEnc (what 0) env of
-                  Bad problems -> Bad problems
-                  Piece _ _ more quals types -> Piece 0 mempty (collected ++ more) quals types
+            case runEnc (what 0) env of
+              Bad problems -> Bad problems
+              Piece _ _ more quals types ->
+                Piece 0 mempty (if Utf8.size s == 0 then more else Set.insert s more) quals types
           Resolved m _ _ -> runEnc (what (indexOf m s)) env
 
 -- QUALIFIED NAMES
@@ -364,7 +408,8 @@ withQual q what =
       Collecting ->
         case runEnc (what 0) env of
           Bad problems -> Bad problems
-          Piece _ _ strings more types -> Piece 0 mempty (qualStrings q ++ strings) (q : more) types
+          Piece _ _ strings more types ->
+            Piece 0 mempty (Set.union (Set.fromList (qualStrings q)) strings) (Set.insert q more) types
       Resolved _ m _ ->
         case Map.lookup q m of
           Just i -> runEnc (what (fromIntegral i)) env
@@ -407,27 +452,22 @@ repQual tag qs = go qs mempty
 -- | Collect a type on the first pass, and do @what@ with its index on the
 -- second.
 --
--- The collecting side runs @typeEnc t@ rather than inspecting the type, which
--- is what makes the recursion free: 'typeEnc' writes a nested type through
--- 'typ' or 'repType', so running it collects every type inside @t@, along with
--- every string and qualified name any of them mentions. That is D93's bug in
--- its deeper form — a table's entries index into the tables before it — and
--- the fix is the same shape: whatever the entry would write, the collecting
--- pass has to have reported.
+-- The collecting side reports @t@ alone, and 'closeTypes' finds what is inside
+-- it once the pass is over: every type inside @t@, along with every string and
+-- qualified name any of them mentions. That is D93's bug in its deeper form — a
+-- table's entries index into the tables before it — and the fix is the same
+-- shape: whatever the entry would write, the collecting pass has to have
+-- reported, here by way of 'closeTypes' (D686).
 withType :: Type -> (Word32 -> Enc) -> Enc
 withType t what =
   Enc $ \env ->
     case _table env of
       Collecting ->
-        case runEnc (typeEnc t) env of
+        case runEnc (what 0) env of
           Bad problems -> Bad problems
-          Piece _ _ strings quals inner ->
-            case runEnc (what 0) env of
-              Bad problems -> Bad problems
-              Piece _ _ strings' quals' more ->
-                Piece 0 mempty (strings ++ strings') (quals ++ quals') (t : inner ++ more)
+          Piece _ _ strings quals more -> Piece 0 mempty strings quals (Set.insert (tall t) more)
       Resolved _ _ m ->
-        case Map.lookup t m of
+        case Map.lookup (tall t) m of
           Just i -> runEnc (what (fromIntegral i)) env
           Nothing ->
             -- Unreachable, for 'indexOf'\'s reason: one 'Enc', run twice.
@@ -527,7 +567,7 @@ typeTable =
     case _table env of
       Collecting -> mempty
       Resolved _ _ m ->
-        runEnc (foldMap (msg 3 . typeEnc) (map fst (List.sortOn snd (Map.toList m)))) env
+        runEnc (foldMap (\(Tall _ t) -> msg 3 (typeEnc t)) (map fst (List.sortOn snd (Map.toList m)))) env
 
 -- MESSAGES
 

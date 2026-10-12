@@ -77,18 +77,18 @@ add ::
   Instance.Instances ->
   Result i w Instance.Instances
 add home classes boolDecl orderDecl exports unions regions imported sofar =
-  foldM addOne sofar classes
+  fst <$> foldM addOne (sofar, Instance.witnessesOf sofar) classes
   where
     -- One pass per class, and each sees what the pass before it produced. The
     -- passes are independent all the same: 'settle' is keyed by the class it
     -- is settling, so @Eq@'s answer for a type never decides @Ord@'s. What is
     -- shared is the map they are both writing into.
-    addOne acc (cls, decl) =
+    addOne (acc, names) (cls, decl) =
       let candidates = transparent exports unions
           taken = Set.union (Map.keysSet acc) (Map.keysSet imported)
           known named = Set.member (keyOf cls named) taken
           deriving_ = Set.filter (\name -> not (known (home, name))) (settle home known candidates)
-       in foldM (generate home cls decl boolDecl orderDecl unions regions) acc (Set.toAscList deriving_)
+       in foldM (generate home cls decl boolDecl orderDecl unions regions) (acc, names) (Set.toAscList deriving_)
 
 -- | The module's types that derive at all: a custom type whose constructors it
 -- exposes, or that it does not expose (§2.5 — structure is the meaning when
@@ -200,16 +200,16 @@ generate ::
   Can.Union ->
   Map.Map Name.Name Can.Union ->
   Map.Map Name.Name A.Region ->
-  Instance.Instances ->
+  (Instance.Instances, Set.Set Name.Name) ->
   Name.Name ->
-  Result i w Instance.Instances
-generate home cls decl boolDecl orderDecl unions regions sofar typeName =
+  Result i w (Instance.Instances, Set.Set Name.Name)
+generate home cls decl boolDecl orderDecl unions regions (sofar, taken) typeName =
   case Map.lookup typeName unions of
     Nothing ->
-      Result.ok sofar
+      Result.ok (sofar, taken)
     Just union ->
       do
-        let witness = Instance.witnessNameOf sofar (classNameOf cls) typeName
+        let witness = Instance.witnessNameOf taken (classNameOf cls) typeName
         let region = Map.findWithDefault A.zero typeName regions
         -- Nothing generated here can fail: 'settle' has already refused every
         -- component 'Canonicalize.Derive' would have reported. The region is
@@ -218,7 +218,7 @@ generate home cls decl boolDecl orderDecl unions regions sofar typeName =
         -- the only thing a reader can be pointed at.
         instance_ <-
           Derive.derive home boolDecl orderDecl region typeName union cls decl witness
-        Result.ok (Map.insert (Can.InstanceKey cls home typeName) instance_ sofar)
+        Result.ok (Map.insert (Can.InstanceKey cls home typeName) instance_ sofar, Set.insert witness taken)
 
 classNameOf :: Can.Class -> Name.Name
 classNameOf (Can.Class _ name) =

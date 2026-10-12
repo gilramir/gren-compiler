@@ -30,6 +30,7 @@ module Canonicalize.Instance
     Instances,
     specialize,
     witnessNameOf,
+    witnessesOf,
   )
 where
 
@@ -91,16 +92,16 @@ canonicalizeInto ::
   [A.Located Src.Instance] ->
   Result i [W.Warning] Instances
 canonicalizeInto pkg imported env sofar instances =
-  foldM (addInstance pkg imported env) sofar instances
+  fst <$> foldM (addInstance pkg imported env) (sofar, witnessesOf sofar) instances
 
 addInstance ::
   Pkg.Name ->
   Map.Map Can.InstanceKey Can.InstanceHead ->
   Env.Env ->
-  Instances ->
+  (Instances, Set.Set Name.Name) ->
   A.Located Src.Instance ->
-  Result i [W.Warning] Instances
-addInstance pkg imported env sofar (A.At region (Src.Instance maybeContext srcHead methods _)) =
+  Result i [W.Warning] (Instances, Set.Set Name.Name)
+addInstance pkg imported env (sofar, taken) (A.At region (Src.Instance maybeContext srcHead methods _)) =
   do
     (classRegion, srcClassName, srcArg) <- splitHead srcHead
 
@@ -131,7 +132,7 @@ addInstance pkg imported env sofar (A.At region (Src.Instance maybeContext srcHe
                       Can._ih_con = home,
                       Can._ih_conName = name,
                       Can._ih_args = args,
-                      Can._ih_witness = witnessNameOf sofar className name,
+                      Can._ih_witness = witnessNameOf taken className name,
                       Can._ih_context = context,
                       Can._ih_methods = Map.empty
                     }
@@ -150,7 +151,7 @@ addInstance pkg imported env sofar (A.At region (Src.Instance maybeContext srcHe
       then Result.throw (Error.InstanceDuplicate region className (Can._ih_conName head_))
       else do
         canMethods <- canonicalizeMethods env region className decl head_ methods
-        Result.ok (Map.insert key (Can.Instance head_ Can.Written canMethods) sofar)
+        Result.ok (Map.insert key (Can.Instance head_ Can.Written canMethods) sofar, Set.insert (Can._ih_witness head_) taken)
 
 -- | The class's methods at this head, which is what a witness for the instance
 -- has to hold (§G26).
@@ -171,14 +172,23 @@ methodTypes head_ (Can.ClassDecl param published) =
 -- modules; the module can see when that happens, so the answer is an index in
 -- declaration order rather than a scheme that flattens four module names into
 -- a name and hopes it stays injective.
-witnessNameOf :: Instances -> Name.Name -> Name.Name -> Name.Name
-witnessNameOf sofar className conName =
+--
+-- The names already taken are a set the caller keeps beside its instances, and
+-- not read out of them, because a module deriving for n types asked a list of
+-- every instance before it n times (D688, @m3-sweep.md@ §SW40).
+witnessNameOf :: Set.Set Name.Name -> Name.Name -> Name.Name -> Name.Name
+witnessNameOf taken className conName =
   let base = "$i$" ++ Name.toChars className ++ "$" ++ Name.toChars conName
-      taken = [Can._ih_witness (Can._in_head i) | i <- Map.elems sofar]
       pick n =
         let candidate = Name.fromChars (if n == (0 :: Int) then base else base ++ "$" ++ show n)
-         in if candidate `elem` taken then pick (n + 1) else candidate
+         in if Set.member candidate taken then pick (n + 1) else candidate
    in pick 0
+
+-- | The witness names a map of instances already uses, which is where a fold
+-- that names more of them starts its 'witnessNameOf' set.
+witnessesOf :: Instances -> Set.Set Name.Name
+witnessesOf sofar =
+  Set.fromList [Can._ih_witness (Can._in_head i) | i <- Map.elems sofar]
 
 -- | `classes.md` §8.3's gate, which classes and instances share.
 --
