@@ -403,7 +403,13 @@ scope prog ctx recursive binds body tipe sp =
     first <- gets _nextId
     let sub = _sub ctx
         numbered = zip [first ..] binds
-        isGeneric (Core.Bind b _) = not (Set.null (freeVars (substT sub (Core._binderType b))))
+        -- Unquantified, as 'local' reads it: "Core.Pass.Specialize" and
+        -- "Core.Pass.FoldSpec" bind a local's copy at @forall a. ...@, whose
+        -- @a@ 'freeVars' does not count, and a copy walked where it is as
+        -- though closed had its @a@ made @{}@ (D493) although values of it
+        -- are built: a let-bound function pushing its argument onto a
+        -- Builder pushed it as a unit (geng-lang @m3-sweep.md@ §SW37).
+        isGeneric (Core.Bind b _) = not (Set.null (freeVars (substT sub (Specialize.unquantified (Core._binderType b)))))
         local env i (Core.Bind b v) =
           let t = substT sub (Specialize.unquantified (Core._binderType b))
            in Local i (Set.toAscList (freeVars t)) t v b sub env

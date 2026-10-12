@@ -432,8 +432,14 @@ classify ctx a =
   case Core._exprValue a of
     Core.ELam _ _ -> Right a
     Core.EGlobal _ -> Right a
+    -- A let-bound function is its definition at this use's type: one that
+    -- generalized is written in its own variables, and copied as written
+    -- its captures kept them, which "Core.Pass.Mono" could not determine and
+    -- made @{}@ (D493), so a value it pushed onto a Builder was pushed as a
+    -- unit (geng-lang @m3-sweep.md@ §SW37).
     Core.EVar n
-      | Just l <- Map.lookup n (_lets ctx) -> Right l
+      | Just l <- Map.lookup n (_lets ctx) ->
+          Right (Specialize.retype (Specialize.substituteT (Specialize.matchT (Specialize.unquantified (Core.typeOf l)) (Core.typeOf a))) l)
       | Set.member n (_staticHere ctx) -> Left "param-static"
       | otherwise -> Left "var"
     Core.EApp _ _ -> Left "call"
