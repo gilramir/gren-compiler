@@ -298,10 +298,12 @@ branch ctx verb union ctor@(Can.Ctor _ index _ argTypes) =
           indexed = byIndex verb union
           earlier =
             [ Can.CaseBranch (anonymousPattern ctx union other) (_v_mismatch verb ctx LT)
-            | other@(Can.Ctor _ otherIndex _ _) <- namedCtors union,
-              Index.toMachine otherIndex < Index.toMachine index,
+            | -- Before the walk, which an indexed type or @eq@ never needs:
+              -- after it, each constructor walked all n of them (D695).
               distinguishesCtors verb,
-              not indexed
+              not indexed,
+              other@(Can.Ctor _ otherIndex _ _) <- namedCtors union,
+              Index.toMachine otherIndex < Index.toMachine index
             ]
           indexOf side =
             call ctx (local ctx nameIndex) [local ctx side]

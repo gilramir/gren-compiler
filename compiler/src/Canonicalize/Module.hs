@@ -650,15 +650,15 @@ checkErlangVariables home (A.At nameRegion name) impls tipe
         Can.TVar v -> [v]
         Can.TLambda _ r -> produces r
         Can.TRecord fields _ -> concatMap (\(Can.FieldType _ t) -> produces t) (Map.elems fields)
-        Can.TType home name as
-          | holdsItsParameters home name -> concatMap produces as
+        Can.TType typeHome typeName as
+          | holdsItsParameters typeHome typeName -> concatMap produces as
         _ -> []
 
     -- The types whose parameters are the values they hold, rather than a
     -- name for what a handle stands for.
-    holdsItsParameters home name =
-      ModuleName._package home == Pkg.core
-        && Name.toChars name
+    holdsItsParameters typeHome typeName =
+      ModuleName._package typeHome == Pkg.core
+        && Name.toChars typeName
           `elem` ["Array", "Maybe", "Result", "Dict", "Set"]
 
     allVars tipe' =

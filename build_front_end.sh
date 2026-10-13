@@ -7,7 +7,7 @@
 # classes and writes instances, so no stock compiler can parse it any more:
 # `npx gren-lang@0.6.3 gren make` fails with "PROBLEM BUILDING DEPENDENCIES"
 # and no detail. The front-end therefore builds itself, with the backend
-# `build_dev_bin.sh` has just produced.
+# `build_bin.sh` (or `build_dev_bin.sh`) has just produced.
 #
 # That makes this step a bootstrap: it needs an `app` to build the next `app`.
 # A checkout with none can produce the first one with stock Gren against `core`

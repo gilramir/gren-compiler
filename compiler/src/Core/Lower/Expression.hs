@@ -615,8 +615,8 @@ expr env (Can.Expr nid region value) =
         -- Integers only. A float carries its digits as text, so folding one
         -- means negating the `Double` after reading it rather than choosing a
         -- constructor, and `negate` at a float is exact anyway.
-        Can.Negate (Can.Expr _ _ (Can.Int value)) ->
-          literal env nid sp tipe Name.int (Literal.int tipe (negate value))
+        Can.Negate (Can.Expr _ _ (Can.Int n)) ->
+          literal env nid sp tipe Name.int (Literal.int tipe (negate n))
         Can.Negate inner ->
           -- `-x` is `Basics.negate` at `x`'s type, and since D144 that is a
           -- method rather than a binding, so this resolves the way an operator

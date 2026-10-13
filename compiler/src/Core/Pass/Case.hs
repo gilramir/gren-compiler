@@ -157,8 +157,10 @@ compile tbl ty sp scrutinee alts fallback =
     (root, wrap) <- rootOf ty sp scrutinee
     let scrutType = Core.typeOf scrutinee
         env = Map.singleton Root (root, scrutType)
+        -- A map, since a list's (!!) made n leaves n² (D693).
+        altAt = Map.fromDistinctAscList (zip [0 ..] allAlts)
         leafBody goal =
-          let Core.Alt p body = allAlts !! goal
+          let Core.Alt p body = altAt Map.! goal
            in destructure ty sp root scrutType p body
 
     joins <- traverse (\goal -> (,) goal <$> fresh "$j") shared
@@ -415,10 +417,11 @@ needsTests tbl pattern =
 gatherEdges :: Table -> Set Path -> [Branch] -> Path -> ([Edge], [Branch])
 gatherEdges tbl bound branches path =
   let tests = testsAtPath tbl path branches
+      relevantTo = relevantBranches path branches
       edges =
         [ Edge test slots (build tbl (Set.union bound (Set.fromList (map (`child` path) slots))) relevant)
         | test <- tests,
-          let relevant = Maybe.mapMaybe (toRelevantBranch test path) branches,
+          let relevant = relevantTo test,
           let slots = slotsFor tbl relevant path test
         ]
       fallback =
@@ -476,36 +479,58 @@ testAtPath tbl selected (Branch _ pats) =
         Core.PWild -> Nothing
         Core.PAs _ _ -> error "Core.Pass.Case: an alias reached testAtPath; flattenAliases removes them"
 
-toRelevantBranch :: Test -> Path -> Branch -> Maybe Branch
-toRelevantBranch test path branch@(Branch goal pats) =
-  case extract path pats of
-    Nothing -> Just branch
-    Just (start, pattern, end) ->
-      case pattern of
-        Core.PCtor q _ args ->
-          case test of
-            IsCtor testName _ _
-              | q == testName ->
-                  Just (Branch goal (start ++ [(Arg i path, p) | (i, p) <- zip [0 ..] args] ++ end))
-            _ -> Nothing
-        Core.PArray items Nothing ->
-          case test of
-            IsArray len
-              | length items == len ->
-                  Just (Branch goal (start ++ [(Elem i path, p) | (i, p) <- zip [0 ..] items] ++ end))
-            _ -> Nothing
-        Core.PArray _ (Just _) -> arrayTailError
-        Core.PRecord fields ->
-          case test of
-            IsRecord -> Just (Branch goal (start ++ [(Fld f path, p) | (f, p) <- fields] ++ end))
-            _ -> Nothing
-        Core.PLit lit ->
-          case test of
-            IsLit testLit | lit == testLit -> Just (Branch goal (start ++ end))
-            _ -> Nothing
-        Core.PVar _ -> Just branch
-        Core.PWild -> Just branch
-        Core.PAs _ _ -> Just branch
+-- | For each test, the branches still relevant once it passes, in their
+-- order: those that test the path the same way, with the pattern's children
+-- put in its place, and those that do not test the path at all.
+--
+-- One pass sorts the branches by what they test, D693's fix to item 6 of
+-- @m3-sweep.md@ §SW30.2: filtering every branch for every test made a @when@
+-- of n literals n² here.
+relevantBranches :: Path -> [Branch] -> Test -> [Branch]
+relevantBranches path branches =
+  let sorted = zipWith (\i b -> (i, sortBranch b)) [0 :: Int ..] branches
+      every = [(i, b) | (i, Left b) <- sorted]
+      keyed = Map.fromListWith (++) [(k, [(i, b)]) | (i, Right (k, b)) <- reverse sorted]
+   in \test -> map snd (mergeByIndex (Map.findWithDefault [] (testKey test) keyed) every)
+  where
+    sortBranch branch@(Branch goal pats) =
+      case extract path pats of
+        Nothing -> Left branch
+        Just (start, pattern, end) ->
+          let narrowed children = Branch goal (start ++ children ++ end)
+           in case pattern of
+                Core.PCtor q _ args -> Right (KeyCtor q, narrowed [(Arg i path, p) | (i, p) <- zip [0 ..] args])
+                Core.PArray items Nothing -> Right (KeyArray (length items), narrowed [(Elem i path, p) | (i, p) <- zip [0 ..] items])
+                Core.PArray _ (Just _) -> arrayTailError
+                Core.PRecord fields -> Right (KeyRecord, narrowed [(Fld f path, p) | (f, p) <- fields])
+                Core.PLit lit -> Right (KeyLit lit, narrowed [])
+                Core.PVar _ -> Left branch
+                Core.PWild -> Left branch
+                Core.PAs _ _ -> Left branch
+
+-- | What a test compares a pattern on: a constructor by its name alone.
+data Key
+  = KeyCtor !Core.QualName
+  | KeyArray !Int
+  | KeyRecord
+  | KeyLit !Core.Literal
+  deriving (Eq, Ord)
+
+testKey :: Test -> Key
+testKey test =
+  case test of
+    IsCtor q _ _ -> KeyCtor q
+    IsArray len -> KeyArray len
+    IsRecord -> KeyRecord
+    IsLit lit -> KeyLit lit
+
+mergeByIndex :: [(Int, a)] -> [(Int, a)] -> [(Int, a)]
+mergeByIndex xs ys =
+  case (xs, ys) of
+    ([], _) -> ys
+    (_, []) -> xs
+    (x@(i, _) : xs', y@(j, _) : ys') ->
+      if i < j then x : mergeByIndex xs' ys else y : mergeByIndex xs ys'
 
 extract :: Path -> [(Path, Core.Pattern)] -> Maybe ([(Path, Core.Pattern)], Core.Pattern, [(Path, Core.Pattern)])
 extract selected pats =
@@ -538,12 +563,13 @@ isIrrelevantTo tbl selected (Branch _ pats) =
 pickPath :: Table -> Set Path -> [Branch] -> Path
 pickPath tbl bound branches =
   let choices =
-        [ path
-        | Branch _ pats <- branches,
-          (path, pattern) <- pats,
-          needsTests tbl pattern,
-          Set.member path bound
-        ]
+        firstOccurrences
+          [ path
+          | Branch _ pats <- branches,
+            (path, pattern) <- pats,
+            needsTests tbl pattern,
+            Set.member path bound
+          ]
    in case choices of
         [] -> error "Core.Pass.Case: a branch needs a test and no bound path offers one"
         _ ->
@@ -553,6 +579,17 @@ pickPath tbl bound branches =
               case bests (weigh (smallBranchingFactor tbl bound branches) tied) of
                 path : _ -> path
                 [] -> error "Core.Pass.Case: bests returned nothing from a non-empty list"
+
+-- | Each path once, where it first appears. A @when@ of n branches offers the
+-- same path n times, and weighing each copy walks every branch (D693). The
+-- choice is the same: 'bests' answers ties in the order given, and the
+-- first copy of a path is where it stood first.
+firstOccurrences :: [Path] -> [Path]
+firstOccurrences =
+  let go _ [] = []
+      go seen (path : rest) =
+        if Set.member path seen then go seen rest else path : go (Set.insert path seen) rest
+   in go Set.empty
 
 weigh :: (Path -> Int) -> [Path] -> [(Path, Int)]
 weigh toWeight paths = [(path, toWeight path) | path <- paths]

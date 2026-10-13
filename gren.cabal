@@ -303,6 +303,7 @@ Test-Suite gren-tests
         Gren.PackageSpec
         Generate.VLQSpec
         Nitpick.PatternMatchesSpec
+        Nitpick.PatternUsefulnessSpec
         Parse.AliasSpec
         Parse.ClassSpec
         Parse.ConstraintSpec

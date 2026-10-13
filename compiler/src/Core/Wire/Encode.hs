@@ -922,19 +922,3 @@ sint32Oneof tag n = key tag WVarint <> varint (zigzag32 n)
 
 sint64Oneof :: Word32 -> Int64 -> Enc
 sint64Oneof tag n = key tag WVarint <> varint (zigzag64 n)
-
-legacyMin :: Integer
-legacyMin = toInteger (minBound :: Int64)
-
-legacyMax :: Integer
-legacyMax = toInteger (maxBound :: Int64)
-
--- | D91. The message is user-facing, so it says the number, the bound and why
--- the bound is where it is.
-legacyProblem :: Integer -> String
-legacyProblem n =
-  "the integer literal "
-    ++ show n
-    ++ " does not fit in 64 bits, so it cannot be written to Core.\n"
-    ++ "Int is a JavaScript double until D2 lands, exact only to 2^53, so a\n"
-    ++ "literal this large is not the number this program will compute with."

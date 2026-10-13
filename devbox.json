@@ -16,6 +16,10 @@
         "npm ci"
       ],
       "build": [
+        "./build_bin.sh",
+        "./build_front_end.sh"
+      ],
+      "build-dev": [
         "./build_dev_bin.sh",
         "./build_front_end.sh"
       ],

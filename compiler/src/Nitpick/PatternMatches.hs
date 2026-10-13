@@ -43,7 +43,7 @@ data Literal
   = Chr ES.String
   | Str ES.String
   | Int Integer
-  deriving (Eq)
+  deriving (Eq, Ord)
 
 -- CREATE SIMPLIFIED PATTERNS
 
@@ -279,14 +279,26 @@ isExhaustive matrix n =
                   let alts@(Can.Union _ altList numAlts _) = snd (Map.findMin ctors)
                    in if numSeen < numAlts
                         then
-                          (:)
-                            <$> Maybe.mapMaybe (isMissing alts ctors) altList
-                            <*> isExhaustive (Maybe.mapMaybe specializeRowByAnything matrix) (n - 1)
+                          -- The rest first: when it is covered, which a
+                          -- wildcard branch makes it, there is nothing to
+                          -- list, and listing the constructors no row names
+                          -- walked all of the type's (D694).
+                          case isExhaustive (Maybe.mapMaybe specializeRowByAnything matrix) (n - 1) of
+                            [] -> []
+                            rest -> (:) <$> Maybe.mapMaybe (isMissing alts ctors) altList <*> rest
                         else
-                          let isAltExhaustive (Can.Ctor name _ arity _) =
+                          -- The rows are split by constructor once, where
+                          -- specializing all of them for each constructor
+                          -- made a when over n constructors n² (D694).
+                          let (tested, untested) = splitRows ctorHead (zip [0 ..] matrix)
+                              isAltExhaustive (Can.Ctor name _ arity _) =
                                 recoverCtor alts name arity
                                   <$> isExhaustive
-                                    (Maybe.mapMaybe (specializeRowByCtor name arity) matrix)
+                                    ( map snd $
+                                        mergeByIndex
+                                          (Map.findWithDefault [] name tested)
+                                          [(i, replicate arity Anything ++ rest) | (i, rest) <- untested]
+                                    )
                                     (arity + n - 1)
                            in concatMap isAltExhaustive altList
 
@@ -305,117 +317,107 @@ recoverCtor union name arity patterns =
 -- REDUNDANT PATTERNS
 
 -- INVARIANT: Produces a list of rows where (forall row. length row == 1)
+--
+-- The first branch no value reaches is the redundant one, as when each was
+-- checked against the useful rows before it; 'usefulRows' answers for all of
+-- them in one walk, where that check made a @when@ of n branches n²
+-- (geng-lang D694, @m3-sweep.md@ §SW30.2 item 6).
 toNonRedundantRows :: A.Region -> [Can.Pattern] -> Either Error [[Pattern]]
 toNonRedundantRows region patterns =
-  toSimplifiedUsefulRows region [] patterns
+  let rows = map (\pattern -> [simplify pattern]) patterns
+      useful = usefulRows (zip [0 ..] rows)
+   in case [(i, r) | (i, A.At r _) <- zip [0 ..] patterns, not (Set.member i useful)] of
+        [] -> Right (reverse rows)
+        (i, r) : _ -> Left (Redundant region r (i + 1))
 
--- INVARIANT: Produces a list of rows where (forall row. length row == 1)
-toSimplifiedUsefulRows :: A.Region -> [[Pattern]] -> [Can.Pattern] -> Either Error [[Pattern]]
-toSimplifiedUsefulRows overallRegion checkedRows uncheckedPatterns =
-  case uncheckedPatterns of
+-- | The rows that some value matches before it matches any row above them,
+-- which is each row's usefulness against the rows before it.
+--
+-- One walk over the whole matrix: the first column's rows are split by what
+-- they test, a row testing a constructor or literal going to its group alone
+-- and a row testing nothing going to every group, and a value reaches the
+-- first row left when the columns run out. Values a column names no test for
+-- reach only the rows testing nothing, the default group; a union whose every
+-- constructor is named has none.
+usefulRows :: [(Int, [Pattern])] -> Set Int
+usefulRows rows =
+  case rows of
     [] ->
-      Right checkedRows
-    pattern@(A.At region _) : rest ->
-      let nextRow = [simplify pattern]
-       in if isUseful checkedRows nextRow
-            then toSimplifiedUsefulRows overallRegion (nextRow : checkedRows) rest
-            else Left (Redundant overallRegion region (length checkedRows + 1))
-
--- Check if a new row "vector" is useful given previous rows "matrix"
-isUseful :: [[Pattern]] -> [Pattern] -> Bool
-isUseful matrix vector =
-  case matrix of
-    [] ->
-      -- No rows are the same as the new vector! The vector is useful!
-      True
+      Set.empty
+    (i, []) : _ ->
+      Set.singleton i
     _ ->
-      case vector of
+      case [pattern | (_, pattern : _) <- rows, not (isAnything pattern)] of
         [] ->
-          -- There is nothing left in the new vector, but we still have
-          -- rows that match the same things. This is not a useful vector!
-          False
-        firstPattern : patterns ->
-          case firstPattern of
-            Ctor _ name args ->
-              -- keep checking rows that start with this Ctor or Anything
-              isUseful
-                (Maybe.mapMaybe (specializeRowByCtor name (length args)) matrix)
-                (args ++ patterns)
-            Array arrayPatterns ->
-              -- keep checking rows that start with Array
-              isUseful
-                (Maybe.mapMaybe (specializeRowByArray (length arrayPatterns)) matrix)
-                (arrayPatterns ++ patterns)
-            Record recordNamedPatterns ->
-              let recordBaseMap = collectRecordFieldsWithAnyPattern ([firstPattern] : matrix)
-                  recordPatternMap = Map.union recordNamedPatterns recordBaseMap
-               in isUseful
-                    (Maybe.mapMaybe (specializeRowByRecord recordBaseMap) matrix)
-                    (Map.elems recordPatternMap ++ patterns)
-            Anything ->
-              -- check if all alts appear in matrix
-              case isComplete matrix of
-                No ->
-                  -- This Anything is useful because some Ctors are missing.
-                  -- But what if a previous row has an Anything?
-                  -- If so, this one is not useful.
-                  isUseful (Maybe.mapMaybe specializeRowByAnything matrix) patterns
-                Yes alts ->
-                  -- All Ctors are covered, so this Anything is not needed for any
-                  -- of those. But what if some of those Ctors have subpatterns
-                  -- that make them less general? If so, this actually is useful!
-                  let isUsefulAlt (Can.Ctor name _ arity _) =
-                        isUseful
-                          (Maybe.mapMaybe (specializeRowByCtor name arity) matrix)
-                          (replicate arity Anything ++ patterns)
-                   in any isUsefulAlt alts
-            Literal literal ->
-              -- keep checking rows that start with this Literal or Anything
-              isUseful
-                (Maybe.mapMaybe (specializeRowByLiteral literal) matrix)
-                patterns
+          usefulRows [(i, patterns) | (i, _ : patterns) <- rows]
+        Ctor (Can.Union _ _ numAlts _) _ _ : _ ->
+          -- Only the constructors the rows name, and not every one the type
+          -- has: a when of two branches over a type of n constructors walked
+          -- all n.
+          let (tested, untested) = splitRows ctorHead rows
+              arities = Map.fromList [(name, length args) | (_, Ctor _ name args : _) <- rows]
+              group (name, these) =
+                let arity = Map.findWithDefault 0 name arities
+                 in usefulRows (mergeByIndex these [(i, replicate arity Anything ++ ps) | (i, ps) <- untested])
+              defaults = if Map.size tested == numAlts then Set.empty else usefulRows untested
+           in Set.unions (defaults : map group (Map.toList tested))
+        Literal _ : _ ->
+          let (tested, untested) = splitRows litHead rows
+              litHead pattern =
+                case pattern of
+                  Literal literal -> Just (literal, [])
+                  _ -> Nothing
+           in Set.unions (usefulRows untested : [usefulRows (mergeByIndex these untested) | these <- Map.elems tested])
+        Array _ : _ ->
+          let (tested, untested) = splitRows arrayHead rows
+              arrayHead pattern =
+                case pattern of
+                  Array items -> Just (length items, items)
+                  _ -> Nothing
+              group (len, these) = usefulRows (mergeByIndex these [(i, replicate len Anything ++ ps) | (i, ps) <- untested])
+           in Set.unions (usefulRows untested : map group (Map.toList tested))
+        Record _ : _ ->
+          let baseRecord = collectRecordFieldsWithAnyPattern (map snd rows)
+           in usefulRows (Maybe.mapMaybe (\(i, row) -> (,) i <$> specializeRowByRecord baseRecord row) rows)
+        Anything : _ ->
+          error "Compiler error! An Anything survived the filter for a test."
 
--- INVARIANT: (length row == N) ==> (length result == arity + N - 1)
-specializeRowByCtor :: Name.Name -> Int -> [Pattern] -> Maybe [Pattern]
-specializeRowByCtor ctorName arity row =
-  case row of
-    Ctor _ name args : patterns ->
-      if name == ctorName
-        then Just (args ++ patterns)
-        else Nothing
-    Anything : patterns ->
-      Just (replicate arity Anything ++ patterns)
-    Array _ : _ ->
-      Nothing
-    Record _ : _ ->
-      Nothing
-    Literal _ : _ ->
-      error $
-        "Compiler bug! After type checking, constructors and literals\
-        \ should never align in pattern match exhaustiveness checks."
-    [] ->
-      error "Compiler error! Empty matrices should not get specialized."
+ctorHead :: Pattern -> Maybe (Name.Name, [Pattern])
+ctorHead pattern =
+  case pattern of
+    Ctor _ name args -> Just (name, args)
+    _ -> Nothing
 
--- INVARIANT: (length row == N) ==> (length result == arity + N - 1)
-specializeRowByArray :: Int -> [Pattern] -> Maybe [Pattern]
-specializeRowByArray arity row =
-  case row of
-    Ctor _ _ _ : _ ->
-      Nothing
-    Array arrayPatterns : patterns ->
-      if arity == (List.length arrayPatterns)
-        then Just (arrayPatterns ++ patterns)
-        else Nothing
-    Record _ : _ ->
-      Nothing
-    Anything : patterns ->
-      Just (replicate arity Anything ++ patterns)
-    Literal _ : _ ->
-      error $
-        "Compiler bug! After type checking, constructors and literals\
-        \ should never align in pattern match exhaustiveness checks."
-    [] ->
-      error "Compiler error! Empty matrices should not get specialized."
+isAnything :: Pattern -> Bool
+isAnything pattern =
+  case pattern of
+    Anything -> True
+    _ -> False
+
+-- | A column's rows, in order: those that test it, by the test, with the
+-- tested pattern's children in its place, and those that do not, without it.
+splitRows :: (Ord k) => (Pattern -> Maybe (k, [Pattern])) -> [(Int, [Pattern])] -> (Map k [(Int, [Pattern])], [(Int, [Pattern])])
+splitRows testOf rows =
+  let classify (i, row) =
+        case row of
+          Anything : rest -> Right (i, rest)
+          pattern : rest ->
+            case testOf pattern of
+              Just (k, children) -> Left (k, (i, children ++ rest))
+              Nothing -> error "Compiler bug! After type checking, a column's patterns test the same kind of value."
+          [] -> error "Compiler error! Empty matrices should not get specialized."
+      classified = map classify rows
+   in ( Map.fromListWith (++) [(k, [r]) | Left (k, r) <- reverse classified],
+        [r | Right r <- classified]
+      )
+
+mergeByIndex :: [(Int, a)] -> [(Int, a)] -> [(Int, a)]
+mergeByIndex xs ys =
+  case (xs, ys) of
+    ([], _) -> ys
+    (_, []) -> xs
+    (x@(i, _) : xs', y@(j, _) : ys') ->
+      if i < j then x : mergeByIndex xs' ys else y : mergeByIndex xs ys'
 
 -- INVARIANT: (length row == N) ==> (length result == arity + N - 1)
 specializeRowByRecord :: Map Name.Name Pattern -> [Pattern] -> Maybe [Pattern]
@@ -438,31 +440,6 @@ specializeRowByRecord baseMap row =
       error "Compiler error! Empty matrices should not get specialized."
 
 -- INVARIANT: (length row == N) ==> (length result == N-1)
-specializeRowByLiteral :: Literal -> [Pattern] -> Maybe [Pattern]
-specializeRowByLiteral literal row =
-  case row of
-    Literal lit : patterns ->
-      if lit == literal
-        then Just patterns
-        else Nothing
-    Anything : patterns ->
-      Just patterns
-    Array _ : _ ->
-      error $
-        "Compiler bug! After type checking, arrays and literals\
-        \ should never align in pattern match exhaustiveness checks."
-    Record _ : _ ->
-      error $
-        "Compiler bug! After type checking, records and literals\
-        \ should never align in pattern match exhaustiveness checks."
-    Ctor _ _ _ : _ ->
-      error $
-        "Compiler bug! After type checking, constructors and literals\
-        \ should never align in pattern match exhaustiveness checks."
-    [] ->
-      error "Compiler error! Empty matrices should not get specialized."
-
--- INVARIANT: (length row == N) ==> (length result == N-1)
 specializeRowByAnything :: [Pattern] -> Maybe [Pattern]
 specializeRowByAnything row =
   case row of
@@ -478,22 +455,6 @@ specializeRowByAnything row =
       Nothing
     Literal _ : _ ->
       Nothing
-
--- ALL CONSTRUCTORS ARE PRESENT?
-
-data Complete
-  = Yes [Can.Ctor]
-  | No
-
-isComplete :: [[Pattern]] -> Complete
-isComplete matrix =
-  let ctors = collectCtors matrix
-      numSeen = Map.size ctors
-   in if numSeen == 0
-        then No
-        else
-          let (Can.Union _ alts numAlts _) = snd (Map.findMin ctors)
-           in if numSeen == numAlts then Yes alts else No
 
 -- COLLECT CTORS
 
