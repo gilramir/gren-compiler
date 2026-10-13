@@ -1271,9 +1271,10 @@ match env value pattern =
     Core.PRecord fields ->
       collect [match env (JS.Access value (generateField (_mode env) f)) p | (f, p) <- fields]
     Core.PArray items Nothing ->
-      let subs = Index.indexedMap (\i p -> match env (JS.Index value (JS.Int (Index.toMachine i))) p) items
+      let subs = Index.indexedMap (\i p -> match env (arr "_Arr_get" [value, JS.Int (Index.toMachine i)]) p) items
           (tests, binds) = collect subs
-       in (JS.Infix JS.OpEq (JS.Access value (JsName.fromLocal "length")) (JS.Int (length items)) : tests, binds)
+          arr name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
+       in (JS.Infix JS.OpEq (arr "_Arr_len" [value]) (JS.Int (length items)) : tests, binds)
     Core.PArray _ (Just _) ->
       error "Generate.CoreJS: an array pattern with a tail — the frontend has no syntax for one"
     Core.PCtor name _ args

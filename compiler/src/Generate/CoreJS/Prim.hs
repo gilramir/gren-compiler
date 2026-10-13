@@ -464,6 +464,7 @@ function _Str_foldr(s, acc, f) {
 
 // Not `String.fromCodePoint(...cs)`: an argument list has a length limit.
 function _Str_fromCodepoints(cs) {
+  cs = _Arr_flat(cs);
   var out = "";
   for (var i = 0; i < cs.length; i++) out += String.fromCodePoint(cs[i]);
   return out;
@@ -582,24 +583,28 @@ function _BytesPrim_setBytes(t, i, b) {
 
 -- ARRAYS
 
--- | D236's fourteen (@docs/m1b-arr-prim.md@ §AR2). An @Array@ is a dense JS
--- array, which is what C7's contract says on this backend and what an extern
--- sees (D192), so the seven @arr_@ primitives are the JS method of the same
--- shape and each names its argument once. Every index here is in range, and
--- every splice bound is already clamped: D239 puts those rules in Geng.
+-- | D236's fourteen (@docs/m1b-arr-prim.md@ §AR2). An @Array@ is a JS array
+-- or a @_Slice@ over a growable one (geng-lang D709, @m3-pushlast.md@ §PL14),
+-- so each of the seven @arr_@ primitives is a helper of 'arrayHelpers' that
+-- tells the two apart; an extern still sees a JS array (D192), which
+-- "Generate.CoreJS.Extern" flattens a slice into. Every index here is in
+-- range, and every splice bound is already clamped: D239 puts those rules in
+-- Geng.
 array :: ArrPrim -> [JS.Expr] -> JS.Expr
 array p args =
   case (p, args) of
-    (ALength, [a]) -> JS.Access a (JsName.fromLocalHumanReadable "length")
-    (AGet, [a, i]) -> JS.Index a i
-    (ASet, [a, i, v]) -> method a "with" [i, v]
-    (ASlice, [a, i, j]) -> method a "slice" [i, j]
-    (AAppend, [a, b]) -> method a "concat" [b]
-    (AInsert, [a, i, v]) -> method a "toSpliced" [i, JS.Int 0, v]
-    (ARemove, [a, i]) -> method a "toSpliced" [i, JS.Int 1]
+    (ALength, [_]) -> helper "_Arr_len" args
+    (AGet, [_, _]) -> helper "_Arr_get" args
+    (ASet, [_, _, _]) -> helper "_Arr_set" args
+    (ASlice, [_, _, _]) -> helper "_Arr_slice" args
+    (AAppend, [_, _]) -> helper "_Arr_append" args
+    (AInsert, [a, i, v]) -> method (flat a) "toSpliced" [i, JS.Int 0, v]
+    (ARemove, [a, i]) -> method (flat a) "toSpliced" [i, JS.Int 1]
     _ -> arityError (ArrOp p) args
   where
     method target name as = JS.Call (JS.Access target (JsName.fromLocalHumanReadable name)) as
+    helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
+    flat a = helper "_Arr_flat" [a]
 
 -- | C7's transient. Every one is a helper: the type is the helpers' own class,
 -- and @push@, @set@ and @to_array@ each read their transient more than once on
@@ -907,6 +912,7 @@ function _TaskPrim_scope(tasks, makeAnswer) {
 }
 
 function _TaskPrim_concurrent(tasks) {
+  tasks = _Arr_flat(tasks);
   if (tasks.length === 0) return _TaskPrim_succeed([]);
 
   return _TaskPrim_scope(tasks, function () {
@@ -927,7 +933,7 @@ function _TaskPrim_concurrent(tasks) {
 // task is apart from the rest, as in `Task.race` (D110), so there is always at
 // least one and this always has an answer to give.
 function _TaskPrim_race(first, rest) {
-  return _TaskPrim_scope([first].concat(rest), function () {
+  return _TaskPrim_scope([first].concat(_Arr_flat(rest)), function () {
     return function (i, res) {
       return _TaskPrim_succeed(res);
     };
@@ -1494,6 +1500,88 @@ isArray op =
 arrayHelpers :: B.Builder
 arrayHelpers =
   [r|
+// geng-lang D709 (m3-pushlast.md §PL14): an `Array` is either a JS
+// array, which is never written after it is made, or a `_Slice`: `len`
+// elements of a growable JS array `buf` from `off`. A growable array carries
+// `f`, the index of its first written element; its `length` is how far it has
+// been written, D607's `used`. An append writes in place when its left
+// operand ends at `buf.length`, or its right one starts at `buf.f` with room
+// before it; otherwise it copies into a new growable array.
+// `Array.isArray` tells the two apart: V8 inlines it, where `instanceof`
+// walks the prototype chain, which cost `geng fmt` 6% where this costs 2.5%
+// (geng-lang m3-pushlast.md §PL14.3).
+function _Slice(buf, off, len) {
+  this.buf = buf;
+  this.off = off;
+  this.len = len;
+}
+
+function _Arr_len(a) { return !Array.isArray(a) ? a.len : a.length; }
+
+function _Arr_get(a, i) { return !Array.isArray(a) ? a.buf[a.off + i] : a[i]; }
+
+// A JS array of the elements: the array itself, or a copy of a slice's.
+function _Arr_flat(a) { return !Array.isArray(a) ? a.buf.slice(a.off, a.off + a.len) : a; }
+
+function _Arr_set(a, i, v) {
+  var it = !Array.isArray(a) ? a.buf.slice(a.off, a.off + a.len) : a.slice();
+  it[i] = v;
+  return it;
+}
+
+// A view, unless it would hold less than a quarter of what it keeps alive or
+// is four elements or fewer: then a copy, as before.
+function _Arr_slice(a, i, j) {
+  var n = j - i;
+  var buf, off;
+  if (!Array.isArray(a)) { buf = a.buf; off = a.off + i; } else { buf = a; off = i; }
+  if (n === _Arr_len(a)) return a;
+  if (n > 4 && n * 4 >= buf.length - (buf.f | 0)) return new _Slice(buf, off, n);
+  return buf.slice(off, off + n);
+}
+
+function _Arr_append(a, b) {
+  var al = _Arr_len(a), bl = _Arr_len(b), i;
+  if (al === 0) return b;
+  if (bl === 0) return a;
+  var buf;
+  if (!Array.isArray(a) && a.buf.f !== undefined && a.off + al === a.buf.length) {
+    buf = a.buf;
+    if (!Array.isArray(b)) { for (i = 0; i < bl; i++) buf.push(b.buf[b.off + i]); }
+    else { for (i = 0; i < bl; i++) buf.push(b[i]); }
+    return new _Slice(buf, a.off, al + bl);
+  }
+  if (!Array.isArray(b) && b.buf.f !== undefined && b.off === b.buf.f && al <= b.off) {
+    buf = b.buf;
+    var at = b.off - al;
+    if (!Array.isArray(a)) { for (i = 0; i < al; i++) buf[at + i] = a.buf[a.off + i]; }
+    else { for (i = 0; i < al; i++) buf[at + i] = a[i]; }
+    buf.f = at;
+    return new _Slice(buf, at, al + bl);
+  }
+  // A new growable array, room at the front when the right operand is the
+  // longer: the end grows by `push`, as JavaScript grows any array. The longer
+  // operand is copied once by JavaScript's own `slice` or `concat` (D710): a
+  // loop of `push`es made the shapes that copy every step 1.5 to 3 times
+  // slower than before, and a second copy of a long array, each a fresh
+  // mapping past V8's large-object threshold, as much again (§PL15).
+  var front;
+  if (al >= bl) {
+    front = 0;
+    buf = Array.isArray(a) ? a.slice() : a.buf.slice(a.off, a.off + al);
+    if (Array.isArray(b)) { for (i = 0; i < bl; i++) buf.push(b[i]); }
+    else { for (i = 0; i < bl; i++) buf.push(b.buf[b.off + i]); }
+  } else {
+    front = al + bl;
+    var head = new Array(front);
+    if (Array.isArray(a)) { for (i = 0; i < al; i++) head.push(a[i]); }
+    else { for (i = 0; i < al; i++) head.push(a.buf[a.off + i]); }
+    buf = head.concat(_Arr_flat(b));
+  }
+  buf.f = front;
+  return new _Slice(buf, front, al + bl);
+}
+
 function _ArrayPrim_Transient(live, escaped, array) {
   this.live = live;
   this.escaped = escaped;
@@ -1505,6 +1593,7 @@ function _ArrayPrim_trNew(capacity) {
 }
 
 function _ArrayPrim_trFromArray(array) {
+  array = _Arr_flat(array);
   return new _ArrayPrim_Transient(array.length, true, array);
 }
 

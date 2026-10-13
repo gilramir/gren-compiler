@@ -329,9 +329,10 @@ sourceHelpers prims
   | otherwise = mempty
 
 arrayHelpers :: [Prim.PrimOp] -> B.Builder
-arrayHelpers prims
-  | any JsPrim.isArray prims = JsPrim.arrayHelpers
-  | otherwise = mempty
+arrayHelpers _ =
+  -- Every program: array patterns, the extern boundary and the task and
+  -- string helpers read an array through these too (geng-lang D709).
+  JsPrim.arrayHelpers
 
 -- | The primitive a binding /is/, when its whole body is one applied to its own
 -- parameters in order.

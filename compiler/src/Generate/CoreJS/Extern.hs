@@ -320,11 +320,18 @@ outbound label depth value v =
     Extern.SourceOf element ->
       "_Extern_source(" <> label <> ", " <> v <> ", " <> elementFn element <> ")"
     Extern.Scalar Extern.Bytes -> "_Extern_bytesOut(" <> v <> ")"
+    -- An array goes out as a JS array of its elements, a slice flattened
+    -- (geng-lang D709).
     Extern.Array element
-      | holdsBytes element ->
+      | holdsBytes element || isArray element ->
           let x = B.stringUtf8 ("x" ++ show depth)
-           in v <> ".map(function (" <> x <> ") { return " <> outbound label (depth + 1) element x <> "; })"
+           in "_Arr_flat(" <> v <> ").map(function (" <> x <> ") { return " <> outbound label (depth + 1) element x <> "; })"
+      | otherwise -> "_Arr_flat(" <> v <> ")"
     _ -> v
+  where
+    isArray e = case e of
+      Extern.Array _ -> True
+      _ -> False
 
 -- | The check one value of a source or an array gets on the way in, as a
 -- function of the label and the value.
