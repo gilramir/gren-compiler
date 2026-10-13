@@ -62,6 +62,9 @@
 -- parameter, and whether the loop was @taken@ or @refused@.
 module Core.Pass.Transient
   ( run,
+    calls,
+    selfOnly,
+    mentions,
   )
 where
 

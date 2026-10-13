@@ -17,6 +17,7 @@
 -- > GENG_CORE_PASSES=mono          -- every type variable copied away by shape ("Core.Pass.Mono")
 -- > GENG_CORE_PASSES=foldspec      -- a fold copied for the function it is handed ("Core.Pass.FoldSpec")
 -- > GENG_CORE_PASSES=transient     -- a Dict a loop threads updated in place ("Core.Pass.Transient")
+-- > GENG_CORE_PASSES=arraytr       -- an Array a loop only appends to, grown through the transient ("Core.Pass.ArrayTransient")
 --
 -- A switch rather than a mode, for the reason C4 gives: the pass is optional,
 -- its output is still Core, and a program has to answer the same either way.
@@ -79,6 +80,12 @@
 -- something is written in place: natively and on JavaScript, not on the BEAM
 -- (D518).
 --
+-- __The @Array@ transient follows that__ (D697, geng-lang @m3-pushlast.md@
+-- §PL16): a loop that only appends to an @Array@, or to a record's @Array@
+-- field, threads C7's transient in its place. It is the BEAM's alone (D703):
+-- natively and on JavaScript an @Array@ is a slice, on which a push already
+-- writes in place, while the BEAM's tuple copies on every push.
+--
 -- __Specialization runs before either__, and it is the one pass that is not a
 -- function of a single module: it needs every module's Core to know what
 -- instantiations a program asks for (§G27). It runs first because the copies it
@@ -94,6 +101,7 @@ where
 
 import Core.AST qualified as Core
 import Core.Dump qualified as Dump
+import Core.Pass.ArrayTransient qualified as ArrayTransient
 import Core.Pass.Case qualified as Case
 import Core.Pass.Float qualified as Float
 import Core.Pass.FoldSpec qualified as FoldSpec
@@ -115,14 +123,14 @@ names :: Target.Target -> [String]
 names target =
   Maybe.fromMaybe (defaults target) Dump.corePasses
 
--- | Every pass, less @inline@ on JavaScript (D487), and @mono@ only on native
--- (D491).
+-- | Every pass, less @inline@ on JavaScript (D487), @mono@ only on native
+-- (D491), and @arraytr@ only on the BEAM (D703).
 defaults :: Target.Target -> [String]
 defaults target =
   case target of
     Target.Js -> ["specialize", "foldspec", "transient", "float", "mutual", "case", "tailcall"]
     Target.Native -> ["specialize", "foldspec", "transient", "mono", "inline", "float", "mutual", "case", "tailcall"]
-    _ -> ["specialize", "foldspec", "inline", "float", "mutual", "case", "tailcall"]
+    _ -> ["specialize", "foldspec", "arraytr", "inline", "float", "mutual", "case", "tailcall"]
 
 run :: Target.Target -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
 run target cores =
@@ -130,7 +138,8 @@ run target cores =
       specialized = pass "specialize" Specialize.run cores
       folded = pass "foldspec" FoldSpec.run specialized
       transient = pass "transient" Transient.run folded
-      monomorphized = pass "mono" (Mono.run (Target.language target) Dump.externBodies) transient
+      arrays = pass "arraytr" ArrayTransient.run transient
+      monomorphized = pass "mono" (Mono.run (Target.language target) Dump.externBodies) arrays
       inlined = pass "inline" Inline.run monomorphized
       floated = pass "float" (Map.map Float.run) inlined
       grouped = pass "mutual" (Map.map Mutual.run) floated

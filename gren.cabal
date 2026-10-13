@@ -127,6 +127,7 @@ Library common
         Core.Lower.Type
         Core.Order
         Core.Pass
+        Core.Pass.ArrayTransient
         Core.Pass.Case
         Core.Pass.Inline
         Core.Pass.Float
