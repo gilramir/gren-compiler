@@ -74,9 +74,12 @@ import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Monoid (All (..), Any (..))
 import Data.Name (Name)
+import Data.List qualified as List
 import Data.Name qualified as Name
 import Data.Set qualified as Set
 import Gren.ModuleName qualified as ModuleName
+import System.Environment qualified as Env
+import System.IO.Unsafe (unsafePerformIO)
 
 -- | The pass; with 'True', @arraypop@, it takes only a loop that pops the
 -- last element and pushes back (D699, D713), the one shape a slice leaves
@@ -87,7 +90,8 @@ run popsOnly = Map.mapWithKey (module_ popsOnly)
 module_ :: Bool -> ModuleName.Canonical -> Core.Module -> Core.Module
 module_ popsOnly home modul =
   let results = [(b, v, loop popsOnly (Core.QualName home (Core._binderName b)) v) | Core.Bind b v <- Core._moduleDefs modul]
-   in if null [() | (_, _, Just _) <- results]
+   in logged home modul results $
+        if null [() | (_, _, Just _) <- results]
         then modul
         else
           let defs =
@@ -106,6 +110,153 @@ module_ popsOnly home modul =
                       length grp > 1
                     ]
                 }
+
+-- THE CENSUS
+
+census :: Maybe FilePath
+census = unsafePerformIO (Env.lookupEnv "GENG_ARRAYTR_CENSUS")
+{-# NOINLINE census #-}
+
+-- | With @GENG_ARRAYTR_CENSUS=<file>@, what the step-4 warning would see
+-- (geng-lang @m3-pushlast.md@ §PL18, D708): a @loop@ line for each parameter
+-- of a loop D583 sees whose type offers an @Array@ to the rules, @taken@,
+-- @refused@ while something in the loop grows what is made of it, or @reads@;
+-- a @step@ line for each parameter holding an @Array@ of a function that
+-- does not call itself and grows what is made of it, the step a fold, a
+-- @Parser.loop@ or a library's helper calls (§PL10); and a @fork@ line for each @let@ or array literal that grows one name in
+-- two of its bindings or elements, the shape D708 leaves quadratic under the
+-- slice. A report only: the Core is the pass's either way.
+logged :: ModuleName.Canonical -> Core.Module -> [(Core.Binder, Core.Expr, Maybe a)] -> b -> b
+logged home@(ModuleName.Canonical _ m) modul results out =
+  case census of
+    Nothing -> out
+    Just path ->
+      unsafePerformIO $ do
+        appendFile path $
+          unlines $
+            [ List.intercalate "\t" ["loop", Name.toChars m, Name.toChars (Core._binderName b), Name.toChars (Core._binderName p), shapeName ws, outcome]
+            | (b, Core.Expr (Core.ELam ps body) _ _, found) <- results,
+              let q = Core.QualName home (Core._binderName b),
+              Transient.selfOnly q (length ps) body,
+              Transient.calls q body,
+              p <- ps,
+              ws@(_ : _) <- [wrappedShapes (Core._binderType p)],
+              let outcome
+                    | Just _ <- found = "taken"
+                    | grownFrom (Core._binderName p) body = "refused"
+                    | otherwise = "reads"
+            ]
+              ++ [ List.intercalate "\t" ["step", Name.toChars m, Name.toChars (Core._binderName b), Name.toChars (Core._binderName p), shapeName ws]
+                 | (b, Core.Expr (Core.ELam ps body) _ _, _) <- results,
+                   not (Transient.calls (Core.QualName home (Core._binderName b)) body),
+                   p <- ps,
+                   ws <- [stepShapes (Core._binderType p)],
+                   not (null ws),
+                   grownFrom (Core._binderName p) body
+                 ]
+              ++ [ List.intercalate "\t" ["fork", Name.toChars m, Name.toChars (Core._binderName b), Name.toChars x, show n, kind]
+                 | Core.Bind b v <- Core._moduleDefs modul,
+                   (x, n, kind) <- forks v
+                 ]
+        return out
+  where
+    shapeName ws =
+      case ws of
+        (Unwrapped, Bare _) : _ -> "bare"
+        (Unwrapped, Field {}) : _ -> "field"
+        (InResult _, _) : _ -> "result"
+        _ -> "maybe"
+
+-- | A step's parameter the census follows: what a loop's may be, or an
+-- @Array@ inside any constructor or record.
+stepShapes :: Core.Type -> [(Wrap, Shape)]
+stepShapes t =
+  case wrappedShapes t of
+    [] -> [(Unwrapped, Bare e) | e <- arraysIn t]
+    ws -> ws
+  where
+    arraysIn ty =
+      case ty of
+        Core.TCon a [e] | a == arrayType -> [e]
+        Core.TCon _ args -> take 1 (concatMap arraysIn args)
+        Core.TRecord fs _ -> take 1 (concatMap (arraysIn . snd) fs)
+        _ -> []
+
+-- | Whether a growth in the expression grows the name's array itself: the
+-- name, a name a @let@ binds to it or to its field, what a @when@ on it binds,
+-- or the parameter of a lambda handed it, as @Result.map@'s is. A value
+-- computed from it, its elements among them, is not followed.
+grownFrom :: Name -> Core.Expr -> Bool
+grownFrom p body =
+  let made = aliases (Set.singleton p) body
+   in hasGrowth made body
+  where
+    hasGrowth d e =
+      case Core._exprValue e of
+        Core.EApp fn args
+          | Just (arrayAt, _) <- growth fn,
+            length args == 2,
+            isAlias d (args !! arrayAt) ->
+              True
+          | isPopLast fn || isPushFirst fn,
+            any (isAlias d) args ->
+              True
+        _ -> getAny (Specialize.children_ (Any . hasGrowth d) e)
+    aliases d e =
+      let d' = Set.union d (bindsFrom d e)
+       in if d' == d then d else aliases d' e
+    bindsFrom d e =
+      Set.union (here d e) (Specialize.children_ (bindsFrom d) e)
+    here d e =
+      case Core._exprValue e of
+        Core.ELet binds _ -> Set.fromList [Core._binderName bb | Core.Bind bb x <- binds, isAlias d x]
+        Core.ECase scrut alts _
+          | isAlias d scrut -> Set.unions [Refs.patternBinders pat | Core.Alt pat _ <- alts]
+        Core.EApp _ args
+          | any (isAlias d) args -> Set.fromList [Core._binderName bb | Core.Expr (Core.ELam bs _) _ _ <- args, bb <- bs]
+        _ -> Set.empty
+    isAlias d x =
+      case Core._exprValue x of
+        Core.EVar n -> Set.member n d
+        Core.EAccess r _ -> isAlias d r
+        _ -> False
+
+-- | Each name a @let@ grows in two of its bindings, or an array literal in two
+-- of its elements, and how many.
+forks :: Core.Expr -> [(Name, Int, String)]
+forks e =
+  case Core._exprValue e of
+    Core.ELet _ _ ->
+      -- A chain of lets is one: the lowering nests each binding's.
+      let (values, end) = chain e
+       in counted "let" values ++ concatMap forks values ++ forks end
+    Core.EArray xs -> counted "list" xs ++ concatMap forks xs
+    _ -> concat (Specialize.children_ (\c -> [forks c]) e)
+  where
+    chain x =
+      case Core._exprValue x of
+        Core.ELet binds body -> let (vs, end) = chain body in (map Core._bindValue binds ++ vs, end)
+        _ -> ([], x)
+    counted kind xs =
+      [ (x, n, kind)
+      | (x, n) <- Map.toList (Map.fromListWith (+) [(x, 1 :: Int) | v <- xs, x <- Set.toList (grownNames v)]),
+        n > 1
+      ]
+    grownNames v =
+      case Core._exprValue v of
+        Core.EApp fn args
+          | Just (arrayAt, _) <- growth fn,
+            length args == 2,
+            Core.EVar x <- Core._exprValue (args !! arrayAt) ->
+              Set.insert x (Set.unions (map grownNames args))
+        Core.ELam _ _ -> Set.empty
+        _ -> Specialize.children_ grownNames v
+
+isPushFirst :: Core.Expr -> Bool
+isPushFirst fn =
+  case Core._exprValue fn of
+    Core.EGlobal (Core.QualName home name) -> home == ModuleName.array && takeWhile (/= '$') (Name.toChars name) == "pushFirst"
+    _ -> False
 
 -- SHAPES
 
