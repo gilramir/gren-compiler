@@ -83,12 +83,14 @@
 --
 -- __The @Array@ transient follows that__ (D697, geng-lang @m3-pushlast.md@
 -- §PL16): a loop that only appends to an @Array@, or to a record's @Array@
--- field, threads C7's transient in its place. It is the BEAM's alone (D703):
--- natively and on JavaScript an @Array@ is a slice, on which a push already
--- writes in place, while the BEAM's tuple copies on every push. Natively and
--- on JavaScript @arraypop@ runs in its place (D699, D713): the same pass,
--- taking only a loop that pops the last element and pushes back, which a
--- slice leaves quadratic (D708).
+-- field, threads C7's transient in its place. It was the BEAM's alone (D703),
+-- until the BEAM's @Array@ grew as a persistent tree past a short tuple
+-- (D715), which makes every loop it took linear without it; it is in no
+-- target's defaults now (D716), and @GENG_CORE_PASSES@ still runs it.
+-- Natively and on JavaScript an @Array@ is a slice, on which a push already
+-- writes in place, and @arraypop@ runs (D699, D713): the same pass, taking
+-- only a loop that pops the last element and pushes back, which a slice
+-- leaves quadratic (D708).
 --
 -- __Specialization runs before either__, and it is the one pass that is not a
 -- function of a single module: it needs every module's Core to know what
@@ -128,14 +130,14 @@ names target =
   Maybe.fromMaybe (defaults target) Dump.corePasses
 
 -- | Every pass, less @inline@ on JavaScript (D487), @mono@ only on native
--- (D491), and @arraytr@ only on the BEAM (D703), with @arraypop@ in its place
--- elsewhere (D713).
+-- (D491), and @arraypop@ natively and on JavaScript (D713). @arraytr@ is in
+-- no target's defaults: the BEAM's Array grows as a tree (D715, D716).
 defaults :: Target.Target -> [String]
 defaults target =
   case target of
     Target.Js -> ["specialize", "foldspec", "transient", "arraypop", "float", "mutual", "case", "tailcall"]
     Target.Native -> ["specialize", "foldspec", "transient", "arraypop", "mono", "inline", "float", "mutual", "case", "tailcall"]
-    _ -> ["specialize", "foldspec", "arraytr", "inline", "float", "mutual", "case", "tailcall"]
+    _ -> ["specialize", "foldspec", "inline", "float", "mutual", "case", "tailcall"]
 
 run :: Target.Target -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
 run target cores =

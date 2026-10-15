@@ -52,13 +52,14 @@
 -- is a version that leaves the loop each step, where the entry's
 -- @tr_to_array@ would add a copy to the one it saves.
 --
--- __The BEAM's whole__ (D703): natively and on JavaScript an @Array@ is a
--- slice, on which a push already writes in place, so 'Core.Pass.defaults'
--- runs all of this on the BEAM alone, whose @Array@ is a tuple every push
--- copies. Elsewhere it runs as @arraypop@ (D713), taking only a loop that pops
--- and pushes back, which a slice leaves quadratic (D708). A list naming
--- @arraytr@ in @GENG_CORE_PASSES@ runs all of it anywhere, which is how the
--- corpus holds it on node.
+-- __The whole, as @arraytr@__ (D703, D716): natively and on JavaScript an
+-- @Array@ is a slice, on which a push already writes in place, so
+-- 'Core.Pass.defaults' ran all of this on the BEAM alone, whose @Array@ was a
+-- tuple every push copied; now that the BEAM's grows as a tree (D715), no
+-- target's defaults run it. Natively and on JavaScript it runs as @arraypop@
+-- (D713), taking only a loop that pops and pushes back, which a slice leaves
+-- quadratic (D708). A list naming @arraytr@ in @GENG_CORE_PASSES@ runs all of
+-- it anywhere, which is how the corpus holds it on node.
 module Core.Pass.ArrayTransient
   ( run,
   )
