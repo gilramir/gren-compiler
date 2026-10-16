@@ -10,6 +10,7 @@ module Type.UnionFind
     get,
     set,
     modify,
+    pointId,
   )
 where
 
@@ -28,8 +29,9 @@ Compared to the Haskell implementation, the major changes here include:
 -}
 
 import Control.Monad (when)
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Word (Word32)
+import System.IO.Unsafe (unsafePerformIO)
 
 -- POINT
 
@@ -38,17 +40,24 @@ newtype Point a
   deriving (Eq)
 
 data PointInfo a
-  = Info {-# UNPACK #-} !(IORef Word32) {-# UNPACK #-} !(IORef a)
+  = Info {-# UNPACK #-} !(IORef Word32) {-# UNPACK #-} !(IORef a) {-# UNPACK #-} !Int
   | Link {-# UNPACK #-} !(Point a)
 
 -- HELPERS
+
+-- | Every point's number, for 'pointId'. Atomic, since modules are solved on
+-- several threads; the numbers mean nothing from one run to the next.
+counter :: IORef Int
+counter = unsafePerformIO (newIORef 0)
+{-# NOINLINE counter #-}
 
 fresh :: a -> IO (Point a)
 fresh value =
   do
     weight <- newIORef 1
     desc <- newIORef value
-    link <- newIORef (Info weight desc)
+    i <- atomicModifyIORef' counter (\n -> (n + 1, n))
+    link <- newIORef (Info weight desc i)
     return (Pt link)
 
 repr :: Point a -> IO (Point a)
@@ -56,7 +65,7 @@ repr point@(Pt ref) =
   do
     pInfo <- readIORef ref
     case pInfo of
-      Info _ _ ->
+      Info _ _ _ ->
         return point
       Link point1@(Pt ref1) ->
         do
@@ -67,18 +76,33 @@ repr point@(Pt ref) =
               writeIORef ref pInfo1
           return point2
 
+-- | A number for the class a point is in, the same for every point in it until
+-- the next 'union': its representative's. What a walk keyed on variables
+-- memoizes by (geng-lang @m3-sweep.md@ §SW44). Not a 'StableName', which the
+-- collector scans at every collection.
+pointId :: Point a -> IO Int
+pointId point =
+  do
+    Pt ref <- repr point
+    pInfo <- readIORef ref
+    case pInfo of
+      Info _ _ i ->
+        return i
+      Link _ ->
+        error "Type.UnionFind.pointId: a representative is never a link"
+
 get :: Point a -> IO a
 get point@(Pt ref) =
   do
     pInfo <- readIORef ref
     case pInfo of
-      Info _ descRef ->
+      Info _ descRef _ ->
         readIORef descRef
       Link (Pt ref1) ->
         do
           link' <- readIORef ref1
           case link' of
-            Info _ descRef ->
+            Info _ descRef _ ->
               readIORef descRef
             Link _ ->
               get =<< repr point
@@ -88,13 +112,13 @@ set point@(Pt ref) newDesc =
   do
     pInfo <- readIORef ref
     case pInfo of
-      Info _ descRef ->
+      Info _ descRef _ ->
         writeIORef descRef newDesc
       Link (Pt ref1) ->
         do
           link' <- readIORef ref1
           case link' of
-            Info _ descRef ->
+            Info _ descRef _ ->
               writeIORef descRef newDesc
             Link _ ->
               do
@@ -106,13 +130,13 @@ modify point@(Pt ref) func =
   do
     pInfo <- readIORef ref
     case pInfo of
-      Info _ descRef ->
+      Info _ descRef _ ->
         modifyIORef' descRef func
       Link (Pt ref1) ->
         do
           link' <- readIORef ref1
           case link' of
-            Info _ descRef ->
+            Info _ descRef _ ->
               modifyIORef' descRef func
             Link _ ->
               do
@@ -125,8 +149,8 @@ union p1 p2 newDesc =
     point1@(Pt ref1) <- repr p1
     point2@(Pt ref2) <- repr p2
 
-    Info w1 d1 <- readIORef ref1
-    Info w2 d2 <- readIORef ref2
+    Info w1 d1 _ <- readIORef ref1
+    Info w2 d2 _ <- readIORef ref2
 
     if point1 == point2
       then writeIORef d1 newDesc
@@ -158,7 +182,7 @@ redundant (Pt ref) =
   do
     pInfo <- readIORef ref
     case pInfo of
-      Info _ _ ->
+      Info _ _ _ ->
         return False
       Link _ ->
         return True

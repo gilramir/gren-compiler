@@ -59,7 +59,7 @@ where
 import AST.Canonical qualified as Can
 import Core.AST qualified as Core
 import Core.Lower.Literal qualified as Literal
-import Core.Lower.Type (lowerAnnotation, lowerType)
+import Core.Lower.Type (lowerAnnotation, lowerType, sharedLowering)
 import Core.Order qualified as Order
 import Core.Prim qualified as Prim
 import Core.Refs qualified as Refs
@@ -88,6 +88,10 @@ data Env = Env
     _file :: !Core.FileId,
     -- | One entry per node, from the solver.
     _types :: Map.Map Can.NodeId Can.Type,
+    -- | The same, lowered: each built once with its solver variable, and
+    -- shared between the nodes that hold it (geng-lang @m3-sweep.md@ §SW44,
+    -- D743). Lowering '_types' node by node walked every node's type whole.
+    _coreTypes :: Map.Map Can.NodeId Core.Type,
     -- | What each use of a constrained name elaborates to, from
     -- `Type.Resolve` (§G23, §G26). Total for the same reason '_types' is:
     -- every use elaborated or the module did not get here.
@@ -115,7 +119,9 @@ canTypeOf env nid =
 -- | The Core type recorded for a node.
 typeOf :: Env -> Can.NodeId -> Core.Type
 typeOf env nid =
-  lowerType (canTypeOf env nid)
+  case Map.lookup nid (_coreTypes env) of
+    Just tipe -> tipe
+    Nothing -> lowerType (canTypeOf env nid)
 
 -- | What a use of a constrained name elaborates to, or nothing if the name is
 -- not constrained.
@@ -138,23 +144,28 @@ paramsOf env nid = Map.findWithDefault [] nid (_params env)
 -- backend already emits.
 witness :: Core.Span -> Resolve.Witness -> Core.Expr
 witness sp w =
+  witnessWith (sharedLowering w) sp w
+
+-- | 'witness', every type in the tree lowered through one 'sharedLowering'.
+witnessWith :: (Can.Type -> Core.Type) -> Core.Span -> Resolve.Witness -> Core.Expr
+witnessWith lower sp w =
   case w of
     Resolve.FromParam name tipe ->
-      Core.Expr (Core.EVar name) (lowerType tipe) sp
+      Core.Expr (Core.EVar name) (lower tipe) sp
     Resolve.FromInstance home name args tipe ->
-      let table = lowerType tipe
+      let table = lower tipe
           global = Core.Expr (Core.EGlobal (Core.QualName home name)) table sp
        in case args of
             [] -> global
-            _ -> Core.Expr (Core.EWitApp global (map (witness sp) args)) table sp
+            _ -> Core.Expr (Core.EWitApp global (map (witnessWith lower sp) args)) table sp
     Resolve.FromRecord cls fields subject tipe ->
-      recordWitness sp cls fields (lowerType subject) (lowerType tipe)
+      recordWitness sp cls fields (lower subject) (lower tipe)
     Resolve.FromInbound holes subject _ ->
-      inboundWitness sp holes (lowerType subject)
+      inboundWitness sp holes (lower subject)
     Resolve.FromOutbound holes subject _ ->
-      outboundWitness sp holes (lowerType subject)
+      outboundWitness sp holes (lower subject)
     Resolve.FromMigrate holes subject _ ->
-      migrateWitness sp holes (lowerType subject)
+      migrateWitness sp holes (lower subject)
 
 -- | The table for @Inbound t@ the compiler supplies (geng-lang
 -- `m2-interop.md` D422, §EI23): @{ inbound = Inbound.check h1 … hn }@, where

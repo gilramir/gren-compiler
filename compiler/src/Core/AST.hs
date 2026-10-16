@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Wall #-}
 
 -- | The Core IR: the compiler's waist.
@@ -49,7 +51,10 @@ module Core.AST
     Text,
 
     -- * Types
-    Type (..),
+    Type (TVar, TCon, TFun, TRecord, TForall),
+    typeId,
+    typeHeight,
+    typeIsClosed,
     Constraint (..),
 
     -- * Expressions
@@ -75,12 +80,14 @@ module Core.AST
 where
 
 import Core.Prim (PrimOp)
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Int (Int32, Int64)
 import Data.Map qualified as Map
 import Data.Name (Name)
 import Data.Utf8 qualified as Utf8
 import Data.Word (Word32, Word64)
 import Gren.ModuleName qualified as ModuleName
+import System.IO.Unsafe (unsafePerformIO)
 
 -- NAMES
 
@@ -151,21 +158,182 @@ data Span = Span
 
 -- TYPES
 
-data Type
-  = TVar !Name
-  | -- | @Int@, @Array a@, @Dict k v@, @MyType a b@
-    TCon !QualName ![Type]
-  | -- | n-ary, per C3: the argument list is the function's real arity, not a
-    -- chain of one-argument arrows to be recovered by analysis.
-    TFun ![Type] !Type
-  | -- | Closed (@Nothing@) or open with a row variable (@Just r@):
-    -- @{ x : Int }@ is @TRecord [("x", Int)] Nothing@ and @{ r | x : Int }@ is
-    -- @TRecord [("x", Int)] (Just "r")@. Fields alphabetical.
-    TRecord ![(Field, Type)] !(Maybe Name)
-  | -- | Quantification and its constraints, together. D11 keeps constraints
-    -- single-parameter, which is what keeps resolution decidable.
-    TForall ![Name] ![Constraint] !Type
-  deriving (Eq, Ord, Show)
+-- | A Core type, __interned__ (geng-lang @m3-sweep.md@ §SW44, D743): every
+-- type is built through one process-wide table, so two equal types are one
+-- value with one '_typeId', and building one costs its arity, not its size.
+-- Before, every node carried a copy of its own, and a type of size /s/ at /n/
+-- nodes cost /n·s/ wherever it was built, compared or written.
+--
+-- It is matched and built through the five pattern synonyms below exactly as
+-- the five constructors it used to have, so no reader changes.
+--
+-- __An id decides equality and nothing else.__ Modules are built on several
+-- threads, so the order types are first met, and with it every id, differs
+-- from run to run. '==' is the ids'; 'compare' is the derived order the
+-- constructors had, the same in every run, short-cut where two subtrees'
+-- ids agree. Nothing iterated into output may be keyed on an id.
+data Type = Type
+  { _typeId :: !Int,
+    _typeHeight :: !Int,
+    _typeClosed :: !Bool,
+    _typeNode :: !TypeNode
+  }
+
+-- | One level of a 'Type'. The constructors are in the order 'Type''s were,
+-- which is what keeps the derived 'Ord' the one Core has always had.
+data TypeNode
+  = TVar_ !Name
+  | TCon_ !QualName ![Type]
+  | TFun_ ![Type] !Type
+  | TRecord_ ![(Field, Type)] !(Maybe Name)
+  | TForall_ ![Name] ![Constraint] !Type
+  deriving (Eq, Ord)
+
+{-# COMPLETE TVar, TCon, TFun, TRecord, TForall #-}
+
+pattern TVar :: Name -> Type
+pattern TVar name <- (_typeNode -> TVar_ name)
+  where
+    TVar name = intern (TVar_ name)
+
+-- | @Int@, @Array a@, @Dict k v@, @MyType a b@
+pattern TCon :: QualName -> [Type] -> Type
+pattern TCon name args <- (_typeNode -> TCon_ name args)
+  where
+    TCon name args = intern (TCon_ name args)
+
+-- | n-ary, per C3: the argument list is the function's real arity, not a
+-- chain of one-argument arrows to be recovered by analysis.
+pattern TFun :: [Type] -> Type -> Type
+pattern TFun args result <- (_typeNode -> TFun_ args result)
+  where
+    TFun args result = intern (TFun_ args result)
+
+-- | Closed (@Nothing@) or open with a row variable (@Just r@):
+-- @{ x : Int }@ is @TRecord [("x", Int)] Nothing@ and @{ r | x : Int }@ is
+-- @TRecord [("x", Int)] (Just "r")@. Fields alphabetical.
+pattern TRecord :: [(Field, Type)] -> Maybe Name -> Type
+pattern TRecord fields row <- (_typeNode -> TRecord_ fields row)
+  where
+    TRecord fields row = intern (TRecord_ fields row)
+
+-- | Quantification and its constraints, together. D11 keeps constraints
+-- single-parameter, which is what keeps resolution decidable.
+pattern TForall :: [Name] -> [Constraint] -> Type -> Type
+pattern TForall vars constraints body <- (_typeNode -> TForall_ vars constraints body)
+  where
+    TForall vars constraints body = intern (TForall_ vars constraints body)
+
+-- | The type's number in this run's table. Equal types have equal ids; the
+-- number itself means nothing from one run to the next.
+typeId :: Type -> Int
+typeId = _typeId
+
+-- | One more than the tallest type inside it; a 'TVar' is 1. A constraint's
+-- type is inside its 'TForall'.
+typeHeight :: Type -> Int
+typeHeight = _typeHeight
+
+-- | Whether no type variable appears in it, bound or free: a substitution
+-- leaves it as it is.
+typeIsClosed :: Type -> Bool
+typeIsClosed = _typeClosed
+
+instance Eq Type where
+  a == b = _typeId a == _typeId b
+
+instance Ord Type where
+  compare a b
+    | _typeId a == _typeId b = EQ
+    | otherwise = compare (_typeNode a) (_typeNode b)
+
+-- | What the derived instance wrote.
+instance Show Type where
+  showsPrec d t =
+    case _typeNode t of
+      TVar_ name -> con "TVar" [showsPrec 11 name]
+      TCon_ name args -> con "TCon" [showsPrec 11 name, showsPrec 11 args]
+      TFun_ args result -> con "TFun" [showsPrec 11 args, showsPrec 11 result]
+      TRecord_ fields row -> con "TRecord" [showsPrec 11 fields, showsPrec 11 row]
+      TForall_ vars constraints body -> con "TForall" [showsPrec 11 vars, showsPrec 11 constraints, showsPrec 11 body]
+    where
+      con name fields =
+        showParen (d > 10) (foldl (\acc f -> acc . showChar ' ' . f) (showString name) fields)
+
+-- | A node with its children as their ids: what the table is keyed on, so a
+-- look-up compares integers and names, never a whole type.
+--
+-- The ids come first in each, so most look-ups are settled on integers before
+-- a name, a package and a module, is compared. Its order reaches nothing.
+data Key
+  = KVar !Name
+  | KCon ![Int] !QualName
+  | KFun ![Int] !Int
+  | KRecord ![Int] ![Field] !(Maybe Name)
+  | KForall !Int ![Int] ![Name] ![QualName]
+  deriving (Eq, Ord)
+
+-- | Every type this process has built (D744). Never emptied: a build's
+-- distinct types are the types its modules write, the size of their wire
+-- tables. A 'Map.Map' on the 'Key', not a hash table (D745), which would be a
+-- new dependency for a log factor.
+typeTable :: IORef (Map.Map Key Type)
+typeTable = unsafePerformIO (newIORef Map.empty)
+{-# NOINLINE typeTable #-}
+
+-- | The one value for this node. Pure to its callers: the same node always
+-- answers an equal type, whichever thread asks and whenever.
+--
+-- The key, and with it every child, is forced before the table is touched.
+-- 'atomicModifyIORef'' leaves a thunk in the reference while it evaluates the
+-- function, and a child built lazily would intern itself against that thunk,
+-- which is the parent's own update: @<<loop>>@.
+intern :: TypeNode -> Type
+intern node =
+  forceKey key `seq`
+    height `seq`
+      unsafePerformIO $
+        atomicModifyIORef' typeTable $ \table ->
+          case Map.lookup key table of
+            Just t -> (table, t)
+            Nothing ->
+              let !t = Type (Map.size table + 1) height closed node
+               in (Map.insert key t table, t)
+  where
+    key =
+      case node of
+        TVar_ name -> KVar name
+        TCon_ name args -> KCon (map _typeId args) name
+        TFun_ args result -> KFun (map _typeId args) (_typeId result)
+        TRecord_ fields row -> KRecord (map (_typeId . snd) fields) (map fst fields) row
+        TForall_ vars constraints body -> KForall (_typeId body) [_typeId t | CClass _ t <- constraints] vars [c | CClass c _ <- constraints]
+    height =
+      1 + case node of
+        TVar_ _ -> 0
+        TCon_ _ args -> tallest args
+        TFun_ args result -> tallest (result : args)
+        TRecord_ fields _ -> tallest (map snd fields)
+        TForall_ _ constraints body -> tallest (body : [t | CClass _ t <- constraints])
+    tallest = foldr (max . _typeHeight) 0
+    closed =
+      case node of
+        TVar_ _ -> False
+        TCon_ _ args -> all _typeClosed args
+        TFun_ args result -> all _typeClosed (result : args)
+        TRecord_ fields row -> null row && all (_typeClosed . snd) fields
+        TForall_ _ _ _ -> False
+{-# NOINLINE intern #-}
+
+forceKey :: Key -> ()
+forceKey key =
+  case key of
+    KVar _ -> ()
+    KCon ids _ -> forceAll ids
+    KFun ids result -> forceAll ids `seq` result `seq` ()
+    KRecord ids _ _ -> forceAll ids
+    KForall body ids _ _ -> body `seq` forceAll ids
+  where
+    forceAll = foldr seq ()
 
 -- | Single-parameter only (D11).
 data Constraint = CClass !QualName !Type

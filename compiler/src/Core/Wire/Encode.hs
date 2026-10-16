@@ -257,30 +257,22 @@ buildTypes strings quals types =
 -- | A type and its height, which is the order every set and table of types in
 -- this module keeps (D690, @m3-sweep.md@ §SW40).
 --
--- The derived order on 'Type' compares two types until they differ, and two
--- types of a module are most often a type and one a level shorter or taller
--- that agree all the way down to where it ends: @Maybe (Maybe Int)@ and
--- @Maybe Int@, an array's element and the array. Compared height first, they
--- differ at the first field, where a type n deep made every comparison cost n
--- and a module of such types n³. Two types of different heights are never
--- equal, so the order is still one in which equal means the same type.
+-- Ordered by height and then by the type's id (D743, §SW44): equal types are
+-- one interned value, so two types are compared in two integers, where the
+-- derived order compared them until they differed, a whole record's fields or
+-- a whole type's depth. An id differs from run to run, and no order these
+-- sets keep reaches the bytes: 'buildTypes' sorts each height by D94's key,
+-- and 'closeTypes' only gathers.
 data Tall = Tall !Int Type
-  deriving (Eq, Ord)
+
+instance Eq Tall where
+  Tall _ a == Tall _ b = a == b
+
+instance Ord Tall where
+  compare (Tall h1 a) (Tall h2 b) = compare h1 h2 <> compare (typeId a) (typeId b)
 
 tall :: Type -> Tall
 tall t = Tall (typeHeight t) t
-
--- | One more than the tallest type inside it; a 'TVar' is 1.
-typeHeight :: Type -> Int
-typeHeight t =
-  case t of
-    TVar _ -> 1
-    TCon _ args -> 1 + tallest args
-    TFun args result -> 1 + tallest (result : args)
-    TRecord fields _ -> 1 + tallest (map snd fields)
-    TForall _ constraints body -> 1 + tallest (body : [c | CClass _ c <- constraints])
-  where
-    tallest = foldr (max . typeHeight) 0
 
 -- | The rest of 'buildTypes'\' key, over a table that already holds every type
 -- shorter than this one.

@@ -56,15 +56,17 @@ lower ::
   P.Platform ->
   Map.Map Name Can.Annotation ->
   Map.Map Can.NodeId Can.Type ->
+  Map.Map Can.NodeId Core.Type ->
   Resolve.Elaboration ->
   Can.Module ->
   Core.Module
-lower platform annotations types elaboration modul =
+lower platform annotations types coreTypes elaboration modul =
   let home = Can._name modul
       env =
         Expr.Env
           selfFile
           types
+          coreTypes
           (Resolve._uses elaboration)
           (Resolve._params elaboration)
           (Resolve._inferred elaboration)

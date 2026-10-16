@@ -9,6 +9,7 @@ where
 
 import AST.Canonical qualified as Can
 import Control.Monad
+import Core.AST qualified as Core
 import Data.Map.Strict ((!))
 import Data.Map.Strict qualified as Map
 import Data.Maybe qualified as Maybe
@@ -47,13 +48,13 @@ run constraint =
           -- A mark of its own, past the one 'defaultStuck' just used, because
           -- the constant one every annotation walk shares would say every
           -- variable had already been visited.
-          (nodeTypes, constrained) <- Type.toNodeTypes (nextMark (nextMark mark)) (Map.elems env) nodes
+          (nodeTypes, coreNodeTypes, constrained) <- Type.toNodeTypes (nextMark (nextMark mark)) (Map.elems env) nodes
           let defaults = Map.mapMaybe (fmap atom . Class.defaultsTo) constrained
           -- After defaulting, because that is what closes a bare literal's
           -- variable at `Int` and the range to check against is the closed
           -- one's (`docs/m1b-int.md` §I20).
           widths <- traverse resolveWidth (reverse literals)
-          return (Right (Solved annotations nodeTypes defaults widths))
+          return (Right (Solved annotations nodeTypes coreNodeTypes defaults widths))
       e : es ->
         return $ Left (NE.List e es)
 
@@ -66,6 +67,9 @@ run constraint =
 data Solved = Solved
   { _annotations :: Map.Map Name.Name Can.Annotation,
     _nodeTypes :: Map.Map Can.NodeId Can.Type,
+    -- | The same types lowered to Core, each built once with its variable
+    -- (`m3-sweep.md` §SW44, D743), which the lowering reads.
+    _coreNodeTypes :: Map.Map Can.NodeId Core.Type,
     -- | What `classes.md` §0 makes of each constrained type variable in those
     -- types: @Int@, @Float@, or no entry where no candidate admits it.
     --

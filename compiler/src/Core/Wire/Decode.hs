@@ -47,6 +47,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe qualified as BS
 import Data.Coerce qualified as Coerce
 import Data.Int (Int32, Int64)
+import Data.IntMap.Strict qualified as IntMap
 import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name qualified as Name
@@ -616,26 +617,16 @@ withTypeTable strings quals types body =
   do
     let strIx = Map.fromList (zip strings [1 :: Int ..])
         qualIx = Map.fromList (zip quals [1 :: Int ..])
-        typeIx = Map.fromList (zip types [1 :: Int ..])
+        typeIx = IntMap.fromList (zip (map typeId types) [1 :: Int ..])
         keys = map (\t -> (typeHeight t, typeSortKey strIx qualIx typeIx t)) types
     unless (and (zipWith (<) keys (drop 1 keys))) $
       failP "the type table is not in ascending (height, content) order"
     let table = Map.fromList (zip [1 ..] types)
     P (\env input -> unP body env {_types = table} input)
 
--- | One more than the tallest type inside it; a 'TVar' is 1.
-typeHeight :: Type -> Int
-typeHeight t =
-  case t of
-    TVar _ -> 1
-    TCon _ args -> 1 + tallest args
-    TFun args result -> 1 + tallest (result : args)
-    TRecord fields _ -> 1 + tallest (map snd fields)
-    TForall _ constraints body -> 1 + tallest (body : [c | CClass _ c <- constraints])
-  where
-    tallest = foldr (max . typeHeight) 0
-
-typeSortKey :: Map.Map Str Int -> Map.Map QualName Int -> Map.Map Type Int -> Type -> [Int]
+-- | Types are looked up by id (D743, @m3-sweep.md@ §SW44): equal types are one
+-- interned value, so a look-up compares integers and not whole types.
+typeSortKey :: Map.Map Str Int -> Map.Map QualName Int -> IntMap.IntMap Int -> Type -> [Int]
 typeSortKey strings quals types = keyOf
   where
     keyOf t =
@@ -655,7 +646,7 @@ typeSortKey strings quals types = keyOf
 
     strIx s = if Utf8.size s == 0 then 0 else Map.findWithDefault 0 (asStr s) strings
     qualIx q = Map.findWithDefault 0 q quals
-    typeIx t = Map.findWithDefault 0 t types
+    typeIx t = IntMap.findWithDefault 0 (typeId t) types
 
 -- | A @oneof@: exactly one member, and it is written even when it holds its
 -- type's default, so there is no rule 5 here.

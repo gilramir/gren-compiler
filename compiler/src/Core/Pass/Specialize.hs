@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Wall #-}
 
 -- | Specialization: a constrained definition becomes one copy per witness it is
@@ -60,6 +62,8 @@ import Core.Order qualified as Order
 import Core.Refs qualified as Refs
 import Data.Functor.Const (Const (..))
 import Data.Functor.Identity (Identity (..))
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IntMap.Strict qualified as IntMap
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -71,6 +75,7 @@ import Data.Set qualified as Set
 import Gren.Fingerprint qualified as FP
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
+import System.IO.Unsafe (unsafePerformIO)
 
 -- WHAT A WITNESS IS, TO THIS PASS
 
@@ -94,21 +99,90 @@ import Gren.Package qualified as Pkg
 -- specializes like any other — 'Built' carries the expression to write back and
 -- is __keyed by its type__, which determines it: a witness for
 -- @Eq { x : Int }@ is the same witness wherever it is built.
-data Wit
-  = Wit !Core.QualName ![Wit]
-  | Built !Core.Type !Core.Expr
-  deriving (Show)
+--
+-- __A witness has an id__ (geng-lang @m3-sweep.md@ §SW44, D746), the same for
+-- every witness this order calls equal, so '==' is two integers and 'compare'
+-- answers 'Prelude.EQ' at once for equal subtrees. Without it every look-up of
+-- a key compared two witness trees whole: @x == x@ at a type @n@ deep asks for
+-- a copy at each depth, keyed by a witness as deep, and the pass spent 73% of
+-- its time comparing them. The order itself is the one it was, because a
+-- copy's name is its position among the sorted keys: an id differs from run
+-- to run and decides nothing but equality.
+data Wit = WitOf
+  { _witId :: !Int,
+    _witNode :: !WitNode
+  }
+
+data WitNode
+  = WitN !Core.QualName ![Wit]
+  | BuiltN !Core.Type !Core.Expr
+
+{-# COMPLETE Wit, Built #-}
+
+pattern Wit :: Core.QualName -> [Wit] -> Wit
+pattern Wit name args <- (_witNode -> WitN name args)
+  where
+    Wit name args = internWit (WitN name args)
+
+-- | Keyed by its type and not its expression, which two witnesses of one type
+-- may build at different spans; each keeps its own.
+pattern Built :: Core.Type -> Core.Expr -> Wit
+pattern Built tipe built <- (_witNode -> BuiltN tipe built)
+  where
+    Built tipe built = internWit (BuiltN tipe built)
+
+instance Show Wit where
+  showsPrec d w =
+    case _witNode w of
+      WitN name args -> showParen (d > 10) (showString "Wit " . showsPrec 11 name . showChar ' ' . showsPrec 11 args)
+      BuiltN tipe built -> showParen (d > 10) (showString "Built " . showsPrec 11 tipe . showChar ' ' . showsPrec 11 built)
 
 instance Eq Wit where
-  a == b = compare a b == Prelude.EQ
+  a == b = _witId a == _witId b
 
 instance Ord Wit where
-  compare a b =
-    case (a, b) of
-      (Wit n1 as, Wit n2 bs) -> compare n1 n2 <> compare as bs
-      (Wit _ _, Built _ _) -> Prelude.LT
-      (Built _ _, Wit _ _) -> Prelude.GT
-      (Built t1 _, Built t2 _) -> compare t1 t2
+  compare a b
+    | _witId a == _witId b = Prelude.EQ
+    | otherwise =
+        case (a, b) of
+          (Wit n1 as, Wit n2 bs) -> compare n1 n2 <> compare as bs
+          (Wit _ _, Built _ _) -> Prelude.LT
+          (Built _ _, Wit _ _) -> Prelude.GT
+          (Built t1 _, Built t2 _) -> compare t1 t2
+
+data WitKey
+  = KWit ![Int] !Core.QualName
+  | KBuilt !Int
+  deriving (Eq, Ord)
+
+-- | The ids handed out, by what a witness is: a table and its arguments' ids,
+-- or a built witness's type's id. A process-wide table, as
+-- 'Core.AST.Type''s is (D744).
+witTable :: IORef (Map WitKey Int)
+witTable = unsafePerformIO (newIORef Map.empty)
+{-# NOINLINE witTable #-}
+
+internWit :: WitNode -> Wit
+internWit node =
+  -- Forced first, for 'Core.AST.intern''s reason: a child built lazily would
+  -- intern itself against this update's thunk.
+  forced `seq` WitOf i node
+  where
+    key =
+      case node of
+        WitN name args -> KWit (map _witId args) name
+        BuiltN tipe _ -> KBuilt (Core.typeId tipe)
+    forced =
+      case key of
+        KWit ids _ -> foldr seq () ids
+        KBuilt t -> t `seq` ()
+    i =
+      unsafePerformIO $
+        atomicModifyIORef' witTable $ \table ->
+          case Map.lookup key table of
+            Just known -> (table, known)
+            Nothing -> let n = Map.size table + 1 in (Map.insert key n table, n)
+{-# NOINLINE internWit #-}
 
 -- | A generic binding applied to a full row of witnesses. This is what gets a
 -- copy, and it is the copy's name.
@@ -166,9 +240,10 @@ run given =
   -- Local definitions first (§G55): what their copies call is what 'demand'
   -- has to find, and a copy of a top-level definition specializes its own
   -- locals again in 'instantiated', where their witnesses become closed.
-  let tys = bindingTypes given
-      cores = Map.map (onExprs (localize (generics given) tys)) given
+  let types = bindingTypes given
+      cores = Map.map (onExprs (localize (generics given) (tysFor (generics given) types))) given
       gens = generics cores
+      tys = tysFor gens types
       collapsed
         | Map.null gens = cores
         | otherwise =
@@ -233,18 +308,32 @@ bindingTypes cores =
 -- unfixed, @Eq { value : a }@ in one generic definition and in another is the
 -- same key whatever each copy's @a@ is, and both copies call whichever of the
 -- two got the name.
-demand :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Map ModuleName.Canonical Core.Module -> Set Key
+demand :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -> Map ModuleName.Canonical Core.Module -> Set Key
 demand gens tys cores =
-  go Set.empty [(key, Map.empty) | key <- concatMap (sites gens) (concatMap exprsOf (Map.elems cores))]
+  go Set.empty Set.empty False [(key, Map.empty) | key <- concatMap (sites gens) (concatMap exprsOf (Map.elems cores))]
   where
-    go seen [] = seen
-    go seen ((key, above) : rest)
-      | key `Set.member` seen = go seen rest
-      | grows above key = go seen rest
+    -- Membership is asked of the keys by their witnesses' ids (D746): a site
+    -- reports every key nested in its witness, and a key's structural order
+    -- compares two witnesses down to where they differ, which for @Eq@ at a
+    -- type n deep was n³ in all. The set by that order is the answer, since
+    -- 'assign' names a copy by its position in it.
+    --
+    -- A key's 'nested' keys come after it at the chain it came with, as they
+    -- did when each site reported them all. A key already seen had them taken
+    -- then, each expanded unless 'grows' stopped it; only once something has
+    -- been stopped can taking them again at another chain find more, so
+    -- until then a repeat is skipped whole and each key is taken once.
+    go seen _ _ [] = seen
+    go seen ids stopped ((key, above) : rest)
+      | idsOf key `Set.member` ids =
+          if stopped
+            then go seen ids stopped ([(next, above) | next <- nested key] ++ rest)
+            else go seen ids stopped rest
+      | grows above key = go seen ids True ([(next, above) | next <- nested key] ++ rest)
       | otherwise =
-          let seen' = Set.insert key seen
-              chain = below above key
-           in go seen' ([(next, chain) | next <- sites gens (instantiated gens tys key)] ++ [(twin, above) | twin <- twinOf key] ++ rest)
+          let chain = below above key
+           in go (Set.insert key seen) (Set.insert (idsOf key) ids) stopped ([(next, chain) | next <- sites gens (instantiated gens tys key)] ++ [(twin, above) | twin <- twinOf key] ++ [(next, above) | next <- nested key] ++ rest)
+    idsOf = keyIds
     twinOf (name, wits) =
       [(twin, wits) | Just twin <- [Map.lookup name twins], Map.member twin gens]
 
@@ -257,15 +346,16 @@ sites gens = collect
     collect e =
       case Core._exprValue e of
         Core.EWitApp fn args
-          | Just (name, wits) <- keyOf gens fn args -> (name, wits) : concatMap fromWit wits
+          | Just (name, wits) <- keyOf gens fn args -> [(name, wits)]
         _ -> children_ collect e
 
-    fromWit w =
-      case w of
-        Wit name args
-          | null args -> []
-          | otherwise -> (name, args) : concatMap fromWit args
-        Built _ _ -> []
+-- | The keys a key's witnesses are made of, one level down: @Eq (Array Int)@'s
+-- witness applies @Eq (Array a)@'s table to one for @Eq Int@, and that
+-- application is an instantiation like any other. 'demand' takes them as it
+-- takes a key, so each is reported once and not at every site (D746).
+nested :: Key -> [Key]
+nested (_, wits) =
+  [(name, args) | Wit name args <- wits, not (null args)]
 
 -- | The key an application makes, when it makes one.
 keyOf :: Map Core.QualName a -> Core.Expr -> [Core.Expr] -> Maybe Key
@@ -419,7 +509,7 @@ substituted gens (name, wits) =
 -- This is the body a copy is, and the body 'demand' reads for the keys a copy
 -- asks for: the two must agree, and they must be read after the types are
 -- fixed, since a record's witness (§G38) is keyed by its type.
-instantiated :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Key -> Core.Expr
+instantiated :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -> Key -> Core.Expr
 instantiated gens tys key =
   localize gens tys (retype (substituteT (fixed gens tys key)) (substituted gens key))
 
@@ -439,7 +529,7 @@ canonical binder = expand
                 [] -> global
                 _ -> Core.Expr (Core.EWitApp global (map expand args)) tipe sp
 
-copy :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Map Key Name -> Key -> Core.Bind
+copy :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -> Map Key Name -> Key -> Core.Bind
 copy gens tys names key@(name, _) =
   let sub = fixed gens tys key
       body = rewrite gens names (instantiated gens tys key)
@@ -454,13 +544,26 @@ copy gens tys names key@(name, _) =
 -- A witness that is itself an application — @Ord (Array Int)@ is the
 -- @Ord (Array a)@ table applied to @Ord Int@ — is resolved the same way,
 -- recursively.
-fixed :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Key -> Map Name Core.Type
+-- | Every binding's type, and what 'witType' has answered in this run. The
+-- answers depend on the generic bindings as well, so each set of them has a
+-- 'Tys' of its own: 'tysFor' is called with both.
+data Tys = Tys
+  { _tysMap :: !(Map Core.QualName Core.Type),
+    _tysMemo :: !(IORef (IntMap.IntMap (Maybe Core.Type)))
+  }
+
+tysFor :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Tys
+tysFor gens types =
+  gens `seq` unsafePerformIO (Tys types <$> newIORef IntMap.empty)
+{-# NOINLINE tysFor #-}
+
+fixed :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -> Key -> Map Name Core.Type
 fixed gens tys (name, wits) =
   let (binders, _, _) = gens Map.! name
    in fixedBy gens tys binders wits
 
 -- | 'fixed' for any row of witness parameters, a local definition's included.
-fixedBy :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> [Core.Binder] -> [Wit] -> Map Name Core.Type
+fixedBy :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -> [Core.Binder] -> [Wit] -> Map Name Core.Type
 fixedBy gens tys binders wits =
   Map.unions
     [ matchT (Core._binderType binder) actual
@@ -470,16 +573,33 @@ fixedBy gens tys binders wits =
 
 -- | The type of a witness expression: the instance table's own type, with the
 -- context it was applied to substituted in.
-witType :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Wit -> Maybe Core.Type
-witType _ _ (Built tipe _) = Just tipe
-witType gens tys (Wit name args) =
+--
+-- Kept per witness id for the run (D746): a witness n deep is asked for at
+-- each of the n keys it reaches, and each answer recursed through all of it.
+witType :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -> Wit -> Maybe Core.Type
+witType gens tys wit =
+  unsafePerformIO $
+    do
+      known <- readIORef (_tysMemo tys)
+      case IntMap.lookup (_witId wit) known of
+        Just answer -> return answer
+        Nothing ->
+          do
+            let !answer = witTypeOnce gens tys wit
+            atomicModifyIORef' (_tysMemo tys) (\m -> (IntMap.insert (_witId wit) answer m, ()))
+            return answer
+{-# NOINLINE witType #-}
+
+witTypeOnce :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -> Wit -> Maybe Core.Type
+witTypeOnce _ _ (Built tipe _) = Just tipe
+witTypeOnce gens tys (Wit name args) =
   case args of
     [] ->
-      Map.lookup name tys
+      Map.lookup name (_tysMap tys)
     _ ->
       do
         (binders, _, _) <- Map.lookup name gens
-        declared <- Map.lookup name tys
+        declared <- Map.lookup name (_tysMap tys)
         let sub =
               Map.unions
                 [ matchT (Core._binderType binder) actual
@@ -525,18 +645,24 @@ matchT declared actual =
     _ -> Map.empty
 
 substituteT :: Map Name Core.Type -> Core.Type -> Core.Type
-substituteT sub tipe =
-  case tipe of
-    Core.TVar n -> Map.findWithDefault tipe n sub
-    Core.TCon q args -> Core.TCon q (map (substituteT sub) args)
-    Core.TFun args result -> Core.TFun (map (substituteT sub) args) (substituteT sub result)
-    Core.TRecord fields row -> Core.TRecord [(f, substituteT sub t) | (f, t) <- fields] row
-    Core.TForall vars constraints body ->
-      let inner = foldr Map.delete sub vars
-       in Core.TForall
-            vars
-            [Core.CClass c (substituteT inner t) | Core.CClass c t <- constraints]
-            (substituteT inner body)
+substituteT sub tipe
+  -- A type with no variable in it is its own substitution, and it is the
+  -- same value (D743): a copy's body holds the witness it was given, as deep
+  -- as the type it is for, and rebuilding each of its closed types was the
+  -- copy's size times the depth.
+  | Core.typeIsClosed tipe || Map.null sub = tipe
+  | otherwise =
+      case tipe of
+        Core.TVar n -> Map.findWithDefault tipe n sub
+        Core.TCon q args -> Core.TCon q (map (substituteT sub) args)
+        Core.TFun args result -> Core.TFun (map (substituteT sub) args) (substituteT sub result)
+        Core.TRecord fields row -> Core.TRecord [(f, substituteT sub t) | (f, t) <- fields] row
+        Core.TForall vars constraints body ->
+          let inner = foldr Map.delete sub vars
+           in Core.TForall
+                vars
+                [Core.CClass c (substituteT inner t) | Core.CClass c t <- constraints]
+                (substituteT inner body)
 
 -- | A copy's type is the generic one with its constraints discharged and the
 -- variables they were about replaced by what the key fixed.
@@ -616,7 +742,7 @@ type LocalKey = (Name, [Wit])
 -- A copy's body is localized too, since substituting its witnesses is what
 -- closes the rows of any local nested in it, and it is what 'demand' reads for
 -- the global definitions the copy calls.
-localize :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Core.QualName Core.Type -> Core.Expr -> Core.Expr
+localize :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -> Core.Expr -> Core.Expr
 localize gens tys = go
   where
     go e =
@@ -779,10 +905,20 @@ rewrite gens names = go
     go e =
       case Core._exprValue e of
         Core.EWitApp fn args
-          | Just key <- keyOf gens fn args,
-            Map.member key names ->
-              Core.Expr (Core.EGlobal (nameOf names key)) (Core.typeOf e) (Core.spanOf e)
+          | Just key@(Core.QualName home _, _) <- keyOf gens fn args,
+            Just name <- Map.lookup (keyIds key) byIds ->
+              Core.Expr (Core.EGlobal (Core.QualName home name)) (Core.typeOf e) (Core.spanOf e)
         _ -> runIdentity (childrenA (Identity . go) e)
+
+    -- Looked up by the witnesses' ids (D746), as 'demand' asks: by the order
+    -- the names were given in, each look-up compared witnesses down to where
+    -- they differ.
+    byIds = Map.fromList [(keyIds key, name) | (key, name) <- Map.toList names]
+
+-- | A key by its witnesses' ids: equal exactly when the keys are, and compared
+-- in integers.
+keyIds :: Key -> ([Int], Core.QualName)
+keyIds (name, wits) = (map _witId wits, name)
 
 module_ ::
   Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) ->

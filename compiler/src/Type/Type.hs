@@ -43,8 +43,12 @@ import AST.Utils.Type qualified as Type
 import Control.Monad (foldM)
 import Control.Monad.State.Strict (StateT, liftIO)
 import Control.Monad.State.Strict qualified as State
+import Core.AST qualified as Core
 import Data.Foldable (foldrM)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.IntMap.Strict qualified as IntMap
 import Data.List qualified as List
+import Data.Map.Lazy qualified as MapLazy
 import Data.Map.Strict qualified as Map
 import Data.Name qualified as Name
 import Data.Word (Word32)
@@ -365,7 +369,7 @@ toAnnotation variable =
 -- every variable in the module — an annotation's walk sees one definition's —
 -- and `classes.md` §0's rule has to be answerable for any of them once an
 -- /open/ constraint can put a variable in front of it (§G33.2).
-toNodeTypes :: Mark -> [Variable] -> Map.Map Can.NodeId Type -> IO (Map.Map Can.NodeId Can.Type, Map.Map Name.Name Class.Classes)
+toNodeTypes :: Mark -> [Variable] -> Map.Map Can.NodeId Type -> IO (Map.Map Can.NodeId Can.Type, Map.Map Can.NodeId Core.Type, Map.Map Name.Name Class.Classes)
 toNodeTypes visited annotated types =
   do
     fromAnnotations <- foldrM (varNames visited (foundName True)) [] annotated
@@ -374,9 +378,192 @@ toNodeTypes visited annotated types =
         kept = Map.fromListWith (\_ old -> old) [(_foundName f, _foundVar f) | f <- fixed]
         rename taken (Found _ name var makeContent) = addName 0 name var makeContent taken
     userNames <- foldM rename kept flexible
-    (canTypes, NameState _ _ _ constrained) <-
-      State.runStateT (traverse typeToCanType types) (makeNameState userNames)
-    return (canTypes, constrained)
+    memo <- newIORef IntMap.empty
+    (both, NameState _ _ _ constrained) <-
+      State.runStateT (traverse (typeToBoth memo) types) (makeNameState userNames)
+    -- 'MapLazy.map' for the `Can.Type`s: each is left a thunk until something
+    -- reads it, and only the nodes 'Type.Resolve' asks about ever are. An
+    -- access @x.f@ on an n-field record has a row of the other n-1 fields of
+    -- its own, so building every node's would be n² again.
+    return (MapLazy.map _bothCan both, Map.map _bothCore both, constrained)
+
+-- | Each variable's two types, once: its `Can.Type` and the Core type
+-- "Core.Lower.Type" would lower it to (geng-lang @m3-sweep.md@ §SW44, D743).
+--
+-- A node's type is a walk of its variable, and a module's nodes share their
+-- variables' structure: an update of an n-field record has n nodes of that
+-- record's type, a value n deep a node at each depth of it. Walked once per
+-- node, that is n·s for types of size s, in time and in the copies kept. Kept
+-- per union-find class, each variable is walked once and every node holding it
+-- shares what it came to, so the cost is the solver's graph.
+--
+-- The Core type is built here, beside the `Can.Type`, because lowering each
+-- node's `Can.Type` would walk it whole again; 'appOf', 'funOf' and 'recordOf'
+-- are 'Core.Lower.Type.lowerType' one level at a time, over children already
+-- lowered.
+--
+-- __All three fields are lazy__, and that is what keeps an access linear in
+-- what it builds. @x.f@ on an n-field record leaves a row of the other n-1
+-- fields, a variable of its own for each access. A record's fields are kept
+-- as a list, '_bothRow', and a record built on a row reads the row's list:
+-- neither the row's Core type nor its `Can.Type` is built unless a node has
+-- the row as its type, so the table holds the records nodes have, not n rows
+-- of n-1 fields.
+data Both = Both
+  { _bothCan :: Can.Type,
+    _bothCore :: Core.Type,
+    -- | A record's fields, alphabetical, and its row variable; 'Nothing' for
+    -- anything else.
+    _bothRow :: Maybe ([(Name.Name, Core.Type)], Maybe Name.Name),
+    -- | A function's arguments and its result, collapsed (C3), the list
+    -- sharing its tail with the result's own; 'Nothing' for anything else. An
+    -- unannotated definition of n arguments has a variable for each suffix of
+    -- its arrow, and a Core type for each would be n of up to n arguments.
+    _bothFun :: Maybe ([Core.Type], Core.Type)
+  }
+
+type Memo = IORef (IntMap.IntMap Both)
+
+-- | A recorded node's type, converted without going through
+-- 'Type.Solve.typeToVariable'.
+--
+-- The round trip through a 'Variable' would allocate into a rank's pool, and
+-- 'CNode' exists on the promise that recording a type cannot perturb
+-- inference. Walking the structure directly keeps that promise: the only
+-- variables touched are the ones the type already refers to.
+typeToBoth :: Memo -> Type -> StateT NameState IO Both
+typeToBoth memo tipe =
+  case tipe of
+    PlaceHolder name ->
+      return (leaf name)
+    VarN var ->
+      variableToBoth memo var
+    AliasN home name args real ->
+      do
+        canArgs <- traverse (traverse (fmap _bothCan . typeToBoth memo)) args
+        aliasOf home name canArgs <$> typeToBoth memo real
+    AppN home name args ->
+      appOf home name <$> traverse (typeToBoth memo) args
+    FunN a b ->
+      funOf <$> typeToBoth memo a <*> typeToBoth memo b
+    EmptyRecordN ->
+      return emptyRecord
+    RecordN fields ext ->
+      recordOf <$> traverse (typeToBoth memo) fields <*> typeToBoth memo ext
+
+variableToBoth :: Memo -> Variable -> StateT NameState IO Both
+variableToBoth memo variable =
+  do
+    key <- liftIO $ UF.pointId variable
+    known <- liftIO $ readIORef memo
+    case IntMap.lookup key known of
+      Just both ->
+        return both
+      Nothing ->
+        do
+          both <- variableToBothOnce memo variable
+          liftIO $ modifyIORef' memo (IntMap.insert key both)
+          return both
+
+variableToBothOnce :: Memo -> Variable -> StateT NameState IO Both
+variableToBothOnce memo variable =
+  do
+    (Descriptor content _ _ _) <- liftIO $ UF.get variable
+    case content of
+      Structure term ->
+        case term of
+          App1 home name args ->
+            appOf home name <$> traverse (variableToBoth memo) args
+          Fun1 a b ->
+            funOf <$> variableToBoth memo a <*> variableToBoth memo b
+          EmptyRecord1 ->
+            return emptyRecord
+          Record1 fields ext ->
+            recordOf <$> traverse (variableToBoth memo) fields <*> variableToBoth memo ext
+      Alias home name args realVariable ->
+        do
+          canArgs <- traverse (traverse (fmap _bothCan . variableToBoth memo)) args
+          aliasOf home name canArgs <$> variableToBoth memo realVariable
+      _ ->
+        -- A variable: 'variableToCanType' names it, notes its classes, and
+        -- answers a bare `Can.TVar`.
+        do
+          canType <- variableToCanType variable
+          case canType of
+            Can.TVar name -> return (leaf name)
+            _ -> error "Type.Type.variableToBoth: a variable that is not a TVar"
+
+leaf :: Name.Name -> Both
+leaf name =
+  Both (Can.TVar name) (Core.TVar name) Nothing Nothing
+
+-- | An alias is its real type in Core, which has none (C2).
+aliasOf :: ModuleName.Canonical -> Name.Name -> [(Name.Name, Can.Type)] -> Both -> Both
+aliasOf home name canArgs real =
+  real {_bothCan = Can.TAlias home name canArgs (Can.Filled (_bothCan real))}
+
+appOf :: ModuleName.Canonical -> Name.Name -> [Both] -> Both
+appOf home name args =
+  Both
+    (Can.TType home name (map _bothCan args))
+    (Core.TCon (Core.QualName home name) (map _bothCore args))
+    Nothing
+    Nothing
+
+-- | An arrow, collapsed maximally (C3), as 'Core.Lower.Type.lowerType' does:
+-- a function whose result is a function has one argument list.
+funOf :: Both -> Both -> Both
+funOf a b =
+  Both
+    (Can.TLambda (_bothCan a) (_bothCan b))
+    (Core.TFun args result)
+    Nothing
+    (Just (args, result))
+  where
+    (args, result) =
+      case _bothFun b of
+        Just (more, final) -> (_bothCore a : more, final)
+        Nothing -> ([_bothCore a], _bothCore b)
+
+emptyRecord :: Both
+emptyRecord =
+  Both (Can.TRecord Map.empty Nothing) (Core.TRecord [] Nothing) (Just ([], Nothing)) Nothing
+
+-- | A record and its extension, merged as 'termToCanType' merges them, with
+-- the fields alphabetical in Core (C2). A field of the extension wins, as
+-- 'Map.union' has it on the `Can` side.
+recordOf :: Map.Map Name.Name Both -> Both -> Both
+recordOf fields ext =
+  Both
+    ( let canFields = MapLazy.map (Can.FieldType 0 . _bothCan) fields
+       in case Type.iteratedDealias (_bothCan ext) of
+            Can.TRecord subFields subExt -> Can.TRecord (Map.union subFields canFields) subExt
+            Can.TVar name -> Can.TRecord canFields (Just name)
+            _ -> error "Used toNodeTypes on a record type that is not well-formed"
+    )
+    (Core.TRecord merged row)
+    (Just (merged, row))
+    Nothing
+  where
+    own = [(name, _bothCore both) | (name, both) <- Map.toAscList fields]
+    (merged, row) =
+      case _bothRow ext of
+        Just (subFields, subRow) -> (mergeFields subFields own, subRow)
+        Nothing ->
+          case _bothCore ext of
+            Core.TVar name -> (own, Just name)
+            _ -> error "Used toNodeTypes on a record type that is not well-formed"
+
+-- | Two alphabetical field lists as one, the first's field kept where both
+-- have it.
+mergeFields :: [(Name.Name, a)] -> [(Name.Name, a)] -> [(Name.Name, a)]
+mergeFields xs [] = xs
+mergeFields [] ys = ys
+mergeFields xs@(x : xt) ys@(y : yt) =
+  case compare (fst x) (fst y) of
+    LT -> x : mergeFields xt ys
+    GT -> y : mergeFields xs yt
+    EQ -> x : mergeFields xt yt
 
 collectTypeVarNames :: Mark -> Type -> [Found] -> IO [Found]
 collectTypeVarNames visited tipe taken =
@@ -391,43 +578,6 @@ collectTypeVarNames visited tipe taken =
         EmptyRecordN -> return taken
         RecordN fields ext ->
           recurse ext =<< foldrM recurse taken (Map.elems fields)
-
--- | Convert a constraint-level 'Type' without going through
--- 'Type.Solve.typeToVariable'.
---
--- The round trip through a 'Variable' would allocate into a rank's pool, and
--- 'CNode' exists on the promise that recording a type cannot perturb
--- inference. Walking the structure directly keeps that promise: the only
--- variables touched are the ones the type already refers to.
-typeToCanType :: Type -> StateT NameState IO Can.Type
-typeToCanType tipe =
-  case tipe of
-    PlaceHolder name ->
-      return (Can.TVar name)
-    VarN var ->
-      variableToCanType var
-    AliasN home name args real ->
-      Can.TAlias home name
-        <$> traverse (traverse typeToCanType) args
-        <*> (Can.Filled <$> typeToCanType real)
-    AppN home name args ->
-      Can.TType home name <$> traverse typeToCanType args
-    FunN a b ->
-      Can.TLambda <$> typeToCanType a <*> typeToCanType b
-    EmptyRecordN ->
-      return (Can.TRecord Map.empty Nothing)
-    RecordN fields ext ->
-      do
-        canFields <- traverse (fmap (Can.FieldType 0) . typeToCanType) fields
-        canExt <- Type.iteratedDealias <$> typeToCanType ext
-        return $
-          case canExt of
-            Can.TRecord subFields subExt ->
-              Can.TRecord (Map.union subFields canFields) subExt
-            Can.TVar name ->
-              Can.TRecord canFields (Just name)
-            _ ->
-              error "Used toNodeTypes on a record type that is not well-formed"
 
 variableToCanType :: Variable -> StateT NameState IO Can.Type
 variableToCanType variable =

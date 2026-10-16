@@ -23,6 +23,7 @@
 --     different field order have the same type and must lower to the same Core.
 module Core.Lower.Type
   ( lowerType,
+    sharedLowering,
     lowerAnnotation,
     lowerUnion,
     lowerAlias,
@@ -32,37 +33,85 @@ where
 
 import AST.Canonical qualified as Can
 import AST.Utils.Type qualified as Type
+import Control.Exception (evaluate)
 import Core.AST qualified as Core
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Index qualified as Index
+import Data.IntMap.Strict qualified as IntMap
 import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Name (Name)
 import Gren.ModuleName qualified as ModuleName
+import System.IO.Unsafe (unsafePerformIO)
+import System.Mem.StableName (hashStableName, makeStableName)
 import Type.Class qualified as Class
 
 lowerType :: Can.Type -> Core.Type
-lowerType tipe =
+lowerType = lowerTypeWith lowerType
+
+-- | 'lowerType' one level, with the given function for what is inside.
+lowerTypeWith :: (Can.Type -> Core.Type) -> Can.Type -> Core.Type
+lowerTypeWith lower tipe =
   case tipe of
     Can.TVar name ->
       Core.TVar name
     Can.TType home name args ->
-      Core.TCon (Core.QualName home name) (map lowerType args)
+      Core.TCon (Core.QualName home name) (map lower args)
     Can.TLambda arg result ->
-      case lowerType result of
-        -- Maximal collapse: a function whose result is itself a function has
-        -- one argument list, not two. See C3.
-        Core.TFun moreArgs finalResult ->
-          Core.TFun (lowerType arg : moreArgs) finalResult
-        loweredResult ->
-          Core.TFun [lowerType arg] loweredResult
+      -- Maximal collapse: a function whose result is itself a function has
+      -- one argument list, not two. See C3. The chain is gathered first and
+      -- built once: built from its result outwards, each of an n-argument
+      -- function's n suffixes would be a type of its own, and since types
+      -- are interned (geng-lang @m3-sweep.md@ §SW44, D743) each costs its
+      -- arity.
+      let (args, final) = arrows result
+       in Core.TFun (lower arg : args) final
     Can.TRecord fields ext ->
       -- `Map.toAscList` is the alphabetical order C2 asks for, and the
       -- `Word16` source-order index Canonical carries is deliberately dropped.
       Core.TRecord
-        [(name, lowerType fieldType) | (name, Can.FieldType _ fieldType) <- Map.toAscList fields]
+        [(name, lower fieldType) | (name, Can.FieldType _ fieldType) <- Map.toAscList fields]
         ext
     Can.TAlias _ _ args aliasType ->
-      lowerType (Type.dealias args aliasType)
+      lower (Type.dealias args aliasType)
+  where
+    -- The arguments and result of a function's result, collapsed: what
+    -- lowering the result would have taken apart, an alias for a function
+    -- included.
+    arrows t =
+      case t of
+        Can.TLambda arg result ->
+          let (args, final) = arrows result
+           in (lower arg : args, final)
+        Can.TAlias _ _ args aliasType ->
+          arrows (Type.dealias args aliasType)
+        _ ->
+          ([], lower t)
+
+-- | A 'lowerType' that lowers a `Can.Type` it has seen before, the same heap
+-- value, once (D743). For one tree of witnesses: a witness for @Eq@ at a type
+-- n deep holds one at each depth, each with its table's type, and those types
+-- share their insides; lowered one by one they were n·s. Its memo lives as
+-- long as the function does. The argument only keeps it from being floated
+-- out and shared between trees.
+sharedLowering :: a -> Can.Type -> Core.Type
+sharedLowering seed =
+  seed `seq` unsafePerformIO (lower <$> newIORef IntMap.empty)
+  where
+    lower memo t =
+      unsafePerformIO $
+        do
+          t' <- evaluate t
+          name <- makeStableName t'
+          known <- readIORef memo
+          case lookup name (IntMap.findWithDefault [] (hashStableName name) known) of
+            Just lowered -> return lowered
+            Nothing ->
+              do
+                let !lowered = lowerTypeWith (lower memo) t'
+                modifyIORef' memo (IntMap.insertWith (++) (hashStableName name) [(name, lowered)])
+                return lowered
+{-# NOINLINE sharedLowering #-}
 
 -- | A top-level definition's generalized type.
 --

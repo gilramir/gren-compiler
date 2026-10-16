@@ -12,6 +12,7 @@ import Canonicalize.NodeId qualified as NodeId
 import Core.AST qualified as Core
 import Core.Dump qualified as Dump
 import Core.Lower.Module qualified as Lower
+import Core.Lower.Type qualified as LowerType
 import Core.Pretty qualified as Pretty
 import Data.List qualified as List
 import Data.Map qualified as Map
@@ -64,19 +65,19 @@ compile platform application pkg ifaces modul =
     -- everything downstream of it must see the same ids.
     canonical <- NodeId.number <$> canonicalize pkg ifaces modul
     () <- checkCapabilities application pkg ifaces canonical
-    Type.Solved solved nodeTypes defaults literalWidths <- typeCheck modul canonical
+    Type.Solved solved nodeTypes coreNodeTypes defaults literalWidths <- typeCheck modul canonical
     () <- checkNodeTypes canonical nodeTypes
     -- Before the annotations, because half of one may come from it: an
     -- unannotated definition's open constraints are the elaborator's answer
     -- (§G33) and nothing earlier knows them. It may also change the types it
     -- was given, which is why they come back out of it (§G33.2).
-    (elaboration, solved', nodeTypes') <-
-      resolveInstances modul ifaces canonical defaults solved nodeTypes
+    (elaboration, solved', nodeTypes', coreNodeTypes') <-
+      resolveInstances modul ifaces canonical defaults solved nodeTypes coreNodeTypes
     let annotations = withContexts canonical (Resolve._inferred elaboration) solved'
     () <- nitpick canonical
     () <- checkLiterals literalWidths
     () <- checkMain platform modul annotations canonical
-    let core = Lower.lower platform annotations nodeTypes' elaboration canonical
+    let core = Lower.lower platform annotations nodeTypes' coreNodeTypes' elaboration canonical
     () <- dumpCore canonical core
     return (Artifacts canonical annotations nodeTypes' core)
 
@@ -181,8 +182,9 @@ resolveInstances ::
   Map.Map Name.Name Can.Type ->
   Map.Map Name.Name Can.Annotation ->
   Map.Map Can.NodeId Can.Type ->
-  Either E.Error (Resolve.Elaboration, Map.Map Name.Name Can.Annotation, Map.Map Can.NodeId Can.Type)
-resolveInstances modul ifaces canonical defaults solved nodeTypes =
+  Map.Map Can.NodeId Core.Type ->
+  Either E.Error (Resolve.Elaboration, Map.Map Name.Name Can.Annotation, Map.Map Can.NodeId Can.Type, Map.Map Can.NodeId Core.Type)
+resolveInstances modul ifaces canonical defaults solved nodeTypes coreNodeTypes =
   let visible =
         Map.union
           (Map.map Can._in_head (Can._instances canonical))
@@ -191,15 +193,25 @@ resolveInstances modul ifaces canonical defaults solved nodeTypes =
         Map.union
           (ownClasses canonical)
           (importedClasses ifaces)
-      ask anns types =
+      ask anns types cores =
         case Resolve.run (Resolve.Env visible classes types defaults anns) canonical of
           Resolve.Answered elaboration ->
-            Right (elaboration, anns, types)
+            Right (elaboration, anns, types, cores)
           Resolve.Refused errors ->
             Left (E.BadInstances (Localizer.fromModule modul) errors)
           Resolve.Defaulted subs ->
-            ask (foldr closeAnnotation anns subs) (foldr closeNodes types subs)
-   in ask solved nodeTypes
+            let types' = foldr closeNodes types subs
+             in ask (foldr closeAnnotation anns subs) types' (lowerClosed types' subs cores)
+   in ask solved nodeTypes coreNodeTypes
+
+-- | Lower again the types defaulting changed. The rest keep the Core type the
+-- solver built with their variables (D743).
+lowerClosed :: Map.Map Can.NodeId Can.Type -> [Resolve.Substitution] -> Map.Map Can.NodeId Core.Type -> Map.Map Can.NodeId Core.Type
+lowerClosed types subs cores =
+  foldr
+    (\nid acc -> maybe acc (\t -> Map.insert nid (LowerType.lowerType t) acc) (Map.lookup nid types))
+    cores
+    (concatMap Resolve._sNodes subs)
 
 -- | Apply one definition's defaults to the annotation it publishes, if it
 -- publishes one, and stop quantifying what they closed.
