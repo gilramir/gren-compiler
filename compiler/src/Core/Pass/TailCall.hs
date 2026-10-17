@@ -77,14 +77,34 @@ definition self value =
 
 -- | Turn a function whose body tail-calls itself into a join over its own
 -- parameters, entered with them.
+--
+-- A constrained definition the specializer gave up on (D654) keeps its witness
+-- abstraction, and its self call is the witness application of itself to the
+-- same witnesses, applied to the arguments: @eqFrom@ behind @Eq (Array a)@'s
+-- table, comparing a long array element by element. The witnesses do not
+-- change from one call to the next, so the loop is over the arguments alone,
+-- inside the abstraction (D763). A self call passing other witnesses, the one
+-- that grows, stays a call.
 loopify :: Core.Expr_ -> Core.Expr -> Fresh Core.Expr
 loopify self value =
   case Core._exprValue value of
+    Core.EWitLam witnesses inner ->
+      let same = [Core.EVar (Core._binderName w) | w <- witnesses]
+          isSelf fn =
+            case Core._exprValue fn of
+              Core.EWitApp f args -> Core._exprValue f == self && map Core._exprValue args == same
+              _ -> False
+       in (\l -> Core.Expr (Core.EWitLam witnesses l) (Core.typeOf value) (Core.spanOf value)) <$> loop isSelf inner
+    _ -> loop (\fn -> Core._exprValue fn == self) value
+
+loop :: (Core.Expr -> Bool) -> Core.Expr -> Fresh Core.Expr
+loop isSelf value =
+  case Core._exprValue value of
     Core.ELam params body
-      | calls self (length params) body ->
+      | calls isSelf (length params) body ->
           do
             join <- fresh
-            let rewritten = rewrite self join (length params) body
+            let rewritten = rewrite isSelf join (length params) body
                 lam = Core.Expr (Core.ELam params rewritten) (Core.typeOf value) (Core.spanOf value)
                 binder = Core.Binder join (Core.typeOf value) (Core.spanOf value)
                 entry =
@@ -98,29 +118,29 @@ loopify self value =
     _ -> pure value
 
 -- | Whether the body has a saturated self call in tail position.
-calls :: Core.Expr_ -> Int -> Core.Expr -> Bool
-calls self arity body =
+calls :: (Core.Expr -> Bool) -> Int -> Core.Expr -> Bool
+calls isSelf arity body =
   case Core._exprValue body of
-    Core.EApp fn args -> Core._exprValue fn == self && length args == arity
-    Core.ELet _ inner -> calls self arity inner
-    Core.ELetRec _ inner -> calls self arity inner
+    Core.EApp fn args -> isSelf fn && length args == arity
+    Core.ELet _ inner -> calls isSelf arity inner
+    Core.ELetRec _ inner -> calls isSelf arity inner
     Core.EJoin binds inner ->
-      calls self arity inner || any (calls self arity . Core._bindValue) binds
+      calls isSelf arity inner || any (calls isSelf arity . Core._bindValue) binds
     Core.ECase _ alts fallback ->
-      any (calls self arity . Core._altBody) alts || any (calls self arity) fallback
+      any (calls isSelf arity . Core._altBody) alts || any (calls isSelf arity) fallback
     _ -> False
 
 -- | Replace every saturated self call in tail position with a jump. Everything
 -- else is left exactly as it is, including a self call that is not in tail
 -- position: that one still needs a stack frame, and the definition is still
 -- there to be called.
-rewrite :: Core.Expr_ -> Name -> Int -> Core.Expr -> Core.Expr
-rewrite self join arity expr =
+rewrite :: (Core.Expr -> Bool) -> Name -> Int -> Core.Expr -> Core.Expr
+rewrite isSelf join arity expr =
   let node v = Core.Expr v (Core.typeOf expr) (Core.spanOf expr)
-      recur = rewrite self join arity
+      recur = rewrite isSelf join arity
    in case Core._exprValue expr of
         Core.EApp fn args
-          | Core._exprValue fn == self && length args == arity -> node (Core.EJump join args)
+          | isSelf fn && length args == arity -> node (Core.EJump join args)
         Core.ELet binds inner -> node (Core.ELet binds (recur inner))
         Core.ELetRec binds inner -> node (Core.ELetRec binds (recur inner))
         Core.EJoin binds inner ->

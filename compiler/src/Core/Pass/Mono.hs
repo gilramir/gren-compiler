@@ -280,7 +280,11 @@ instance_ prog defs key@(q, shapes) =
       binder' =
         binder
           { Core._binderName = Core._qnName (copyName key),
-            Core._binderType = fixT sub (Core._binderType binder)
+            -- Through the quantifier a constrained definition the
+            -- specializer gave up on keeps (D763): 'substT' leaves a
+            -- 'Core.TForall''s own variables alone, and 'closeT' would make
+            -- them @{}@ where the copy has them at its shapes.
+            Core._binderType = fixT sub (Specialize.unquantified (Core._binderType binder))
           }
    in (Core.Bind binder' value', reverse (_asked st))
 
@@ -475,7 +479,7 @@ copyLocal prog locals (i, shapes) =
       ( Core.Bind
           b
             { Core._binderName = suffixed (Core._binderName b) shapes,
-              Core._binderType = fixT sub (Core._binderType b)
+              Core._binderType = fixT sub (Specialize.unquantified (Core._binderType b))
             }
           value
       )
