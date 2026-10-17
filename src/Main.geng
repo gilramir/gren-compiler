@@ -656,6 +656,34 @@ parseUserArgs context compilerPath =
                                                             Task.succeed exitCode
                                                     )
 
+                                        else if compiling.native then
+                                            -- `geng run`'s native build
+                                            -- (geng-lang `m3-closeout.md`
+                                            -- D759).
+                                            Terminal.Beam.forgetProgram context.fsPermission compiling.outputPath
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        nativeMake context
+                                                            compilerPath
+                                                            { encodedCommand = compiling.encodedCommand
+                                                            , headless = True
+                                                            , output = Just compiling.output
+                                                            , optimization = "-O0"
+                                                            , debugInfo = False
+                                                            }
+                                                            compiling.resolution
+                                                            ordinary
+                                                    )
+                                                |> Task.andThen
+                                                    (\exitCode ->
+                                                        if exitCode == 0 then
+                                                            Terminal.Native.requireProgram context.fsPermission compiling.outputPath
+                                                                |> Task.map (\_ -> exitCode)
+
+                                                        else
+                                                            Task.succeed exitCode
+                                                    )
+
                                         else
                                             ordinary
 
@@ -687,6 +715,9 @@ parseUserArgs context compilerPath =
                                                     , runner =
                                                         if compiling.beam then
                                                             Terminal.Run.Escript tools.escript
+
+                                                        else if compiling.native then
+                                                            Terminal.Run.Executable
 
                                                         else
                                                             Terminal.Run.ByPlatform

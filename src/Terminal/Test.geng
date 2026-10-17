@@ -37,6 +37,7 @@ import FileSystem.Path as Path exposing (Path)
 import String.Parser.Advanced
 import Task exposing (Task)
 import Terminal.Beam
+import Terminal.Native
 import Terminal.PackageInstall as PackageInstall
 import Terminal.Run
 
@@ -88,13 +89,22 @@ package and module, and for task tests, the package and module whose
 `runTasks` runs them, which the project must depend on as it depends on
 `test`.
 -}
-runnerFor : Bool -> { package : String, module_ : String, taskPackage : String, taskModule : String }
-runnerFor beam =
-    if beam then
+runnerFor : Outline -> { package : String, module_ : String, taskPackage : String, taskModule : String }
+runnerFor outline =
+    if Terminal.Beam.isTarget outline then
         { package = "github.com/geng-language/test-runner-beam"
         , module_ = "Test.Runner.Beam"
         , taskPackage = "github.com/geng-language/test-runner-beam"
         , taskModule = "Test.Runner.Beam"
+        }
+
+    else if Terminal.Native.isTarget outline then
+        -- geng-lang `m3-closeout.md` D759: one package for both, as on the
+        -- BEAM, since a native project's manifest names it either way.
+        { package = "github.com/geng-language/test-runner-os"
+        , module_ = "Test.Runner.Os"
+        , taskPackage = "github.com/geng-language/test-runner-os"
+        , taskModule = "Test.Runner.Os"
         }
 
     else
@@ -135,7 +145,7 @@ make config named =
                 Terminal.Beam.isTarget projectOutline.outline
 
             runner =
-                runnerFor beam
+                runnerFor projectOutline.outline
 
             findSources =
                 Outline.findSourceFiles config.fsPermission projectOutline.outline projectOutline.projectPath
