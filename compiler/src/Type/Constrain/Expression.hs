@@ -195,13 +195,24 @@ constrainHelp rtv _nid region expression expected =
         let fieldType = VarN fieldVar
         let recordType = RecordN (Map.singleton field fieldType) extType
 
+        -- The subject is checked against a variable of its own, made the
+        -- record type first, as 'constrainUpdate' does, so the subject's node
+        -- records the variable the subject's type is unified into: the whole
+        -- record, one type for every access to it. Checked against the
+        -- structure itself, the node had a copy of its own, @{ ext | f : a }@,
+        -- and each access to an n-field record kept a row of the other n-1
+        -- alive until the lowering (D747, geng-lang @m3-sweep.md@ §SW45). The first
+        -- constraint cannot fail, a fresh variable against a structure, and
+        -- the second fails where it did, with the same types.
+        recordVar <- mkFlexVar
         let context = RecordAccess (Can.exprRegion expr) (getAccessName expr) accessRegion field
-        recordCon <- constrain rtv expr (FromContext region context recordType)
+        recordCon <- constrain rtv expr (FromContext region context (VarN recordVar))
 
         return $
-          exists [fieldVar, extVar] $
+          exists [fieldVar, extVar, recordVar] $
             CAnd
-              [ recordCon,
+              [ CEqual region Record (VarN recordVar) (NoExpectation recordType),
+                recordCon,
                 CEqual region (Access field) fieldType expected
               ]
     Can.Update expr fields ->

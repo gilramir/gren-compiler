@@ -106,10 +106,18 @@ import System.IO.Unsafe (unsafePerformIO)
 -- a key compared two witness trees whole: @x == x@ at a type @n@ deep asks for
 -- a copy at each depth, keyed by a witness as deep, and the pass spent 73% of
 -- its time comparing them. The order itself is the one it was, because a
--- copy's name is its position among the sorted keys: an id differs from run
--- to run and decides nothing but equality.
+-- local copy's name is its position among the sorted keys ('localNames'): an
+-- id differs from run to run and decides nothing but equality. The top-level
+-- keys are held by their ids alone ('Keys'), since nothing about them is
+-- ordered: a copy is named by a fingerprint ('assign') and placed by its name
+-- ('reorder').
+--
+-- It carries its size, which 'grows' asks of every key, for the same reason,
+-- and whether a built witness is anywhere in it, which 'pending' asks.
 data Wit = WitOf
   { _witId :: !Int,
+    _witSize :: !Int,
+    _witBuilt :: !Bool,
     _witNode :: !WitNode
   }
 
@@ -156,18 +164,28 @@ data WitKey
   deriving (Eq, Ord)
 
 -- | The ids handed out, by what a witness is: a table and its arguments' ids,
--- or a built witness's type's id. A process-wide table, as
+-- or a built witness's type's id; and each witness by its id, which is how a
+-- 'pending' witness in a copy's body is read back. A process-wide table, as
 -- 'Core.AST.Type''s is (D744).
-witTable :: IORef (Map WitKey Int)
-witTable = unsafePerformIO (newIORef Map.empty)
+witTable :: IORef (Map WitKey Int, IntMap.IntMap Wit)
+witTable = unsafePerformIO (newIORef (Map.empty, IntMap.empty))
 {-# NOINLINE witTable #-}
 
 internWit :: WitNode -> Wit
 internWit node =
   -- Forced first, for 'Core.AST.intern''s reason: a child built lazily would
   -- intern itself against this update's thunk.
-  forced `seq` WitOf i node
+  forced `seq` wit
   where
+    wit = WitOf i size built node
+    size =
+      case node of
+        WitN _ args -> 1 + sum (map _witSize args)
+        BuiltN tipe _ -> typeSize tipe
+    built =
+      case node of
+        WitN _ args -> any _witBuilt args
+        BuiltN _ _ -> True
     key =
       case node of
         WitN name args -> KWit (map _witId args) name
@@ -178,15 +196,79 @@ internWit node =
         KBuilt t -> t `seq` ()
     i =
       unsafePerformIO $
-        atomicModifyIORef' witTable $ \table ->
+        atomicModifyIORef' witTable $ \(table, byId) ->
           case Map.lookup key table of
-            Just known -> (table, known)
-            Nothing -> let n = Map.size table + 1 in (Map.insert key n table, n)
+            Just known -> ((table, byId), known)
+            Nothing ->
+              let n = Map.size table + 1
+               in ((Map.insert key n table, IntMap.insert n (WitOf n size built node) byId), n)
 {-# NOINLINE internWit #-}
+
+-- | A type's size, which is how a built witness counts in 'rowSize'.
+typeSize :: Core.Type -> Int
+typeSize t =
+  case t of
+    Core.TVar _ -> 1
+    Core.TCon _ args -> 1 + sum (map typeSize args)
+    Core.TFun args result -> 1 + sum (map typeSize (result : args))
+    Core.TRecord fields _ -> 1 + sum (map (typeSize . snd) fields)
+    Core.TForall _ _ inner -> 1 + typeSize inner
+
+-- | A witness applied to witnesses, held in a copy's body as one node until
+-- 'rewrite' names its copy (D748, geng-lang @m3-sweep.md@ §SW45).
+--
+-- A copy's witness parameter used to be replaced by the whole witness written
+-- out, an 'Core.AST.EWitApp' for each table down to the leaves: for @x == x@
+-- at a type n deep, a chain n long in the copy at each depth, every node of it
+-- retyped and interned and read back into a 'Wit' again at each site. But a
+-- witness applied to witnesses is itself a key, which 'demand' takes through
+-- 'nested', so 'rewrite' would replace it by its copy's name whole and none
+-- of the chain under it reaches the output. Now it is one 'Core.AST.EGlobal'
+-- whose name carries its id, which no source name can be, since @$@ cannot
+-- appear in one; 'witOf' reads it back, and 'rewrite' replaces it by its
+-- copy, or writes it out a level where nothing copied it ('grows' gave up).
+-- The ids differ from run to run, and none of them survives the pass.
+--
+-- A witness with a built one in it is written out as far down as that, as it
+-- was: a built witness keeps the expression it was read from, at its own span,
+-- and the table answers an id with the first witness it was minted for.
+pending :: Core.Type -> Core.Span -> Wit -> Core.Expr
+pending tipe sp w =
+  case w of
+    Built _ built -> built
+    Wit name [] -> Core.Expr (Core.EGlobal name) tipe sp
+    Wit name args
+      | _witBuilt w ->
+          Core.Expr (Core.EWitApp (Core.Expr (Core.EGlobal name) tipe sp) (map (pending tipe sp) args)) tipe sp
+    Wit name _ -> Core.Expr (Core.EGlobal (Core.QualName (Core._qnHome name) (Name.fromChars (pendingPrefix ++ show (_witId w))))) tipe sp
+
+pendingPrefix :: String
+pendingPrefix = "$pending$"
+
+-- | The witness a 'pending' name stands for.
+--
+-- The read is inside the look-up of the id: left a constant, GHC floats it
+-- out and reads the table once, before the witnesses minted after it.
+pendingWit :: Core.QualName -> Maybe Wit
+pendingWit q =
+  case List.stripPrefix pendingPrefix (Name.toChars (Core._qnName q)) of
+    Just digits ->
+      let i = read digits
+       in case unsafePerformIO (IntMap.lookup i . snd <$> readIORef witTable) of
+            Just w -> Just w
+            Nothing -> error ("Core.Pass.Specialize: no witness has the id of " ++ Name.toChars (Core._qnName q))
+    Nothing -> Nothing
+{-# NOINLINE pendingWit #-}
 
 -- | A generic binding applied to a full row of witnesses. This is what gets a
 -- copy, and it is the copy's name.
 type Key = (Core.QualName, [Wit])
+
+-- | The keys 'demand' finds, and the names 'assign' gives them, held by
+-- 'keyIds': equal exactly when the keys are, and compared in integers.
+type Keys = Map ([Int], Core.QualName) Key
+
+type Names = Map ([Int], Core.QualName) Name
 
 -- | Whether a key is polymorphic recursion: a binding asked for, along the
 -- chain of copies that reached it, at a row larger than the same binding was
@@ -219,19 +301,7 @@ below above (name, wits) =
 -- a })@, grows only its type, and counted as one it never grew and the demand
 -- ran until memory did.
 rowSize :: [Wit] -> Int
-rowSize = sum . map size
-  where
-    size w =
-      case w of
-        Wit _ args -> 1 + sum (map size args)
-        Built tipe _ -> typeSize tipe
-    typeSize t =
-      case t of
-        Core.TVar _ -> 1
-        Core.TCon _ args -> 1 + sum (map typeSize args)
-        Core.TFun args result -> 1 + sum (map typeSize (result : args))
-        Core.TRecord fields _ -> 1 + sum (map (typeSize . snd) fields)
-        Core.TForall _ _ inner -> 1 + typeSize inner
+rowSize = sum . map _witSize
 
 -- THE PASS
 
@@ -244,6 +314,8 @@ run given =
       cores = Map.map (onExprs (localize (generics given) (tysFor (generics given) types))) given
       gens = generics cores
       tys = tysFor gens types
+      -- With no generic binding there is no 'pending' witness to rewrite
+      -- either: one is a table applied to witnesses, and that table is one.
       collapsed
         | Map.null gens = cores
         | otherwise =
@@ -253,7 +325,7 @@ run given =
                   Map.fromListWith
                     (++)
                     [ (Core._qnHome name, [copy gens tys names key])
-                    | key@(name, _) <- Set.toAscList keys
+                    | key@(name, _) <- Map.elems keys
                     ]
              in Map.mapWithKey (module_ gens names added) cores
       -- A local's copy reads its method out of a known table too, so the fold
@@ -308,32 +380,31 @@ bindingTypes cores =
 -- unfixed, @Eq { value : a }@ in one generic definition and in another is the
 -- same key whatever each copy's @a@ is, and both copies call whichever of the
 -- two got the name.
-demand :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -> Map ModuleName.Canonical Core.Module -> Set Key
+demand :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -> Map ModuleName.Canonical Core.Module -> Keys
 demand gens tys cores =
-  go Set.empty Set.empty False [(key, Map.empty) | key <- concatMap (sites gens) (concatMap exprsOf (Map.elems cores))]
+  go Map.empty False [(key, Map.empty) | key <- concatMap (sites gens) (concatMap exprsOf (Map.elems cores))]
   where
-    -- Membership is asked of the keys by their witnesses' ids (D746): a site
+    -- The keys are held by their witnesses' ids (D746, D748): a site
     -- reports every key nested in its witness, and a key's structural order
     -- compares two witnesses down to where they differ, which for @Eq@ at a
-    -- type n deep was n³ in all. The set by that order is the answer, since
-    -- 'assign' names a copy by its position in it.
+    -- type n deep was n³ in all, and still n² log n as the order of the
+    -- answer once membership was asked by ids. Nothing reads that order.
     --
     -- A key's 'nested' keys come after it at the chain it came with, as they
     -- did when each site reported them all. A key already seen had them taken
     -- then, each expanded unless 'grows' stopped it; only once something has
     -- been stopped can taking them again at another chain find more, so
     -- until then a repeat is skipped whole and each key is taken once.
-    go seen _ _ [] = seen
-    go seen ids stopped ((key, above) : rest)
-      | idsOf key `Set.member` ids =
+    go seen _ [] = seen
+    go seen stopped ((key, above) : rest)
+      | keyIds key `Map.member` seen =
           if stopped
-            then go seen ids stopped ([(next, above) | next <- nested key] ++ rest)
-            else go seen ids stopped rest
-      | grows above key = go seen ids True ([(next, above) | next <- nested key] ++ rest)
+            then go seen stopped ([(next, above) | next <- nested key] ++ rest)
+            else go seen stopped rest
+      | grows above key = go seen True ([(next, above) | next <- nested key] ++ rest)
       | otherwise =
           let chain = below above key
-           in go (Set.insert key seen) (Set.insert (idsOf key) ids) stopped ([(next, chain) | next <- sites gens (instantiated gens tys key)] ++ [(twin, above) | twin <- twinOf key] ++ [(next, above) | next <- nested key] ++ rest)
-    idsOf = keyIds
+           in go (Map.insert (keyIds key) key seen) stopped ([(next, chain) | next <- sites gens (instantiated gens tys key)] ++ [(twin, above) | twin <- twinOf key] ++ [(next, above) | next <- nested key] ++ rest)
     twinOf (name, wits) =
       [(twin, wits) | Just twin <- [Map.lookup name twins], Map.member twin gens]
 
@@ -374,7 +445,9 @@ closedRow args =
 witOf :: Core.Expr -> Maybe Wit
 witOf e =
   case Core._exprValue e of
-    Core.EGlobal name -> Just (Wit name [])
+    Core.EGlobal name
+      | Just w <- pendingWit name -> Just w
+      | otherwise -> Just (Wit name [])
     Core.EWitApp fn args ->
       case Core._exprValue fn of
         Core.EGlobal name -> Wit name <$> traverse witOf args
@@ -415,10 +488,10 @@ witOf e =
 -- Two keys of one binding whose first eight digits agree take all sixteen,
 -- and so does the rest of that binding's group, which keeps the choice a
 -- property of the group alone.
-assign :: Set Key -> Map Key Name
+assign :: [Key] -> Names
 assign keys =
   Map.fromList
-    [ (key, Name.fromChars (Name.toChars (Core._qnName name) ++ "$s" ++ take width digits))
+    [ (keyIds key, Name.fromChars (Name.toChars (Core._qnName name) ++ "$s" ++ take width digits))
     | (name, group) <- Map.toAscList grouped,
       let hexes = [(key, FP.toHex (keyPrint key)) | key <- group],
       let width = if distinct (map (take 8 . snd) hexes) then 8 else 16,
@@ -426,12 +499,20 @@ assign keys =
     ]
   where
     grouped =
-      Map.fromListWith (++) [(name, [key]) | key@(name, _) <- Set.toList keys]
+      Map.fromListWith (++) [(name, [key]) | key@(name, _) <- keys]
     distinct xs = length xs == Set.size (Set.fromList xs)
 
 -- | What 'assign' names a copy by: every part of the key, length-prefixed by
 -- 'FP.chars' and tagged by shape, so that two different keys feed different
 -- bytes.
+--
+-- A witness applied to witnesses is itself a key, and is fed in as that key's
+-- own fingerprint, kept per witness for the run (D749, geng-lang
+-- @m3-sweep.md@ §SW45). It was fed in whole, every table down to the leaves,
+-- so for @x == x@ at a type n deep the copy at each depth fed a witness as
+-- deep, and naming the copies was three-quarters of what the pass spent once
+-- their bodies were linear. A key whose witnesses are all tables or built ones
+-- feeds the bytes it fed, and keeps its name.
 keyPrint :: Key -> FP.Fingerprint
 keyPrint (name, wits) =
   foldl (flip ($)) FP.empty (qual name : count wits : map wit wits)
@@ -442,7 +523,8 @@ keyPrint (name, wits) =
       FP.chars (Name.toChars n) (FP.chars (Name.toChars home) (FP.chars (Pkg.toChars pkg) fp))
     wit w fp =
       case w of
-        Wit table args -> foldl (flip wit) (count args (qual table (tag "w" fp))) args
+        Wit table [] -> count [] (qual table (tag "w" fp))
+        Wit _ _ -> FP.fingerprint (witPrint w) (tag "k" fp)
         Built tipe _ -> ty tipe (tag "b" fp)
     ty t fp =
       case t of
@@ -457,6 +539,29 @@ keyPrint (name, wits) =
           let fp' = foldl (\acc v -> FP.chars (Name.toChars v) acc) (count vars (tag "a" fp)) vars
               fp'' = foldl (\acc (Core.CClass c ct) -> ty ct (qual c acc)) (count constraints fp') constraints
            in ty body fp''
+
+-- | 'keyPrint' of the key a witness applied to witnesses is, by its id. A
+-- process-wide table, as the ids are; what it holds is the same in every run.
+witPrint :: Wit -> FP.Fingerprint
+witPrint w =
+  unsafePerformIO $
+    do
+      known <- readIORef witPrints
+      case IntMap.lookup (_witId w) known of
+        Just answer -> return answer
+        Nothing ->
+          do
+            let !answer =
+                  case w of
+                    Wit table args -> keyPrint (table, args)
+                    Built _ _ -> error "Core.Pass.Specialize.witPrint: a built witness is not a key"
+            atomicModifyIORef' witPrints (\m -> (IntMap.insert (_witId w) answer m, ()))
+            return answer
+{-# NOINLINE witPrint #-}
+
+witPrints :: IORef (IntMap.IntMap FP.Fingerprint)
+witPrints = unsafePerformIO (newIORef IntMap.empty)
+{-# NOINLINE witPrints #-}
 
 -- | D582 (geng-lang @m3-fold.md@ §FL10): @core@'s @Dict@ transient twins.
 -- Whenever a key of the first is copied, the second is copied for the same
@@ -473,22 +578,23 @@ twins =
     ]
 
 -- | 'assign', with every twin key named after its original's copy.
-assignTwins :: Set Key -> Map Key Name
+assignTwins :: Keys -> Names
 assignTwins keys =
-  let twinned = Set.fromList [(twin, wits) | (name, wits) <- Set.toList keys, Just twin <- [Map.lookup name twins], Set.member (twin, wits) keys]
-      base = assign (Set.difference keys twinned)
+  let twinned = Map.fromList [(keyIds (twin, wits), (twin, wits)) | (name, wits) <- Map.elems keys, Just twin <- [Map.lookup name twins], Map.member (keyIds (twin, wits)) keys]
+      base = assign (Map.elems (Map.difference keys twinned))
       named =
         Map.fromList
-          [ ((twin, wits), Name.fromChars (Name.toChars (Core._qnName twin) ++ drop (length (Name.toChars (Core._qnName name))) (Name.toChars copied)))
-          | ((name, wits), copied) <- Map.toList base,
+          [ (keyIds (twin, wits), Name.fromChars (Name.toChars (Core._qnName twin) ++ drop (length (Name.toChars (Core._qnName name))) (Name.toChars copied)))
+          | (name, wits) <- Map.elems (Map.difference keys twinned),
+            Just copied <- [Map.lookup (keyIds (name, wits)) base],
             Just twin <- [Map.lookup name twins],
-            Set.member (twin, wits) twinned
+            Map.member (keyIds (twin, wits)) twinned
           ]
    in Map.union base named
 
-nameOf :: Map Key Name -> Key -> Core.QualName
+nameOf :: Names -> Key -> Core.QualName
 nameOf names key@(Core.QualName home _, _) =
-  case Map.lookup key names of
+  case Map.lookup (keyIds key) names of
     Just name -> Core.QualName home name
     Nothing -> fst key
 
@@ -513,23 +619,14 @@ instantiated :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -
 instantiated gens tys key =
   localize gens tys (retype (substituteT (fixed gens tys key)) (substituted gens key))
 
--- | A witness, written back as the expression it was read from. The type and
--- span are the parameter's, so a copy is a function of its key alone.
+-- | A witness, written back for a parameter: a table, a built witness, or
+-- one 'pending' node. The type and span are the parameter's, so a copy is a
+-- function of its key alone.
 canonical :: Core.Binder -> Wit -> Core.Expr
-canonical binder = expand
-  where
-    tipe = Core._binderType binder
-    sp = Core._binderSpan binder
-    expand w =
-      case w of
-        Built _ built -> built
-        Wit name args ->
-          let global = Core.Expr (Core.EGlobal name) tipe sp
-           in case args of
-                [] -> global
-                _ -> Core.Expr (Core.EWitApp global (map expand args)) tipe sp
+canonical binder =
+  pending (Core._binderType binder) (Core._binderSpan binder)
 
-copy :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -> Map Key Name -> Key -> Core.Bind
+copy :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Tys -> Names -> Key -> Core.Bind
 copy gens tys names key@(name, _) =
   let sub = fixed gens tys key
       body = rewrite gens names (instantiated gens tys key)
@@ -899,21 +996,23 @@ scopedChildren f live e@(Core.Expr value tipe sp) =
 -- The arguments are not walked: a witness row is described entirely by the key,
 -- and the copies its own nesting needs were registered by 'sites'. Everything
 -- else recurses.
-rewrite :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Map Key Name -> Core.Expr -> Core.Expr
+rewrite :: Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) -> Names -> Core.Expr -> Core.Expr
 rewrite gens names = go
   where
     go e =
       case Core._exprValue e of
         Core.EWitApp fn args
           | Just key@(Core.QualName home _, _) <- keyOf gens fn args,
-            Just name <- Map.lookup (keyIds key) byIds ->
+            Just name <- Map.lookup (keyIds key) names ->
               Core.Expr (Core.EGlobal (Core.QualName home name)) (Core.typeOf e) (Core.spanOf e)
+        Core.EGlobal q
+          | Just (Wit table args) <- pendingWit q ->
+              let tipe = Core.typeOf e
+                  sp = Core.spanOf e
+               in case Map.lookup (keyIds (table, args)) names of
+                    Just name -> Core.Expr (Core.EGlobal (Core.QualName (Core._qnHome table) name)) tipe sp
+                    Nothing -> go (Core.Expr (Core.EWitApp (Core.Expr (Core.EGlobal table) tipe sp) (map (pending tipe sp) args)) tipe sp)
         _ -> runIdentity (childrenA (Identity . go) e)
-
-    -- Looked up by the witnesses' ids (D746), as 'demand' asks: by the order
-    -- the names were given in, each look-up compared witnesses down to where
-    -- they differ.
-    byIds = Map.fromList [(keyIds key, name) | (key, name) <- Map.toList names]
 
 -- | A key by its witnesses' ids: equal exactly when the keys are, and compared
 -- in integers.
@@ -922,7 +1021,7 @@ keyIds (name, wits) = (map _witId wits, name)
 
 module_ ::
   Map Core.QualName ([Core.Binder], Core.Expr, Core.Type) ->
-  Map Key Name ->
+  Names ->
   Map ModuleName.Canonical [Core.Bind] ->
   ModuleName.Canonical ->
   Core.Module ->
