@@ -566,19 +566,23 @@ fixT :: Map Name Core.Type -> Core.Type -> Core.Type
 fixT sub = closeT . substT sub
 
 closeT :: Core.Type -> Core.Type
-closeT tipe =
-  case tipe of
-    Core.TVar _ -> unit
-    Core.TCon q args -> Core.TCon q (map closeT args)
-    Core.TFun args result -> Core.TFun (map closeT args) (closeT result)
-    Core.TRecord fields _ -> Core.TRecord [(f, closeT t) | (f, t) <- fields] Nothing
-    Core.TForall _ _ body -> closeT body
+closeT tipe
+  -- A closed type is left as it is, not rebuilt: every node's type goes
+  -- through here, and rebuilding one a nest deep is its whole depth (D780).
+  | Core.typeIsClosed tipe = tipe
+  | otherwise =
+      case tipe of
+        Core.TVar _ -> unit
+        Core.TCon q args -> Core.TCon q (map closeT args)
+        Core.TFun args result -> Core.TFun (map closeT args) (closeT result)
+        Core.TRecord fields _ -> Core.TRecord [(f, closeT t) | (f, t) <- fields] Nothing
+        Core.TForall _ _ body -> closeT body
 
 -- | Substitution with rows: a row variable bound to a record extends the record
 -- it is the row of, whose fields stay alphabetical.
 substT :: Map Name Core.Type -> Core.Type -> Core.Type
 substT sub tipe
-  | Map.null sub = tipe
+  | Map.null sub || Core.typeIsClosed tipe = tipe
   | otherwise =
       case tipe of
         Core.TVar v -> Map.findWithDefault tipe v sub

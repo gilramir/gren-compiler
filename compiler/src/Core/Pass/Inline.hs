@@ -246,12 +246,17 @@ data Ctx = Ctx
     -- constructor, by name: @Ryu.mantissaBits@ is 52, and a guard on it is a
     -- branch @dialyzer@ can see is dead.
     _constant :: Core.QualName -> Maybe Core.Expr,
-    _known :: Map Name Core.Expr
+    _known :: Map Name Core.Expr,
+    -- | The locals the definition binds once when its simplifying starts,
+    -- other than a name 'fresh' could make: a lambda whose parameters are
+    -- all of these can have them bound by @let@s where it stands without
+    -- shadowing anything (D780).
+    _once :: Set Name
   }
 
 optimize :: (Core.QualName -> Maybe Cand) -> (Core.QualName -> Maybe Core.Expr) -> Core.Expr -> (Core.Expr, Bool)
 optimize candidate constant value =
-  let (out, St _ _ changed) = runState (simplify (Ctx candidate constant Map.empty) value) (St 0 fuelPerDefinition False)
+  let (out, St _ _ changed) = runState (simplify (Ctx candidate constant Map.empty (boundOnce value)) value) (St 0 fuelPerDefinition False)
    in (out, changed)
 
 fresh :: M Name
@@ -413,13 +418,72 @@ node ctx e@(Core.Expr value tipe sp) =
     -- A lambda written out in place and applied at once, as a witness's
     -- method is once the access above has read it: the body, with the
     -- arguments bound as a call's are ('bindAll').
+    --
+    -- Except a large body no argument can fold anything in (D780): its
+    -- parameters are bound by @let@s around it as it is. The body is already
+    -- simplified, and renaming and simplifying it again at every level of a
+    -- nest of these is n² in its depth (@m3-closeout.md@ §CL19.3). Its names
+    -- are kept, so only a lambda whose parameters nothing else in the
+    -- definition binds: specialization copies a witness's methods with their
+    -- names, and a copy opened inside another would shadow it ('boundOnce').
     Core.EApp (Core.Expr (Core.ELam params body) _ _) args
       | length params == length args ->
           do
             markFired
-            out <- bindAll (zip params args) body tipe sp
-            simplify ctx out
+            if all (\b -> Set.member (Core._binderName b) (_once ctx)) params
+              && opensNothing args
+              && Core.typeOf body == tipe
+              && atLeast openLimit body
+              then
+                return $
+                  foldr
+                    (\(binder, arg) acc -> Core.Expr (Core.ELet [Core.Bind (binder {Core._binderType = refine (Core.typeOf arg) (Core._binderType binder)}) arg] acc) tipe sp)
+                    body
+                    (zip params args)
+              else do
+                out <- bindAll (zip params args) body tipe sp
+                simplify ctx out
     _ -> return e
+
+-- | The size from which a lambda applied at once keeps its body (D780): past
+-- 'sizeLimit', so a body the size of anything inlined is simplified again.
+openLimit :: Int
+openLimit = 64
+
+-- | Arguments that, put in place of a parameter, give no rule anything to
+-- fold and that 'bindAll' would bind by a @let@ itself: none is atomic (a
+-- variable or a literal, which it substitutes), a constructor, a lambda or a
+-- value known itself.
+opensNothing :: [Core.Expr] -> Bool
+opensNothing =
+  all $ \arg ->
+    case Core._exprValue arg of
+      Core.ELam _ _ -> False
+      _ -> not (atomic arg) && Maybe.isNothing (knownValue arg)
+
+-- | The locals bound exactly once in a definition, leaving out the names
+-- 'fresh' makes, since one of those could be made again.
+boundOnce :: Core.Expr -> Set Name
+boundOnce value =
+  Map.keysSet (Map.filterWithKey (\n k -> k == (1 :: Int) && not (List.isPrefixOf "$n" (Name.toChars n))) (go Map.empty [value]))
+  where
+    go counts pending =
+      case pending of
+        [] -> counts
+        x : rest ->
+          let counts' = List.foldl' (\m b -> Map.insertWith (+) (Core._binderName b) 1 m) counts (bindersOf (Core._exprValue x))
+           in counts' `seq` go counts' (Specialize.children_ (: []) x ++ rest)
+
+-- | Whether an expression has at least @k@ nodes, counting no more than that.
+atLeast :: Int -> Core.Expr -> Bool
+atLeast k e = count k [e] <= 0
+  where
+    count n pending =
+      case pending of
+        [] -> n
+        x : rest
+          | n <= 0 -> n
+          | otherwise -> count (n - 1) (Specialize.children_ (: []) x ++ rest)
 
 -- | Which side of a pipe is the function, which the value, and whether
 -- applying one to the other moves the value after the function's arguments.
@@ -608,6 +672,9 @@ refineTails tipe e =
 refine :: Core.Type -> Core.Type -> Core.Type
 refine a b =
   case (a, b) of
+    -- One interned type, compared by its id: what the walk below would
+    -- answer, without walking a type as tall as a nest is deep (D780).
+    _ | a == b -> a
     _ | isShape a -> b
     _ | isShape b -> a
     (Core.TCon q xs, Core.TCon q' ys)
@@ -686,9 +753,10 @@ pure_ e =
 -- (m2-beam-toptier.md §TT30.5).
 thinned :: [Core.Alt] -> Maybe [Core.Alt]
 thinned alts =
-  let thinAlt (Core.Alt p b) = Core.Alt (thin (Refs.freeLocals b) p) b
+  let thinAlt alt@(Core.Alt p b) =
+        if Set.null (Refs.patternBinders p) then alt else Core.Alt (thin (Refs.freeLocals b) p) b
       alts' = map thinAlt alts
-   in if alts' /= alts then Just alts' else Nothing
+   in if map Core._altPattern alts' /= map Core._altPattern alts then Just alts' else Nothing
 
 thin :: Set Name -> Core.Pattern -> Core.Pattern
 thin free p =
