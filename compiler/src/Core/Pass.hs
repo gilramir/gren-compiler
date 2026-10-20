@@ -4,14 +4,16 @@
 --
 -- @docs/core.md@ C11 puts the passes in Haskell through M1b. M1a's pipeline
 -- had none of them; since D169 they all run (four since D442, five since D479,
--- six since D483), except @inline@ on JavaScript since D487, unless
--- @GENG_CORE_PASSES@ says otherwise ('Core.Dump.corePasses'):
+-- six since D483), except @inline@ on JavaScript since D487, which runs
+-- @inlinematch@ in its place since D792, unless @GENG_CORE_PASSES@ says
+-- otherwise ('Core.Dump.corePasses'):
 --
 -- > GENG_CORE_PASSES=none          -- none of them
 -- > GENG_CORE_PASSES=case          -- decision trees (C4, "Core.Pass.Case")
 -- > GENG_CORE_PASSES=case,tailcall -- and self tail calls ("Core.Pass.TailCall")
 -- > GENG_CORE_PASSES=specialize    -- witness erasure ("Core.Pass.Specialize")
 -- > GENG_CORE_PASSES=inline        -- small functions inlined ("Core.Pass.Inline")
+-- > GENG_CORE_PASSES=inlinematch   -- only where a case matches them, and @prim wrappers (JavaScript's, D792)
 -- > GENG_CORE_PASSES=mutual        -- local mutual tail calls, one function ("Core.Pass.Mutual")
 -- > GENG_CORE_PASSES=float         -- a let in a let's right-hand side floated out ("Core.Pass.Float")
 -- > GENG_CORE_PASSES=mono          -- every type variable copied away by shape ("Core.Pass.Mono")
@@ -58,6 +60,15 @@
 -- V8 inlines anyway. So 'defaults' leaves it out for 'Target.Js'; a list named
 -- in @GENG_CORE_PASSES@ still turns it on there, which is how it is measured.
 -- The other targets keep it until their own measurements say otherwise.
+--
+-- __JavaScript inlines narrowly instead__ (D792, geng-lang
+-- @m3-js-inline.md@): @inlinematch@ is the same pass in a mode that opens a
+-- call only where a @case@ matches its constructor and is then decided, and
+-- @core@'s one-primitive wrappers anywhere. It takes the @Just@ a
+-- @Bytes.get@ loop built on every byte (§BA4) and @fib@'s comparison chain,
+-- and with the backend's statements for a @let@'s block (D793) the byte loops
+-- are 3× faster, the stage read 15% and @geng fmt@ 2%. With both named, the
+-- full pass runs first and the narrow one finds nothing left.
 --
 -- __Monomorphization is native's__ (D491, @m3-native.md@ §NA19). It is in
 -- 'defaults' for 'Target.Native' alone, since JavaScript and the BEAM have a
@@ -129,13 +140,14 @@ names :: Target.Target -> [String]
 names target =
   Maybe.fromMaybe (defaults target) Dump.corePasses
 
--- | Every pass, less @inline@ on JavaScript (D487), @mono@ only on native
--- (D491), and @arraypop@ natively and on JavaScript (D713). @arraytr@ is in
--- no target's defaults: the BEAM's Array grows as a tree (D715, D716).
+-- | Every pass, less @inline@ on JavaScript (D487), which runs @inlinematch@
+-- in its place (D792), @mono@ only on native (D491), and @arraypop@ natively
+-- and on JavaScript (D713). @arraytr@ is in no target's defaults: the BEAM's
+-- Array grows as a tree (D715, D716).
 defaults :: Target.Target -> [String]
 defaults target =
   case target of
-    Target.Js -> ["specialize", "foldspec", "transient", "arraypop", "float", "mutual", "case", "tailcall"]
+    Target.Js -> ["specialize", "foldspec", "transient", "arraypop", "inlinematch", "float", "mutual", "case", "tailcall"]
     Target.Native -> ["specialize", "foldspec", "transient", "arraypop", "mono", "inline", "float", "mutual", "case", "tailcall"]
     _ -> ["specialize", "foldspec", "inline", "float", "mutual", "case", "tailcall"]
 
@@ -147,7 +159,7 @@ run target cores =
       transient = pass "transient" Transient.run folded
       arrays = pass "arraypop" (ArrayTransient.run True) (pass "arraytr" (ArrayTransient.run False) transient)
       monomorphized = pass "mono" (Mono.run (Target.language target) Dump.externBodies) arrays
-      inlined = pass "inline" Inline.run monomorphized
+      inlined = pass "inlinematch" (Inline.runWith Inline.Matched) (pass "inline" Inline.run monomorphized)
       floated = pass "float" (Map.map Float.run) inlined
       grouped = pass "mutual" (Map.map Mutual.run) floated
       tbl = Case.table (Map.elems grouped)

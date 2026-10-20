@@ -83,6 +83,8 @@ data Stmt
   | Break (Maybe Name)
   | Continue (Maybe Name)
   | Labelled Name Stmt
+  | -- | @label: { … }@: a block a @break label@ leaves (geng D793).
+    LabelledBlock Name [Stmt]
   | Try Stmt Name Stmt
   | Throw Expr
   | Return Expr
@@ -375,6 +377,16 @@ fromStmt level@(Level indent nextLevel) statement builder =
         & addAscii ":"
         & addLine
         & fromStmt level stmt
+    LabelledBlock label stmts ->
+      builder
+        & addByteString indent
+        & addByteString (Name.toBuilder label)
+        & addAscii ": {"
+        & addLine
+        & fromStmtBlock nextLevel stmts
+        & addByteString indent
+        & addAscii "}"
+        & addLine
     Try tryStmt errorName catchStmt ->
       builder
         & addByteString indent

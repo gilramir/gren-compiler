@@ -64,6 +64,7 @@ import Generate.Mode qualified as Mode
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Reporting.Annotation qualified as A
+import Data.Monoid (All (..))
 
 -- ENVIRONMENT
 
@@ -290,12 +291,56 @@ globalRef env pos (Core.QualName home@(ModuleName.Canonical pkg raw) name)
 localBind :: Env -> Core.Bind -> JS.Stmt
 localBind env (Core.Bind binder body) =
   let name = Core._binderName binder
-   in JS.TrackedVar
-        (_home env)
-        (start (Core._binderSpan binder))
-        (JsName.fromLocalHumanReadable name)
-        (JsName.fromLocal name)
-        (jsExpr env body)
+      var = JS.TrackedVar (_home env) (start (Core._binderSpan binder)) (JsName.fromLocalHumanReadable name) (JsName.fromLocal name)
+   in case generate env body of
+        JsBlock stmts
+          | Nothing <- conditional stmts,
+            hoistable body ->
+              -- D793 (geng-lang @m3-js-inline.md@, @pre-m3-js.md@ §JS2's
+              -- second way): the block as statements of the enclosing
+              -- function, each @return e@ the @var@ again and a break out of a
+              -- labelled block, where it was a function made and called on the
+              -- spot. A @var@ may be declared again, and the block's own are
+              -- names no other statement of the function binds.
+              let label = JsName.makeLabel name 9
+               in JS.LabelledBlock label (map (assignReturns (\e -> JS.Block [var e, JS.Break (Just label)])) stmts)
+        code -> var (codeToExpr code)
+
+-- | A block that may be statements of the function around it (D793): it
+-- makes no function, so no closure can capture a variable the enclosing
+-- function shares between iterations, and every name it binds is one the
+-- passes made (@$m@, @$n@), from counters that restart at each definition, so
+-- it rebinds nothing around it. A name someone wrote is not taken: nothing
+-- promises it is bound once in a definition (a specialized witness method
+-- keeps its names, D780), and that is registered (D796).
+hoistable :: Core.Expr -> Bool
+hoistable e =
+  ok (Core._exprValue e) && getAll (Specialize.children_ (All . hoistable) e)
+  where
+    ok v =
+      case v of
+        Core.ELam _ _ -> False
+        Core.ELetRec _ _ -> False
+        Core.ETyLam _ _ -> False
+        Core.EWitLam _ _ -> False
+        Core.ELet binds _ -> all (made . Core._binderName . Core._bindBinder) binds
+        Core.ECase _ alts _ -> all (all made . Set.toList . Refs.patternBinders . Core._altPattern) alts
+        Core.EJoin _ _ -> False
+        _ -> True
+    made n = take 1 (Name.toChars n) == "$"
+
+-- | Every @return@ of a block, not inside a function, replaced.
+assignReturns :: (JS.Expr -> JS.Stmt) -> JS.Stmt -> JS.Stmt
+assignReturns f stmt =
+  case stmt of
+    JS.Return e -> f e
+    JS.Block ss -> JS.Block (map (assignReturns f) ss)
+    JS.IfStmt c a b -> JS.IfStmt c (assignReturns f a) (assignReturns f b)
+    JS.Labelled l s' -> JS.Labelled l (assignReturns f s')
+    JS.LabelledBlock l ss -> JS.LabelledBlock l (map (assignReturns f) ss)
+    JS.While c s' -> JS.While c (assignReturns f s')
+    JS.Switch c cases -> JS.Switch c [case k of JS.Case x ss -> JS.Case x (map (assignReturns f) ss); JS.Default ss -> JS.Default (map (assignReturns f) ss) | k <- cases]
+    other -> other
 
 -- LITERALS
 

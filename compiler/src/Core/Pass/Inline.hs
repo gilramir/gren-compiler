@@ -52,6 +52,24 @@
 --
 -- Together they turn @lt@'s @compare@-then-match into the one comparison.
 --
+-- __JavaScript's narrow set__ ('Matched', D792, geng-lang @m3-js-inline.md@):
+-- on node the full set slows a real program (D487), and what it is worth
+-- there is the constructor a caller matches, §BA4's @Just@ a byte above all.
+-- So in this mode a call is opened only
+--
+--   * where a @case@ matches it, its candidate's every leaf a constructor, a
+--     literal or a crash ('answersKnown'), and only when the @case@ is then
+--     decided (case-of-case pushes into it, or 'select' takes a branch); or
+--   * anywhere, when its candidate is one primitive of its parameters
+--     ('onePrim', @core@'s @\@prim@ declarations): the JavaScript backend
+--     writes that call as the operator anyway, and as a call it makes a test
+--     of it look effectful to 'pure_'.
+--
+-- and one more fold applies: a @case@ whose branches are all the same
+-- expression, nothing bound, of a scrutinee with no effect, is that
+-- expression ('sameBranches'), which case-of-case leaves when it copies a
+-- branch into two leaves. Every other fold above applies in both modes.
+--
 -- __Evaluation order is kept__: an argument that is not a variable, literal or
 -- nullary constructor is bound by a @let@ where the call was, in order, so it
 -- is evaluated exactly when it was before; the only thing ever dropped is a
@@ -72,6 +90,8 @@
 -- program's worth of plain cases.
 module Core.Pass.Inline
   ( run,
+    runWith,
+    Mode (..),
 
     -- * For "Core.Pass.FoldSpec" (prototype)
     Space,
@@ -123,8 +143,17 @@ fuelPerDefinition = 400
 
 -- THE PASS
 
+-- | Which calls are opened: every candidate's ('Full', D442, the BEAM's and
+-- native's @inline@), or JavaScript's narrow set ('Matched', D792, its
+-- @inlinematch@): see the header.
+data Mode = Full | Matched
+  deriving (Eq)
+
 run :: Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
-run cores =
+run = runWith Full
+
+runWith :: Mode -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
+runWith mode cores =
   let space = fileSpace cores
       defs =
         Map.fromList
@@ -150,7 +179,7 @@ run cores =
       -- The knot: each definition optimized against the others' optimized
       -- bodies. Lazy, and it ends because 'candidate' refuses a recursive name
       -- before it forces anything.
-      optimized = Map.map (optimize candidate constant) defs
+      optimized = Map.map (optimize mode candidate constant) defs
       classified = Map.mapWithKey classify optimized
       classify q (value, _)
         | barred q = Nothing
@@ -241,7 +270,8 @@ type M a = State St a
 -- cases on it over every width), and the dead branches it keeps are what
 -- @erlc@ and @dialyzer@ warn about.
 data Ctx = Ctx
-  { _candidate :: Core.QualName -> Maybe Cand,
+  { _mode :: Mode,
+    _candidate :: Core.QualName -> Maybe Cand,
     -- | A top-level binding whose value is a literal or a nullary
     -- constructor, by name: @Ryu.mantissaBits@ is 52, and a guard on it is a
     -- branch @dialyzer@ can see is dead.
@@ -254,9 +284,9 @@ data Ctx = Ctx
     _once :: Set Name
   }
 
-optimize :: (Core.QualName -> Maybe Cand) -> (Core.QualName -> Maybe Core.Expr) -> Core.Expr -> (Core.Expr, Bool)
-optimize candidate constant value =
-  let (out, St _ _ changed) = runState (simplify (Ctx candidate constant Map.empty (boundOnce value)) value) (St 0 fuelPerDefinition False)
+optimize :: Mode -> (Core.QualName -> Maybe Cand) -> (Core.QualName -> Maybe Core.Expr) -> Core.Expr -> (Core.Expr, Bool)
+optimize mode candidate constant value =
+  let (out, St _ _ changed) = runState (simplify (Ctx mode candidate constant Map.empty (boundOnce value)) value) (St 0 fuelPerDefinition False)
    in (out, changed)
 
 fresh :: M Name
@@ -350,8 +380,25 @@ node ctx e@(Core.Expr value tipe sp) =
           do
             markFired
             node ctx (Core.Expr call tipe sp)
+    -- A one-primitive wrapper whose primitive takes its parameters in order
+    -- is that primitive of the arguments, with no @let@ for an argument that
+    -- is not atomic: each argument is still evaluated once, in the order it
+    -- was, before the primitive. Bound by a @let@, @total + UInt8.toInt b@
+    -- left a block in a tail call's argument, which JavaScript makes and
+    -- calls on every iteration (D796, @m3-js-inline.md@ §JI10).
+    Core.EApp (Core.Expr (Core.EGlobal q) _ _) args
+      | _mode ctx == Matched,
+        Just cand@(Cand params (Core.Expr (Core.EPrim op primArgs) _ _) _) <- _candidate ctx q,
+        onePrim cand,
+        length args == length params,
+        [n | Core.Expr (Core.EVar n) _ _ <- primArgs] == map Core._binderName params,
+        length primArgs == length params ->
+          do
+            markFired
+            node ctx (Core.Expr (Core.EPrim op args) tipe sp)
     Core.EApp (Core.Expr (Core.EGlobal q) siteType _) args
       | Just cand <- _candidate ctx q,
+        _mode ctx == Full || onePrim cand,
         length args == length (_candParams cand) ->
           do
             ok <- spend
@@ -777,6 +824,35 @@ thin free p =
 caseOf :: Ctx -> Core.Expr -> Core.Expr -> [Core.Alt] -> Maybe Core.Expr -> M Core.Expr
 caseOf ctx e scrut alts fallback =
   case known of
+    Nothing
+      | _mode ctx == Matched,
+        Core.EApp (Core.Expr (Core.EGlobal q) siteType _) args <- Core._exprValue scrut,
+        Just cand <- _candidate ctx q,
+        length args == length (_candParams cand),
+        answersKnown (_candBody cand) ->
+          do
+            ok <- spend
+            if not ok
+              then return e
+              else do
+                inlined <- beta cand siteType args (Core.typeOf scrut) (Core.spanOf scrut)
+                scrut' <- simplify ctx inlined
+                -- Only when the case is then decided: a body case-of-case
+                -- will not push into (a branch too large to copy, a name it
+                -- would capture) stays a call, since opened it is the same
+                -- constructor built in place of the call, inside a function
+                -- JavaScript makes and calls (m3-js-inline.md §JI3).
+                if decides scrut'
+                  then do
+                    markFired
+                    node ctx (Core.Expr (Core.ECase scrut' alts fallback) (Core.typeOf e) (Core.spanOf e))
+                  else return e
+    Nothing
+      | _mode ctx == Matched,
+        Just same <- sameBranches scrut alts fallback ->
+          do
+            markFired
+            return same
     Just (Chosen binds body) ->
       do
         markFired
@@ -813,6 +889,12 @@ caseOf ctx e scrut alts fallback =
             return (Core.Expr (Core.ECase scrut thinnedAlts fallback) (Core.typeOf e) (Core.spanOf e))
       | otherwise -> return e
   where
+    decides s =
+      case Core._exprValue s of
+        Core.ELet _ inner ->
+          Maybe.isJust (letOfCase e s alts fallback) && decides inner
+        _ -> Maybe.isJust (select s alts fallback) || Maybe.isJust (caseOfCase e s alts fallback)
+
     -- A known value whose branch cannot be taken whole (its pattern binds a
     -- field that is not atomic) still rules out every branch of another
     -- constructor, and those are dropped: they are the clauses @erlc@ says
@@ -1032,6 +1114,49 @@ leaves e =
       | (leaf, names) <- leaves body
       ]
     _ -> [(e, Set.empty)]
+
+-- | A body that is one primitive of the parameters and literals, as @core@'s
+-- @\@prim@ declarations are: opened anywhere by the narrow inliner too, since
+-- the call is what makes a test of it look effectful to 'pure_' (D792).
+onePrim :: Cand -> Bool
+onePrim (Cand params body _) =
+  case Core._exprValue body of
+    Core.EPrim _ args -> all isParam args
+    _ -> False
+  where
+    names = Set.fromList (map Core._binderName params)
+    isParam a =
+      case Core._exprValue a of
+        Core.EVar v -> Set.member v names
+        Core.ELit _ -> True
+        _ -> False
+
+-- | A body every leaf of which is a constructor, a literal or a crash: what
+-- the narrow inliner opens where a @case@ matches it (D792).
+answersKnown :: Core.Expr -> Bool
+answersKnown body =
+  all (known . fst) (leaves body)
+  where
+    known leaf =
+      case Core._exprValue leaf of
+        Core.ECtor _ _ _ -> True
+        Core.ELit _ -> True
+        Core.ECrash _ -> True
+        _ -> False
+
+-- | Every branch the same expression, nothing bound, of a scrutinee with no
+-- effect: case-of-case leaves @case b < a of True -> x; False -> x@ when it
+-- copies one branch into two leaves. The narrow inliner's alone (D792); the
+-- full one's is registered (D795).
+sameBranches :: Core.Expr -> [Core.Alt] -> Maybe Core.Expr -> Maybe Core.Expr
+sameBranches scrut alts fallback =
+  case map Core._altBody alts ++ maybe [] pure fallback of
+    first : rest@(_ : _)
+      | pure_ scrut,
+        all (Set.null . Refs.patternBinders . Core._altPattern) alts,
+        all (== first) rest ->
+          Just first
+    _ -> Nothing
 
 -- | Every branch the same nullary constructor or literal, and nothing bound.
 allSame :: Core.Expr -> [Core.Alt] -> Maybe Core.Expr -> Maybe Core.Expr
