@@ -5,8 +5,8 @@ module Terminal.BackendWorker exposing
     , stackMb
     )
 
-{-| The C and BEAM backends on a stack of their own (geng-lang `m3-sweep.md`
-D645).
+{-| The C and BEAM backends, and the formatter, on a stack of their own
+(geng-lang `m3-sweep.md` D645, `m3-closeout.md` D786).
 
 Each backend is Geng in this front end, and it recurses once for each level of
 the Core it reads, lowers and prints, so on node's default stack a native or
@@ -17,6 +17,10 @@ this same program with a stack of `stackMb`, as a request in JSON; `main` sees
 the request, does that part, and answers in JSON. Everything else, the command
 line, the terminal, the C compiler or `erlc`, and every report, stays on the
 main thread. See `src/Ext/BackendWorker.js`.
+
+`geng fmt` is the same shape: `gren-format-lib` recurses once for each level of
+the source, and overflowed node's stack on a record 500 deep, so the files are
+read, formatted, checked and written on a worker too (`Terminal.Format.serve`).
 -}
 
 import Cli.PrettyPrinter as PP
@@ -34,9 +38,10 @@ stackMb =
 
 
 {-| The request, run on a worker, and its answer read; or a report that the
-worker ended without one, which it has said why on standard error. -}
-call : Encode.Value -> Decode.Decoder a -> Task Report a
-call request_ decoder =
+worker ended without one, which it has said why on standard error. The name is
+what ran there, for that report: "backend" or "formatter". -}
+call : String -> Encode.Value -> Decode.Decoder a -> Task Report a
+call name request_ decoder =
     run stackMb (Encode.encode 0 request_)
         |> Task.andThen
             (\text ->
@@ -47,16 +52,16 @@ call request_ decoder =
                     Err e ->
                         Task.fail ("its answer was not one I read: " ++ Decode.errorToString e)
             )
-        |> Task.mapError stopped
+        |> Task.mapError (stopped name)
 
 
-stopped : String -> Report
-stopped why =
+stopped : String -> String -> Report
+stopped name why =
     Report.create
-        "THE BACKEND STOPPED"
+        ("THE " ++ String.toUpper name ++ " STOPPED")
         Nothing
         (PP.verticalBlock
-            [ PP.words ("The backend runs on a thread of its own, with a stack of " ++ String.fromInt stackMb ++ " MiB, and " ++ why ++ ".")
+            [ PP.words ("The " ++ name ++ " runs on a thread of its own, with a stack of " ++ String.fromInt stackMb ++ " MiB, and " ++ why ++ ".")
             , PP.empty
             , PP.words "What it wrote on standard error, above, says why. Running out of memory, or out of that stack on a program nested deeper than it holds, is a limit of this compiler; anything else is a defect in it."
             ]

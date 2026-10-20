@@ -374,7 +374,7 @@ its own with a large stack (D645, `Terminal.BackendWorker`): it writes
 `program.c` and answers what it printed. -}
 buildStage : Config -> Plan -> Task Report Int
 buildStage config thePlan =
-    BackendWorker.call
+    BackendWorker.call "backend"
         (Encode.object
             [ { key = "target", value = Encode.string "native" }
             , { key = "exe", value = Encode.string (config.toString thePlan.exe) }

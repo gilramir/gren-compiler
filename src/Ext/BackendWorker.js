@@ -7,7 +7,8 @@
 // to match, but a worker thread's is what `resourceLimits.stackSizeMb` asks for.
 // So the backend runs in a worker started on this same file, which `main` sees
 // as a request (`request`) and answers once (`answer`); the command line, its
-// terminal and its reports stay on the main thread.
+// terminal and its reports stay on the main thread. `geng fmt` formats its
+// files on one too, for the same reason (geng-lang m3-closeout.md D786).
 
 var worker_threads = require("node:worker_threads");
 

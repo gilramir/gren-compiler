@@ -3,6 +3,7 @@ module Terminal.Format exposing
     , Sources(..)
     , Error(..)
     , run
+    , serve
     , prettifyError
     )
 
@@ -32,6 +33,11 @@ The correctness argument is the one `DESIGN.md` §8 item 3 asks for and
 (`Compiler.Ast.Compare`), and formatting it again is a fixed point. Any of the
 three failing is an error, not a warning — a formatter that is unsure has no
 business writing the file.
+
+The files are found here, and read, formatted, checked and written on a worker
+thread with D645's stack (`Terminal.BackendWorker`, geng-lang `m3-closeout.md`
+D786): the library recurses once for each level of the source, and on node's
+default stack a record 500 deep was a `RangeError`.
 -}
 
 import Bytes exposing (Bytes)
@@ -47,10 +53,13 @@ import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Formatter.Logical exposing (makeLogicalPrintingTree)
 import Formatter.Render exposing (renderRoot)
+import Json.Decode as Decode
+import Json.Encode as Encode
 import Stream
 import Stream.Log
 import String.Parser.Advanced as Parser
 import Task exposing (Task)
+import Terminal.BackendWorker as BackendWorker
 import Terminal.PackageInstall as PackageInstall
 
 
@@ -58,6 +67,7 @@ type alias Config =
     { stdout : Stream.Writable Bytes
     , fsPermission : FileSystem.Permission
     , pathToString : Path -> String
+    , pathFromString : String -> Path
     , sources : Sources
     , check : Bool
     }
@@ -87,6 +97,7 @@ type Error
     | NotIdempotent { path : Path }
     | OverwriteFailure { path : Path, error : String }
     | NotFormatted (Array String)
+    | Stopped Report
 
 
 
@@ -234,7 +245,7 @@ what we would write?" — a question about the disk that cannot be answered from
 text the line endings have been scrubbed out of. A file whose only defect is its
 CRLFs is unformatted, and comparing against normalized text says it is not.
 -}
-readSource : Config -> Path -> Task Error { raw : String, source : String }
+readSource : { c | fsPermission : FileSystem.Permission } -> Path -> Task Error { raw : String, source : String }
 readSource config path =
     FileSystem.readFile config.fsPermission path
         |> Task.mapError (\fsErr -> ReadFailure { path = path, error = FileSystem.errorToString fsErr })
@@ -325,7 +336,7 @@ isAlreadyFormatted { raw, pretty } =
 {-| Write to `<file>.tmp` and rename onto the original, so an interrupted run
 leaves the source file as it was rather than half of it.
 -}
-atomicWrite : Config -> Path -> String -> Task Error {}
+atomicWrite : { c | fsPermission : FileSystem.Permission } -> Path -> String -> Task Error {}
 atomicWrite config path pretty =
     let
         tmpPath =
@@ -360,12 +371,156 @@ run config =
                     Task.fail NothingToFormat
 
                 else
-                    Array.foldl (formatOne config) (Task.succeed { rewritten = [], skipped = 0 }) files
-                        |> Task.andThen (summarize config)
+                    BackendWorker.call "formatter" (request config files) (answerDecoder config.pathFromString)
+                        |> Task.mapError Stopped
+                        |> Task.andThen
+                            (\answered ->
+                                when answered is
+                                    Ok tally ->
+                                        summarize config tally
+
+                                    Err err ->
+                                        Task.fail err
+                            )
             )
 
 
-formatOne : Config -> { path : Path, display : String } -> Task Error Tally -> Task Error Tally
+{-| What the worker is asked: whether this is `--check`, and the files. -}
+request : Config -> Array { path : Path, display : String } -> Encode.Value
+request config files =
+    Encode.object
+        [ { key = "target", value = Encode.string "fmt" }
+        , { key = "check", value = Encode.bool config.check }
+        , { key = "files"
+          , value =
+                Encode.array
+                    (\file ->
+                        Encode.object
+                            [ { key = "path", value = Encode.string (config.pathToString file.path) }
+                            , { key = "display", value = Encode.string file.display }
+                            ]
+                    )
+                    files
+          }
+        ]
+
+
+{-| What a formatting run on the worker needs: no output, since it answers. -}
+type alias Job =
+    { fsPermission : FileSystem.Permission
+    , check : Bool
+    }
+
+
+{-| The files read, formatted, checked and written, in order, on the worker's
+thread, and stopping at the first that fails as `run` always has: answered as
+`answerDecoder` reads it, the tally or the failure. -}
+serve : FileSystem.Permission -> (Path -> String) -> (String -> Path) -> Decode.Value -> Task Never String
+serve fs toString fromString value =
+    let
+        fileDecoder =
+            Decode.map2 (\path display -> { path = fromString path, display = display })
+                (Decode.field "path" Decode.string)
+                (Decode.field "display" Decode.string)
+    in
+    when Decode.decodeValue (Decode.map2 (\check files -> { check = check, files = files }) (Decode.field "check" Decode.bool) (Decode.field "files" (Decode.array fileDecoder))) value is
+        Err e ->
+            Task.succeed (Encode.encode 0 (Encode.object [ { key = "refused", value = Encode.string ("The formatter's request was not one it reads: " ++ Decode.errorToString e) } ]))
+
+        Ok { check, files } ->
+            Array.foldl (formatOne { fsPermission = fs, check = check }) (Task.succeed { rewritten = [], skipped = 0 }) files
+                |> Task.map
+                    (\tally ->
+                        Encode.object
+                            [ { key = "rewritten", value = Encode.array Encode.string tally.rewritten }
+                            , { key = "skipped", value = Encode.int tally.skipped }
+                            ]
+                    )
+                |> Task.onError (\err -> Task.succeed (encodeFailure toString err))
+                |> Task.map (Encode.encode 0)
+
+
+{-| A file's failure as the worker answers it: which, the file, and what was
+said. Only `formatOne`'s failures reach here; any other is answered as a
+refusal, which `answerDecoder` does not read. -}
+encodeFailure : (Path -> String) -> Error -> Encode.Value
+encodeFailure toString err =
+    let
+        failed kind path message =
+            Encode.object
+                [ { key = "failed", value = Encode.string kind }
+                , { key = "path", value = Encode.string (toString path) }
+                , { key = "message", value = Encode.string message }
+                ]
+    in
+    when err is
+        ReadFailure { path, error } ->
+            failed "read" path error
+
+        ParseFailure { path, error } ->
+            failed "parse" path error
+
+        PrettyPrintFailure { path, error } ->
+            failed "render" path error
+
+        ReparseFailure { path, error } ->
+            failed "reparse" path error
+
+        AstMismatchAfterFormat { path, explanation } ->
+            failed "mismatch" path explanation
+
+        NotIdempotent { path } ->
+            failed "unstable" path ""
+
+        OverwriteFailure { path, error } ->
+            failed "write" path error
+
+        _ ->
+            Encode.object [ { key = "refused", value = Encode.string "The formatter failed in a way its worker does not answer." } ]
+
+
+answerDecoder : (String -> Path) -> Decode.Decoder (Result Error Tally)
+answerDecoder fromString =
+    Decode.oneOf
+        [ Decode.map2 (\rewritten skipped -> Ok { rewritten = rewritten, skipped = skipped })
+            (Decode.field "rewritten" (Decode.array Decode.string))
+            (Decode.field "skipped" Decode.int)
+        , Decode.map3 (\kind path message -> { kind = kind, path = fromString path, message = message })
+            (Decode.field "failed" Decode.string)
+            (Decode.field "path" Decode.string)
+            (Decode.field "message" Decode.string)
+            |> Decode.andThen
+                (\{ kind, path, message } ->
+                    when kind is
+                        "read" ->
+                            Decode.succeed (Err (ReadFailure { path = path, error = message }))
+
+                        "parse" ->
+                            Decode.succeed (Err (ParseFailure { path = path, error = message }))
+
+                        "render" ->
+                            Decode.succeed (Err (PrettyPrintFailure { path = path, error = message }))
+
+                        "reparse" ->
+                            Decode.succeed (Err (ReparseFailure { path = path, error = message }))
+
+                        "mismatch" ->
+                            Decode.succeed (Err (AstMismatchAfterFormat { path = path, explanation = message }))
+
+                        "unstable" ->
+                            Decode.succeed (Err (NotIdempotent { path = path }))
+
+                        "write" ->
+                            Decode.succeed (Err (OverwriteFailure { path = path, error = message }))
+
+                        _ ->
+                            Decode.fail ("a failure I do not know, " ++ kind)
+                )
+        , Decode.field "refused" Decode.string |> Decode.andThen Decode.fail
+        ]
+
+
+formatOne : Job -> { path : Path, display : String } -> Task Error Tally -> Task Error Tally
 formatOne config file previous =
     previous
         |> Task.andThen
@@ -584,3 +739,6 @@ prettifyError error =
                     , PP.words "Run geng fmt to format them."
                     ]
                 )
+
+        Stopped report ->
+            report

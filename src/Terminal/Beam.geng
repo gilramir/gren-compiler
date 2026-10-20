@@ -612,7 +612,7 @@ buildStage config thePlan =
     directRows config
         |> Task.andThen
             (\direct ->
-                BackendWorker.call
+                BackendWorker.call "backend"
                     (Encode.object
                         [ { key = "target", value = Encode.string "beam" }
                         , { key = "escript", value = Encode.string (config.toString thePlan.escript) }
