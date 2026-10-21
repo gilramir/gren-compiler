@@ -64,7 +64,10 @@ data Env = Env
     _q_types :: Qualified Type,
     _q_ctors :: Qualified Ctor,
     _q_classes :: Qualified Can.ClassDecl,
-    _q_methods :: Qualified Method
+    _q_methods :: Qualified Method,
+    -- | The names the signatures around this point give, outermost first,
+    -- which a @let@'s refinements may read (geng-lang @m4-refine.md@ D823).
+    _signatures :: [Can.Enclosing]
   }
 
 type Exposed a =
@@ -144,7 +147,7 @@ data Binop = Binop
 -- VARIABLE -- ADD LOCALS
 
 addLocals :: Map.Map Name.Name A.Region -> Env -> Result i w Env
-addLocals names (Env home vars ts cs bs cls ms qvs qts qcs qcls qms) =
+addLocals names (Env home vars ts cs bs cls ms qvs qts qcs qcls qms sigs) =
   do
     newVars <-
       Map.mergeA
@@ -157,7 +160,7 @@ addLocals names (Env home vars ts cs bs cls ms qvs qts qcs qcls qms) =
         names
         vars
 
-    Result.ok (Env home newVars ts cs bs cls ms qvs qts qcs qcls qms)
+    Result.ok (Env home newVars ts cs bs cls ms qvs qts qcs qcls qms sigs)
 
 addLocalLeft :: Name.Name -> A.Region -> Var
 addLocalLeft _ region =
@@ -197,7 +200,7 @@ findClass region env name =
 -- against the methods the class publishes, so it is the one caller that has to
 -- read what is on the other side of the name.
 findClassDecl :: A.Region -> Env -> Name.Name -> Result i w (Can.Class, Can.ClassDecl)
-findClassDecl region (Env _ _ ts _ _ cls _ _ _ _ qcls _) name =
+findClassDecl region (Env _ _ ts _ _ cls _ _ _ _ qcls _ _) name =
   case Map.lookup name cls of
     Just (Specific home decl) ->
       Result.ok (Can.Class home name, decl)
@@ -213,7 +216,7 @@ findClassQual region env prefix name =
   fst <$> findClassDeclQual region env prefix name
 
 findClassDeclQual :: A.Region -> Env -> Name.Name -> Name.Name -> Result i w (Can.Class, Can.ClassDecl)
-findClassDeclQual region (Env _ _ _ _ _ cls _ _ _ _ qcls _) prefix name =
+findClassDeclQual region (Env _ _ _ _ _ cls _ _ _ _ qcls _ _) prefix name =
   case Map.lookup prefix qcls of
     Just qualified ->
       case Map.lookup name qualified of
@@ -229,7 +232,7 @@ findClassDeclQual region (Env _ _ _ _ _ cls _ _ _ _ qcls _) prefix name =
 -- FIND TYPE
 
 findType :: A.Region -> Env -> Name.Name -> Result i w Type
-findType region (Env _ _ ts _ _ _ _ _ qts _ _ _) name =
+findType region (Env _ _ ts _ _ _ _ _ qts _ _ _ _) name =
   case Map.lookup name ts of
     Just (Specific _ tipe) ->
       Result.ok tipe
@@ -239,7 +242,7 @@ findType region (Env _ _ ts _ _ _ _ _ qts _ _ _) name =
       Result.throw (Error.NotFoundType region Nothing name (toPossibleNames ts qts))
 
 findTypeQual :: A.Region -> Env -> Name.Name -> Name.Name -> Result i w Type
-findTypeQual region (Env _ _ ts _ _ _ _ _ qts _ _ _) prefix name =
+findTypeQual region (Env _ _ ts _ _ _ _ _ qts _ _ _ _) prefix name =
   case Map.lookup prefix qts of
     Just qualified ->
       case Map.lookup name qualified of
@@ -255,7 +258,7 @@ findTypeQual region (Env _ _ ts _ _ _ _ _ qts _ _ _) prefix name =
 -- FIND CTOR
 
 findCtor :: A.Region -> Env -> Name.Name -> Result i w Ctor
-findCtor region (Env _ _ _ cs _ _ _ _ _ qcs _ _) name =
+findCtor region (Env _ _ _ cs _ _ _ _ _ qcs _ _ _) name =
   case Map.lookup name cs of
     Just (Specific _ ctor) ->
       Result.ok ctor
@@ -265,7 +268,7 @@ findCtor region (Env _ _ _ cs _ _ _ _ _ qcs _ _) name =
       Result.throw (Error.NotFoundVariant region Nothing name (toPossibleNames cs qcs))
 
 findCtorQual :: A.Region -> Env -> Name.Name -> Name.Name -> Result i w Ctor
-findCtorQual region (Env _ _ _ cs _ _ _ _ _ qcs _ _) prefix name =
+findCtorQual region (Env _ _ _ cs _ _ _ _ _ qcs _ _ _) prefix name =
   case Map.lookup prefix qcs of
     Just qualified ->
       case Map.lookup name qualified of
@@ -281,7 +284,7 @@ findCtorQual region (Env _ _ _ cs _ _ _ _ _ qcs _ _) prefix name =
 -- FIND BINOP
 
 findBinop :: A.Region -> Env -> Name.Name -> Result i w Binop
-findBinop region (Env _ _ _ _ binops _ _ _ _ _ _ _) name =
+findBinop region (Env _ _ _ _ binops _ _ _ _ _ _ _ _) name =
   case Map.lookup name binops of
     Just (Specific _ binop) ->
       Result.ok binop

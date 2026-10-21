@@ -1,6 +1,8 @@
 module Canonicalize.Type
   ( toAnnotation,
     toSignature,
+    Signature (..),
+    checkBody,
     canonicalize,
     addFreeVars,
   )
@@ -12,6 +14,7 @@ import AST.Utils.Type qualified as Type
 import Canonicalize.Binops qualified as Binops
 import Canonicalize.Environment qualified as Env
 import Canonicalize.Environment.Dups qualified as Dups
+import Canonicalize.NodeId qualified as NodeId
 import Control.Monad (foldM)
 import Data.List qualified as List
 import Data.Map qualified as Map
@@ -131,15 +134,59 @@ canonicalizeFields env fields =
 -- The annotation is the type with every name taken off, so nothing after
 -- this sees a signature that names its arguments as different from one that
 -- does not. The names are resolved here, each predicate's names against the
--- signature's own, and the type checker then checks each predicate as a
--- @Bool@ ("Type.Constrain.Expression").
-toSignature :: Env.Env -> Maybe Src.Context -> Src.Type -> Result i w (Can.Annotation, [Can.Refinement])
-toSignature env maybeContext srcType =
+-- signature's own and the arguments the signatures around it name (D823),
+-- and the type checker then checks each predicate as a @Bool@
+-- ("Type.Constrain.Expression").
+--
+-- A name of this signature may be read by a @let@ inside the definition, so
+-- two more things come back with the signature: the environment its body is
+-- canonicalized in, which carries its names, and a check of the canonical
+-- body, which refuses a name that nothing, nested or not, reads (D821).
+toSignature :: Env.Env -> Name.Name -> Maybe Src.Context -> Src.Type -> Result i w Signature
+toSignature env defName maybeContext srcType =
   do
     (tipe, named) <- spine env [] srcType
     freeVars <- addContext env (addFreeVars Map.empty tipe) maybeContext
-    refinements <- refine env named
-    Result.ok (Can.Forall freeVars tipe, refinements)
+    (refinements, unread) <- refine env named
+    let enclosing = [Can.Enclosing defName (_name n) (_path n) (_type n) | n <- named]
+    Result.ok $
+      Signature
+        { _annotation = Can.Forall freeVars tipe,
+          _refinements = refinements,
+          _bodyEnv = env {Env._signatures = Env._signatures env ++ enclosing},
+          _defName = defName,
+          _unread = unread
+        }
+
+-- | A canonical signature, and what its definition's body needs from it.
+data Signature = Signature
+  { _annotation :: Can.Annotation,
+    _refinements :: [Can.Refinement],
+    _bodyEnv :: Env.Env,
+    _defName :: Name.Name,
+    _unread :: [A.Located Name.Name]
+  }
+
+-- | The names no predicate of their own signature reads, refused unless a
+-- @let@ in the canonical body reads them (D821, D823).
+checkBody :: Signature -> Can.Expr -> Result i w ()
+checkBody (Signature _ _ _ defName unread) body =
+  if null unread
+    then Result.ok ()
+    else
+      let nestedReads =
+            [ A.toValue (Can._enc_name e)
+              | r <- NodeId.exprRefinements body,
+                e <- Can._ref_enclosing r,
+                Can._enc_def e == defName
+            ]
+       in traverse_
+            ( \(A.At region name) ->
+                if name `elem` nestedReads
+                  then Result.ok ()
+                  else Result.throw (Error.RefinementNameUnused region name)
+            )
+            unread
 
 -- | A name in a signature, before its predicate is canonicalized.
 data Named = Named
@@ -208,16 +255,20 @@ isNamed (A.At _ tipe) =
 
 -- REFINE
 
--- | Every name once in a signature; each predicate canonicalized against the
--- names it may see; and every name read by some predicate or refined itself.
-refine :: Env.Env -> [Named] -> Result i w [Can.Refinement]
+-- | Every name once in a signature and in the signatures around it; each
+-- predicate canonicalized against the names it may see; and every name read
+-- by some predicate or refined itself. A name that only a @let@ in the body
+-- could read, an argument of the signature's own arrows, comes back unread,
+-- to be checked against the body; any other is refused here.
+refine :: Env.Env -> [Named] -> Result i w ([Can.Refinement], [A.Located Name.Name])
 refine env named =
   do
     checkDuplicates named
+    traverse_ (checkShadows (Env._signatures env)) named
     refinements <- traverse (refineOne env named) named
     let readNames = concatMap (maybe [] predicateLocals . Can._ref_predicate) refinements
-    traverse_ (checkRead readNames) named
-    Result.ok refinements
+    unread <- concat <$> traverse (checkRead readNames) named
+    Result.ok (refinements, unread)
 
 traverse_ :: (a -> Result i w ()) -> [a] -> Result i w ()
 traverse_ f xs = () <$ traverse f xs
@@ -234,22 +285,55 @@ checkDuplicates named =
         (Map.toList byName)
 
 -- | A name that nothing reads and that is not refined is refused, as D819
--- refused it: it would look as if it meant something (D821).
-checkRead :: [Name.Name] -> Named -> Result i w ()
+-- refused it: it would look as if it meant something (D821). One a @let@
+-- could still read is handed back.
+checkRead :: [Name.Name] -> Named -> Result i w [A.Located Name.Name]
 checkRead readNames n =
   case _predicate n of
-    Just _ -> Result.ok ()
+    Just _ -> Result.ok []
     Nothing ->
       let A.At region name = _name n
        in if name `elem` readNames
-            then Result.ok ()
-            else Result.throw (Error.RefinementNameUnused region name)
+            then Result.ok []
+            else
+              if isOutermostArg (_path n)
+                then Result.ok [_name n]
+                else Result.throw (Error.RefinementNameUnused region name)
+
+-- | An argument of the signature's own arrows, the only names a @let@ inside
+-- the definition may read (D823): the result has no value until the body is
+-- done, and a callback's arguments none until it is called.
+isOutermostArg :: [Can.RefinementStep] -> Bool
+isOutermostArg path =
+  case path of
+    [Can.Arg _] -> True
+    _ -> False
+
+-- | No signature gives a name a signature around it gives, as no @let@ may
+-- shadow a name in Gren: the predicate's reading of it would depend on which
+-- was nearer.
+checkShadows :: [Can.Enclosing] -> Named -> Result i w ()
+checkShadows enclosing n =
+  let A.At region name = _name n
+   in case filter ((== name) . A.toValue . Can._enc_name) enclosing of
+        outer : _ -> Result.throw (Error.RefinementNameShadows name (A.toRegion (Can._enc_name outer)) region)
+        [] -> Result.ok ()
 
 refineOne :: Env.Env -> [Named] -> Named -> Result i w Can.Refinement
 refineOne env named n =
   do
-    predicate <- traverse (canonicalizePredicate env (Scope n named)) (_predicate n)
-    Result.ok (Can.Refinement (_region n) (_path n) (_name n) (_type n) predicate)
+    let enclosing = Env._signatures env
+    predicate <- traverse (canonicalizePredicate env (Scope n named enclosing)) (_predicate n)
+    let readNames = maybe [] predicateLocals predicate
+    Result.ok $
+      Can.Refinement
+        { Can._ref_region = _region n,
+          Can._ref_path = _path n,
+          Can._ref_name = _name n,
+          Can._ref_type = _type n,
+          Can._ref_predicate = predicate,
+          Can._ref_enclosing = filter ((`elem` readNames) . A.toValue . Can._enc_name) enclosing
+        }
 
 predicateLocals :: Can.Expr -> [Name.Name]
 predicateLocals (Can.Expr _ _ expr) =
@@ -262,21 +346,23 @@ predicateLocals (Can.Expr _ _ expr) =
 
 -- SCOPE
 
--- | The name whose predicate this is, and every name in the signature.
-data Scope = Scope Named [Named]
+-- | The name whose predicate this is, every name in the signature, and every
+-- name the signatures around it give.
+data Scope = Scope Named [Named] [Can.Enclosing]
 
 -- | What a predicate may name (§RF13.2): every argument of its own arrows and
 -- of the arrows around them, before or after it; and a result only in that
 -- result's own predicate. A callback's arguments are seen by the callback's
--- predicates and no others, since they exist only for a call of it.
+-- predicates and no others, since they exist only for a call of it. Around a
+-- @let@, the arguments of the enclosing signatures' own arrows too (D823).
 data Seen
-  = Seen Named
+  = Seen Can.Type
   | SeenOnlyByResult
   | SeenOnlyInCallback
   | Unknown [Name.Name]
 
 lookupName :: Scope -> Name.Name -> Seen
-lookupName (Scope self named) name =
+lookupName scope@(Scope self named enclosing) name =
   case filter ((== name) . A.toValue . _name) named of
     other : _ ->
       let otherPath = _path other
@@ -286,9 +372,16 @@ lookupName (Scope self named) name =
             else
               if last otherPath == Can.Result && otherPath /= selfPath
                 then SeenOnlyByResult
-                else Seen other
+                else Seen (_type other)
     [] ->
-      Unknown [A.toValue (_name other) | other <- named, isSeen (lookupName (Scope self named) (A.toValue (_name other)))]
+      case filter ((== name) . A.toValue . Can._enc_name) enclosing of
+        outer : _
+          | isOutermostArg (Can._enc_path outer) -> Seen (Can._enc_type outer)
+          | last (Can._enc_path outer) == Can.Result -> SeenOnlyByResult
+          | otherwise -> SeenOnlyInCallback
+        [] ->
+          let candidates = map (A.toValue . _name) named ++ map (A.toValue . Can._enc_name) enclosing
+           in Unknown [other | other <- candidates, isSeen (lookupName scope other)]
 
 isSeen :: Seen -> Bool
 isSeen seen =
@@ -320,8 +413,8 @@ canonicalizePredicate env scope (A.At region expression) =
       canonicalizePredicate env scope inner
     Src.Var Src.LowVar name ->
       do
-        n <- findName region scope name
-        if isInt (_type n)
+        tipe <- findName region scope name
+        if isInt tipe
           then Result.ok (Can.at region (Can.VarLocal name))
           else Result.throw (Error.RefinementNameNotInt region name)
     Src.Var Src.CapVar name ->
@@ -371,10 +464,10 @@ canonicalizePredicate env scope (A.At region expression) =
       -- The parser builds nothing else (D815).
       Result.throw (Error.RefinementNotCore region (Name.fromChars "?"))
 
-findName :: A.Region -> Scope -> Name.Name -> Result i w Named
+findName :: A.Region -> Scope -> Name.Name -> Result i w Can.Type
 findName region scope name =
   case lookupName scope name of
-    Seen n -> Result.ok n
+    Seen tipe -> Result.ok tipe
     SeenOnlyByResult -> Result.throw (Error.RefinementNameOutOfScope region name True)
     SeenOnlyInCallback -> Result.throw (Error.RefinementNameOutOfScope region name False)
     Unknown seen -> Result.throw (Error.RefinementNameUnknown region name seen)

@@ -423,7 +423,9 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
             return (toNodeTwo name srcArgs def Map.empty, name, [])
     Just (Src.Annotation maybeContext srcType _) ->
       do
-        (Can.Forall freeVars tipe, refinements) <- Type.toSignature env maybeContext srcType
+        signature <- Type.toSignature env name maybeContext srcType
+        let Can.Forall freeVars tipe = Type._annotation signature
+        let refinements = Type._refinements signature
 
         -- An extern with a Geng body (D222) is held to every rule a bodiless
         -- one is, and is then an ordinary definition of that body.
@@ -445,10 +447,11 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
             Expr.gatherTypedArgs env name (fmap snd srcArgs) tipe Index.first []
 
         newEnv <-
-          Env.addLocals argBindings env
+          Env.addLocals argBindings (Type._bodyEnv signature)
 
         (cbody, freeLocals) <-
           Expr.verifyBindings W.Pattern argBindings (Expr.canonicalize newEnv geng)
+        Type.checkBody signature cbody
 
         let def = Can.TypedDef aname freeVars args cbody resultType refinements
         return

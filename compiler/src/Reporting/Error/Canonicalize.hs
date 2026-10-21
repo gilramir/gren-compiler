@@ -53,6 +53,7 @@ data Error
   | RefinementNameUnknown A.Region Name.Name [Name.Name]
   | RefinementNameOutOfScope A.Region Name.Name Bool
   | RefinementNameDuplicate Name.Name A.Region A.Region
+  | RefinementNameShadows Name.Name A.Region A.Region
   | RefinementNameUnused A.Region Name.Name
   | RefinementNameNotInt A.Region Name.Name
   | RefinementNotMeasure A.Region Name.Name Name.Name
@@ -439,9 +440,9 @@ toReport source err =
           region
           Nothing
           ( D.reflow $
-              "This refinement reads `" ++ Name.toChars name ++ "`, which is not an argument of its signature:",
+              "This refinement reads `" ++ Name.toChars name ++ "`, which is not an argument of its signature or of one around it:",
             D.reflow $
-              "A refinement names only the arguments of the signature it is in, never a value in scope. "
+              "A refinement names only the arguments of the signature it is in, and of the signatures around a `let`, never a value in scope. "
                 ++ case seen of
                   [] -> "This one can see no names."
                   _ -> "It can see " ++ commaList (map (\n -> "`" ++ Name.toChars n ++ "`") seen) ++ "."
@@ -462,6 +463,9 @@ toReport source err =
     RefinementNameDuplicate name r1 r2 ->
       nameClash source r1 r2 $
         "This signature names `" <> Name.toChars name <> "` more than once."
+    RefinementNameShadows name outer inner ->
+      nameClash source outer inner $
+        "This signature names `" <> Name.toChars name <> "`, and so does a signature around it."
     RefinementNameUnused region name ->
       Report.Report "UNUSED NAME" region [] $
         Code.toSnippet

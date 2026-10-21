@@ -150,7 +150,7 @@ refuseRefinements canonical =
     r : rs ->
       Left (E.BadNames (foldr1 OneOrMore.more (map (OneOrMore.one . refusal) (r : rs))))
   where
-    refusal (Can.Refinement region _ _ _ maybePredicate) =
+    refusal (Can.Refinement region _ _ _ maybePredicate _) =
       Error.RefinementNotChecked region (Maybe.isJust maybePredicate)
 
 checkCapabilities :: Bool -> Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Can.Module -> Either E.Error ()

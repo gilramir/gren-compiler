@@ -29,6 +29,7 @@ module Canonicalize.NodeId
     nodes,
     defNodes,
     refinements,
+    exprRefinements,
   )
 where
 

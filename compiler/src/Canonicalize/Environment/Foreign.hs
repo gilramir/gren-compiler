@@ -31,7 +31,7 @@ createInitialEnv :: ModuleName.Canonical -> Map.Map ModuleName.Raw I.Interface -
 createInitialEnv home ifaces imports =
   do
     (State vs ts cs bs cls ms qvs qts qcs qcls qms) <- foldM (addImport ifaces) emptyState (toSafeImports home imports)
-    Result.ok (Env.Env home (Map.map infoToVar vs) ts cs bs cls ms qvs qts qcs qcls qms)
+    Result.ok (Env.Env home (Map.map infoToVar vs) ts cs bs cls ms qvs qts qcs qcls qms [])
 
 infoToVar :: Env.Info Can.Annotation -> Env.Var
 infoToVar info =

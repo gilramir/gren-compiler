@@ -621,22 +621,27 @@ constrainDef rtv def bodyCon =
 -- §RF17), with the signature's names bound to their declared types. Those
 -- types share the definition's rigid variables, so @(a : Array x)@ is the
 -- signature's @x@; and a predicate's operators were given 'Int' signatures
--- when it was canonicalized, so a predicate on 'Float's does not type.
+-- when it was canonicalized, so a predicate on 'Float's does not type. A
+-- @let@'s predicate may read an argument of a signature around it (D823),
+-- bound at its type there, whose variables are the enclosing definition's
+-- rigid ones and so already in the 'RTV'.
 constrainRefinements :: RTV -> [Can.Refinement] -> IO Constraint
 constrainRefinements rtv refinements =
   if null refinements
     then return CTrue
     else do
+      let own = [(name, tipe) | Can.Refinement _ _ name tipe _ _ <- refinements]
+          enclosing = [(Can._enc_name e, Can._enc_type e) | r <- refinements, e <- Can._ref_enclosing r]
       header <-
         Map.fromList
           <$> traverse
-            ( \(Can.Refinement _ _ (A.At region name) tipe _) ->
+            ( \(A.At region name, tipe) ->
                 (,) name . A.At region <$> Instantiate.fromSrcType rtv tipe
             )
-            refinements
+            (own ++ enclosing)
       predicateCons <-
         traverse
-          ( \(Can.Refinement _ _ (A.At _ name) _ maybePredicate) ->
+          ( \(Can.Refinement _ _ (A.At _ name) _ maybePredicate _) ->
               case maybePredicate of
                 Nothing ->
                   return CTrue

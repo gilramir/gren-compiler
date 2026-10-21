@@ -20,6 +20,7 @@ module AST.Canonical
     Def (..),
     Refinement (..),
     RefinementStep (..),
+    Enclosing (..),
     Decls (..),
     -- patterns
     Pattern,
@@ -242,12 +243,27 @@ data Def
 -- was written, its parentheses included. The predicate is a @Bool@
 -- expression whose 'VarLocal's are the signature's names, and whose operators
 -- carry @Int@ signatures rather than their classes' (§RF17).
+--
+-- A @let@'s predicate may also read an argument named by a signature it is
+-- defined inside (D823); each such name it reads is in '_ref_enclosing'.
 data Refinement = Refinement
   { _ref_region :: A.Region,
     _ref_path :: [RefinementStep],
     _ref_name :: A.Located Name,
     _ref_type :: Type,
-    _ref_predicate :: Maybe Expr
+    _ref_predicate :: Maybe Expr,
+    _ref_enclosing :: [Enclosing]
+  }
+  deriving (Show)
+
+-- | A name an enclosing signature gives (D823): the definition whose
+-- signature it is, and the name's place and type there as in 'Refinement'.
+-- No two levels give the same name, so the name alone says which it is.
+data Enclosing = Enclosing
+  { _enc_def :: Name,
+    _enc_name :: A.Located Name,
+    _enc_path :: [RefinementStep],
+    _enc_type :: Type
   }
   deriving (Show)
 

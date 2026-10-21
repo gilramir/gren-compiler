@@ -52,7 +52,7 @@ add module_ env =
 -- ADD VARS
 
 addVars :: Src.Module -> Classes -> Env.Env -> Result i w Env.Env
-addVars module_ classes (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
+addVars module_ classes (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs) =
   do
     topLevelVars <- collectVars module_ classes
     -- Use union to overwrite foreign stuff. A local method overwrites it too,
@@ -60,7 +60,7 @@ addVars module_ classes (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
     -- called `size` cannot go on answering for it once this module declares a
     -- `size` method.
     let vs2 = Map.union topLevelVars (Map.difference vs (methodIndex classes))
-    Result.ok $ Env.Env home vs2 ts cs bs cls ms qvs qts qcs qcls qms
+    Result.ok $ Env.Env home vs2 ts cs bs cls ms qvs qts qcs qcls qms sigs
 
 -- | The module's top-level value names, with its methods among them.
 --
@@ -125,7 +125,7 @@ withClassNames env classes =
         ]
 
 withClasses :: Env.Env -> Classes -> (Env.Env, Classes)
-withClasses (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) decls =
+withClasses (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs) decls =
   ( Env.Env
       home
       vs
@@ -138,7 +138,8 @@ withClasses (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) decls =
       qts
       qcs
       qcls
-      qms,
+      qms
+      sigs,
     decls
   )
 
@@ -154,7 +155,7 @@ methodIndex classes =
     ]
 
 canonicalizeClass :: Env.Env -> A.Located Src.Class -> Result i w (Name.Name, Can.ClassDecl)
-canonicalizeClass env@(Env.Env home _ _ _ _ _ _ _ _ _ _ _) (A.At _ (Src.Class (A.At _ name) (A.At _ param) methods _)) =
+canonicalizeClass env@(Env.Env home _ _ _ _ _ _ _ _ _ _ _ _) (A.At _ (Src.Class (A.At _ name) (A.At _ param) methods _)) =
   do
     canMethods <- traverse (canonicalizeMethod env home name param) methods
     Result.ok (name, Can.ClassDecl param (Map.fromList canMethods))
@@ -195,7 +196,7 @@ canonicalizeMethod env home className param (_, A.At region methodName, Src.Anno
 -- one position. They are checked together and stored apart — a class is not a
 -- type and cannot appear where one does.
 addTypes :: Src.Module -> Env.Env -> Result i w Env.Env
-addTypes (Src.Module _ _ _ _ _ classes _ unions aliases _ _ _ _ _) (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
+addTypes (Src.Module _ _ _ _ _ classes _ unions aliases _ _ _ _ _) (Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs) =
   let addAliasDups dups (A.At _ (Src.Alias (A.At region name) _ _)) = Dups.insert name region () dups
       addUnionDups dups (A.At _ (Src.Union (A.At region name) _ _ _ _)) = Dups.insert name region () dups
       addClassDups dups (A.At _ (Src.Class (A.At region name) _ _ _)) = Dups.insert name region () dups
@@ -207,7 +208,7 @@ addTypes (Src.Module _ _ _ _ _ classes _ unions aliases _ _ _ _ _) (Env.Env home
    in do
         _ <- Dups.detect Error.DuplicateType typeNameDups
         ts1 <- foldM (addUnion home) ts (fmap snd unions)
-        addAliases (fmap snd aliases) (Env.Env home vs ts1 cs bs cls ms qvs qts qcs qcls qms)
+        addAliases (fmap snd aliases) (Env.Env home vs ts1 cs bs cls ms qvs qts qcs qcls qms sigs)
 
 addUnion :: ModuleName.Canonical -> Env.Exposed Env.Type -> A.Located Src.Union -> Result i w (Env.Exposed Env.Type)
 addUnion home types union@(A.At _ (Src.Union (A.At _ name) _ _ _ _)) =
@@ -225,7 +226,7 @@ addAliases aliases env =
    in foldM addAlias env sccs
 
 addAlias :: Env.Env -> Graph.SCC (A.Located Src.Alias) -> Result i w Env.Env
-addAlias env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) scc =
+addAlias env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs) scc =
   case scc of
     Graph.AcyclicSCC alias@(A.At _ (Src.Alias (A.At _ name) _ tipe)) ->
       do
@@ -233,7 +234,7 @@ addAlias env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) scc =
         ctype <- Type.canonicalize Error.InAlias env tipe
         let one = Env.Specific home (Env.Alias (length args) home args ctype)
         let ts1 = Map.insert name one ts
-        Result.ok $ Env.Env home vs ts1 cs bs cls ms qvs qts qcs qcls qms
+        Result.ok $ Env.Env home vs ts1 cs bs cls ms qvs qts qcs qcls qms sigs
     Graph.CyclicSCC [] ->
       Result.ok env
     Graph.CyclicSCC (alias@(A.At _ (Src.Alias (A.At region name1) _ tipe)) : others) ->
@@ -331,7 +332,7 @@ addFreeVars freeVars (A.At region tipe) =
 -- ADD CTORS
 
 addCtors :: Src.Module -> Env.Env -> Result i w (Env.Env, Unions, Aliases)
-addCtors (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _ _) env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) =
+addCtors (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _ _) env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs) =
   do
     unionInfo <- traverse (canonicalizeUnion env) (fmap snd unions)
     aliasInfo <- traverse (canonicalizeAlias env) (fmap snd aliases)
@@ -345,7 +346,7 @@ addCtors (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _ _) env@(Env.Env home v
     let cs2 = Map.union ctors cs
 
     Result.ok
-      ( Env.Env home vs ts cs2 bs cls ms qvs qts qcs qcls qms,
+      ( Env.Env home vs ts cs2 bs cls ms qvs qts qcs qcls qms sigs,
         Map.fromList (map fst unionInfo),
         Map.fromList (map fst aliasInfo)
       )
@@ -365,7 +366,7 @@ canonicalizeAlias env (A.At _ (Src.Alias (A.At _ name) args tipe)) =
 -- CANONICALIZE UNION
 
 canonicalizeUnion :: Env.Env -> A.Located Src.Union -> Result i w ((Name.Name, Can.Union), CtorDups)
-canonicalizeUnion env@(Env.Env home _ _ _ _ _ _ _ _ _ _ _) (A.At _ (Src.Union (A.At _ name) avars ctors _ _)) =
+canonicalizeUnion env@(Env.Env home _ _ _ _ _ _ _ _ _ _ _ _) (A.At _ (Src.Union (A.At _ name) avars ctors _ _)) =
   do
     cctors <- Index.indexedTraverse (canonicalizeCtor env) ctors
     let vars = map (A.toValue . snd) avars
