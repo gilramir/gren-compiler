@@ -79,6 +79,9 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
         p : ps ->
           do
             artifacts <- buildPaths style root details sources (reachOf outline) (NE.List p ps)
+            -- 'False' is a build stopped for the refinement checker, its
+            -- Core written for the CLI (D833): nothing to write out.
+            goesOn <- Task.mapError Exit.MakeBadGenerate (Generate.refinementCut details artifacts)
             let mains = getMains artifacts
                 -- 'Nothing' is a build that stopped after a stage and wrote
                 -- its Core (@GENG_STAGE_WRITE@, Core.Stage): there is no
@@ -94,6 +97,7 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                       Nothing -> return ()
                       Just bundle -> writeToDisk style path bundle names
             case maybeOutput of
+              _ | not goesOn -> return ()
               _ | Target.Beam <- targetOf outline -> beamBuild artifacts mains maybeOutput (generate Generate.Bare)
               _ | Platform.Host <- platform -> hostBuild artifacts maybeOutput (generate Generate.Bare)
               Nothing ->

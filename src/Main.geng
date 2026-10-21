@@ -282,6 +282,16 @@ parseUserArgs context compilerPath =
                         }
                         backendCommand
 
+                -- A build's run of the binary, checked by the refinement
+                -- checker (D833); `backend` is every other command's.
+                makeBackend backendCommand =
+                    checkedBackend context
+                        compilerPath
+                        Dict.empty
+                        { headless = False
+                        , encodedCommand = encodeFor backendCommand
+                        }
+
                 backend backendCommand =
                     startBackend context compilerPath Dict.empty
                         |> Task.andThen
@@ -365,7 +375,7 @@ parseUserArgs context compilerPath =
                                         , escript = flags.escript
                                         }
                                         resolved
-                                        (backend command)
+                                        (makeBackend command)
 
                                 else if Terminal.Native.isTarget resolved.outline && Array.length flags.entryPoints /= 0 then
                                     -- The same for `native`: the backend is
@@ -380,12 +390,11 @@ parseUserArgs context compilerPath =
                                         , debugInfo = flags.debugInfo
                                         }
                                         resolved
-                                        (backend command)
+                                        (makeBackend command)
 
                                 else
-                                    backend command
+                                    makeBackend command
                             )
-                        |> Task.andThen (Terminal.Refine.reportIfAsked context.fsPermission context.pathFromString context.envVars)
                         |> Task.onError (endWithErrorReport reportType)
 
                 CliParser.Release flags ->
@@ -442,7 +451,7 @@ parseUserArgs context compilerPath =
                                                 , escript = flags.escript
                                                 }
                                                 resolved
-                                                (backend command)
+                                                (makeBackend command)
                                                 |> Task.andThen
                                                     (\exitCode ->
                                                         if exitCode /= 0 then
@@ -504,13 +513,12 @@ parseUserArgs context compilerPath =
                                             { erlc = opts.erlc, escript = opts.escript }
 
                                     ordinary =
-                                        startBackend context compilerPath Dict.empty
-                                            |> Task.andThen
-                                                (talkToBackend context
-                                                    { headless = True
-                                                    , encodedCommand = compiling.encodedCommand
-                                                    }
-                                                )
+                                        checkedBackend context
+                                            compilerPath
+                                            Dict.empty
+                                            { headless = True
+                                            , encodedCommand = compiling.encodedCommand
+                                            }
 
                                     built =
                                         if compiling.beam then
@@ -633,13 +641,12 @@ parseUserArgs context compilerPath =
                                             (Terminal.Beam.libraries compiling.resolution.projectPath compiling.resolution.outline)
 
                                     ordinary =
-                                        startBackend context compilerPath Dict.empty
-                                            |> Task.andThen
-                                                (talkToBackend context
-                                                    { headless = True
-                                                    , encodedCommand = compiling.encodedCommand
-                                                    }
-                                                )
+                                        checkedBackend context
+                                            compilerPath
+                                            Dict.empty
+                                            { headless = True
+                                            , encodedCommand = compiling.encodedCommand
+                                            }
 
                                     built =
                                         if compiling.beam then
@@ -1067,12 +1074,14 @@ beamMake context compilerPath flags resolved ordinary =
 
                 Ok environment ->
                     Terminal.Beam.prepare context.fsPermission thePlan
-                        |> Task.andThen (\_ -> startBackend context compilerPath environment)
                         |> Task.andThen
-                            (talkToBackend context
-                                { headless = flags.headless
-                                , encodedCommand = flags.encodedCommand
-                                }
+                            (\_ ->
+                                checkedBackend context
+                                    compilerPath
+                                    environment
+                                    { headless = flags.headless
+                                    , encodedCommand = flags.encodedCommand
+                                    }
                             )
                         |> Task.andThen
                             (\exitCode ->
@@ -1151,12 +1160,14 @@ nativeMakeBuild context compilerPath flags resolved ordinary =
 
                 Ok environment ->
                     Terminal.Native.prepare context.fsPermission thePlan
-                        |> Task.andThen (\_ -> startBackend context compilerPath environment)
                         |> Task.andThen
-                            (talkToBackend context
-                                { headless = flags.headless
-                                , encodedCommand = flags.encodedCommand
-                                }
+                            (\_ ->
+                                checkedBackend context
+                                    compilerPath
+                                    environment
+                                    { headless = flags.headless
+                                    , encodedCommand = flags.encodedCommand
+                                    }
                             )
                         |> Task.andThen
                             (\exitCode ->
@@ -1214,6 +1225,30 @@ nativeSources context resolved =
         }
 
 
+{-| A build's run of the backend, checked by the refinement checker (geng-lang
+`m4-refine.md` §RF24, D833): `Terminal.Refine` runs it once, and a second time
+when it stopped for the checker and the checker refused nothing.
+-}
+checkedBackend : Context -> Path -> Dict String String -> { headless : Bool, encodedCommand : Bytes } -> Task Report Int
+checkedBackend context compilerPath environment talk =
+    Terminal.Refine.build
+        { fs = context.fsPermission
+        , envVars = context.envVars
+        , toString = context.pathToString
+        , fromString = context.pathFromString
+        , run =
+            \extra ->
+                startBackend context compilerPath (Dict.union extra environment)
+                    |> Task.andThen
+                        (talkWith context
+                            { headless = talk.headless
+                            , encodedCommand = talk.encodedCommand
+                            , readInput = Basics.not talk.headless && Basics.not (Dict.member "GENG_REFINE_STAGE" extra)
+                            }
+                        )
+        }
+
+
 {-| The backend, started, with `environment` set in it on top of ours.
 
 Everything but a `beam` build passes nothing: the backend takes its work from
@@ -1256,6 +1291,16 @@ which reads no input.
 -}
 talkToBackend : Context -> { headless : Bool, encodedCommand : Bytes } -> ChildProcess.Child -> Task x Int
 talkToBackend context { headless, encodedCommand } child =
+    talkWith context { headless = headless, encodedCommand = encodedCommand, readInput = Basics.not headless } child
+
+
+{-| `talkToBackend`, with whether our input is copied to the backend's said
+on its own. A copy that loses its race leaves our input locked, so a run that
+may be followed by another in this process, as the refinement checker's first
+is (D833), does not copy it.
+-}
+talkWith : Context -> { headless : Bool, encodedCommand : Bytes, readInput : Bool } -> ChildProcess.Child -> Task x Int
+talkWith context { headless, encodedCommand, readInput } child =
     let
         exited =
             ChildProcess.waitForExit child
@@ -1270,11 +1315,11 @@ talkToBackend context { headless, encodedCommand } child =
                     Stream.write encodedCommand streams.input
                         |> Task.andThen
                             (\_ ->
-                                if headless then
-                                    Task.succeed {}
+                                if readInput then
+                                    copy context.stdin streams.input
 
                                 else
-                                    copy context.stdin streams.input
+                                    Task.succeed {}
                             )
                         |> Task.andThen (\_ -> Task.map (\_ -> {}) exited)
             in

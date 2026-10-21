@@ -48,7 +48,6 @@ data Error
   | ClassDeclThirdParty A.Region Name.Name
   | ClassMethodWithoutParam A.Region Name.Name Name.Name Name.Name
   | ConstraintDuplicate A.Region Name.Name Name.Name
-  | RefinementNotChecked A.Region Bool
   | RefinementMisplaced A.Region Bool RefinementPlace
   | RefinementNameUnknown A.Region Name.Name [Name.Name]
   | RefinementNameOutOfScope A.Region Name.Name Bool
@@ -402,21 +401,6 @@ toReport source err =
               "A method is picked by what its class parameter turns out to be, so a method\
               \ whose type never mentions the parameter can never be called: there would be\
               \ nothing at the call to say which instance is meant."
-          )
-    RefinementNotChecked region refined ->
-      Report.Report (if refined then "REFINEMENTS NOT CHECKED YET" else "NAMED ARGUMENTS NOT CHECKED YET") region [] $
-        Code.toSnippet
-          source
-          region
-          Nothing
-          ( D.reflow $
-              if refined
-                then "This type is refined, and refinements are read but not yet checked:"
-                else "This type is named, and a named argument is read but not yet checked:",
-            D.reflow $
-              "Rather than drop it and let it look checked, I stop here. Write the type without its "
-                ++ (if refined then "name and refinement" else "name")
-                ++ " until refinements are checked."
           )
     RefinementMisplaced region refined place ->
       Report.Report "MISPLACED REFINEMENT" region [] $

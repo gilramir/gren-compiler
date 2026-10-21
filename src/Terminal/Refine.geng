@@ -1,15 +1,21 @@
-module Terminal.Refine exposing (reportIfAsked)
+module Terminal.Refine exposing (Config, build)
 
-{-| The refinement checker's report, while the checker is built (geng-lang
-`m4-refine.md` §RF19, piece 4b).
+{-| A build checked by the refinement checker (geng-lang `m4-refine.md`
+§RF24, D833).
 
-Nothing here refuses a program: until piece 4e the Haskell process refuses
-every refinement (D819) unless `GENG_UNCHECKED_REFINEMENTS` asks it not to
-(D825). With `GENG_REFINE_REPORT` naming a file and `GENG_DUMP_WIRE` a
-directory, a `make` that succeeded has every module of its program in that
-directory as pre-pass Core, the dependencies' among them, and the checker
-walks the application's own modules (package `app`) and writes one line a
-goal to the file. `harness/refine.py` pins those reports for `corpus/refine/`.
+The checker is a Geng package (D826), so it runs here, between two runs of
+the compiler binary. The first is asked with `GENG_REFINE_STAGE` naming a
+temporary directory: a program with a refinement in any of its modules stops
+there with every module's Core written and nothing else, and one with none is
+built as it always was. When it stopped, the checker walks the Core, and a
+goal it could not prove refuses the program with each such goal on its own
+line. Otherwise the binary is run again with `GENG_REFINE_CHECKED`, and that
+run is the build. The directory is removed either way.
+
+`GENG_REFINE_REPORT` names a file for every goal's line, proved or not, which
+is what `harness/refine.py` pins. `GENG_UNCHECKED_REFINEMENTS` lets a program
+whose goals are not all proved build anyway (D825): a development switch, so
+that the gate can report on cases written to be refused.
 -}
 
 import Bytes
@@ -24,29 +30,104 @@ import Geng.Refine.Check as Check
 import Task exposing (Task)
 
 
-{-| After a build that answered `exitCode`: the report, when both variables ask
-for one and the build succeeded; `exitCode` either way.
+{-| What a checked build needs: `run` runs the compiler binary once with the
+variables given set on top of the build's own, and answers its exit status.
 -}
-reportIfAsked : FileSystem.Permission -> (String -> Path) -> Dict String String -> Int -> Task Report Int
-reportIfAsked fs fromString envVars exitCode =
-    when { report = Dict.get "GENG_REFINE_REPORT" envVars, wire = Dict.get "GENG_DUMP_WIRE" envVars } is
-        { report = Just out, wire = Just dir } ->
-            if exitCode /= 0 then
-                Task.succeed exitCode
+type alias Config =
+    { fs : FileSystem.Permission
+    , envVars : Dict String String
+    , toString : Path -> String
+    , fromString : String -> Path
+    , run : Dict String String -> Task Report Int
+    }
 
-            else
-                readModules fs (fromString dir)
+
+build : Config -> Task Report Int
+build config =
+    FileSystem.makeTempDirectory config.fs "geng-refine-"
+        |> Task.mapError (\e -> failure "I cannot make a directory for the refinement checker" (FileSystem.errorToString e))
+        |> Task.andThen
+            (\dir ->
+                config.run (Dict.singleton "GENG_REFINE_STAGE" (config.toString dir))
                     |> Task.andThen
-                        (\modules ->
-                            FileSystem.writeFile fs
-                                (Bytes.fromString (Check.render (Check.check (\name -> name.package == "app") modules)))
-                                (fromString out)
-                                |> Task.mapError (\e -> failure "I cannot write the refinement report" (FileSystem.errorToString e))
-                        )
-                    |> Task.map (\_ -> exitCode)
+                        (\exitCode ->
+                            if exitCode /= 0 then
+                                Task.succeed exitCode
 
-        _ ->
-            Task.succeed exitCode
+                            else
+                                readModules config.fs dir
+                                    |> Task.andThen (checked config)
+                        )
+                    |> Task.andThen (\exitCode -> remove config dir |> Task.map (\_ -> exitCode))
+                    |> Task.onError (\report -> remove config dir |> Task.andThen (\_ -> Task.fail report))
+            )
+
+
+{-| After a first run that succeeded: the build it was, when it wrote no Core;
+otherwise the check, and the second run or the refusal.
+-}
+checked : Config -> Array Core.Module -> Task Report Int
+checked config modules =
+    if Array.isEmpty modules then
+        Task.succeed 0
+
+    else
+        let
+            goals =
+                Check.check (\_ -> True) modules
+
+            refusing =
+                Check.refused goals
+        in
+        writeReport config goals
+            |> Task.andThen
+                (\_ ->
+                    if Array.isEmpty refusing || Dict.member "GENG_UNCHECKED_REFINEMENTS" config.envVars then
+                        config.run (Dict.singleton "GENG_REFINE_CHECKED" "1")
+
+                    else
+                        Task.fail (refusal refusing)
+                )
+
+
+writeReport : Config -> Array Check.Goal -> Task Report {}
+writeReport config goals =
+    when Dict.get "GENG_REFINE_REPORT" config.envVars is
+        Just out ->
+            FileSystem.writeFile config.fs (Bytes.fromString (Check.render goals)) (config.fromString out)
+                |> Task.map (\_ -> {})
+                |> Task.mapError (\e -> failure "I cannot write the refinement report" (FileSystem.errorToString e))
+
+        Nothing ->
+            Task.succeed {}
+
+
+{-| The refusal, plain until step 6 (D811): each goal not proved, as the
+report writes it, with where, what was required as written and why.
+-}
+refusal : Array Check.Goal -> Report
+refusal goals =
+    Report.create
+        "REFINEMENTS NOT PROVED"
+        Nothing
+        (PP.verticalBlock
+            (Array.flatten
+                [ [ PP.words
+                        (if Array.length goals == 1 then
+                            "I could not prove this refinement, so I stop here:"
+
+                         else
+                            "I could not prove these " ++ String.fromInt (Array.length goals) ++ " refinements, so I stop here:"
+                        )
+                  , PP.empty
+                  ]
+                , String.lines (String.trimRight (Check.render goals)) |> Array.map (\line -> PP.indent (PP.words line))
+                , [ PP.empty
+                  , PP.words "Each line is the module and definition, the line and column, what is required as written, and why it is not proved. A refuted one gives values that meet every fact there and break the requirement."
+                  ]
+                ]
+            )
+        )
 
 
 readModules : FileSystem.Permission -> Path -> Task Report (Array Core.Module)
@@ -79,6 +160,13 @@ readModules fs directory =
                         )
                     |> Task.sequence
             )
+
+
+remove : Config -> Path -> Task Report {}
+remove config dir =
+    FileSystem.remove config.fs { recursive = True } dir
+        |> Task.map (\_ -> {})
+        |> Task.onError (\_ -> Task.succeed {})
 
 
 failure : String -> String -> Report

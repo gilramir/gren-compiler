@@ -1582,6 +1582,7 @@ data Generate
   | GenerateNoBackend Target.Target
   | GenerateConstrainedRoots [(ModuleName.Raw, N.Name, [N.Name])]
   | GenerateExportsDoNotCross [(ModuleName.Raw, N.Name, [ExportProblem])]
+  | GenerateRefinementsUnchecked
 
 -- | Why a library's export cannot be one C function (geng-lang
 -- @m3-embed.md@ D619, D620), as 'Generate.checkRoots' finds it.
@@ -1634,6 +1635,13 @@ toGenerateReport problem =
             "An extern serves the targets of the languages it has rows for: js serves js and\
             \ wasm, erlang serves beam, and c serves native. One with a Geng body as well serves\
             \ every target (ffi.md F1, D77, D222)."
+        ]
+    GenerateRefinementsUnchecked ->
+      Help.report
+        "REFINEMENTS NOT CHECKED"
+        Nothing
+        "This program has a refinement, and nothing will check it: the refinement checker is part of geng's command line, and this compiler was run without it."
+        [ D.reflow "Build it with geng make, which checks the refinements and then finishes the build. GENG_UNCHECKED_REFINEMENTS=1 builds it unchecked, a development switch whose program has promises nothing kept."
         ]
     GenerateNoBackend target ->
       Help.report

@@ -3,6 +3,7 @@ module Generate
     Shape (..),
     Request (..),
     make,
+    refinementCut,
     ExtSources,
     extSources,
   )
@@ -41,6 +42,7 @@ import Gren.Platform qualified as Platform
 import Nitpick.Debug qualified as Nitpick
 import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
+import System.Environment qualified as Env
 import Prelude hiding (cycle, print)
 
 -- GENERATORS
@@ -151,6 +153,48 @@ make target details sources artifacts request =
           case Stage.writeTo of
             Just (Stage.Front, dir) -> Task.io (Stage.write dir whole front) >> return Nothing
             _ -> afterFront backend details sources whole front request
+
+-- | Whether a build goes on past its modules, as the refinement checker needs
+-- (geng-lang @m4-refine.md@ §RF24, D833).
+--
+-- The checker is a Geng program the CLI runs (D826), so a program with a
+-- refinement in any of its modules, a dependency's among them, is built in two
+-- processes. The CLI's first asks with @GENG_REFINE_STAGE=dir@: every module's
+-- Core goes to that directory as @GENG_DUMP_WIRE@ writes it, and the build stops
+-- with nothing written. The CLI checks it and either refuses the program or asks
+-- again with @GENG_REFINE_CHECKED@, and this build goes on as one with no
+-- refinements does. A program with none is built in one process, and the cut
+-- costs it a look at each module's signature table.
+--
+-- __Neither variable set is a refusal__, since nothing will check the program:
+-- the binary run by itself, not by the CLI. @GENG_UNCHECKED_REFINEMENTS@ lets
+-- it build anyway (D825), a development switch whose program has promises
+-- nothing kept.
+--
+-- Here, before the output is chosen, rather than in 'make', because a build
+-- with no @main@, a @--output=/dev/null@ one and a @beam@ library reach no
+-- backend and would be built unchecked.
+refinementCut :: Details.Details -> Build.Artifacts -> Task Bool
+refinementCut details artifacts =
+  do
+    cores <- Task.io (programCore details artifacts)
+    if all (null . Core._moduleSignatures) (Map.elems cores)
+      then return True
+      else do
+        stage <- Task.io (Env.lookupEnv "GENG_REFINE_STAGE")
+        afterCheck <- Task.io (isSet "GENG_REFINE_CHECKED")
+        unchecked <- Task.io (isSet "GENG_UNCHECKED_REFINEMENTS")
+        case stage of
+          Just dir
+            | dir /= "" ->
+                do
+                  _ <- Task.io (roundTrip (Just dir) cores)
+                  return False
+          _
+            | afterCheck || unchecked -> return True
+            | otherwise -> Task.throw Exit.GenerateRefinementsUnchecked
+  where
+    isSet name = maybe False (/= "") <$> Env.lookupEnv name
 
 -- | The passes, and then either a stop or the rest of the build.
 afterFront :: Maybe Backend -> Details.Details -> ExtSources -> Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> Request -> Task (Maybe B.Builder)
