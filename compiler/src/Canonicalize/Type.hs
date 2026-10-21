@@ -101,6 +101,11 @@ canonicalize env (A.At typeRegion tipe) =
         return $ Can.TRecord cfields (fmap (A.toValue . fst) ext)
     Src.TParens inner _ ->
       canonicalize env inner
+    Src.TNamed _ _ maybePredicate ->
+      -- Read since geng-lang D814, checked from §RF14's later steps; until
+      -- then a name or a refinement is refused rather than dropped, so that
+      -- nothing looks checked that is not (D819).
+      Result.throw (Error.RefinementNotChecked typeRegion (maybe False (const True) maybePredicate))
 
 canonicalizeFields :: Env.Env -> [Src.TRecordField] -> [(A.Located Name.Name, Result i w Can.FieldType, ())]
 canonicalizeFields env fields =

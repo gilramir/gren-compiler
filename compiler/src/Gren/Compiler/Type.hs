@@ -108,6 +108,8 @@ fromRawType (A.At _ astType) =
             (fmap (A.toValue . fst) ext)
     Src.TParens inner _ ->
       fromRawType inner
+    Src.TNamed _ inner _ ->
+      fromRawType inner
 
 -- JSON for PROGRAM
 

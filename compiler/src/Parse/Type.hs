@@ -11,7 +11,11 @@ where
 import AST.Source qualified as Src
 import AST.SourceComments qualified as SC
 import Data.Name qualified as Name
+import Parse.Keyword qualified as Keyword
+import Parse.Number qualified as Number
 import Parse.Primitives (Parser, addEnd, addLocation, getPosition, inContext, lookAhead, oneOf, oneOfWithFallback, specialize, word1, word2)
+import Parse.Primitives qualified as P
+import Parse.Symbol qualified as Symbol
 import Parse.Space qualified as Space
 import Parse.Variable qualified as Var
 import Reporting.Annotation qualified as A
@@ -45,11 +49,15 @@ term =
         inContext E.TParenthesis (word1 0x28 {-(-} E.TStart) $
           do
             commentsAfterOpeningParen <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisIndentOpen
-            ((tipe, commentsBeforeClosingParen), end) <- specialize E.TParenthesisType expression
-            Space.checkIndent end E.TParenthesisIndentEnd
-            word1 0x29 {-)-} E.TParenthesisEnd
-            let comments = SC.TParensComments commentsAfterOpeningParen commentsBeforeClosingParen
-            addEnd start (Src.TParens tipe comments),
+            named <- oneOfWithFallback [lookAhead namedHead >> return True] False
+            if named
+              then namedType start
+              else do
+                ((tipe, commentsBeforeClosingParen), end) <- specialize E.TParenthesisType expression
+                Space.checkIndent end E.TParenthesisIndentEnd
+                word1 0x29 {-)-} E.TParenthesisEnd
+                let comments = SC.TParensComments commentsAfterOpeningParen commentsBeforeClosingParen
+                addEnd start (Src.TParens tipe comments),
         -- records
         inContext E.TRecord (word1 0x7B {- { -} E.TStart) $
           do
@@ -83,6 +91,158 @@ term =
                     ]
               ]
       ]
+
+-- NAMED TYPES
+
+-- | Whether a parenthesis opens a named type: a lowercase name and then a
+-- colon. Without the colon it is a parenthesized type that starts with a type
+-- variable, @(a -> b)@, so this is only looked at, never consumed.
+namedHead :: Parser E.TParenthesis ()
+namedHead =
+  do
+    _ <- Var.lower E.TParenthesisEnd
+    _ <- Space.chomp E.TParenthesisSpace
+    word1 0x3A {-:-} E.TParenthesisEnd
+
+-- | @(name : Type)@ or @(name : Type where predicate)@ (geng-lang
+-- @m4-refine.md@ D814), after its @(@.
+namedType :: A.Position -> Parser E.TParenthesis Src.Type
+namedType start =
+  do
+    name <- addLocation (Var.lower E.TParenthesisEnd)
+    _ <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisIndentEnd
+    word1 0x3A {-:-} E.TParenthesisEnd
+    _ <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisIndentOpen
+    ((tipe, _), end) <- specialize E.TParenthesisType expression
+    Space.checkIndent end E.TParenthesisIndentEnd
+    maybePredicate <-
+      oneOfWithFallback
+        [ do
+            Keyword.where_ E.TParenthesisEnd
+            _ <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisPredicate
+            (predicate, predicateEnd) <- chain
+            Space.checkIndent predicateEnd E.TParenthesisIndentEnd
+            return (Just predicate)
+        ]
+        Nothing
+    word1 0x29 {-)-} E.TParenthesisEnd
+    addEnd start (Src.TNamed name tipe maybePredicate)
+
+-- PREDICATES
+
+-- | A refinement's predicate, read by its own grammar rather than by the
+-- expression parser, which imports this module (D815). It holds what D808
+-- allows: integer literals, names, a qualified function applied to one name
+-- (a measure, @Bytes.length b@), @True@, @False@, @not@, unary @-@, the
+-- operators @+ - * < <= > >= == /= && ||@ and parentheses.
+--
+-- The operators are read as a chain, @Src.Binops@, as the expression parser
+-- reads them, and canonicalization gives them their precedence, so a predicate
+-- is the expression it would be anywhere else. That @a < b < c@ does not
+-- type, or that a @*@ needs a literal side, is for the checker to say.
+chain :: Parser E.TParenthesis (Src.Expr, A.Position)
+chain =
+  do
+    start <- getPosition
+    (first, firstEnd) <- operand
+    chainHelp start [] first firstEnd
+
+chainHelp :: A.Position -> [Src.BinopsSegment] -> Src.Expr -> A.Position -> Parser E.TParenthesis (Src.Expr, A.Position)
+chainHelp start ops current currentEnd =
+  do
+    -- Chomped outside the choice, as `expression` chomps before its `->`:
+    -- a chomp succeeds as having consumed, so inside it the `)` that ends
+    -- the predicate would be an error rather than the end.
+    commentsBefore <- Space.chomp E.TParenthesisSpace
+    chainOperator start ops current currentEnd commentsBefore
+
+chainOperator :: A.Position -> [Src.BinopsSegment] -> Src.Expr -> A.Position -> [Src.Comment] -> Parser E.TParenthesis (Src.Expr, A.Position)
+chainOperator start ops current currentEnd commentsBefore =
+  oneOfWithFallback
+    [ do
+        Space.checkIndent currentEnd E.TParenthesisIndentEnd
+        opStart <- getPosition
+        op <- Symbol.operator E.TParenthesisPredicate (\_ -> E.TParenthesisPredicate)
+        opEnd <- getPosition
+        if op `elem` predicateOperators
+          then return ()
+          else refuseAt opStart
+        commentsAfter <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisPredicate
+        (next, nextEnd) <- operand
+        let segment = (current, A.At (A.Region opStart opEnd) op, SC.BinopsSegmentComments commentsBefore commentsAfter)
+        chainHelp start (segment : ops) next nextEnd
+    ]
+    (finish start ops current currentEnd, currentEnd)
+  where
+    finish s revOps lastExpr end =
+      case revOps of
+        [] -> lastExpr
+        _ -> A.at s end (Src.Binops (reverse revOps) lastExpr)
+
+predicateOperators :: [Name.Name]
+predicateOperators =
+  map Name.fromChars ["+", "-", "*", "<", "<=", ">", ">=", "==", "/=", "&&", "||"]
+
+operand :: Parser E.TParenthesis (Src.Expr, A.Position)
+operand =
+  do
+    start <- getPosition
+    oneOf
+      E.TParenthesisPredicate
+      [ do
+          word1 0x28 {-(-} E.TParenthesisPredicate
+          commentsAfterOpen <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisPredicate
+          (inner, innerEnd) <- chain
+          commentsBeforeClose <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisIndentEnd
+          Space.checkIndent innerEnd E.TParenthesisIndentEnd
+          word1 0x29 {-)-} E.TParenthesisEnd
+          end <- getPosition
+          return (A.at start end (Src.Parens commentsAfterOpen inner commentsBeforeClose), end),
+        do
+          word1 0x2D {---} E.TParenthesisPredicate
+          (inner, end) <- operand
+          return (A.at start end (Src.Negate inner), end),
+        do
+          nmbr <- Number.number E.TParenthesisPredicate (\_ -> E.TParenthesisPredicate)
+          end <- getPosition
+          case nmbr of
+            Number.Int int intFormat ->
+              return (A.at start end (Src.Int int intFormat), end)
+            Number.Float _ ->
+              refuseAt start,
+        do
+          var <- Var.foreignAlpha E.TParenthesisPredicate
+          end <- getPosition
+          let func = A.at start end var
+          case var of
+            Src.Var Src.LowVar name
+              | name == Name.fromChars "not" ->
+                  do
+                    comments <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisPredicate
+                    (arg, argEnd) <- operand
+                    return (A.at start argEnd (Src.Call func [(comments, arg)]), argEnd)
+              | otherwise ->
+                  return (func, end)
+            Src.Var Src.CapVar name
+              | name == Name.fromChars "True" || name == Name.fromChars "False" ->
+                  return (func, end)
+            Src.VarQual Src.LowVar _ _ ->
+              do
+                comments <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisPredicate
+                argStart <- getPosition
+                argName <- Var.lower E.TParenthesisPredicate
+                argEnd <- getPosition
+                let arg = A.at argStart argEnd (Src.Var Src.LowVar argName)
+                return (A.at start argEnd (Src.Call func [(comments, arg)]), argEnd)
+            _ ->
+              refuseAt start
+      ]
+
+-- | A predicate holds something D808 does not allow: an operator outside its
+-- list, a float, a constructor other than @True@ and @False@.
+refuseAt :: A.Position -> Parser E.TParenthesis a
+refuseAt (A.Position row col) =
+  P.Parser $ \_ _ _ cerr _ -> cerr row col E.TParenthesisPredicate
 
 -- ANNOTATIONS
 

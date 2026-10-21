@@ -482,6 +482,7 @@ data TParenthesis
   | --
     TParenthesisIndentOpen Row Col
   | TParenthesisIndentEnd Row Col
+  | TParenthesisPredicate Row Col
   deriving (Show)
 
 -- LITERALS
@@ -6612,5 +6613,23 @@ toTParenthesisReport source context parenthesizedType startRow startCol =
                     D.toSimpleNote $
                       "I can get confused by indentation in cases like this, so\
                       \ maybe you have a closing parenthesis but it is not indented enough?"
+                  ]
+              )
+    TParenthesisPredicate row col ->
+      let surroundings = A.Region (A.Position startRow startCol) (A.Position row col)
+          region = toRegion row col
+       in Report.Report "BAD REFINEMENT" region [] $
+            Code.toSnippet
+              source
+              surroundings
+              (Just region)
+              ( D.reflow $
+                  "I am partway through a refinement, the predicate after `where`, and I got stuck here:",
+                D.stack
+                  [ D.reflow $
+                      "A refinement can hold integer literals, the names of arguments, a measure\
+                      \ applied to a name (like `Bytes.length b`), `True`, `False`, `not`, a unary `-`,\
+                      \ parentheses, and the operators + - * < <= > >= == /= && and ||.",
+                    D.indent 4 $ D.dullyellow "(i : Int where 0 <= i && i < Bytes.length b)"
                   ]
               )

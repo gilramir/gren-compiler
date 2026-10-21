@@ -189,6 +189,12 @@ data Type_
   | TTypeQual A.Region Name Name [([Comment], Type)]
   | TRecord [TRecordField] (Maybe (A.Located Name, SC.UpdateComments))
   | TParens Type SC.TParensComments
+  | -- | @(name : Type)@ or @(name : Type where predicate)@, a named and
+    -- perhaps refined argument or result (geng-lang @m4-refine.md@ D814). The
+    -- predicate is an ordinary expression, read by the type parser's own
+    -- grammar (D815). Comments inside are not kept: nothing reads a type's
+    -- comments from this AST.
+    TNamed (A.Located Name) Type (Maybe Expr)
   deriving (Show)
 
 type TRecordField = (A.Located Name, Type, SC.RecordFieldComments)

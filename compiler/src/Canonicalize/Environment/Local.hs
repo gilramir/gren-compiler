@@ -263,6 +263,8 @@ getEdges edges (A.At _ tipe) =
       List.foldl' (\es (_, t, _) -> getEdges es t) edges fields
     Src.TParens inner _ ->
       getEdges edges inner
+    Src.TNamed _ inner _ ->
+      getEdges edges inner
 
 -- CHECK FREE VARIABLES
 
@@ -322,6 +324,8 @@ addFreeVars freeVars (A.At region tipe) =
                 Map.insert ext extRegion freeVars
        in List.foldl' (\fvs (_, t, _) -> addFreeVars fvs t) extFreeVars fields
     Src.TParens inner _ ->
+      addFreeVars freeVars inner
+    Src.TNamed _ inner _ ->
       addFreeVars freeVars inner
 
 -- ADD CTORS
