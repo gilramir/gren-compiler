@@ -583,7 +583,7 @@ constrainDef rtv def bodyCon =
                     },
                 _bodyCon = bodyCon
               }
-    Can.TypedDef (A.At region name) freeVars typedArgs expr srcResultType ->
+    Can.TypedDef (A.At region name) freeVars typedArgs expr srcResultType refinements ->
       do
         let newNames = Map.difference freeVars rtv
         newRigids <- Map.traverseWithKey nameToRigid newNames
@@ -596,21 +596,62 @@ constrainDef rtv def bodyCon =
         exprCon <-
           constrain newRtv expr expected
 
+        refinementCon <- constrainRefinements newRtv refinements
+
         return $
           CLet
             { _rigidVars = Map.elems newRigids,
               _flexVars = [],
               _header = Map.singleton name (A.At region tipe),
               _headerCon =
-                CLet
-                  { _rigidVars = [],
-                    _flexVars = pvars,
-                    _header = headers,
-                    _headerCon = CAnd (reverse revCons),
-                    _bodyCon = exprCon
-                  },
+                CAnd
+                  [ CLet
+                      { _rigidVars = [],
+                        _flexVars = pvars,
+                        _header = headers,
+                        _headerCon = CAnd (reverse revCons),
+                        _bodyCon = exprCon
+                      },
+                    refinementCon
+                  ],
               _bodyCon = bodyCon
             }
+
+-- | Each predicate of a signature as a 'Bool' (geng-lang @m4-refine.md@
+-- §RF17), with the signature's names bound to their declared types. Those
+-- types share the definition's rigid variables, so @(a : Array x)@ is the
+-- signature's @x@; and a predicate's operators were given 'Int' signatures
+-- when it was canonicalized, so a predicate on 'Float's does not type.
+constrainRefinements :: RTV -> [Can.Refinement] -> IO Constraint
+constrainRefinements rtv refinements =
+  if null refinements
+    then return CTrue
+    else do
+      header <-
+        Map.fromList
+          <$> traverse
+            ( \(Can.Refinement _ _ (A.At region name) tipe _) ->
+                (,) name . A.At region <$> Instantiate.fromSrcType rtv tipe
+            )
+            refinements
+      predicateCons <-
+        traverse
+          ( \(Can.Refinement _ _ (A.At _ name) _ maybePredicate) ->
+              case maybePredicate of
+                Nothing ->
+                  return CTrue
+                Just predicate ->
+                  constrain rtv predicate (FromContext (Can.exprRegion predicate) (Refinement name) Type.bool)
+          )
+          refinements
+      return $
+        CLet
+          { _rigidVars = [],
+            _flexVars = [],
+            _header = header,
+            _headerCon = CTrue,
+            _bodyCon = CAnd predicateCons
+          }
 
 -- CONSTRAIN RECURSIVE DEFS
 
@@ -678,7 +719,7 @@ recDefsHelp rtv defs bodyCon rigidInfo flexInfo =
                   _cons = recordDefType nid tipe defCon : flexCons,
                   _headers = Map.insert name (A.At region tipe) flexHeaders
                 }
-        Can.TypedDef (A.At region name) freeVars typedArgs expr srcResultType ->
+        Can.TypedDef (A.At region name) freeVars typedArgs expr srcResultType refinements ->
           do
             let newNames = Map.difference freeVars rtv
             newRigids <- Map.traverseWithKey nameToRigid newNames
@@ -691,14 +732,19 @@ recDefsHelp rtv defs bodyCon rigidInfo flexInfo =
               constrain newRtv expr $
                 FromAnnotation name (length typedArgs) TypedBody resultType
 
+            refinementCon <- constrainRefinements newRtv refinements
+
             let defCon =
-                  CLet
-                    { _rigidVars = [],
-                      _flexVars = pvars,
-                      _header = headers,
-                      _headerCon = CAnd (reverse revCons),
-                      _bodyCon = exprCon
-                    }
+                  CAnd
+                    [ CLet
+                        { _rigidVars = [],
+                          _flexVars = pvars,
+                          _header = headers,
+                          _headerCon = CAnd (reverse revCons),
+                          _bodyCon = exprCon
+                        },
+                      refinementCon
+                    ]
 
             let (Info rigidVars rigidCons rigidHeaders) = rigidInfo
             recDefsHelp

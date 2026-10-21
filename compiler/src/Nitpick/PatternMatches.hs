@@ -116,7 +116,7 @@ checkDef def errors =
   case def of
     Can.Def _ _ args body ->
       foldr checkArg (checkExpr body errors) args
-    Can.TypedDef _ _ args body _ ->
+    Can.TypedDef _ _ args body _ _ ->
       foldr checkTypedArg (checkExpr body errors) args
 
 checkArg :: Can.Pattern -> [Error] -> [Error]

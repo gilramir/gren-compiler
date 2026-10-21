@@ -491,6 +491,6 @@ addDef types def =
   case def of
     Can.Def _ (A.At region name) _ _ ->
       Map.insert name (Left region) types
-    Can.TypedDef (A.At _ name) _ typedArgs _ resultType ->
+    Can.TypedDef (A.At _ name) _ typedArgs _ resultType _ ->
       let tipe = foldr Can.TLambda resultType (map snd typedArgs)
        in Map.insert name (Right tipe) types

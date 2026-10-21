@@ -136,4 +136,4 @@ walk (Can.Expr nid reg value) = (nid, reg) : children value
     defWalk d =
       case d of
         Can.Def nid (A.At defRegion _) _ body -> (nid, defRegion) : walk body
-        Can.TypedDef _ _ _ body _ -> walk body
+        Can.TypedDef _ _ _ body _ _ -> walk body

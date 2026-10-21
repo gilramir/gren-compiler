@@ -63,6 +63,9 @@ data Context
   | Destructure
   | -- | The expression inside @(e : T)@, checked against @T@ (D358).
     Annotation
+  | -- | A refinement's predicate, checked as a 'Bool' (geng-lang
+    -- @m4-refine.md@ §RF17), and the name it refines.
+    Refinement Name.Name
 
 data SubContext
   = TypedIfBranch Index.ZeroBased
@@ -737,6 +740,14 @@ toExprReport source localizer exprRegion category tipe expected =
                   "This `if` condition does not evaluate to a boolean value, True or False.",
                   "It is",
                   [ D.fillSep ["But", "I", "need", "this", "`if`", "condition", "to", "be", "a", D.dullyellow "Bool", "value."]
+                  ]
+                )
+            Refinement name ->
+              badType
+                ( Just exprRegion,
+                  "The refinement of `" <> Name.toChars name <> "` is not a condition:",
+                  "It is",
+                  [ D.fillSep ["But", "a", "refinement", "has", "to", "be", "a", D.dullyellow "Bool", "value,", "True", "for", "every", "value", "it", "allows."]
                   ]
                 )
             IfBranch index ->

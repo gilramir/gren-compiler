@@ -109,6 +109,7 @@ Library common
         Canonicalize.Environment.Foreign
         Canonicalize.Derive
         Canonicalize.Environment.Local
+        Canonicalize.Binops
         Canonicalize.Expression
         Canonicalize.Implicit
         Canonicalize.Instance

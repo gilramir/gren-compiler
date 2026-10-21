@@ -179,7 +179,7 @@ canonicalizeMethod ::
   Result i w (Name.Name, Can.Annotation)
 canonicalizeMethod env home className param (_, A.At region methodName, Src.Annotation maybeContext srcType _) =
   do
-    (Can.Forall freeVars tipe) <- Type.toAnnotation env maybeContext srcType
+    (Can.Forall freeVars tipe) <- Type.toAnnotation Error.InMethod env maybeContext srcType
     if Map.member param freeVars
       then Result.ok (methodName, Can.Forall (Map.insert param [Can.Class home className] freeVars) tipe)
       else Result.throw (Error.ClassMethodWithoutParam region className param methodName)
@@ -230,7 +230,7 @@ addAlias env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms) scc =
     Graph.AcyclicSCC alias@(A.At _ (Src.Alias (A.At _ name) _ tipe)) ->
       do
         args <- checkAliasFreeVars alias
-        ctype <- Type.canonicalize env tipe
+        ctype <- Type.canonicalize Error.InAlias env tipe
         let one = Env.Specific home (Env.Alias (length args) home args ctype)
         let ts1 = Map.insert name one ts
         Result.ok $ Env.Env home vs ts1 cs bs cls ms qvs qts qcs qcls qms
@@ -358,7 +358,7 @@ canonicalizeAlias :: Env.Env -> A.Located Src.Alias -> Result i w ((Name.Name, C
 canonicalizeAlias env (A.At _ (Src.Alias (A.At _ name) args tipe)) =
   do
     let vars = map A.toValue args
-    ctipe <- Type.canonicalize env tipe
+    ctipe <- Type.canonicalize Error.InAlias env tipe
     Result.ok
       ((name, Can.Alias vars ctipe), Dups.none)
 
@@ -382,7 +382,7 @@ canonicalizeCtor env index (_, A.At region ctor, tipes, _) =
    in if argLength > 1
         then Result.throw (Error.CustomTypeTooManyParams region ctor argLength)
         else do
-          ctipes <- traverse (Type.canonicalize env) (fmap snd tipes)
+          ctipes <- traverse (Type.canonicalize Error.InConstructor env) (fmap snd tipes)
           Result.ok $
             A.At region $
               Can.Ctor ctor index (length ctipes) ctipes

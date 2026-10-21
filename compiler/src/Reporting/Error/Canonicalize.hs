@@ -5,6 +5,7 @@ module Reporting.Error.Canonicalize
     BadArityContext (..),
     DuplicatePatternContext (..),
     PossibleNames (..),
+    RefinementPlace (..),
     VarKind (..),
     toReport,
   )
@@ -48,6 +49,16 @@ data Error
   | ClassMethodWithoutParam A.Region Name.Name Name.Name Name.Name
   | ConstraintDuplicate A.Region Name.Name Name.Name
   | RefinementNotChecked A.Region Bool
+  | RefinementMisplaced A.Region Bool RefinementPlace
+  | RefinementNameUnknown A.Region Name.Name [Name.Name]
+  | RefinementNameOutOfScope A.Region Name.Name Bool
+  | RefinementNameDuplicate Name.Name A.Region A.Region
+  | RefinementNameUnused A.Region Name.Name
+  | RefinementNameNotInt A.Region Name.Name
+  | RefinementNotMeasure A.Region Name.Name Name.Name
+  | RefinementNotCore A.Region Name.Name
+  | RefinementNonlinear A.Region
+  | RefinementComparesConditions A.Region
   | ConstraintNotAClass A.Region Name.Name
   | ConstraintVarUnbound A.Region Name.Name Name.Name
   | DeriveComponentIsFunction A.Region Name.Name Int [Name.Name]
@@ -113,6 +124,18 @@ data Error
   | Shadowing Name.Name A.Region A.Region
   | TypeVarsUnboundInUnion A.Region Name.Name [Name.Name] (Name.Name, A.Region) [(Name.Name, A.Region)]
   | TypeVarsMessedUpInAlias A.Region Name.Name [Name.Name] [(Name.Name, A.Region)] [(Name.Name, A.Region)]
+
+-- | Where a named or refined type was written that is not a value's
+-- signature (geng-lang @m4-refine.md@ §RF17).
+data RefinementPlace
+  = InAlias
+  | InConstructor
+  | InMethod
+  | InInstance
+  | InAnnotation
+  | InExtern
+  | InTypeArgument
+  | InRecordField
 
 data BadArityContext
   = TypeArity
@@ -393,6 +416,117 @@ toReport source err =
               "Rather than drop it and let it look checked, I stop here. Write the type without its "
                 ++ (if refined then "name and refinement" else "name")
                 ++ " until refinements are checked."
+          )
+    RefinementMisplaced region refined place ->
+      Report.Report "MISPLACED REFINEMENT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              (if refined then "This type is refined" else "This type is named")
+                ++ ", and "
+                ++ placeText place
+                ++ ":",
+            D.reflow $
+              "A name or a refinement goes on an argument or the result of a value's signature, top-level or in a `let`, "
+                ++ placeHint place
+          )
+    RefinementNameUnknown region name seen ->
+      Report.Report "UNKNOWN NAME IN REFINEMENT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This refinement reads `" ++ Name.toChars name ++ "`, which is not an argument of its signature:",
+            D.reflow $
+              "A refinement names only the arguments of the signature it is in, never a value in scope. "
+                ++ case seen of
+                  [] -> "This one can see no names."
+                  _ -> "It can see " ++ commaList (map (\n -> "`" ++ Name.toChars n ++ "`") seen) ++ "."
+          )
+    RefinementNameOutOfScope region name isResult ->
+      Report.Report "NAME OUT OF REACH" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This refinement reads `" ++ Name.toChars name ++ "`, which it cannot see:",
+            D.reflow $
+              if isResult
+                then "`" ++ Name.toChars name ++ "` names a result, and only that result's own refinement may read it: the arguments are what a call is checked against, before there is a result."
+                else "`" ++ Name.toChars name ++ "` names an argument of a callback, and only the callback's own refinements may read it: it has a value only when the callback is called."
+          )
+    RefinementNameDuplicate name r1 r2 ->
+      nameClash source r1 r2 $
+        "This signature names `" <> Name.toChars name <> "` more than once."
+    RefinementNameUnused region name ->
+      Report.Report "UNUSED NAME" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This signature names `" ++ Name.toChars name ++ "`, and no refinement reads it:",
+            D.reflow $
+              "A name is there for a refinement to read. One nothing reads would look as if it meant something, so write the type without it, or refine it."
+          )
+    RefinementNameNotInt region name ->
+      Report.Report "REFINEMENT READS A NON-INT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This refinement reads `" ++ Name.toChars name ++ "` directly, and it is not an `Int`:",
+            D.reflow $
+              "A refinement's arithmetic and comparisons are on `Int`s. An argument of any other type is read through a measure, `Array.length`, `Bytes.length`, `String.count`, `Dict.count` or `Set.count`."
+          )
+    RefinementNotMeasure region prefix name ->
+      Report.Report "NOT A MEASURE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This refinement calls `" ++ Name.toChars prefix ++ "." ++ Name.toChars name ++ "`, which is not one of core's measures:",
+            D.reflow $
+              "A refinement may apply only `Array.length`, `Bytes.length`, `String.count`, `Dict.count` and `Set.count`, each to a name, so that the checker knows what each means."
+          )
+    RefinementNotCore region name ->
+      Report.Report "NOT CORE'S IN A REFINEMENT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This refinement uses `" ++ Name.toChars name ++ "`, and it does not name core's:",
+            D.reflow $
+              "In a refinement, `not`, `True`, `False` and the operators mean what core's Basics defines, since the checker reads them as that. Make sure nothing in this module hides them."
+          )
+    RefinementComparesConditions region ->
+      Report.Report "COMPARED CONDITIONS" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This refinement compares a condition:",
+            D.reflow $
+              "A comparison in a refinement compares two `Int`s, never two conditions. Conditions are joined with `&&`, `||` and `not`."
+          )
+    RefinementNonlinear region ->
+      Report.Report "NONLINEAR REFINEMENT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This refinement multiplies two things that are not numbers written out:",
+            D.reflow $
+              "A refinement's arithmetic is linear, which is what lets the checker decide it: one side of each `*` is a literal, as in `2 * n`."
           )
     ConstraintDuplicate region className var ->
       Report.Report "DUPLICATE CONSTRAINT" region [] $
@@ -1763,3 +1897,31 @@ asWritten tipe =
     Core.TFun args result -> Core.TFun (map asWritten args) (asWritten result)
     Core.TRecord fields ext -> Core.TRecord [(f, asWritten t) | (f, t) <- fields] ext
     Core.TForall vars constraints body -> Core.TForall vars constraints (asWritten body)
+
+placeText :: RefinementPlace -> String
+placeText place =
+  case place of
+    InAlias -> "it is in a type alias"
+    InConstructor -> "it is a variant's argument"
+    InMethod -> "it is in a class method's signature"
+    InInstance -> "it is in an instance's head"
+    InAnnotation -> "it is in an expression's annotation"
+    InExtern -> "it is in an extern's signature"
+    InTypeArgument -> "it is an argument of a type"
+    InRecordField -> "it is a record's field"
+
+placeHint :: RefinementPlace -> String
+placeHint place =
+  case place of
+    InAlias -> "and a refined type alias waits until programs show it is wanted (D816)."
+    InRecordField -> "and a refined record field waits until programs show it is wanted (D816)."
+    InAnnotation -> "and a refined expression annotation waits until programs show it is wanted (D816)."
+    InTypeArgument -> "where it names a value the function takes or gives; an argument of a type is no such value."
+    _ -> "and this is not one."
+
+commaList :: [String] -> String
+commaList items =
+  case reverse items of
+    [] -> ""
+    [one] -> one
+    final : rest -> List.intercalate ", " (reverse rest) ++ " and " ++ final

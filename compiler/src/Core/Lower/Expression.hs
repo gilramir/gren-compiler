@@ -1029,7 +1029,7 @@ def env d =
       -- was attributed to it, which is what keeps every unconstrained
       -- definition's Core exactly what it was.
       quantified env (span env region) name (Map.findWithDefault Map.empty nid (_inferred env)) (canTypeOf env nid) args body
-    Can.TypedDef (A.At region name) freeVars args body result ->
+    Can.TypedDef (A.At region name) freeVars args body result _ ->
       quantified env (span env region) name freeVars (foldr (Can.TLambda . snd) result args) (map fst args) body
 
 -- | Bind a definition under the context it carries.

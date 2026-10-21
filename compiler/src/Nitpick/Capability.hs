@@ -67,7 +67,7 @@ def :: Can.Def -> [(A.Region, ModuleName.Canonical, Name)]
 def d =
   case d of
     Can.Def _ _ _ body -> expr body
-    Can.TypedDef _ _ _ body _ -> expr body
+    Can.TypedDef _ _ _ body _ _ -> expr body
 
 expr :: Can.Expr -> [(A.Region, ModuleName.Canonical, Name)]
 expr (Can.Expr _ region value) =

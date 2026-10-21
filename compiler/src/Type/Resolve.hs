@@ -661,7 +661,7 @@ defNodeId :: Can.Def -> Can.NodeId
 defNodeId d =
   case d of
     Can.Def nid _ _ _ -> nid
-    Can.TypedDef _ _ _ body _ -> nodeIdOf body
+    Can.TypedDef _ _ _ body _ _ -> nodeIdOf body
 
 -- | Record that one of a definition's variables takes §0's default.
 close :: Quantifier -> Name -> Can.Type -> Walk ()
@@ -817,7 +817,7 @@ annotationOf env inferred d =
       case Map.lookup nid inferred of
         Nothing -> Map.empty
         Just context -> Map.singleton name (Can.Forall context (typeOf env nid))
-    Can.TypedDef (A.At _ name) freeVars args _ result ->
+    Can.TypedDef (A.At _ name) freeVars args _ result _ ->
       Map.singleton name (Can.Forall freeVars (foldr (Can.TLambda . snd) result args))
 
 decls :: Env -> Map.Map Name Can.Annotation -> Scope -> Can.Decls -> Walk ()
@@ -871,7 +871,7 @@ defWith published env tops scope d =
         scope' <- bindWitnesses env context (nodeIdOf body) scope
         let inferable = _scopeInferable scope ++ [quantifies]
         expr env tops (bindPatterns args scope' {_scopeInferable = inferable, _scopeEnclosing = Just d}) body
-    Can.TypedDef _ freeVars args body _ ->
+    Can.TypedDef _ freeVars args body _ _ ->
       do
         scope' <- bindWitnesses env freeVars (nodeIdOf body) scope
         let rigid = Set.union (Map.keysSet freeVars) (_scopeRigid scope)

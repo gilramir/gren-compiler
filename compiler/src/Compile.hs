@@ -30,6 +30,7 @@ import Nitpick.Main qualified as NitpickMain
 import Nitpick.PatternMatches qualified as PatternMatches
 import Reporting.Annotation qualified as A
 import Reporting.Error qualified as E
+import Reporting.Error.Canonicalize qualified as Error
 import Reporting.Error.Literal qualified as Literal
 import Reporting.Render.Type.Localizer qualified as Localizer
 import Reporting.Result qualified as R
@@ -67,6 +68,7 @@ compile platform application pkg ifaces modul =
     () <- checkCapabilities application pkg ifaces canonical
     Type.Solved solved nodeTypes coreNodeTypes defaults literalWidths <- typeCheck modul canonical
     () <- checkNodeTypes canonical nodeTypes
+    () <- refuseRefinements canonical
     -- Before the annotations, because half of one may come from it: an
     -- unannotated definition's open constraints are the elaborator's answer
     -- (§G33) and nothing earlier knows them. It may also change the types it
@@ -129,13 +131,28 @@ contextOf inferred d =
       case Map.lookup nid inferred of
         Nothing -> Map.empty
         Just context -> Map.singleton name context
-    Can.TypedDef (A.At _ name) freeVars _ _ _
+    Can.TypedDef (A.At _ name) freeVars _ _ _ _
       | all null (Map.elems freeVars) -> Map.empty
       | otherwise -> Map.singleton name freeVars
 
 -- PHASES
 
 -- | D258: a package may not refer to a capability another package declares.
+-- | Every name and refinement, now resolved and type-checked (geng-lang
+-- @m4-refine.md@ §RF17), is still refused until the checker exists (D819):
+-- one that compiled unchecked would read as a promise kept. After the type
+-- checker, so that a predicate's names and type are reported first.
+refuseRefinements :: Can.Module -> Either E.Error ()
+refuseRefinements canonical =
+  case NodeId.refinements canonical of
+    [] ->
+      Right ()
+    r : rs ->
+      Left (E.BadNames (foldr1 OneOrMore.more (map (OneOrMore.one . refusal) (r : rs))))
+  where
+    refusal (Can.Refinement region _ _ _ maybePredicate) =
+      Error.RefinementNotChecked region (Maybe.isJust maybePredicate)
+
 checkCapabilities :: Bool -> Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Can.Module -> Either E.Error ()
 checkCapabilities application pkg ifaces canonical =
   case Capability.check application pkg ifaces canonical of

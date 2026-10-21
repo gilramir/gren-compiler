@@ -228,7 +228,7 @@ methodDef ctx head_ published name build =
         let Can.Forall freeVars tipe = Instance.specialize head_ (_param ctx) annotation
         let (args, result) = arguments ctx tipe
         built <- build (map (binderOf . fst) args)
-        Result.ok (Can.TypedDef (A.At (_region ctx) name) freeVars args built result)
+        Result.ok (Can.TypedDef (A.At (_region ctx) name) freeVars args built result [])
 
 -- | The argument list a method's specialized type asks for, named @$0@, @$1@.
 --
@@ -358,6 +358,7 @@ indexDef ctx union@(Can.Union vars ctors _ _) =
               ]
         )
         (Can.TType ModuleName.basics Name.int [])
+        []
 
 nameIndex :: Name.Name
 nameIndex =

@@ -28,6 +28,7 @@ module Canonicalize.NodeId
     nodeId,
     nodes,
     defNodes,
+    refinements,
   )
 where
 
@@ -82,7 +83,13 @@ defNodes :: Can.Def -> [Node]
 defNodes d =
   case d of
     Can.Def nid _ args body -> DefNode nid (length args) : exprNodes body
-    Can.TypedDef _ _ _ body _ -> exprNodes body
+    Can.TypedDef _ _ _ body _ rs -> exprNodes body ++ concatMap refinementNodes rs
+
+-- | A refinement's predicate is typed as any expression is (§RF17), after
+-- the definition's body, so a module that refines nothing is numbered as it
+-- was.
+refinementNodes :: Can.Refinement -> [Node]
+refinementNodes r = maybe [] exprNodes (Can._ref_predicate r)
 
 exprNodes :: Can.Expr -> [Node]
 exprNodes (Can.Expr nid _ value) = ExprNode nid : childNodes value
@@ -107,6 +114,48 @@ childNodes e =
     Can.Update record fields ->
       exprNodes record ++ concatMap (\(Can.FieldUpdate _ v) -> exprNodes v) (Map.elems fields)
     Can.Record fields -> concatMap exprNodes (Map.elems fields)
+    _ -> []
+
+-- | Every signature's names and refinements in a module, nested @let@s
+-- included, in numbering order.
+refinements :: Can.Module -> [Can.Refinement]
+refinements modul =
+  declRefinements (Can._decls modul)
+    ++ concatMap (concatMap defRefinements . Map.elems . Can._in_methods) (Map.elems (Can._instances modul))
+
+declRefinements :: Can.Decls -> [Can.Refinement]
+declRefinements ds =
+  case ds of
+    Can.Declare d rest -> defRefinements d ++ declRefinements rest
+    Can.DeclareRec d others rest -> concatMap defRefinements (d : others) ++ declRefinements rest
+    Can.SaveTheEnvironment -> []
+
+defRefinements :: Can.Def -> [Can.Refinement]
+defRefinements d =
+  case d of
+    Can.Def _ _ _ body -> exprRefinements body
+    Can.TypedDef _ _ _ body _ rs -> exprRefinements body ++ rs
+
+exprRefinements :: Can.Expr -> [Can.Refinement]
+exprRefinements (Can.Expr _ _ value) =
+  case value of
+    Can.Array items -> concatMap exprRefinements items
+    Can.Negate inner -> exprRefinements inner
+    Can.Annotated inner _ -> exprRefinements inner
+    Can.Binop _ _ _ left right -> exprRefinements left ++ exprRefinements right
+    Can.Lambda _ body -> exprRefinements body
+    Can.Call func args -> concatMap exprRefinements (func : args)
+    Can.If branches final ->
+      concatMap (\(c, b) -> exprRefinements c ++ exprRefinements b) branches ++ exprRefinements final
+    Can.Let d body -> defRefinements d ++ exprRefinements body
+    Can.LetRec ds body -> concatMap defRefinements ds ++ exprRefinements body
+    Can.LetDestruct _ v body -> exprRefinements v ++ exprRefinements body
+    Can.Case scrutinee branches ->
+      exprRefinements scrutinee ++ concatMap (\(Can.CaseBranch _ b) -> exprRefinements b) branches
+    Can.Access record _ -> exprRefinements record
+    Can.Update record fields ->
+      exprRefinements record ++ concatMap (\(Can.FieldUpdate _ v) -> exprRefinements v) (Map.elems fields)
+    Can.Record fields -> concatMap exprRefinements (Map.elems fields)
     _ -> []
 
 fresh :: Numbering Can.NodeId
@@ -157,8 +206,15 @@ def d =
       do
         nid <- fresh
         Can.Def nid name args <$> expr body
-    Can.TypedDef name freeVars args body result ->
-      (\b -> Can.TypedDef name freeVars args b result) <$> expr body
+    Can.TypedDef name freeVars args body result rs ->
+      Can.TypedDef name freeVars args
+        <$> expr body
+        <*> pure result
+        <*> traverse refinement rs
+
+refinement :: Can.Refinement -> Numbering Can.Refinement
+refinement r =
+  (\p -> r {Can._ref_predicate = p}) <$> traverse expr (Can._ref_predicate r)
 
 expr :: Can.Expr -> Numbering Can.Expr
 expr (Can.Expr _ region value) =

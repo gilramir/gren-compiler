@@ -236,7 +236,7 @@ spec = do
     it "builds a typed definition's type from its annotation" $
       case Lower.def
         (env [(2, intT)])
-        (Can.TypedDef (located "f") Map.empty [(A.At here' (Can.PVar "x"), intT)] (at 2 (Can.VarLocal "x")) intT) of
+        (Can.TypedDef (located "f") Map.empty [(A.At here' (Can.PVar "x"), intT)] (at 2 (Can.VarLocal "x")) intT []) of
         Core.Bind (Core.Binder "f" tipe _) _ ->
           tipe `shouldBe` Core.TFun [core intT] (core intT)
         other ->

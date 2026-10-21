@@ -115,7 +115,7 @@ lower platform annotations types coreTypes elaboration modul =
 isExternDef :: Can.Def -> Bool
 isExternDef d =
   case d of
-    Can.TypedDef _ _ _ (Can.Expr _ _ (Can.VarExtern {})) _ -> True
+    Can.TypedDef _ _ _ (Can.Expr _ _ (Can.VarExtern {})) _ _ -> True
     _ -> False
 
 -- | An extern declaration as Core's entry for it (D196). Its binder is written
@@ -123,7 +123,7 @@ isExternDef d =
 externOf :: Expr.Env -> Can.Def -> Core.Extern
 externOf env d =
   case d of
-    Can.TypedDef (A.At region name) _ _ (Can.Expr _ _ (Can.VarExtern _ impls isPure _)) result ->
+    Can.TypedDef (A.At region name) _ _ (Can.Expr _ _ (Can.VarExtern _ impls isPure _)) result _ ->
       Core.Extern
         { Core._externBinder = Core.Binder name (lowerType result) (Expr.span env region),
           Core._externImpls = map externImpl impls,
@@ -139,7 +139,7 @@ externOf env d =
 externWithBody :: Expr.Env -> Map.Map Name Can.Annotation -> Map.Map Name Can.ExternBody -> Can.Def -> [Core.Extern]
 externWithBody env annotations bodies d =
   case d of
-    Can.TypedDef (A.At region name) _ _ _ _
+    Can.TypedDef (A.At region name) _ _ _ _ _
       | Just (Can.ExternBody impls isPure) <- Map.lookup name bodies,
         Just (Can.Forall _ tipe) <- Map.lookup name annotations ->
           [ Core.Extern
@@ -425,7 +425,7 @@ defName :: Can.Def -> Name
 defName d =
   case d of
     Can.Def _ (A.At _ name) _ _ -> name
-    Can.TypedDef (A.At _ name) _ _ _ _ -> name
+    Can.TypedDef (A.At _ name) _ _ _ _ _ -> name
 
 -- EXPORTS
 

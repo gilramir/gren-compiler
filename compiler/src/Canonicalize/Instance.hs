@@ -119,7 +119,7 @@ addInstance pkg imported env (sofar, taken) (A.At region (Src.Instance maybeCont
     -- about a qualified name (D135).
     checkNotClosed pkg region cls
 
-    (Can.Forall context canArgType) <- Type.toAnnotation env maybeContext srcArg
+    (Can.Forall context canArgType) <- Type.toAnnotation Error.InInstance env maybeContext srcArg
 
     head_ <-
       case canArgType of
@@ -310,7 +310,7 @@ canonicalizeMethod env className published head_ param (_, A.At _ (Src.Value ana
         (cbody, _) <-
           Expr.verifyBindings W.Pattern argBindings (Expr.canonicalize newEnv body)
 
-        Result.ok (name, Can.TypedDef aname freeVars args cbody resultType)
+        Result.ok (name, Can.TypedDef aname freeVars args cbody resultType [])
 
 -- SPECIALIZE
 

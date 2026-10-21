@@ -18,6 +18,8 @@ module AST.Canonical
     CtorOpts (..),
     -- definitions
     Def (..),
+    Refinement (..),
+    RefinementStep (..),
     Decls (..),
     -- patterns
     Pattern,
@@ -224,8 +226,35 @@ data FieldUpdate
 -- because it already caches a 'Type' per argument.
 data Def
   = Def NodeId (A.Located Name) [Pattern] Expr
-  | TypedDef (A.Located Name) FreeVars [(Pattern, Type)] Expr Type
+  | -- | The last field is the signature's named arguments and result, each
+    -- with its predicate if it is refined (geng-lang @m4-refine.md@ D814,
+    -- §RF17). Empty for every signature that names nothing.
+    TypedDef (A.Located Name) FreeVars [(Pattern, Type)] Expr Type [Refinement]
   deriving (Show)
+
+-- | A named argument or result of a signature, @(i : Int where 0 <= i)@.
+--
+-- The path says where in the signature's type it is written, so that it does
+-- not depend on how many patterns the definition happens to take: @[Arg 1]@ is
+-- the second argument, @[Result]@ the last arrow's target, and @[Arg 1, Arg
+-- 0]@ the first argument of a callback that is the second argument. The type
+-- is the named type with the name taken off, and the region the whole of what
+-- was written, its parentheses included. The predicate is a @Bool@
+-- expression whose 'VarLocal's are the signature's names, and whose operators
+-- carry @Int@ signatures rather than their classes' (§RF17).
+data Refinement = Refinement
+  { _ref_region :: A.Region,
+    _ref_path :: [RefinementStep],
+    _ref_name :: A.Located Name,
+    _ref_type :: Type,
+    _ref_predicate :: Maybe Expr
+  }
+  deriving (Show)
+
+data RefinementStep
+  = Arg Int
+  | Result
+  deriving (Eq, Show)
 
 -- DECLARATIONS
 

@@ -1,5 +1,6 @@
 module Canonicalize.Type
   ( toAnnotation,
+    toSignature,
     canonicalize,
     addFreeVars,
   )
@@ -7,12 +8,17 @@ where
 
 import AST.Canonical qualified as Can
 import AST.Source qualified as Src
+import AST.Utils.Type qualified as Type
+import Canonicalize.Binops qualified as Binops
 import Canonicalize.Environment qualified as Env
 import Canonicalize.Environment.Dups qualified as Dups
 import Control.Monad (foldM)
 import Data.List qualified as List
 import Data.Map qualified as Map
+import Data.Maybe qualified as Maybe
 import Data.Name qualified as Name
+import Gren.ModuleName qualified as ModuleName
+import Gren.Package qualified as Pkg
 import Reporting.Annotation qualified as A
 import Reporting.Error.Canonicalize qualified as Error
 import Reporting.Result qualified as Result
@@ -31,10 +37,10 @@ type Result i w a =
 -- of what an annotation is — `Src.Annotation` already pairs them — and because
 -- a constraint has no meaning apart from the variables the type binds. A port
 -- has no context and passes `Nothing`.
-toAnnotation :: Env.Env -> Maybe Src.Context -> Src.Type -> Result i w Can.Annotation
-toAnnotation env maybeContext srcType =
+toAnnotation :: Error.RefinementPlace -> Env.Env -> Maybe Src.Context -> Src.Type -> Result i w Can.Annotation
+toAnnotation place env maybeContext srcType =
   do
-    tipe <- canonicalize env srcType
+    tipe <- canonicalize place env srcType
     freeVars <- addContext env (addFreeVars Map.empty tipe) maybeContext
     Result.ok $ Can.Forall freeVars tipe
 
@@ -80,8 +86,13 @@ addConstraint env freeVars (A.At region constraint, _) =
 
 -- CANONICALIZE TYPES
 
-canonicalize :: Env.Env -> Src.Type -> Result i w Can.Type
-canonicalize env (A.At typeRegion tipe) =
+-- | A type written anywhere but on a signature's arguments and result, where
+-- a name or a refinement is refused (geng-lang @m4-refine.md@ D816, §RF17).
+-- The place is where the type is written, and it moves inward with the
+-- type: an argument of a type is 'Error.InTypeArgument' wherever the type is,
+-- and a record's field 'Error.InRecordField'.
+canonicalize :: Error.RefinementPlace -> Env.Env -> Src.Type -> Result i w Can.Type
+canonicalize place env (A.At typeRegion tipe) =
   case tipe of
     Src.TVar x ->
       Result.ok (Can.TVar x)
@@ -93,33 +104,373 @@ canonicalize env (A.At typeRegion tipe) =
         =<< Env.findTypeQual region env home name
     Src.TLambda a b _ ->
       Can.TLambda
-        <$> canonicalize env a
-        <*> canonicalize env b
+        <$> canonicalize place env a
+        <*> canonicalize place env b
     Src.TRecord fields ext ->
       do
         cfields <- sequenceA =<< Dups.checkFields (canonicalizeFields env fields)
         return $ Can.TRecord cfields (fmap (A.toValue . fst) ext)
     Src.TParens inner _ ->
-      canonicalize env inner
+      canonicalize place env inner
     Src.TNamed _ _ maybePredicate ->
-      -- Read since geng-lang D814, checked from §RF14's later steps; until
-      -- then a name or a refinement is refused rather than dropped, so that
-      -- nothing looks checked that is not (D819).
-      Result.throw (Error.RefinementNotChecked typeRegion (maybe False (const True) maybePredicate))
+      Result.throw (Error.RefinementMisplaced typeRegion (Maybe.isJust maybePredicate) place)
 
 canonicalizeFields :: Env.Env -> [Src.TRecordField] -> [(A.Located Name.Name, Result i w Can.FieldType, ())]
 canonicalizeFields env fields =
   let len = fromIntegral (length fields)
       canonicalizeField index (name, srcType, _) =
-        (name, Can.FieldType index <$> canonicalize env srcType, ())
+        (name, Can.FieldType index <$> canonicalize Error.InRecordField env srcType, ())
    in zipWith canonicalizeField [0 .. len] fields
+
+-- SIGNATURES
+
+-- | A value's signature, top-level or a @let@'s: its annotation, and the
+-- arguments and result it names, each with its predicate if it is refined
+-- (geng-lang @m4-refine.md@ D814, §RF17).
+--
+-- The annotation is the type with every name taken off, so nothing after
+-- this sees a signature that names its arguments as different from one that
+-- does not. The names are resolved here, each predicate's names against the
+-- signature's own, and the type checker then checks each predicate as a
+-- @Bool@ ("Type.Constrain.Expression").
+toSignature :: Env.Env -> Maybe Src.Context -> Src.Type -> Result i w (Can.Annotation, [Can.Refinement])
+toSignature env maybeContext srcType =
+  do
+    (tipe, named) <- spine env [] srcType
+    freeVars <- addContext env (addFreeVars Map.empty tipe) maybeContext
+    refinements <- refine env named
+    Result.ok (Can.Forall freeVars tipe, refinements)
+
+-- | A name in a signature, before its predicate is canonicalized.
+data Named = Named
+  { _region :: A.Region,
+    _path :: [Can.RefinementStep],
+    _name :: A.Located Name.Name,
+    _type :: Can.Type,
+    _predicate :: Maybe Src.Expr
+  }
+
+-- | The arrows of a signature, or of a callback inside one: each argument a
+-- position, and the last arrow's target the result. Parentheses around the
+-- arrows that are left, @a -> (b -> c)@, are the same arrows.
+spine :: Env.Env -> [Can.RefinementStep] -> Src.Type -> Result i w (Can.Type, [Named])
+spine env prefix =
+  go 0
+  where
+    go index srcType@(A.At _ tipe) =
+      case tipe of
+        Src.TLambda arg rest _ ->
+          do
+            (argType, argNamed) <- position env (prefix ++ [Can.Arg index]) arg
+            (restType, restNamed) <- go (index + 1) rest
+            Result.ok (Can.TLambda argType restType, argNamed ++ restNamed)
+        Src.TParens inner _
+          | isArrow inner ->
+              go index inner
+        _ ->
+          position env (prefix ++ [Can.Result]) srcType
+
+-- | One argument or the result. It may be named; and when its type is a
+-- function, a callback, its own arguments and result are positions too
+-- (§RF13.2).
+position :: Env.Env -> [Can.RefinementStep] -> Src.Type -> Result i w (Can.Type, [Named])
+position env path srcType@(A.At region tipe) =
+  case tipe of
+    Src.TNamed name inner maybePredicate ->
+      do
+        (innerType, innerNamed) <- positionType env path inner
+        Result.ok (innerType, Named region path name innerType maybePredicate : innerNamed)
+    Src.TParens inner _
+      | isNamed inner ->
+          position env path inner
+    _ ->
+      positionType env path srcType
+
+positionType :: Env.Env -> [Can.RefinementStep] -> Src.Type -> Result i w (Can.Type, [Named])
+positionType env path srcType =
+  if isArrow srcType
+    then spine env path srcType
+    else (\tipe -> (tipe, [])) <$> canonicalize Error.InTypeArgument env srcType
+
+isArrow :: Src.Type -> Bool
+isArrow (A.At _ tipe) =
+  case tipe of
+    Src.TLambda {} -> True
+    Src.TParens inner _ -> isArrow inner
+    _ -> False
+
+isNamed :: Src.Type -> Bool
+isNamed (A.At _ tipe) =
+  case tipe of
+    Src.TNamed {} -> True
+    Src.TParens inner _ -> isNamed inner
+    _ -> False
+
+-- REFINE
+
+-- | Every name once in a signature; each predicate canonicalized against the
+-- names it may see; and every name read by some predicate or refined itself.
+refine :: Env.Env -> [Named] -> Result i w [Can.Refinement]
+refine env named =
+  do
+    checkDuplicates named
+    refinements <- traverse (refineOne env named) named
+    let readNames = concatMap (maybe [] predicateLocals . Can._ref_predicate) refinements
+    traverse_ (checkRead readNames) named
+    Result.ok refinements
+
+traverse_ :: (a -> Result i w ()) -> [a] -> Result i w ()
+traverse_ f xs = () <$ traverse f xs
+
+checkDuplicates :: [Named] -> Result i w ()
+checkDuplicates named =
+  let byName = Map.fromListWith (flip (++)) [(A.toValue (_name n), [A.toRegion (_name n)]) | n <- named]
+   in traverse_
+        ( \(name, regions) ->
+            case regions of
+              first : second : _ -> Result.throw (Error.RefinementNameDuplicate name first second)
+              _ -> Result.ok ()
+        )
+        (Map.toList byName)
+
+-- | A name that nothing reads and that is not refined is refused, as D819
+-- refused it: it would look as if it meant something (D821).
+checkRead :: [Name.Name] -> Named -> Result i w ()
+checkRead readNames n =
+  case _predicate n of
+    Just _ -> Result.ok ()
+    Nothing ->
+      let A.At region name = _name n
+       in if name `elem` readNames
+            then Result.ok ()
+            else Result.throw (Error.RefinementNameUnused region name)
+
+refineOne :: Env.Env -> [Named] -> Named -> Result i w Can.Refinement
+refineOne env named n =
+  do
+    predicate <- traverse (canonicalizePredicate env (Scope n named)) (_predicate n)
+    Result.ok (Can.Refinement (_region n) (_path n) (_name n) (_type n) predicate)
+
+predicateLocals :: Can.Expr -> [Name.Name]
+predicateLocals (Can.Expr _ _ expr) =
+  case expr of
+    Can.VarLocal name -> [name]
+    Can.Negate inner -> predicateLocals inner
+    Can.Binop _ _ _ left right -> predicateLocals left ++ predicateLocals right
+    Can.Call func args -> concatMap predicateLocals (func : args)
+    _ -> []
+
+-- SCOPE
+
+-- | The name whose predicate this is, and every name in the signature.
+data Scope = Scope Named [Named]
+
+-- | What a predicate may name (§RF13.2): every argument of its own arrows and
+-- of the arrows around them, before or after it; and a result only in that
+-- result's own predicate. A callback's arguments are seen by the callback's
+-- predicates and no others, since they exist only for a call of it.
+data Seen
+  = Seen Named
+  | SeenOnlyByResult
+  | SeenOnlyInCallback
+  | Unknown [Name.Name]
+
+lookupName :: Scope -> Name.Name -> Seen
+lookupName (Scope self named) name =
+  case filter ((== name) . A.toValue . _name) named of
+    other : _ ->
+      let otherPath = _path other
+          selfPath = _path self
+       in if not (init otherPath `List.isPrefixOf` init selfPath)
+            then SeenOnlyInCallback
+            else
+              if last otherPath == Can.Result && otherPath /= selfPath
+                then SeenOnlyByResult
+                else Seen other
+    [] ->
+      Unknown [A.toValue (_name other) | other <- named, isSeen (lookupName (Scope self named) (A.toValue (_name other)))]
+
+isSeen :: Seen -> Bool
+isSeen seen =
+  case seen of
+    Seen _ -> True
+    _ -> False
+
+-- PREDICATES
+
+-- | A predicate as the parser builds it (D815): literals, names, a measure
+-- applied to a name, @not@, @True@, @False@, unary @-@, parentheses and
+-- D808's operators, made into the expression it is.
+--
+-- Every name it reads is the signature's, never a value in scope: a local or a
+-- top-level value of the same name is not what the predicate means, and D808
+-- allows nothing else. A name read directly must be an 'Int', the checker's
+-- only number (D799); any other is read only through a measure. The operators
+-- carry 'Int' signatures in place of their classes', so @x < y@ on two
+-- 'Float's is a type error rather than a predicate the checker cannot read,
+-- and a @*@ needs a literal on one side, the arithmetic being linear (§RF9).
+canonicalizePredicate :: Env.Env -> Scope -> Src.Expr -> Result i w Can.Expr
+canonicalizePredicate env scope (A.At region expression) =
+  case expression of
+    Src.Int int _ ->
+      Result.ok (Can.at region (Can.Int int))
+    Src.Negate inner ->
+      Can.at region . Can.Negate <$> canonicalizePredicate env scope inner
+    Src.Parens _ inner _ ->
+      canonicalizePredicate env scope inner
+    Src.Var Src.LowVar name ->
+      do
+        n <- findName region scope name
+        if isInt (_type n)
+          then Result.ok (Can.at region (Can.VarLocal name))
+          else Result.throw (Error.RefinementNameNotInt region name)
+    Src.Var Src.CapVar name ->
+      do
+        ctor <- Env.findCtor region env name
+        case ctor of
+          Env.Ctor home typeName (Can.Union vars _ _ opts) index args
+            | home == ModuleName.basics && typeName == Name.bool ->
+                let tipe = foldr Can.TLambda (Can.TType home typeName (map Can.TVar vars)) args
+                    freeVars = Map.fromList (map (\v -> (v, [])) vars)
+                 in Result.ok (Can.at region (Can.VarCtor opts home name index (Can.Forall freeVars tipe)))
+          _ ->
+            Result.throw (Error.RefinementNotCore region name)
+    Src.Call (A.At funcRegion (Src.Var Src.LowVar name)) [(_, arg)] ->
+      do
+        func <-
+          case Map.lookup name (Env._vars env) of
+            Just (Env.Foreign home annotation)
+              | home == ModuleName.basics ->
+                  Result.ok (Can.at funcRegion (Can.VarForeign home name annotation))
+            _ ->
+              Result.throw (Error.RefinementNotCore funcRegion name)
+        carg <- canonicalizePredicate env scope arg
+        Result.ok (Can.at region (Can.Call func [carg]))
+    Src.Call (A.At funcRegion (Src.VarQual Src.LowVar prefix name)) [(_, A.At argRegion (Src.Var Src.LowVar argName))] ->
+      do
+        func <-
+          case Map.lookup name =<< Map.lookup prefix (Env._q_vars env) of
+            Just (Env.Specific home annotation)
+              | (home, name) `elem` measures ->
+                  Result.ok (Can.at funcRegion (Can.VarForeign home name annotation))
+            _ ->
+              Result.throw (Error.RefinementNotMeasure funcRegion prefix name)
+        _ <- findName argRegion scope argName
+        Result.ok (Can.at region (Can.Call func [Can.at argRegion (Can.VarLocal argName)]))
+    Src.Binops ops final ->
+      do
+        tree <-
+          Binops.run region
+            =<< ( Binops.More
+                    <$> traverse (\(expr, A.At opRegion op, _) -> (,) <$> canonicalizePredicate env scope expr <*> predicateOperator env opRegion op) ops
+                    <*> canonicalizePredicate env scope final
+                )
+        checkShape tree
+        Result.ok tree
+    _ ->
+      -- The parser builds nothing else (D815).
+      Result.throw (Error.RefinementNotCore region (Name.fromChars "?"))
+
+findName :: A.Region -> Scope -> Name.Name -> Result i w Named
+findName region scope name =
+  case lookupName scope name of
+    Seen n -> Result.ok n
+    SeenOnlyByResult -> Result.throw (Error.RefinementNameOutOfScope region name True)
+    SeenOnlyInCallback -> Result.throw (Error.RefinementNameOutOfScope region name False)
+    Unknown seen -> Result.throw (Error.RefinementNameUnknown region name seen)
+
+isInt :: Can.Type -> Bool
+isInt tipe =
+  case Type.iteratedDealias tipe of
+    Can.TType home name [] -> home == ModuleName.basics && name == Name.int
+    _ -> False
+
+-- | @core@'s measures (D808): the size of each of its collections.
+measures :: [(ModuleName.Canonical, Name.Name)]
+measures =
+  [ (ModuleName.array, Name.fromChars "length"),
+    (ModuleName.bytes, Name.fromChars "length"),
+    (ModuleName.string, Name.fromChars "count"),
+    (ModuleName.dict, Name.fromChars "count"),
+    (ModuleName.Canonical Pkg.core (Name.fromChars "Set"), Name.fromChars "count")
+  ]
+
+-- | An operator of D808's, resolved as any operator is, and given the 'Int'
+-- or 'Bool' signature a predicate reads it at.
+predicateOperator :: Env.Env -> A.Region -> Name.Name -> Result i w Env.Binop
+predicateOperator env region op =
+  do
+    binop <- Env.findBinop region env op
+    let home =
+          case Env._op_target binop of
+            Can.OpValue h _ -> h
+            Can.OpMethod (Can.Class h _) _ _ -> h
+    case lookup (Name.toChars op) operatorTypes of
+      Just (left, right, answer)
+        | home == ModuleName.basics ->
+            Result.ok binop {Env._op_annotation = Can.Forall Map.empty (Can.TLambda left (Can.TLambda right answer))}
+      _ ->
+        Result.throw (Error.RefinementNotCore region op)
+
+operatorTypes :: [(String, (Can.Type, Can.Type, Can.Type))]
+operatorTypes =
+  [(op, (int, int, int)) | op <- ["+", "-", "*"]]
+    ++ [(op, (int, int, bool)) | op <- ["<", "<=", ">", ">=", "==", "/="]]
+    ++ [(op, (bool, bool, bool)) | op <- ["&&", "||"]]
+  where
+    int = Can.TType ModuleName.basics Name.int []
+    bool = Can.TType ModuleName.basics Name.bool []
+
+-- | What §RF13.4's layers said that a chain does not: a @*@ has a literal
+-- on one side, so that the arithmetic stays linear, and a comparison compares
+-- two sums, never two conditions.
+checkShape :: Can.Expr -> Result i w ()
+checkShape (Can.Expr _ region expr) =
+  case expr of
+    Can.Binop op _ _ left right ->
+      do
+        checkShape left
+        checkShape right
+        if Name.toChars op == "*" && not (isLiteral left || isLiteral right)
+          then Result.throw (Error.RefinementNonlinear region)
+          else Result.ok ()
+        if Name.toChars op `elem` comparisons
+          then traverse_ checkSum [left, right]
+          else Result.ok ()
+    Can.Negate inner -> checkShape inner
+    Can.Call _ args -> traverse_ checkShape args
+    _ -> Result.ok ()
+  where
+    checkSum operand =
+      if isCondition operand
+        then Result.throw (Error.RefinementComparesConditions (Can.exprRegion operand))
+        else Result.ok ()
+
+comparisons :: [String]
+comparisons =
+  ["<", "<=", ">", ">=", "==", "/="]
+
+isCondition :: Can.Expr -> Bool
+isCondition (Can.Expr _ _ expr) =
+  case expr of
+    Can.Binop op _ _ _ _ -> Name.toChars op `elem` ("&&" : "||" : comparisons)
+    Can.Call (Can.Expr _ _ (Can.VarForeign home _ _)) _ -> home == ModuleName.basics
+    Can.VarCtor {} -> True
+    _ -> False
+
+isLiteral :: Can.Expr -> Bool
+isLiteral (Can.Expr _ _ expr) =
+  case expr of
+    Can.Int _ -> True
+    Can.Negate inner -> isLiteral inner
+    _ -> False
 
 -- CANONICALIZE TYPE
 
 canonicalizeType :: Env.Env -> A.Region -> Name.Name -> [Src.Type] -> Env.Type -> Result i w Can.Type
 canonicalizeType env region name args info =
   do
-    cargs <- traverse (canonicalize env) args
+    cargs <- traverse (canonicalize Error.InTypeArgument env) args
     case info of
       Env.Alias arity home argNames aliasedType ->
         checkArity arity region name args $

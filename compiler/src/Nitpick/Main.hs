@@ -68,10 +68,10 @@ defName :: Can.Def -> Name
 defName def =
   case def of
     Can.Def _ (A.At _ name) _ _ -> name
-    Can.TypedDef (A.At _ name) _ _ _ _ -> name
+    Can.TypedDef (A.At _ name) _ _ _ _ _ -> name
 
 defRegion :: Can.Def -> A.Region
 defRegion def =
   case def of
     Can.Def _ (A.At region _) _ _ -> region
-    Can.TypedDef (A.At region _) _ _ _ _ -> region
+    Can.TypedDef (A.At region _) _ _ _ _ _ -> region

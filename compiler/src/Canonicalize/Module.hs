@@ -370,7 +370,7 @@ extractDefName :: Can.Def -> A.Located Name.Name
 extractDefName def =
   case def of
     Can.Def _ name _ _ -> name
-    Can.TypedDef name _ _ _ _ -> name
+    Can.TypedDef name _ _ _ _ _ -> name
 
 -- DECLARATIONS / CYCLE DETECTION SETUP
 --
@@ -411,7 +411,7 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
     Just (Src.Annotation maybeContext srcType _)
       | A.At bodyRegion (Src.Extern impls Nothing) <- body ->
           do
-            annotation@(Can.Forall freeVars tipe) <- Type.toAnnotation env maybeContext srcType
+            annotation@(Can.Forall freeVars tipe) <- Type.toAnnotation Error.InExtern env maybeContext srcType
             checkExtern aname impls tipe
             checkJsExtern aname impls tipe
             checkErlangExtern impls
@@ -419,11 +419,11 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
             let canImpls = List.sortOn (\(Can.ExternImpl language _) -> language) (map canonicalImpl impls)
             let isPure = any (\(Src.ExternImpl p _ _) -> p) impls
             let cbody = Can.at bodyRegion (Can.VarExtern name canImpls isPure annotation)
-            let def = Can.TypedDef aname freeVars [] cbody tipe
+            let def = Can.TypedDef aname freeVars [] cbody tipe []
             return (toNodeTwo name srcArgs def Map.empty, name, [])
     Just (Src.Annotation maybeContext srcType _) ->
       do
-        (Can.Forall freeVars tipe) <- Type.toAnnotation env maybeContext srcType
+        (Can.Forall freeVars tipe, refinements) <- Type.toSignature env maybeContext srcType
 
         -- An extern with a Geng body (D222) is held to every rule a bodiless
         -- one is, and is then an ordinary definition of that body.
@@ -450,7 +450,7 @@ toNodeOne env (A.At _ (Src.Value aname@(A.At _ name) srcArgs body maybeType _)) 
         (cbody, freeLocals) <-
           Expr.verifyBindings W.Pattern argBindings (Expr.canonicalize newEnv geng)
 
-        let def = Can.TypedDef aname freeVars args cbody resultType
+        let def = Can.TypedDef aname freeVars args cbody resultType refinements
         return
           ( toNodeTwo name srcArgs def freeLocals,
             name,
