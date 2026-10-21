@@ -725,7 +725,10 @@ runGit context args directory =
         , runDuration = ChildProcess.Milliseconds (10 * 60 * 1000)
         }
         |> Task.mapError (constructFailedCommand args)
-        |> Task.map (\result -> Maybe.withDefault "" (Bytes.toString result.stdout))
+        -- Lossy, so one tag name that is not UTF-8 is one tag that is not a
+        -- version: read strictly, it made the whole listing empty and hid
+        -- every tag (geng-lang m4-refine.md §RF7.4).
+        |> Task.map (\result -> Bytes.toStringLossy result.stdout)
 
 
 -- GITHUB, FOR PUBLISHING
@@ -817,7 +820,7 @@ constructFailedCommand args details =
                 ChildProcess.ProgramError err ->
                     String.join "\n"
                         [ "Exit code: " ++ String.fromInt err.exitCode
-                        , "Message: " ++ Maybe.withDefault "" (Bytes.toString err.stderr)
+                        , "Message: " ++ Bytes.toStringLossy err.stderr
                         ]
         }
 

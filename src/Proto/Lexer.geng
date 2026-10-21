@@ -454,7 +454,10 @@ escape chars state =
                         code =
                             digitsValue 16 (Array.slice (state.index + 1) (state.index + 1 + wanted) chars)
                     in
-                    if code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF) then
+                    -- Eight digits past 7FFFFFFF are negative in a 32-bit
+                    -- Int, so the test is below 0 as well as above 0x10FFFF
+                    -- (geng-lang m4-refine.md §RF7.4).
+                    if code < 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF) then
                         Err { row = backslash.row, col = backslash.col, message = "this escape is not a Unicode scalar value" }
 
                     else

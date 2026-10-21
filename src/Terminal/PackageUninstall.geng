@@ -158,7 +158,7 @@ promptUpdateOutline config projectPath removedPackages edit =
             )
         |> Task.andThen
             (\bytes ->
-                when edit (Maybe.withDefault "" (Bytes.toString bytes)) is
+                when Result.andThen edit (Result.fromMaybe Terminal.PackageInstall.notUtf8 (Bytes.toString bytes)) is
                     Ok newText ->
                         FileSystem.writeFile config.fsPermission (Bytes.fromString newText) manifestPath
                             |> Task.mapError OutlineWriteError

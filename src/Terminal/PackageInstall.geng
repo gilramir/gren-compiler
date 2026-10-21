@@ -7,6 +7,7 @@ module Terminal.PackageInstall exposing
     , writeLock
     , newerVersions
     , prettifyError
+    , notUtf8
     --
     , AddPackageError (..)
     , addPackage
@@ -266,21 +267,41 @@ readUserSources : FileSystem.Permission -> Path -> Task PackageInstallError (Dic
 readUserSources fsPermission path =
     FileSystem.readFile fsPermission path
         |> Task.map Just
-        |> Task.onError (\_ -> Task.succeed Nothing)
+        |> Task.onError
+            (\err ->
+                if FileSystem.errorIsNoSuchFileOrDirectory err then
+                    Task.succeed Nothing
+
+                else
+                    Task.fail (PackageInstallInvalidConfig { path = path, message = FileSystem.errorToString err })
+            )
         |> Task.andThen
             (\maybeBytes ->
-                when maybeBytes is
+                when Maybe.map Bytes.toString maybeBytes is
                     Nothing ->
                         Task.succeed Dict.empty
 
-                    Just bytes ->
-                        when Outline.readSources (Maybe.withDefault "" (Bytes.toString bytes)) is
+                    Just Nothing ->
+                        Task.fail (PackageInstallInvalidConfig { path = path, message = notUtf8 })
+
+                    Just (Just text) ->
+                        when Outline.readSources text is
                             Ok sources ->
                                 Task.succeed sources
 
                             Err err ->
                                 Task.fail (PackageInstallInvalidConfig { path = path, message = Outline.readErrorToString err })
             )
+
+
+{-| A file the CLI reads as text, a manifest, `geng.lock` or the user's
+`config.toml`, that is not UTF-8. It is refused rather than read as empty,
+which dropped every `[sources]` override over one Latin-1 comment, and wrote a
+manifest back empty (geng-lang m4-refine.md §RF7.4).
+-}
+notUtf8 : String
+notUtf8 =
+    "The file is not UTF-8, which TOML requires."
 
 
 readLock : FileSystem.Permission -> Path -> Task PackageInstallError Lock
@@ -297,12 +318,15 @@ readLock fsPermission path =
             )
         |> Task.andThen
             (\maybeBytes ->
-                when maybeBytes is
+                when Maybe.map Bytes.toString maybeBytes is
                     Nothing ->
                         Task.succeed Lock.empty
 
-                    Just bytes ->
-                        when Lock.decode (Maybe.withDefault "" (Bytes.toString bytes)) is
+                    Just Nothing ->
+                        Task.fail (PackageInstallInvalidLock { path = path, message = notUtf8 })
+
+                    Just (Just text) ->
+                        when Lock.decode text is
                             Ok lock ->
                                 Task.succeed lock
 
@@ -1571,7 +1595,7 @@ promptUpdateOutline config projectPath heading packages edit =
             )
         |> Task.andThen
             (\bytes ->
-                when edit (Maybe.withDefault "" (Bytes.toString bytes)) is
+                when Result.andThen edit (Result.fromMaybe notUtf8 (Bytes.toString bytes)) is
                     Ok newText ->
                         FileSystem.writeFile config.fsPermission (Bytes.fromString newText) manifestPath
                             |> Task.mapError AddPackageWriteOutlineError

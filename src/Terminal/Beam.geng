@@ -865,11 +865,16 @@ directRows config =
                         (\path ->
                             FileSystem.readFile config.fs path
                                 |> Task.mapError (failure "I cannot read an extern module")
-                                |> Task.map
+                                |> Task.andThen
                                     (\data ->
-                                        Bytes.toString data
-                                            |> Maybe.map (Build.directRows (externModule path))
-                                            |> Maybe.withDefault []
+                                        -- Refused, where it was read as no rows
+                                        -- (geng-lang m4-refine.md §RF7.4).
+                                        when Bytes.toString data is
+                                            Just text ->
+                                                Task.succeed (Build.directRows (externModule path) text)
+
+                                            Nothing ->
+                                                Task.fail (failureText ("I cannot read the extern module " ++ Path.toPosixString path) "It is not UTF-8.")
                                     )
                         )
                     |> Task.sequence
