@@ -63,8 +63,41 @@ moduleToBuilder opts m =
       block (map (instanceDecl opts) (_moduleInstances m)),
       block (maybe [] (pure . mainDecl) (_moduleMain m)),
       block (map (externDecl opts) (_moduleExterns m)),
+      block (map (signatureDecl opts) (_moduleSignatures m)),
       block (map (topBind opts (recNames m)) (_moduleDefs m))
     ]
+
+-- | A signature's named arguments and result (D824): the definition's
+-- binder, its name, where it starts, which is what finds it, and its type,
+-- then a line per name,
+-- its place, its type and its predicate as written, and the predicate as Core.
+signatureDecl :: Options -> Signature -> B.Builder
+signatureDecl opts (Signature b nameds) =
+  "signature "
+    <> name (_binderName b)
+    <> " at "
+    <> B.word32Dec (_spanStartRow (_binderSpan b))
+    <> ":"
+    <> B.word32Dec (_spanStartCol (_binderSpan b))
+    <> " : "
+    <> typeToBuilder opts (_binderType b)
+    <> "\n"
+    <> mconcat (map namedDecl nameds)
+  where
+    namedDecl (Named path nb predicate source) =
+      "  "
+        <> mconcat [step st <> " " | st <- path]
+        <> name (_binderName nb)
+        <> " : "
+        <> typeToBuilder opts (_binderType nb)
+        <> maybe "" (\_ -> " where " <> B.stringUtf8 (show (Utf8.toChars source))) predicate
+        <> "\n"
+        <> maybe "" (\p -> expr opts 2 p <> "\n") predicate
+    step st =
+      case st of
+        StepArg i -> "arg " <> B.intDec i
+        StepResult -> "result"
+
 
 -- | An @\@extern@ declaration (D196): the binder, then one line per language,
 -- and a last line when the declaration has a Geng body (D222), which is the

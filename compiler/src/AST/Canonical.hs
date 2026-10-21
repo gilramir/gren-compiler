@@ -241,8 +241,10 @@ data Def
 -- 0]@ the first argument of a callback that is the second argument. The type
 -- is the named type with the name taken off, and the region the whole of what
 -- was written, its parentheses included. The predicate is a @Bool@
--- expression whose 'VarLocal's are the signature's names, and whose operators
--- carry @Int@ signatures rather than their classes' (§RF17).
+-- expression whose 'VarLocal's are the signature's names; the type checker
+-- reads its operators at @Int@ signatures rather than their classes' (§RF17),
+-- and they keep their own annotations here, so that the elaborator and the
+-- lowering treat them as a body's (§RF18).
 --
 -- A @let@'s predicate may also read an argument named by a signature it is
 -- defined inside (D823); each such name it reads is in '_ref_enclosing'.
@@ -252,6 +254,8 @@ data Refinement = Refinement
     _ref_name :: A.Located Name,
     _ref_type :: Type,
     _ref_predicate :: Maybe Expr,
+    -- | The predicate as written (D812), empty when there is none.
+    _ref_source :: String,
     _ref_enclosing :: [Enclosing]
   }
   deriving (Show)

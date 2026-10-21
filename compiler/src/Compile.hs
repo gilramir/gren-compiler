@@ -68,7 +68,7 @@ compile platform application pkg ifaces modul =
     () <- checkCapabilities application pkg ifaces canonical
     Type.Solved solved nodeTypes coreNodeTypes defaults literalWidths <- typeCheck modul canonical
     () <- checkNodeTypes canonical nodeTypes
-    () <- refuseRefinements canonical
+    () <- if uncheckedRefinements then Right () else refuseRefinements canonical
     -- Before the annotations, because half of one may come from it: an
     -- unannotated definition's open constraints are the elaborator's answer
     -- (§G33) and nothing earlier knows them. It may also change the types it
@@ -150,7 +150,7 @@ refuseRefinements canonical =
     r : rs ->
       Left (E.BadNames (foldr1 OneOrMore.more (map (OneOrMore.one . refusal) (r : rs))))
   where
-    refusal (Can.Refinement region _ _ _ maybePredicate _) =
+    refusal (Can.Refinement region _ _ _ maybePredicate _ _) =
       Error.RefinementNotChecked region (Maybe.isJust maybePredicate)
 
 checkCapabilities :: Bool -> Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Can.Module -> Either E.Error ()
@@ -330,6 +330,17 @@ arrowCount tipe =
   case tipe of
     Can.TLambda _ result -> 1 + arrowCount result
     _ -> 0
+
+-- | @GENG_UNCHECKED_REFINEMENTS@: build a module whose refinements nothing
+-- checks yet, rather than refuse it (D819), so that the Core they lower to
+-- can be pinned before the checker that reads it exists (geng-lang
+-- @m4-refine.md@ §RF18, D825). A development switch, as
+-- @GENG_CHECK_NODE_TYPES@ is: a program built with it has promises nothing
+-- kept.
+uncheckedRefinements :: Bool
+uncheckedRefinements =
+  unsafePerformIO (maybe False (/= "") <$> Env.lookupEnv "GENG_UNCHECKED_REFINEMENTS")
+{-# NOINLINE uncheckedRefinements #-}
 
 nodeTypeCheckEnabled :: Bool
 nodeTypeCheckEnabled =

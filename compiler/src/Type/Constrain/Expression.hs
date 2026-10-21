@@ -630,7 +630,7 @@ constrainRefinements rtv refinements =
   if null refinements
     then return CTrue
     else do
-      let own = [(name, tipe) | Can.Refinement _ _ name tipe _ _ <- refinements]
+      let own = [(name, tipe) | Can.Refinement _ _ name tipe _ _ _ <- refinements]
           enclosing = [(Can._enc_name e, Can._enc_type e) | r <- refinements, e <- Can._ref_enclosing r]
       header <-
         Map.fromList
@@ -641,12 +641,12 @@ constrainRefinements rtv refinements =
             (own ++ enclosing)
       predicateCons <-
         traverse
-          ( \(Can.Refinement _ _ (A.At _ name) _ maybePredicate _) ->
+          ( \(Can.Refinement _ _ (A.At _ name) _ maybePredicate _ _) ->
               case maybePredicate of
                 Nothing ->
                   return CTrue
                 Just predicate ->
-                  constrain rtv predicate (FromContext (Can.exprRegion predicate) (Refinement name) Type.bool)
+                  constrain rtv (atInt predicate) (FromContext (Can.exprRegion predicate) (Refinement name) Type.bool)
           )
           refinements
       return $
@@ -657,6 +657,32 @@ constrainRefinements rtv refinements =
             _headerCon = CTrue,
             _bodyCon = CAnd predicateCons
           }
+
+-- | A predicate with D822's signatures on its operators: @+ - *@ from two
+-- 'Int's to an 'Int', the six comparisons from two 'Int's to a 'Bool', @&&@
+-- and @||@ on 'Bool's. Only what the checker sees changes; the canonical
+-- predicate keeps each operator's own annotation for the elaborator.
+atInt :: Can.Expr -> Can.Expr
+atInt (Can.Expr nid region expr) =
+  Can.Expr nid region $
+    case expr of
+      Can.Binop op target annotation left right ->
+        Can.Binop op target (maybe annotation id (intSignature op)) (atInt left) (atInt right)
+      Can.Negate inner -> Can.Negate (atInt inner)
+      Can.Call func args -> Can.Call func (map atInt args)
+      _ -> expr
+
+intSignature :: Name.Name -> Maybe Can.Annotation
+intSignature op =
+  let canInt = Can.TType ModuleName.basics Name.int []
+      canBool = Can.TType ModuleName.basics Name.bool []
+      sig left right answer = Just (Can.Forall Map.empty (Can.TLambda left (Can.TLambda right answer)))
+   in case Name.toChars op of
+        o
+          | o `elem` ["+", "-", "*"] -> sig canInt canInt canInt
+          | o `elem` ["<", "<=", ">", ">=", "==", "/="] -> sig canInt canInt canBool
+          | o `elem` ["&&", "||"] -> sig canBool canBool canBool
+        _ -> Nothing
 
 -- CONSTRAIN RECURSIVE DEFS
 

@@ -124,6 +124,19 @@ spec = do
     it "refuses another module's alias" $
       refused ((moduleWith []) {_moduleAliases = [Alias (QualName otherHome "Point") [] (TRecord [("x", intType)] Nothing)]})
 
+    it "carries a signature's names, its paths, predicates and source text (D824)" $
+      roundTrip ((moduleWith [bindOf (lit (LInt 1))]) {_moduleSignatures = [signatureAt 1, signatureAt 5]})
+
+    it "refuses signatures out of order, one naming nothing, names out of order, and a predicate without its text" $
+      do
+        refused ((moduleWith []) {_moduleSignatures = [signatureAt 5, signatureAt 1]})
+        refused ((moduleWith []) {_moduleSignatures = [signatureAt 1, signatureAt 1]})
+        refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) []]})
+        refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) (reverse (_sigNamed (signatureAt 1)))]})
+        refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [StepArg 0] (Binder "n" intType (at 1 6 1 7)) (Just var) (utf8 "")]]})
+        refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [StepArg 0] (Binder "n" intType (at 1 6 1 7)) Nothing (utf8 "n > 0")]]})
+        refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [] (Binder "n" intType (at 1 6 1 7)) Nothing (utf8 "")]]})
+
     it "carries each kind of main" $
       mapM_ (\m -> roundTrip ((moduleWith []) {_moduleMain = Just m})) everyMain
 
@@ -354,6 +367,18 @@ someProgram =
     Whole.Prod
     Whole.Node
 
+-- | A signature on row @row@: a refined argument, a bare one, a callback's
+-- argument and a refined result, every predicate at absolute spans.
+signatureAt :: Word32 -> Signature
+signatureAt row =
+  Signature
+    (Binder "f" intType (at row 1 row 2))
+    [ Named [StepArg 0] (Binder "n" intType (at row 6 row 7)) (Just (Expr (EVar "n") intType (at row 20 row 21))) (utf8 "n > 0"),
+      Named [StepArg 1] (Binder "b" intType (at row 30 row 31)) Nothing (utf8 ""),
+      Named [StepArg 2, StepArg 0] (Binder "i" intType (at row 40 row 41)) (Just (Expr (EVar "i") intType (at row 44 row 45))) (utf8 "i < n"),
+      Named [StepResult] (Binder "r" intType (at (row + 1) 3 (row + 1) 4)) (Just (Expr (EVar "r") intType (at (row + 1) 8 (row + 1) 9))) (utf8 "r >= 0")
+    ]
+
 moduleWith :: [Bind] -> Module
 moduleWith defs =
   Module
@@ -368,7 +393,8 @@ moduleWith defs =
       _moduleMain = Nothing,
       _moduleExterns = [],
       _moduleInline = [],
-      _moduleAliases = []
+      _moduleAliases = [],
+      _moduleSignatures = []
     }
 
 -- | All 21 of them (C2). The list is the point: adding a node to 'Expr_' and

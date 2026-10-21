@@ -50,6 +50,7 @@ import Data.Int (Int32, Int64)
 import Data.IntMap.Strict qualified as IntMap
 import Data.List qualified as List
 import Data.Map qualified as Map
+import Data.Maybe qualified as Maybe
 import Data.Name qualified as Name
 import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
@@ -928,7 +929,7 @@ methodImplP =
 
 moduleP :: P Module
 moduleP =
-  message "Module" 17 $
+  message "Module" 18 $
     do
       strings <- stringTable
       withTable strings $
@@ -985,6 +986,12 @@ moduleBodyP =
     if List.sort aliasNames /= aliasNames || length (List.nub aliasNames) /= length aliasNames
       then failAt aliasesAt "aliases is not sorted by name, or names one alias twice"
       else pure ()
+    signaturesAt <- offset
+    signatures <- rep "signatures" 18 signatureP
+    let starts = map (spanStart . _binderSpan . _sigBinder) signatures
+    if not (strictlyAscending starts)
+      then failAt signaturesAt "signatures is not sorted by where each binder starts, or has two that start together"
+      else pure ()
     pure
       Module
         { _moduleName = name,
@@ -998,8 +1005,54 @@ moduleBodyP =
           _moduleMain = main_,
           _moduleExterns = externs,
           _moduleInline = inline,
-          _moduleAliases = aliases
+          _moduleAliases = aliases,
+          _moduleSignatures = signatures
         }
+
+-- | A signature (D824): its binder, then at least one name, in the order
+-- they are written, which is the order their spans start in. A name has a
+-- step or more, and has source text exactly when it has a predicate (D812).
+signatureP :: P Signature
+signatureP =
+  message "Signature" 2 $
+    do
+      b <- msg "binder" 1 binderP
+      here <- offset
+      nameds <- rep "named" 2 namedP
+      if null nameds
+        then failAt here "a signature names nothing"
+        else
+          if strictlyAscending (map (spanStart . _binderSpan . _namedBinder) nameds)
+            then pure (Signature b nameds)
+            else failAt here "a signature's names are not in the order their spans start"
+
+namedP :: P Named
+namedP =
+  message "Named" 4 $
+    do
+      here <- offset
+      got <- next "path" 1 WBytes (submessage packedVarints)
+      path <-
+        case got of
+          Nothing -> failAt here "a name has no path"
+          Just [] -> failAt here "field 1 is present holding its default []"
+          Just codes -> pure (map stepOf codes)
+      b <- msg "binder" 2 binderP
+      predicate <- optMsg "predicate" 3 exprP
+      sourceAt <- offset
+      source <- text "source" 4
+      if Utf8.isEmpty source == Maybe.isNothing predicate
+        then pure (Named path b predicate source)
+        else failAt sourceAt "a name has source text without a predicate, or a predicate without its source text"
+  where
+    stepOf code =
+      if code == 0 then StepResult else StepArg (fromIntegral code - 1)
+
+spanStart :: Span -> (Word32, Word32)
+spanStart (Span _ row col _ _) = (row, col)
+
+strictlyAscending :: Ord a => [a] -> Bool
+strictlyAscending xs = and (zipWith (<) xs (drop 1 xs))
 
 aliasP :: P Alias
 aliasP =

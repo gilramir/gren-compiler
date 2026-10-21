@@ -189,7 +189,8 @@ modul defs =
       Core._moduleExports = [],
       Core._moduleExterns = [],
       Core._moduleInline = [],
-      Core._moduleAliases = []
+      Core._moduleAliases = [],
+      Core._moduleSignatures = []
     }
 
 ctorDecl :: Name -> Int -> [Core.Type] -> Core.Ctor

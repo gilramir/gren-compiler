@@ -34,6 +34,9 @@ module Core.AST
     Module (..),
     DataDecl (..),
     Alias (..),
+    Signature (..),
+    Named (..),
+    Step (..),
     Ctor (..),
     Transparency (..),
     ClassDecl (..),
@@ -430,7 +433,13 @@ data Module = Module
     -- its aliases expanded; these are kept only so that a native library's
     -- header can name a record that crosses into C by the name its author
     -- gave it. No pass reads them.
-    _moduleAliases :: ![Alias]
+    _moduleAliases :: ![Alias],
+    -- | Every signature in the module that names an argument or its result,
+    -- top-level and @let@ alike, sorted by where its definition's binder
+    -- starts (geng-lang @m4-refine.md@ §RF18, D824): what the refinement
+    -- checker reads. No pass reads them, and a backend drops them with the
+    -- module, which is the erasure D797 asks for.
+    _moduleSignatures :: ![Signature]
   }
   deriving (Eq, Show)
 
@@ -442,6 +451,38 @@ data Alias = Alias
     _aliasType :: !Type
   }
   deriving (Eq, Show)
+
+-- | A definition's named arguments and result (D814), by the definition's
+-- binder exactly as its 'Bind' has it, which no other definition in the module
+-- shares: a binder's span is where its name is written.
+data Signature = Signature
+  { _sigBinder :: !Binder,
+    _sigNamed :: ![Named]
+  }
+  deriving (Eq, Show)
+
+-- | One named argument or result, in the order they are written.
+--
+-- The binder is the name, the type it names with the name taken off, and the
+-- name's span. The predicate is a 'Bool' expression whose 'EVar's are the
+-- names of this signature or, in a @let@, of a signature around it (D823),
+-- lowered as a body's expression is; the source is the predicate as written
+-- (D812), empty when there is no predicate.
+data Named = Named
+  { _namedPath :: ![Step],
+    _namedBinder :: !Binder,
+    _namedPredicate :: !(Maybe Expr),
+    _namedSource :: !Text
+  }
+  deriving (Eq, Show)
+
+-- | Where in a signature's type a name is: @[StepArg 1]@ is the second
+-- argument, @[StepResult]@ the last arrow's target, @[StepArg 1, StepArg 0]@
+-- the first argument of a callback that is the second argument.
+data Step
+  = StepArg !Int
+  | StepResult
+  deriving (Eq, Ord, Show)
 
 -- | An @\@extern@ declaration (@ffi.md@ F1, @m1b-extern.md@ §H12, D196).
 --

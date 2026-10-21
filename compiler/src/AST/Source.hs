@@ -192,9 +192,10 @@ data Type_
   | -- | @(name : Type)@ or @(name : Type where predicate)@, a named and
     -- perhaps refined argument or result (geng-lang @m4-refine.md@ D814). The
     -- predicate is an ordinary expression, read by the type parser's own
-    -- grammar (D815). Comments inside are not kept: nothing reads a type's
-    -- comments from this AST.
-    TNamed (A.Located Name) Type (Maybe Expr)
+    -- grammar (D815), with its source text, the bytes from its first token to
+    -- its last exactly as written, which Core carries (D812). Comments inside
+    -- are not kept as comments: nothing reads a type's comments from this AST.
+    TNamed (A.Located Name) Type (Maybe (Expr, String))
   deriving (Show)
 
 type TRecordField = (A.Located Name, Type, SC.RecordFieldComments)

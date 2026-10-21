@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Parse.Type
@@ -11,6 +12,7 @@ where
 import AST.Source qualified as Src
 import AST.SourceComments qualified as SC
 import Data.Name qualified as Name
+import Data.Utf8 qualified as Utf8
 import Parse.Keyword qualified as Keyword
 import Parse.Number qualified as Number
 import Parse.Primitives (Parser, addEnd, addLocation, getPosition, inContext, lookAhead, oneOf, oneOfWithFallback, specialize, word1, word2)
@@ -120,15 +122,39 @@ namedType start =
         [ do
             Keyword.where_ E.TParenthesisEnd
             _ <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisPredicate
-            (predicate, predicateEnd) <- chain
+            (predicate, predicateEnd, text) <- withText chain
             Space.checkIndent predicateEnd E.TParenthesisIndentEnd
-            return (Just predicate)
+            return (Just (predicate, text))
         ]
         Nothing
     word1 0x29 {-)-} E.TParenthesisEnd
     addEnd start (Src.TNamed name tipe maybePredicate)
 
 -- PREDICATES
+
+-- | A predicate and its source text (D812): the bytes from where the parser
+-- started to the end of the predicate's region, so the whitespace and
+-- comments a chain chomps after its last operand are not in it. The bytes are
+-- copied while the parse holds the source.
+withText :: Parser x (Src.Expr, A.Position) -> Parser x (Src.Expr, A.Position, String)
+withText (P.Parser parser) =
+  P.Parser $ \state@(P.State _ start _ _ row col) cok eok cerr eerr ->
+    let finish ok (predicate, end) s@(P.State _ stop _ _ _ _) =
+          let !bytes = Utf8.fromPtr start stop :: Utf8.Utf8 ()
+           in ok (predicate, end, upTo (A.Position row col) (regionEnd predicate) (Utf8.toChars bytes)) s
+     in parser state (finish cok) (finish eok) cerr eerr
+  where
+    regionEnd (A.At (A.Region _ end) _) = end
+
+-- | The characters from one position up to another, counting a column a
+-- character and a row a newline, as the parser counts them.
+upTo :: A.Position -> A.Position -> String -> String
+upTo here@(A.Position r c) end chars =
+  case chars of
+    ch : rest
+      | here /= end ->
+          ch : upTo (if ch == '\n' then A.Position (r + 1) 1 else A.Position r (c + 1)) end rest
+    _ -> []
 
 -- | A refinement's predicate, read by its own grammar rather than by the
 -- expression parser, which imports this module (D815). It holds what D808

@@ -61,6 +61,7 @@ import Control.Monad.Trans.State.Strict (State, execState, get, gets, modify', p
 import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Maybe (listToMaybe)
+import Data.Maybe qualified as Maybe
 import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.NonEmptyList qualified as NE
@@ -871,11 +872,17 @@ defWith published env tops scope d =
         scope' <- bindWitnesses env context (nodeIdOf body) scope
         let inferable = _scopeInferable scope ++ [quantifies]
         expr env tops (bindPatterns args scope' {_scopeInferable = inferable, _scopeEnclosing = Just d}) body
-    Can.TypedDef _ freeVars args body _ _ ->
+    Can.TypedDef _ freeVars args body _ refinements ->
       do
         scope' <- bindWitnesses env freeVars (nodeIdOf body) scope
         let rigid = Set.union (Map.keysSet freeVars) (_scopeRigid scope)
         expr env tops (bindPatterns (map fst args) scope' {_scopeEnclosing = Just d, _scopeRigid = rigid}) body
+        -- Each predicate as a body's expression is walked, so its operators
+        -- get the witnesses they take anywhere else (geng-lang
+        -- @m4-refine.md@ §RF18). Its names are the signature's, never a
+        -- local, so none is looked up among the locals in scope.
+        let predicateScope = scope' {_scopeEnclosing = Just d, _scopeRigid = rigid, _scopeLocals = Map.empty}
+        mapM_ (expr env tops predicateScope) (Maybe.mapMaybe Can._ref_predicate refinements)
 
 -- | The closed constraints the solver put on a definition's own annotation.
 --

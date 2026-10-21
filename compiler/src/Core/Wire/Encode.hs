@@ -732,6 +732,34 @@ moduleEnc m =
     <> rep 15 externEnc (_moduleExterns m)
     <> repQual 16 (_moduleInline m)
     <> rep 17 aliasEnc (_moduleAliases m)
+    <> rep 18 signatureEnc (_moduleSignatures m)
+
+-- | A signature that names an argument or its result (D824): the
+-- definition's binder, then each name. Nothing here is inside an 'Expr', so
+-- every span under it is absolute, as a top-level binder's is (D95).
+signatureEnc :: Signature -> Enc
+signatureEnc (Signature b nameds) =
+  msg 1 (binderEnc b)
+    <> rep 2 namedEnc nameds
+
+namedEnc :: Named -> Enc
+namedEnc (Named path b predicate source) =
+  repU32 1 (map stepCode path)
+    <> msg 2 (binderEnc b)
+    <> optMsg 3 exprEnc predicate
+    <> text 4 source
+
+-- | A path's step: the result is 0 and argument @i@ is @i + 1@.
+stepCode :: Step -> Word32
+stepCode st =
+  case st of
+    StepResult -> 0
+    StepArg i -> fromIntegral i + 1
+
+-- | @repeated uint32@ of plain numbers, packed (rule 3).
+repU32 :: Word32 -> [Word32] -> Enc
+repU32 _ [] = mempty
+repU32 tag ns = key tag WBytes <> packedRun (mconcat (map (varint . fromIntegral) ns))
 
 aliasEnc :: Alias -> Enc
 aliasEnc (Alias name params tipe) =

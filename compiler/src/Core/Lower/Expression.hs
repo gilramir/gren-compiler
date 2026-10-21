@@ -51,6 +51,7 @@ module Core.Lower.Expression
   ( Env (..),
     expr,
     def,
+    signatures,
     pattern,
     span,
   )
@@ -1042,17 +1043,81 @@ def env d =
 quantified :: Env -> Core.Span -> Name -> Can.FreeVars -> Can.Type -> [Can.Pattern] -> Can.Expr -> Core.Bind
 quantified env sp name freeVars declared args body =
   let value = bindValue env sp (lowerType declared) args (expr env body)
+      binder = definitionBinder sp name freeVars declared
    in case Can.contextOrder freeVars of
         [] ->
-          Core.Bind (Core.Binder name (lowerType declared) sp) value
+          Core.Bind binder value
         _ ->
           -- Every constraint binds a witness since D144, closed ones included:
           -- the middle case that bound none — a definition constrained only by
           -- `Num`, which had no methods to project — went with the list that
           -- named it (@docs\/m1b-int.md@ §I11).
-          Core.Bind
-            (Core.Binder name (lowerAnnotation (Can.Forall freeVars declared)) sp)
-            (witnessLam env sp (nodeIdOf body) value)
+          Core.Bind binder (witnessLam env sp (nodeIdOf body) value)
+
+-- | A definition's binder: quantified exactly when it is constrained.
+definitionBinder :: Core.Span -> Name -> Can.FreeVars -> Can.Type -> Core.Binder
+definitionBinder sp name freeVars declared =
+  case Can.contextOrder freeVars of
+    [] -> Core.Binder name (lowerType declared) sp
+    _ -> Core.Binder name (lowerAnnotation (Can.Forall freeVars declared)) sp
+
+-- SIGNATURES
+
+-- | Every signature among these definitions and the @let@s inside them that
+-- names an argument or its result, sorted by where its binder starts
+-- (geng-lang @m4-refine.md@ §RF18, D824). The binder is the one 'def' gives
+-- the definition, so the checker finds the definition by it.
+signatures :: Env -> [Can.Def] -> [Core.Signature]
+signatures env defs =
+  List.sortOn
+    (\(Core.Signature (Core.Binder _ _ (Core.Span _ row col _ _)) _) -> (row, col))
+    [ Core.Signature
+        (definitionBinder (span env region) name freeVars (foldr (Can.TLambda . snd) result args))
+        (map (named env) refinements)
+    | Can.TypedDef (A.At region name) freeVars args _ result refinements <- concatMap definitionsIn defs,
+      not (null refinements)
+    ]
+
+named :: Env -> Can.Refinement -> Core.Named
+named env r =
+  let A.At region name = Can._ref_name r
+   in Core.Named
+        { Core._namedPath = map step (Can._ref_path r),
+          Core._namedBinder = Core.Binder name (lowerType (Can._ref_type r)) (span env region),
+          Core._namedPredicate = expr env <$> Can._ref_predicate r,
+          Core._namedSource = Utf8.fromChars (Can._ref_source r)
+        }
+  where
+    step s =
+      case s of
+        Can.Arg i -> Core.StepArg i
+        Can.Result -> Core.StepResult
+
+-- | A definition and every definition in its body, at any depth.
+definitionsIn :: Can.Def -> [Can.Def]
+definitionsIn d =
+  d
+    : case d of
+      Can.Def _ _ _ body -> inExpr body
+      Can.TypedDef _ _ _ body _ _ -> inExpr body
+  where
+    inExpr (Can.Expr _ _ value) =
+      case value of
+        Can.Let inner body -> definitionsIn inner ++ inExpr body
+        Can.LetRec inners body -> concatMap definitionsIn inners ++ inExpr body
+        Can.LetDestruct _ v body -> inExpr v ++ inExpr body
+        Can.Array items -> concatMap inExpr items
+        Can.Negate inner -> inExpr inner
+        Can.Annotated inner _ -> inExpr inner
+        Can.Binop _ _ _ left right -> inExpr left ++ inExpr right
+        Can.Lambda _ body -> inExpr body
+        Can.Call func args -> concatMap inExpr (func : args)
+        Can.If branches final -> concatMap (\(c, b) -> inExpr c ++ inExpr b) branches ++ inExpr final
+        Can.Case scrutinee branches -> inExpr scrutinee ++ concatMap (\(Can.CaseBranch _ b) -> inExpr b) branches
+        Can.Access record _ -> inExpr record
+        Can.Update record fields -> inExpr record ++ concatMap (\(Can.FieldUpdate _ v) -> inExpr v) (Map.elems fields)
+        Can.Record fields -> concatMap inExpr (Map.elems fields)
+        _ -> []
 
 bindValue :: Env -> Core.Span -> Core.Type -> [Can.Pattern] -> Core.Expr -> Core.Expr
 bindValue env sp tipe args body =

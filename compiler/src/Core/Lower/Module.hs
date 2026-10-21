@@ -105,7 +105,8 @@ lower platform annotations types coreTypes elaboration modul =
               (map (externOf env) externDefs ++ concatMap (externWithBody env annotations (Can._externBodies modul)) valueDefs),
           Core._moduleInline = map (Core.QualName home) (Set.toAscList (Can._inlines modul)),
           Core._moduleAliases =
-            [a | (name, alias) <- Map.toAscList (Can._aliases modul), Just a <- [lowerAlias home name alias]]
+            [a | (name, alias) <- Map.toAscList (Can._aliases modul), Just a <- [lowerAlias home name alias]],
+          Core._moduleSignatures = Expr.signatures env valueDefs
         }
 
 -- EXTERNS

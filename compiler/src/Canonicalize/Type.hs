@@ -194,7 +194,8 @@ data Named = Named
     _path :: [Can.RefinementStep],
     _name :: A.Located Name.Name,
     _type :: Can.Type,
-    _predicate :: Maybe Src.Expr
+    _predicate :: Maybe Src.Expr,
+    _source :: String
   }
 
 -- | The arrows of a signature, or of a callback inside one: each argument a
@@ -226,7 +227,7 @@ position env path srcType@(A.At region tipe) =
     Src.TNamed name inner maybePredicate ->
       do
         (innerType, innerNamed) <- positionType env path inner
-        Result.ok (innerType, Named region path name innerType maybePredicate : innerNamed)
+        Result.ok (innerType, Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) : innerNamed)
     Src.TParens inner _
       | isNamed inner ->
           position env path inner
@@ -332,6 +333,7 @@ refineOne env named n =
           Can._ref_name = _name n,
           Can._ref_type = _type n,
           Can._ref_predicate = predicate,
+          Can._ref_source = _source n,
           Can._ref_enclosing = filter ((`elem` readNames) . A.toValue . Can._enc_name) enclosing
         }
 
@@ -398,10 +400,11 @@ isSeen seen =
 -- Every name it reads is the signature's, never a value in scope: a local or a
 -- top-level value of the same name is not what the predicate means, and D808
 -- allows nothing else. A name read directly must be an 'Int', the checker's
--- only number (D799); any other is read only through a measure. The operators
--- carry 'Int' signatures in place of their classes', so @x < y@ on two
--- 'Float's is a type error rather than a predicate the checker cannot read,
--- and a @*@ needs a literal on one side, the arithmetic being linear (§RF9).
+-- only number (D799); any other is read only through a measure. The type
+-- checker reads the operators at 'Int' signatures in place of their classes',
+-- so @x < y@ on two 'Float's is a type error rather than a predicate the
+-- checker cannot read, and a @*@ needs a literal on one side, the arithmetic
+-- being linear (§RF9).
 canonicalizePredicate :: Env.Env -> Scope -> Src.Expr -> Result i w Can.Expr
 canonicalizePredicate env scope (A.At region expression) =
   case expression of
@@ -488,8 +491,7 @@ measures =
     (ModuleName.Canonical Pkg.core (Name.fromChars "Set"), Name.fromChars "count")
   ]
 
--- | An operator of D808's, resolved as any operator is, and given the 'Int'
--- or 'Bool' signature a predicate reads it at.
+-- | An operator of D808's, resolved as any operator is.
 predicateOperator :: Env.Env -> A.Region -> Name.Name -> Result i w Env.Binop
 predicateOperator env region op =
   do
@@ -498,21 +500,17 @@ predicateOperator env region op =
           case Env._op_target binop of
             Can.OpValue h _ -> h
             Can.OpMethod (Can.Class h _) _ _ -> h
-    case lookup (Name.toChars op) operatorTypes of
-      Just (left, right, answer)
-        | home == ModuleName.basics ->
-            Result.ok binop {Env._op_annotation = Can.Forall Map.empty (Can.TLambda left (Can.TLambda right answer))}
-      _ ->
-        Result.throw (Error.RefinementNotCore region op)
+    if home == ModuleName.basics && Name.toChars op `elem` operators
+      then Result.ok binop
+      else Result.throw (Error.RefinementNotCore region op)
 
-operatorTypes :: [(String, (Can.Type, Can.Type, Can.Type))]
-operatorTypes =
-  [(op, (int, int, int)) | op <- ["+", "-", "*"]]
-    ++ [(op, (int, int, bool)) | op <- ["<", "<=", ">", ">=", "==", "/="]]
-    ++ [(op, (bool, bool, bool)) | op <- ["&&", "||"]]
-  where
-    int = Can.TType ModuleName.basics Name.int []
-    bool = Can.TType ModuleName.basics Name.bool []
+-- | D808's operators. The type checker reads them at the 'Int' signatures
+-- D822 gives them ("Type.Constrain.Expression"); here each keeps its own
+-- annotation, so the elaborator gives it the witness it takes anywhere else
+-- and the lowering writes it as a body's operator is written (§RF18).
+operators :: [String]
+operators =
+  ["+", "-", "*", "<", "<=", ">", ">=", "==", "/=", "&&", "||"]
 
 -- | What §RF13.4's layers said that a chain does not: a @*@ has a literal
 -- on one side, so that the arithmetic stays linear, and a comparison compares
