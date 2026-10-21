@@ -16,6 +16,12 @@ run is the build. The directory is removed either way.
 is what `harness/refine.py` pins. `GENG_UNCHECKED_REFINEMENTS` lets a program
 whose goals are not all proved build anyway (D825): a development switch, so
 that the gate can report on cases written to be refused.
+
+`GENG_REFINE_QUERIES` names a file for every question the checker put to its
+solver, as SMT-LIB with the solver's verdict, which `harness/oracle.py` puts
+to Z3 (§RF25, D803); `GENG_REFINE_EVERY_MODULE` has the checker walk every
+module of the program, so that the questions `core`'s loops raise are among
+them.
 -}
 
 import Bytes
@@ -73,13 +79,22 @@ checked config modules =
 
     else
         let
+            checkedRun =
+                Check.checkWith
+                    { recording = Dict.member "GENG_REFINE_QUERIES" config.envVars
+                    , everyModule = Dict.member "GENG_REFINE_EVERY_MODULE" config.envVars
+                    }
+                    (\_ -> True)
+                    modules
+
             goals =
-                Check.check (\_ -> True) modules
+                checkedRun.goals
 
             refusing =
                 Check.refused goals
         in
         writeReport config goals
+            |> Task.andThen (\_ -> writeQueries config checkedRun.queries)
             |> Task.andThen
                 (\_ ->
                     if Array.isEmpty refusing || Dict.member "GENG_UNCHECKED_REFINEMENTS" config.envVars then
@@ -97,6 +112,18 @@ writeReport config goals =
             FileSystem.writeFile config.fs (Bytes.fromString (Check.render goals)) (config.fromString out)
                 |> Task.map (\_ -> {})
                 |> Task.mapError (\e -> failure "I cannot write the refinement report" (FileSystem.errorToString e))
+
+        Nothing ->
+            Task.succeed {}
+
+
+writeQueries : Config -> Array Check.Query -> Task Report {}
+writeQueries config queries =
+    when Dict.get "GENG_REFINE_QUERIES" config.envVars is
+        Just out ->
+            FileSystem.writeFile config.fs (Bytes.fromString (Check.renderQueries queries)) (config.fromString out)
+                |> Task.map (\_ -> {})
+                |> Task.mapError (\e -> failure "I cannot write the refinement queries" (FileSystem.errorToString e))
 
         Nothing ->
             Task.succeed {}
