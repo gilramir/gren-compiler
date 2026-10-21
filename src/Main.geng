@@ -38,6 +38,7 @@ import Terminal.PackageValidate
 import Terminal.Parser as CliParser
 import Terminal.Paths
 import Terminal.Protobuf
+import Terminal.Refine
 import Terminal.Run
 import Terminal.Test
 
@@ -384,6 +385,7 @@ parseUserArgs context compilerPath =
                                 else
                                     backend command
                             )
+                        |> Task.andThen (Terminal.Refine.reportIfAsked context.fsPermission context.pathFromString context.envVars)
                         |> Task.onError (endWithErrorReport reportType)
 
                 CliParser.Release flags ->

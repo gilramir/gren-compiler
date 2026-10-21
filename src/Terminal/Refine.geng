@@ -1,0 +1,94 @@
+module Terminal.Refine exposing (reportIfAsked)
+
+{-| The refinement checker's report, while the checker is built (geng-lang
+`m4-refine.md` §RF19, piece 4b).
+
+Nothing here refuses a program: until piece 4e the Haskell process refuses
+every refinement (D819) unless `GENG_UNCHECKED_REFINEMENTS` asks it not to
+(D825). With `GENG_REFINE_REPORT` naming a file and `GENG_DUMP_WIRE` a
+directory, a `make` that succeeded has every module of its program in that
+directory as pre-pass Core, the dependencies' among them, and the checker
+walks the application's own modules (package `app`) and writes one line a
+goal to the file. `harness/refine.py` pins those reports for `corpus/refine/`.
+-}
+
+import Bytes
+import Cli.PrettyPrinter as PP
+import Cli.Report as Report exposing (Report)
+import Dict exposing (Dict)
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Geng.Core as Core
+import Geng.Core.Wire as Wire
+import Geng.Refine.Check as Check
+import Task exposing (Task)
+
+
+{-| After a build that answered `exitCode`: the report, when both variables ask
+for one and the build succeeded; `exitCode` either way.
+-}
+reportIfAsked : FileSystem.Permission -> (String -> Path) -> Dict String String -> Int -> Task Report Int
+reportIfAsked fs fromString envVars exitCode =
+    when { report = Dict.get "GENG_REFINE_REPORT" envVars, wire = Dict.get "GENG_DUMP_WIRE" envVars } is
+        { report = Just out, wire = Just dir } ->
+            if exitCode /= 0 then
+                Task.succeed exitCode
+
+            else
+                readModules fs (fromString dir)
+                    |> Task.andThen
+                        (\modules ->
+                            FileSystem.writeFile fs
+                                (Bytes.fromString (Check.render (Check.check (\name -> name.package == "app") modules)))
+                                (fromString out)
+                                |> Task.mapError (\e -> failure "I cannot write the refinement report" (FileSystem.errorToString e))
+                        )
+                    |> Task.map (\_ -> exitCode)
+
+        _ ->
+            Task.succeed exitCode
+
+
+readModules : FileSystem.Permission -> Path -> Task Report (Array Core.Module)
+readModules fs directory =
+    let
+        cannot e =
+            failure "I cannot read the Core the build wrote" (FileSystem.errorToString e)
+    in
+    FileSystem.listDirectory fs directory
+        |> Task.mapError cannot
+        |> Task.andThen
+            (\entries ->
+                entries
+                    |> Array.map (\entry -> Path.filenameWithExtension entry.path)
+                    |> Array.keepIf (String.endsWith ".corepb")
+                    |> Array.sort
+                    |> Array.map
+                        (\name ->
+                            FileSystem.readFile fs (Path.append (Path.fromPosixString name) directory)
+                                |> Task.mapError cannot
+                                |> Task.andThen
+                                    (\data ->
+                                        when Wire.read data is
+                                            Ok m ->
+                                                Task.succeed m
+
+                                            Err e ->
+                                                Task.fail (failure ("I cannot read " ++ name) (Wire.errorToString e))
+                                    )
+                        )
+                    |> Task.sequence
+            )
+
+
+failure : String -> String -> Report
+failure what why =
+    Report.create
+        "CANNOT CHECK REFINEMENTS"
+        Nothing
+        (PP.verticalBlock
+            [ PP.words (what ++ ":")
+            , PP.empty
+            , PP.words why
+            ]
+        )

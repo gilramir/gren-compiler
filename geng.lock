@@ -39,6 +39,11 @@ version = "0.1.0"
 path = "../../../packages/protobuf"
 
 [[package]]
+name = "github.com/geng-language/refine"
+version = "0.1.0"
+path = "../../../packages/refine"
+
+[[package]]
 name = "github.com/geng-language/stream"
 version = "0.1.0"
 path = "../../../packages/stream"
