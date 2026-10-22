@@ -284,10 +284,11 @@ parseUserArgs context compilerPath =
 
                 -- A build's run of the binary, checked by the refinement
                 -- checker (D833); `backend` is every other command's.
-                makeBackend backendCommand =
+                makeBackend resolution backendCommand =
                     checkedBackend context
                         compilerPath
                         Dict.empty
+                        (Terminal.Refine.sourcesOf resolution)
                         { headless = False
                         , encodedCommand = encodeFor backendCommand
                         }
@@ -375,7 +376,7 @@ parseUserArgs context compilerPath =
                                         , escript = flags.escript
                                         }
                                         resolved
-                                        (makeBackend command)
+                                        (makeBackend resolved command)
 
                                 else if Terminal.Native.isTarget resolved.outline && Array.length flags.entryPoints /= 0 then
                                     -- The same for `native`: the backend is
@@ -390,10 +391,10 @@ parseUserArgs context compilerPath =
                                         , debugInfo = flags.debugInfo
                                         }
                                         resolved
-                                        (makeBackend command)
+                                        (makeBackend resolved command)
 
                                 else
-                                    makeBackend command
+                                    makeBackend resolved command
                             )
                         |> Task.onError (endWithErrorReport reportType)
 
@@ -451,7 +452,7 @@ parseUserArgs context compilerPath =
                                                 , escript = flags.escript
                                                 }
                                                 resolved
-                                                (makeBackend command)
+                                                (makeBackend resolved command)
                                                 |> Task.andThen
                                                     (\exitCode ->
                                                         if exitCode /= 0 then
@@ -516,6 +517,7 @@ parseUserArgs context compilerPath =
                                         checkedBackend context
                                             compilerPath
                                             Dict.empty
+                                            (Terminal.Refine.sourcesOf compiling.resolution)
                                             { headless = True
                                             , encodedCommand = compiling.encodedCommand
                                             }
@@ -644,6 +646,7 @@ parseUserArgs context compilerPath =
                                         checkedBackend context
                                             compilerPath
                                             Dict.empty
+                                            (Terminal.Refine.sourcesOf compiling.resolution)
                                             { headless = True
                                             , encodedCommand = compiling.encodedCommand
                                             }
@@ -1079,6 +1082,7 @@ beamMake context compilerPath flags resolved ordinary =
                                 checkedBackend context
                                     compilerPath
                                     environment
+                                    (Terminal.Refine.sourcesOf resolved)
                                     { headless = flags.headless
                                     , encodedCommand = flags.encodedCommand
                                     }
@@ -1165,6 +1169,7 @@ nativeMakeBuild context compilerPath flags resolved ordinary =
                                 checkedBackend context
                                     compilerPath
                                     environment
+                                    (Terminal.Refine.sourcesOf resolved)
                                     { headless = flags.headless
                                     , encodedCommand = flags.encodedCommand
                                     }
@@ -1229,11 +1234,12 @@ nativeSources context resolved =
 `m4-refine.md` §RF24, D833): `Terminal.Refine` runs it once, and a second time
 when it stopped for the checker and the checker refused nothing.
 -}
-checkedBackend : Context -> Path -> Dict String String -> { headless : Bool, encodedCommand : Bytes } -> Task Report Int
-checkedBackend context compilerPath environment talk =
+checkedBackend : Context -> Path -> Dict String String -> Terminal.Refine.Sources -> { headless : Bool, encodedCommand : Bytes } -> Task Report Int
+checkedBackend context compilerPath environment sources talk =
     Terminal.Refine.build
         { fs = context.fsPermission
         , envVars = context.envVars
+        , sources = sources
         , toString = context.pathToString
         , fromString = context.pathFromString
         , run =

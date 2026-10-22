@@ -6,6 +6,8 @@ module Reporting
     silent,
     json,
     terminal,
+    heldTerminal,
+    releaseHeld,
     --
     attempt,
     attemptWithStyle,
@@ -40,10 +42,14 @@ import System.Info qualified as Info
 
 -- STYLE
 
+-- | A 'Terminal' with a slot holds its build's "Success!" rather than
+-- printing it: the run the refinement checker stops (geng-lang @m4-refine.md@
+-- §RF26, D844) built a program it has not yet accepted, and its message is
+-- printed by 'releaseHeld' only if the build goes on in that run.
 data Style
   = Silent
   | Json
-  | Terminal (MVar ())
+  | Terminal (MVar ()) (Maybe (MVar (Maybe String)))
 
 silent :: Style
 silent =
@@ -55,7 +61,25 @@ json =
 
 terminal :: IO Style
 terminal =
-  Terminal <$> newMVar ()
+  Terminal <$> newMVar () <*> pure Nothing
+
+heldTerminal :: IO Style
+heldTerminal =
+  Terminal <$> newMVar () <*> (Just <$> newMVar Nothing)
+
+-- | The message a held build kept, printed now.
+releaseHeld :: Style -> IO ()
+releaseHeld style =
+  case style of
+    Terminal mvar (Just held) ->
+      do
+        readMVar mvar
+        message <- swapMVar held Nothing
+        -- Flushed now: the build may yet fail in this run, a backend's
+        -- refusal on stderr, and the line must not wait on the exit for it.
+        mapM_ (\m -> putStrLn m >> hFlush stdout) message
+    _ ->
+      return ()
 
 -- ATTEMPT
 
@@ -82,7 +106,7 @@ attemptWithStyle style toReport work =
             return a
           Json ->
             return a
-          Terminal mvar ->
+          Terminal mvar _ ->
             do
               readMVar mvar
               return a
@@ -94,7 +118,7 @@ attemptWithStyle style toReport work =
             do
               B.hPutBuilder stderr (Encode.encodeUgly (Exit.toJson (toReport x)))
               Exit.exitFailure
-          Terminal mvar ->
+          Terminal mvar _ ->
             do
               readMVar mvar
               Exit.toStderr (toReport x)
@@ -156,7 +180,7 @@ trackBuild style callback =
       callback (Key (\_ -> return ()))
     Json ->
       callback (Key (\_ -> return ()))
-    Terminal mvar ->
+    Terminal mvar held ->
       do
         chan <- newChan
 
@@ -164,7 +188,7 @@ trackBuild style callback =
           do
             takeMVar mvar
             putStrFlush "Compiling ..."
-            buildLoop chan 0
+            buildLoop chan held 0
             putMVar mvar ()
 
         result <- callback (Key (writeChan chan . Left))
@@ -174,8 +198,8 @@ trackBuild style callback =
 data BMsg
   = BDone
 
-buildLoop :: Chan (Either BMsg (BResult a)) -> Int -> IO ()
-buildLoop chan done =
+buildLoop :: Chan (Either BMsg (BResult a)) -> Maybe (MVar (Maybe String)) -> Int -> IO ()
+buildLoop chan held done =
   do
     msg <- readChan chan
     case msg of
@@ -183,14 +207,21 @@ buildLoop chan done =
         do
           let !done1 = done + 1
           putStrFlush $ "\rCompiling (" ++ show done1 ++ ")"
-          buildLoop chan done1
+          buildLoop chan held done1
       Right result ->
         let !message = toFinalMessage done result
             !width = 12 + length (show done)
-         in putStrLn $
-              if length message < width
-                then '\r' : replicate width ' ' ++ '\r' : message
-                else '\r' : message
+         in case (held, result) of
+              (Just slot, Right _) ->
+                do
+                  putStrFlush ('\r' : replicate width ' ' ++ "\r")
+                  _ <- swapMVar slot (Just message)
+                  return ()
+              _ ->
+                putStrLn $
+                  if length message < width
+                    then '\r' : replicate width ' ' ++ '\r' : message
+                    else '\r' : message
 
 toFinalMessage :: Int -> BResult a -> [Char]
 toFinalMessage done result =
@@ -218,7 +249,7 @@ reportGenerate style names output =
       return ()
     Json ->
       return ()
-    Terminal mvar ->
+    Terminal mvar _ ->
       do
         readMVar mvar
         let cnames = fmap ModuleName.toChars names

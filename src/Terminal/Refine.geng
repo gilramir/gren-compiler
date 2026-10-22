@@ -1,4 +1,4 @@
-module Terminal.Refine exposing (Config, build)
+module Terminal.Refine exposing (Config, Sources, build, sourcesOf)
 
 {-| A build checked by the refinement checker (geng-lang `m4-refine.md`
 §RF24, D833).
@@ -17,6 +17,13 @@ is what `harness/refine.py` pins. `GENG_UNCHECKED_REFINEMENTS` lets a program
 whose goals are not all proved build anyway (D825): a development switch, so
 that the gate can report on cases written to be refused.
 
+Each goal that refuses the program is an error of its own (geng-lang
+`m4-refine.md` §RF26, D811): its title, its module's path, and
+`Geng.Refine.Error`'s blocks, with an excerpt of the source the build read,
+which is the source this CLI sent the binary (D840). `GENG_REFINE_ERRORS`
+names a file for the errors' text, without colour, whether or not they refuse
+the program, which is what `harness/refine.py` pins beside the report.
+
 `GENG_REFINE_QUERIES` names a file for every question the checker put to its
 solver, as SMT-LIB with the solver's verdict, which `harness/oracle.py` puts
 to Z3 (§RF25, D803); `GENG_REFINE_EVERY_MODULE` has the checker walk every
@@ -33,6 +40,7 @@ import FileSystem.Path as Path exposing (Path)
 import Geng.Core as Core
 import Geng.Core.Wire as Wire
 import Geng.Refine.Check as Check
+import Geng.Refine.Error as Error
 import Task exposing (Task)
 
 
@@ -42,9 +50,35 @@ variables given set on top of the build's own, and answers its exit status.
 type alias Config =
     { fs : FileSystem.Permission
     , envVars : Dict String String
+    , sources : Sources
     , toString : Path -> String
     , fromString : String -> Path
     , run : Dict String String -> Task Report Int
+    }
+
+
+{-| The source the build read: the application's modules by name, each with
+its path, and each dependency's, by package, under its root.
+-}
+type alias Sources =
+    { projectPath : Path
+    , root : Dict String { path : Path, data : String }
+    , dependencies : Dict String { path : Path, sources : Dict String String }
+    }
+
+
+{-| A package resolution's sources, which every checked build has. -}
+sourcesOf :
+    { r
+        | projectPath : Path
+        , rootSources : Dict String { s | path : Path, data : String }
+        , dependencies : Dict String { d | path : Path, sources : Dict String String }
+    }
+    -> Sources
+sourcesOf resolution =
+    { projectPath = resolution.projectPath
+    , root = Dict.map (\_ file -> { path = file.path, data = file.data }) resolution.rootSources
+    , dependencies = Dict.map (\_ dep -> { path = dep.path, sources = dep.sources }) resolution.dependencies
     }
 
 
@@ -95,13 +129,14 @@ checked config modules =
         in
         writeReport config goals
             |> Task.andThen (\_ -> writeQueries config checkedRun.queries)
+            |> Task.andThen (\_ -> writeErrors config refusing)
             |> Task.andThen
                 (\_ ->
                     if Array.isEmpty refusing || Dict.member "GENG_UNCHECKED_REFINEMENTS" config.envVars then
                         config.run (Dict.singleton "GENG_REFINE_CHECKED" "1")
 
                     else
-                        Task.fail (refusal refusing)
+                        Task.fail (refusal config refusing)
                 )
 
 
@@ -129,32 +164,140 @@ writeQueries config queries =
             Task.succeed {}
 
 
-{-| The refusal, plain until step 6 (D811): each goal not proved, as the
-report writes it, with where, what was required as written and why.
--}
-refusal : Array Check.Goal -> Report
-refusal goals =
-    Report.create
-        "REFINEMENTS NOT PROVED"
-        Nothing
-        (PP.verticalBlock
-            (Array.flatten
-                [ [ PP.words
-                        (if Array.length goals == 1 then
-                            "I could not prove this refinement, so I stop here:"
+writeErrors : Config -> Array Check.Goal -> Task Report {}
+writeErrors config goals =
+    when Dict.get "GENG_REFINE_ERRORS" config.envVars is
+        Just out ->
+            let
+                text =
+                    if Array.isEmpty goals then
+                        ""
 
-                         else
-                            "I could not prove these " ++ String.fromInt (Array.length goals) ++ " refinements, so I stop here:"
-                        )
-                  , PP.empty
-                  ]
-                , String.lines (String.trimRight (Check.render goals)) |> Array.map (\line -> PP.indent (PP.words line))
-                , [ PP.empty
-                  , PP.words "Each line is the module and definition, the line and column, what is required as written, and why it is not proved. A refuted one gives values that meet every fact there and break the requirement."
-                  ]
-                ]
+                    else
+                        Report.toString (Report.Terminal { useColor = False }) config.toString (refusal config goals)
+            in
+            FileSystem.writeFile config.fs (Bytes.fromString text) (config.fromString out)
+                |> Task.map (\_ -> {})
+                |> Task.mapError (\e -> failure "I cannot write the refinement errors" (FileSystem.errorToString e))
+
+        Nothing ->
+            Task.succeed {}
+
+
+{-| The refusal (D811): each goal not proved as an error of its own, the
+first as the report and each after it under a bar of its own, drawn as
+`Cli.Report` draws one, so that the report stays one report for `--report`.
+-}
+refusal : Config -> Array Check.Goal -> Report
+refusal config goals =
+    let
+        errors =
+            Array.map
+                (\goal ->
+                    let
+                        found =
+                            locate config.sources goal
+                    in
+                    { error = Error.fromGoal (Maybe.map .data found) goal
+                    , path = Maybe.map .path found
+                    }
+                )
+                goals
+
+        later =
+            Array.dropFirst 1 errors
+                |> Array.mapAndFlatten
+                    (\e ->
+                        [ PP.empty
+                        , PP.empty
+                        , bar config e.error.title e.path
+                        , PP.empty
+                        , message e.error
+                        ]
+                    )
+    in
+    when Array.first errors is
+        Just first ->
+            Report.create first.error.title first.path (PP.verticalBlock (Array.pushFirst (message first.error) later))
+
+        Nothing ->
+            Report.empty
+
+
+message : Error.Error -> PP.Document
+message error =
+    error.blocks
+        |> Array.map
+            (\block ->
+                when block is
+                    Error.Prose text ->
+                        PP.words text
+
+                    Error.Code lines ->
+                        PP.verticalBlock (Array.map PP.text lines)
             )
-        )
+        |> Array.intersperse PP.empty
+        |> PP.verticalBlock
+
+
+{-| A report's bar, `-- TITLE ---- path`, as `Cli.Report` draws it. -}
+bar : Config -> String -> Maybe Path -> PP.Document
+bar config title maybePath =
+    let
+        dashes n =
+            String.repeat (max 1 (80 - n)) "-"
+
+        end =
+            when maybePath is
+                Nothing ->
+                    " " ++ dashes (5 + String.count title)
+
+                Just path ->
+                    let
+                        written =
+                            config.toString path
+                    in
+                    " " ++ dashes (5 + String.count title + String.count written) ++ " " ++ written
+    in
+    PP.block [ PP.text "-- ", PP.text title, PP.text end ]
+        |> PP.color PP.Cyan
+
+
+{-| A goal's module's source and its path, the application's relative to the
+project: a dependency's when the goal's package is one, the application's
+otherwise.
+-}
+locate : Sources -> Check.Goal -> Maybe { path : Path, data : String }
+locate sources goal =
+    when Dict.get goal.package sources.dependencies is
+        Just dep ->
+            Dict.get goal.module_ dep.sources
+                |> Maybe.map
+                    (\data ->
+                        { path = Path.append (Path.fromPosixString ("src/" ++ String.replace "." "/" goal.module_ ++ ".geng")) dep.path
+                        , data = data
+                        }
+                    )
+
+        Nothing ->
+            Dict.get goal.module_ sources.root
+                |> Maybe.map (\file -> { path = relativeTo sources.projectPath file.path, data = file.data })
+
+
+relativeTo : Path -> Path -> Path
+relativeTo root path =
+    let
+        rootText =
+            Path.toPosixString root
+
+        pathText =
+            Path.toPosixString path
+    in
+    if rootText /= "" && String.startsWith (rootText ++ "/") pathText then
+        Path.fromPosixString (String.dropFirst (String.count rootText + 1) pathText)
+
+    else
+        path
 
 
 readModules : FileSystem.Permission -> Path -> Task Report (Array Core.Module)

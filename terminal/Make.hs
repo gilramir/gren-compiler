@@ -6,6 +6,7 @@ module Make
 where
 
 import Build qualified
+import Control.Monad (when)
 import Core.AST qualified as Core
 import Core.Target qualified as Target
 import Data.ByteString.Builder qualified as B
@@ -27,6 +28,7 @@ import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
 import System.Directory qualified as Dir
 import System.FilePath qualified as FP
+import System.Environment qualified as Env
 import System.IO qualified as IO
 
 -- FLAGS
@@ -76,12 +78,14 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
           do
             exposed <- getExposed details
             buildExposed style root details sources exposed
+            Task.io (Reporting.releaseHeld style)
         p : ps ->
           do
             artifacts <- buildPaths style root details sources (reachOf outline) (NE.List p ps)
             -- 'False' is a build stopped for the refinement checker, its
             -- Core written for the CLI (D833): nothing to write out.
             goesOn <- Task.mapError Exit.MakeBadGenerate (Generate.refinementCut details artifacts)
+            when goesOn (Task.io (Reporting.releaseHeld style))
             let mains = getMains artifacts
                 -- 'Nothing' is a build that stopped after a stage and wrote
                 -- its Core (@GENG_STAGE_WRITE@, Core.Stage): there is no
@@ -234,7 +238,12 @@ getStyle :: Maybe Output -> Bool -> IO Reporting.Style
 getStyle maybeOutput report =
   case (maybeOutput, report) of
     (Just DevStdOut, _) -> return Reporting.silent
-    (_, False) -> Reporting.terminal
+    (_, False) ->
+      do
+        -- The run the refinement checker may stop holds its "Success!"
+        -- (D844): the CLI prints the refusal, or the run after it the build.
+        stage <- Env.lookupEnv "GENG_REFINE_STAGE"
+        if maybe False (/= "") stage then Reporting.heldTerminal else Reporting.terminal
     (_, True) -> return Reporting.json
 
 getMode :: Bool -> Task Generate.Mode
