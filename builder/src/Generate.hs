@@ -199,6 +199,9 @@ refinementCut details artifacts =
 
 -- | Whether a module outside @core@ has a signature or calls a refined function,
 -- which is what the checker checks (geng-lang @m4-refine.md@ §RF27, D845).
+-- A function is refined here when a caller is asked something (D853): one
+-- whose predicates are all facts given to its caller, as @Array.pushLast@'s
+-- result is, owes a calling module nothing.
 --
 -- @core@'s own goals are not checked in a build. @core@ is the compiler's, at
 -- the version beside it that no manifest may ask for (D307), so its goals are
@@ -214,10 +217,16 @@ owesCheck cores =
         [ Core.QualName (Core._moduleName m) name
         | m <- modules,
           let tops = Set.fromList [Core._binderName (Core._bindBinder b) | b <- Core._moduleDefs m],
-          Core.Signature binder _ <- Core._moduleSignatures m,
+          Core.Signature binder named <- Core._moduleSignatures m,
+          any asks named,
           let name = Core._binderName binder,
           Set.member name tops
         ]
+    -- A predicate the caller is asked to show, as the checker's @requires@
+    -- reads it: an odd number of argument steps (D853).
+    asks n =
+      Maybe.isJust (Core._namedPredicate n)
+        && odd (length [() | Core.StepArg _ <- Core._namedPath n])
     owes m =
       ModuleName._package (Core._moduleName m) /= Pkg.core
         && ( not (null (Core._moduleSignatures m))
