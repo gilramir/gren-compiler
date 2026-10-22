@@ -77,8 +77,11 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
         [] ->
           do
             exposed <- getExposed details
-            buildExposed style root details sources exposed
-            Task.io (Reporting.releaseHeld style)
+            cores <- buildExposed style root details sources exposed
+            -- A package's own goals are checked as a program's are (D859):
+            -- 'False' is the build stopped for the checker.
+            goesOn <- Task.mapError Exit.MakeBadGenerate (Generate.packageCut "" details cores)
+            when goesOn (Task.io (Reporting.releaseHeld style))
         p : ps ->
           do
             artifacts <- buildPaths style root details sources (reachOf outline) (NE.List p ps)
@@ -270,10 +273,10 @@ getPlatform (Details.Details _ validOutline _ _ _ _) = do
 
 -- BUILD PROJECTS
 
-buildExposed :: Reporting.Style -> FilePath -> Details.Details -> Build.Sources -> NE.List ModuleName.Raw -> Task ()
+buildExposed :: Reporting.Style -> FilePath -> Details.Details -> Build.Sources -> NE.List ModuleName.Raw -> Task [Core.Module]
 buildExposed style root details sources exposed =
   Task.eio Exit.MakeCannotBuild $
-    Build.fromExposed style root details sources Build.IgnoreDocs exposed
+    Build.fromExposed style root details sources Build.KeepCore exposed
 
 buildPaths :: Reporting.Style -> FilePath -> Details.Details -> Build.Sources -> Build.Reach -> NE.List ModuleName.Raw -> Task Build.Artifacts
 buildPaths style root details sources reach modules =

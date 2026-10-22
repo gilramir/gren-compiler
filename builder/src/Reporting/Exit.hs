@@ -380,6 +380,7 @@ data Validate
   | ValidateMissingTag V.Version
   | ValidateNoGit
   | ValidateLocalChanges V.Version
+  | ValidateBadGenerate Generate
 
 validateToReport :: Validate -> Help.Report
 validateToReport validate =
@@ -676,6 +677,8 @@ validateToReport validate =
           D.toSimpleNote $
             "We plan to do this without the `git` binary in a future release."
         ]
+    ValidateBadGenerate generateProblem ->
+      toGenerateReport generateProblem
     ValidateLocalChanges version ->
       let vsn = V.toChars version
        in Help.docReport
@@ -1640,8 +1643,8 @@ toGenerateReport problem =
       Help.report
         "REFINEMENTS NOT CHECKED"
         Nothing
-        "This program has a refinement, and nothing will check it: the refinement checker is part of geng's command line, and this compiler was run without it."
-        [ D.reflow "Build it with geng make, which checks the refinements and then finishes the build. GENG_UNCHECKED_REFINEMENTS=1 builds it unchecked, a development switch whose program has promises nothing kept."
+        "This project has a refinement, and nothing will check it: the refinement checker is part of geng's command line, and this compiler was run without it."
+        [ D.reflow "Run the command through geng, which checks the refinements and then goes on. GENG_UNCHECKED_REFINEMENTS=1 builds it unchecked, a development switch whose program has promises nothing kept."
         ]
     GenerateNoBackend target ->
       Help.report

@@ -52,6 +52,7 @@ import Geng.Core.Wire as Wire
 import Geng.Refine.Check as Check
 import Geng.Refine.Error as Error
 import Geng.Refine.Semver as Semver
+import SemanticVersion exposing (SemanticVersion)
 import Task exposing (Task)
 
 
@@ -74,7 +75,7 @@ its path, and each dependency's, by package, under its root.
 type alias Sources =
     { projectPath : Path
     , root : Dict String { path : Path, data : String }
-    , dependencies : Dict String { path : Path, sources : Dict String String }
+    , dependencies : Dict String { path : Path, version : String, sources : Dict String String }
     }
 
 
@@ -83,13 +84,16 @@ sourcesOf :
     { r
         | projectPath : Path
         , rootSources : Dict String { s | path : Path, data : String }
-        , dependencies : Dict String { d | path : Path, sources : Dict String String }
+        , dependencies : Dict String { d | path : Path, outline : { o | version : SemanticVersion }, sources : Dict String String }
     }
     -> Sources
 sourcesOf resolution =
     { projectPath = resolution.projectPath
     , root = Dict.map (\_ file -> { path = file.path, data = file.data }) resolution.rootSources
-    , dependencies = Dict.map (\_ dep -> { path = dep.path, sources = dep.sources }) resolution.dependencies
+    , dependencies =
+        Dict.map
+            (\_ dep -> { path = dep.path, version = SemanticVersion.toString dep.outline.version, sources = dep.sources })
+            resolution.dependencies
     }
 
 
@@ -121,6 +125,11 @@ both versions and whose refinements are not, and each version's Core of their
 modules under `old` and `new`. Each is decided by entailment (D807), and the
 second run is given the verdicts in `GENG_REFINE_VERDICTS` and is the command.
 A first run that did not stop was the command.
+
+`validate` also writes the version's own Core under `own`, when any of its
+modules has a signature or calls a refined function (§RF30, D858). Its goals are
+checked first, and one not proved refuses the version, as it would refuse a
+program; otherwise the second run is told so with `GENG_REFINE_CHECKED`.
 -}
 compareVersions : Config -> Task Report Int
 compareVersions config =
@@ -135,17 +144,38 @@ compareVersions config =
                                 Task.succeed exitCode
 
                             else
-                                FileSystem.readFile config.fs (Path.append (Path.fromPosixString "values") dir)
-                                    |> Task.map (\data -> Just (Bytes.toString data |> Maybe.withDefault ""))
-                                    |> Task.onError (\_ -> Task.succeed Nothing)
+                                Task.map2 (\own values -> { own = own, values = values })
+                                    (ownModules config dir)
+                                    (FileSystem.readFile config.fs (Path.append (Path.fromPosixString "values") dir)
+                                        |> Task.map (\data -> Just (Bytes.toString data |> Maybe.withDefault ""))
+                                        |> Task.onError (\_ -> Task.succeed Nothing)
+                                    )
                                     |> Task.andThen
-                                        (\values ->
-                                            when values is
-                                                Nothing ->
+                                        (\staged ->
+                                            when staged is
+                                                { own = [], values = Nothing } ->
                                                     Task.succeed exitCode
 
-                                                Just text ->
-                                                    decideVersions config dir text
+                                                _ ->
+                                                    let
+                                                        checkedVars =
+                                                            if Array.isEmpty staged.own then
+                                                                Dict.empty
+
+                                                            else
+                                                                Dict.singleton "GENG_REFINE_CHECKED" "1"
+                                                    in
+                                                    checkGoals config staged.own
+                                                        |> Task.andThen
+                                                            (\_ ->
+                                                                when staged.values is
+                                                                    Just text ->
+                                                                        decideVersions config dir text
+                                                                            |> Task.andThen (\verdicts -> config.run (Dict.set "GENG_REFINE_VERDICTS" (config.toString verdicts) checkedVars))
+
+                                                                    Nothing ->
+                                                                        config.run checkedVars
+                                                            )
                                         )
                         )
                     |> Task.andThen (\exitCode -> remove config dir |> Task.map (\_ -> exitCode))
@@ -153,7 +183,29 @@ compareVersions config =
             )
 
 
-decideVersions : Config -> Path -> String -> Task Report Int
+{-| The version's own Core, which only `validate` writes; none when there is
+no `own` directory.
+-}
+ownModules : Config -> Path -> Task Report (Array Core.Module)
+ownModules config dir =
+    let
+        own =
+            Path.append (Path.fromPosixString "own") dir
+    in
+    FileSystem.checkAccess config.fs [] own
+        |> Task.map (\_ -> True)
+        |> Task.onError (\_ -> Task.succeed False)
+        |> Task.andThen
+            (\exists ->
+                if exists then
+                    readModules config.fs own
+
+                else
+                    Task.succeed []
+            )
+
+
+decideVersions : Config -> Path -> String -> Task Report Path
 decideVersions config dir text =
     let
         values =
@@ -211,7 +263,7 @@ decideVersions config dir text =
                             FileSystem.writeFile config.fs (Bytes.fromString verdictsText) verdictsFile
                                 |> Task.mapError (\e -> failure "I cannot write the refinement checker's verdicts" (FileSystem.errorToString e))
                         )
-                    |> Task.andThen (\_ -> config.run (Dict.singleton "GENG_REFINE_VERDICTS" (config.toString verdictsFile)))
+                    |> Task.map (\_ -> verdictsFile)
             )
 
 
@@ -234,6 +286,20 @@ checked : Config -> Array Core.Module -> Task Report Int
 checked config modules =
     if Array.isEmpty modules then
         Task.succeed 0
+
+    else
+        checkGoals config modules
+            |> Task.andThen (\_ -> config.run (Dict.singleton "GENG_REFINE_CHECKED" "1"))
+
+
+{-| The check of every module outside `core` (D845): the report, the
+questions and the errors written where they are asked for, and the refusal
+when a goal is not proved. No modules is nothing to check.
+-}
+checkGoals : Config -> Array Core.Module -> Task Report {}
+checkGoals config modules =
+    if Array.isEmpty modules then
+        Task.succeed {}
 
     else
         let
@@ -261,7 +327,7 @@ checked config modules =
             |> Task.andThen
                 (\_ ->
                     if Array.isEmpty refusing || Dict.member "GENG_UNCHECKED_REFINEMENTS" config.envVars then
-                        config.run (Dict.singleton "GENG_REFINE_CHECKED" "1")
+                        Task.succeed {}
 
                     else
                         Task.fail (refusal config refusing)
@@ -325,8 +391,17 @@ refusal config goals =
                     let
                         found =
                             locate config.sources goal
+
+                        error =
+                            Error.fromGoal (Maybe.map .data found) goal
                     in
-                    { error = Error.fromGoal (Maybe.map .data found) goal
+                    { error =
+                        when Dict.get goal.package config.sources.dependencies is
+                            Just dep ->
+                                { error | blocks = Array.pushLast (Error.Prose (dependencyLine goal.package dep.version)) error.blocks }
+
+                            Nothing ->
+                                error
                     , path = Maybe.map .path found
                     }
                 )
@@ -350,6 +425,20 @@ refusal config goals =
 
         Nothing ->
             Report.empty
+
+
+{-| What a dependency's goal adds to its error (§RF30, D861): whose it is, and
+that the project refused for it cannot fix it there.
+-}
+dependencyLine : String -> String -> String
+dependencyLine package version =
+    "This is in "
+        ++ package
+        ++ " "
+        ++ version
+        ++ ", a dependency, and this project cannot fix it. Its author can, or another version of "
+        ++ package
+        ++ " may prove it."
 
 
 message : Error.Error -> PP.Document
@@ -402,7 +491,7 @@ locate sources goal =
             Dict.get goal.module_ dep.sources
                 |> Maybe.map
                     (\data ->
-                        { path = Path.append (Path.fromPosixString ("src/" ++ String.replace "." "/" goal.module_ ++ ".geng")) dep.path
+                        { path = shorter sources.projectPath (Path.append (Path.fromPosixString ("src/" ++ String.replace "." "/" goal.module_ ++ ".geng")) dep.path)
                         , data = data
                         }
                     )
@@ -410,6 +499,46 @@ locate sources goal =
         Nothing ->
             Dict.get goal.module_ sources.root
                 |> Maybe.map (\file -> { path = relativeTo sources.projectPath file.path, data = file.data })
+
+
+{-| A dependency's file as the shorter of its path from the project, with a
+`..` for each step up, and its path from the root: `../refined/src/Refined.geng`
+for a package the manifest names by a path beside it, the cache's path for one
+fetched (§RF30, D861).
+-}
+shorter : Path -> Path -> Path
+shorter root path =
+    let
+        segments p =
+            Path.toPosixString p
+                |> String.split "/"
+                |> Array.keepIf (\segment -> segment /= "" && segment /= ".")
+
+        rootSegments =
+            segments root
+
+        pathSegments =
+            segments path
+
+        common =
+            Array.map2 (\a b -> a == b) rootSegments pathSegments
+                |> Array.findFirst (\same -> Basics.not same)
+                |> Maybe.map .index
+                |> Maybe.withDefault (min (Array.length rootSegments) (Array.length pathSegments))
+
+        relative =
+            Array.repeat (Array.length rootSegments - common) ".."
+                ++ Array.dropFirst common pathSegments
+                |> String.join "/"
+
+        absolute =
+            Path.toPosixString path
+    in
+    if rootSegments /= [] && String.startsWith "/" (Path.toPosixString root) && String.count relative < String.count absolute then
+        Path.fromPosixString relative
+
+    else
+        path
 
 
 relativeTo : Path -> Path -> Path

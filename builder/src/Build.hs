@@ -900,6 +900,9 @@ data DocsGoal a where
   -- | The documentation and each module's Core, for comparing two versions'
   -- refinements (geng-lang @m4-refine.md@ §RF29, D854).
   KeepDocsAndCore :: DocsGoal (Docs.Documentation, [Core.Module])
+  -- | Each module's Core and no documentation, for the refinement checker
+  -- over a package built as the project (geng-lang @m4-refine.md@ §RF30, D859).
+  KeepCore :: DocsGoal [Core.Module]
   WriteDocs :: FilePath -> DocsGoal ()
   IgnoreDocs :: DocsGoal ()
 
@@ -916,6 +919,7 @@ toDocsNeed goal =
     WriteDocs _ -> DocsNeed True
     KeepDocs -> DocsNeed True
     KeepDocsAndCore -> DocsNeed True
+    KeepCore -> DocsNeed False
 
 makeDocs :: DocsNeed -> Can.Module -> Either EDocs.Error (Maybe Docs.Module)
 makeDocs (DocsNeed isNeeded) modul =
@@ -932,6 +936,8 @@ finalizeDocs goal results =
       return $ Map.mapMaybe toDocs results
     KeepDocsAndCore ->
       return (Map.mapMaybe toDocs results, Map.elems (Map.mapMaybe toCore results))
+    KeepCore ->
+      return (Map.elems (Map.mapMaybe toCore results))
     WriteDocs path ->
       E.writeUgly path $ Docs.encode $ Map.mapMaybe toDocs results
     IgnoreDocs ->
@@ -942,6 +948,7 @@ toCore result =
   case result of
     RNew _ _ core _ -> Just core
     RSame _ _ core _ -> Just core
+    RCached _ _ core -> Just core
     _ -> Nothing
 
 toDocs :: Result -> Maybe Docs.Module

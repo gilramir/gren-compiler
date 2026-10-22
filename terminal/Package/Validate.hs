@@ -7,6 +7,7 @@ module Package.Validate
 where
 
 import Build qualified
+import Control.Monad (when)
 import Command qualified
 import Core.AST qualified as Core
 import Data.List qualified as List
@@ -15,6 +16,7 @@ import Data.NonEmptyList qualified as NE
 import Deps.Diff qualified as Diff
 import Deps.Refinements qualified as Refinements
 import Deps.Package qualified as Pkg
+import Generate qualified
 import Gren.Details qualified as Details
 import Gren.Docs qualified as Docs
 import Gren.Magnitude qualified as M
@@ -46,16 +48,18 @@ validate (Flags root knownVersions (Command.ProjectInfo currentOutline currentSo
       Task.throw Exit.ValidateApplication
     (Outline.Pkg currentPkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _ _), Nothing) ->
       do
-        _ <- buildProject root currentPkgOutline currentSources currentDeps
-        Task.io $ putStrLn "Everything looks good!"
+        (_, goesOn) <- buildChecked root currentPkgOutline currentSources currentDeps
+        when goesOn $ Task.io $ putStrLn "Everything looks good!"
     (Outline.Pkg (Outline.PkgOutline _ _ _ _ _ _ _ _ _), Just (Command.ProjectInfo (Outline.App _) _ _)) ->
       error "Previous version is app"
     (Outline.Pkg currentPkgOutline@(Outline.PkgOutline _ _ _ vsn _ _ _ _ _), Just (Command.ProjectInfo (Outline.Pkg previousOutline) previousSources previousDeps)) ->
       do
-        current@(currentDocs, _) <- buildProject root currentPkgOutline currentSources currentDeps
+        (current@(currentDocs, _), goesOn) <- buildChecked root currentPkgOutline currentSources currentDeps
         previous@(previousDocs, _) <- buildProject root previousOutline previousSources previousDeps
 
-        outcome <- Task.io $ Refinements.decide False previous current
+        -- A first run that stopped for the package's own goals stops for the
+        -- comparison too, so that the CLI does both between the same two runs.
+        outcome <- Task.io $ Refinements.decide (not goesOn) previous current
         case outcome of
           Refinements.Stopped ->
             return ()
@@ -64,8 +68,24 @@ validate (Flags root knownVersions (Command.ProjectInfo currentOutline currentSo
               _ <- Task.eio id $ verifyBump verdicts vsn currentDocs previousDocs knownVersions
               Task.io $ putStrLn "Everything looks good!"
 
+-- | The version being published, built, and its own goals owed to the
+-- refinement checker (geng-lang @m4-refine.md@ §RF30, D858): its Core goes to
+-- @own@ under @GENG_REFINE_STAGE@, the first run stops, and the CLI checks it
+-- and refuses the version on a goal not proved. 'False' is that stop. The
+-- previous version is not checked; it is already published.
+buildChecked :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Validate ((Docs.Documentation, [Core.Module]), Bool)
+buildChecked root pkgOutline sources solution =
+  do
+    (details, built@(_, cores)) <- buildWith root pkgOutline sources solution
+    goesOn <- Task.mapError Exit.ValidateBadGenerate (Generate.packageCut "own" details cores)
+    return (built, goesOn)
+
 buildProject :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Validate (Docs.Documentation, [Core.Module])
-buildProject root pkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _ _) sources solution =
+buildProject root pkgOutline sources solution =
+  snd <$> buildWith root pkgOutline sources solution
+
+buildWith :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Validate (Details.Details, (Docs.Documentation, [Core.Module]))
+buildWith root pkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _ _) sources solution =
   do
     details@(Details.Details _ outline _ _ _ _) <-
       Task.eio Exit.ValidateBadDetails $
@@ -77,8 +97,8 @@ buildProject root pkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _ _) sources solu
         Details.ValidPkg _ _ [] _ -> Task.throw Exit.ValidateNoExposed
         Details.ValidPkg _ _ (e : es) _ -> return (NE.List e es)
 
-    Task.eio Exit.ValidateBuildProblem $
-      Build.fromExposed Reporting.silent root details sources Build.KeepDocsAndCore exposed
+    (,) details
+      <$> Task.eio Exit.ValidateBuildProblem (Build.fromExposed Reporting.silent root details sources Build.KeepDocsAndCore exposed)
 
 data GoodVersion
   = GoodBump V.Version M.Magnitude

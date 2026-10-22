@@ -4,6 +4,7 @@ module Generate
     Request (..),
     make,
     refinementCut,
+    packageCut,
     ExtSources,
     extSources,
   )
@@ -44,6 +45,7 @@ import Nitpick.Debug qualified as Nitpick
 import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
 import System.Environment qualified as Env
+import System.FilePath ((</>))
 import Prelude hiding (cycle, print)
 
 -- GENERATORS
@@ -179,21 +181,38 @@ refinementCut :: Details.Details -> Build.Artifacts -> Task Bool
 refinementCut details artifacts =
   do
     cores <- Task.io (programCore details artifacts)
-    if not (owesCheck cores)
-      then return True
-      else do
-        stage <- Task.io (Env.lookupEnv "GENG_REFINE_STAGE")
-        afterCheck <- Task.io (isSet "GENG_REFINE_CHECKED")
-        unchecked <- Task.io (isSet "GENG_UNCHECKED_REFINEMENTS")
-        case stage of
-          Just dir
-            | dir /= "" ->
-                do
-                  _ <- Task.io (roundTrip (Just dir) cores)
-                  return False
-          _
-            | afterCheck || unchecked -> return True
-            | otherwise -> Task.throw Exit.GenerateRefinementsUnchecked
+    cutAt "" cores
+
+-- | The same cut for a package built as the project, from its exposed modules
+-- rather than from a program's roots (geng-lang @m4-refine.md@ §RF30, D858,
+-- D859): @geng make@ with no module named, and @geng package validate@, whose
+-- Core goes to @sub@ under @GENG_REFINE_STAGE@ (@own@, beside D855's two
+-- versions). The package's modules and every dependency's are written, as a
+-- program's are, so the checker reads the signatures it calls.
+packageCut :: FilePath -> Details.Details -> [Core.Module] -> Task Bool
+packageCut sub details own =
+  do
+    let ownCores = Map.fromList [(Core._moduleName m, m) | m <- own]
+    cores <- Task.io (throughWire (Map.union ownCores (Details.loadCores details)))
+    cutAt sub cores
+
+cutAt :: FilePath -> Map.Map ModuleName.Canonical Core.Module -> Task Bool
+cutAt sub cores =
+  if not (owesCheck cores)
+    then return True
+    else do
+      stage <- Task.io (Env.lookupEnv "GENG_REFINE_STAGE")
+      afterCheck <- Task.io (isSet "GENG_REFINE_CHECKED")
+      unchecked <- Task.io (isSet "GENG_UNCHECKED_REFINEMENTS")
+      case stage of
+        Just dir
+          | dir /= "" ->
+              do
+                _ <- Task.io (roundTrip (Just (if null sub then dir else dir </> sub)) cores)
+                return False
+        _
+          | afterCheck || unchecked -> return True
+          | otherwise -> Task.throw Exit.GenerateRefinementsUnchecked
   where
     isSet name = maybe False (/= "") <$> Env.lookupEnv name
 

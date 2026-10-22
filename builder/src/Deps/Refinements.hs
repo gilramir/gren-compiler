@@ -44,7 +44,8 @@ data Outcome
   | Decided Diff.Verdicts
 
 -- | The verdicts for comparing @old@ with @new@, or a stop for the checker.
--- @alwaysStop@ is @bump@'s.
+-- @alwaysStop@ is @bump@'s, and @validate@'s when its first run stopped for the
+-- version's own goals (D858).
 decide :: Bool -> (Docs.Documentation, [Core.Module]) -> (Docs.Documentation, [Core.Module]) -> IO Outcome
 decide alwaysStop (oldDocs, oldCores) (newDocs, newCores) =
   do
