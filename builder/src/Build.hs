@@ -897,6 +897,9 @@ addImportProblems results name problems =
 
 data DocsGoal a where
   KeepDocs :: DocsGoal Docs.Documentation
+  -- | The documentation and each module's Core, for comparing two versions'
+  -- refinements (geng-lang @m4-refine.md@ §RF29, D854).
+  KeepDocsAndCore :: DocsGoal (Docs.Documentation, [Core.Module])
   WriteDocs :: FilePath -> DocsGoal ()
   IgnoreDocs :: DocsGoal ()
 
@@ -912,6 +915,7 @@ toDocsNeed goal =
     IgnoreDocs -> DocsNeed False
     WriteDocs _ -> DocsNeed True
     KeepDocs -> DocsNeed True
+    KeepDocsAndCore -> DocsNeed True
 
 makeDocs :: DocsNeed -> Can.Module -> Either EDocs.Error (Maybe Docs.Module)
 makeDocs (DocsNeed isNeeded) modul =
@@ -926,10 +930,19 @@ finalizeDocs goal results =
   case goal of
     KeepDocs ->
       return $ Map.mapMaybe toDocs results
+    KeepDocsAndCore ->
+      return (Map.mapMaybe toDocs results, Map.elems (Map.mapMaybe toCore results))
     WriteDocs path ->
       E.writeUgly path $ Docs.encode $ Map.mapMaybe toDocs results
     IgnoreDocs ->
       return ()
+
+toCore :: Result -> Maybe Core.Module
+toCore result =
+  case result of
+    RNew _ _ core _ -> Just core
+    RSame _ _ core _ -> Just core
+    _ -> Nothing
 
 toDocs :: Result -> Maybe Docs.Module
 toDocs result =

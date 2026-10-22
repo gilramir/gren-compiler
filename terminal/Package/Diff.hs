@@ -6,8 +6,10 @@ module Package.Diff
   )
 where
 
+import AST.Canonical qualified as Can
 import Build qualified
 import Command qualified
+import Core.AST qualified as Core
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -16,6 +18,7 @@ import Data.Name qualified as Name
 import Data.NonEmptyList qualified as NE
 import Deps.Diff (Changes (..), ModuleChanges (..), PackageChanges (..))
 import Deps.Diff qualified as DD
+import Deps.Refinements qualified as Refinements
 import Gren.Compiler.Type qualified as Type
 import Gren.Details qualified as Details
 import Gren.Docs qualified as Docs
@@ -27,6 +30,7 @@ import Reporting.Doc ((<+>))
 import Reporting.Doc qualified as D
 import Reporting.Exit qualified as Exit
 import Reporting.Exit.Help qualified as Help
+import Reporting.Render.Type qualified as RT
 import Reporting.Render.Type.Localizer qualified as L
 import Reporting.Task qualified as Task
 
@@ -57,13 +61,16 @@ type Task a =
 diff :: Flags -> Outline.PkgOutline -> Outline.PkgOutline -> Task ()
 diff (Flags _ root (Command.ProjectInfo _ currentSources currentSolution) (Command.ProjectInfo _ publishedSources publishedSolution)) currentOutline publishedOutline =
   do
-    newDocs <- generateDocs root currentOutline currentSources currentSolution
-    oldDocs <- generateDocs root publishedOutline publishedSources publishedSolution
-    writeDiff oldDocs newDocs
+    new@(newDocs, _) <- generateDocs root currentOutline currentSources currentSolution
+    old@(oldDocs, _) <- generateDocs root publishedOutline publishedSources publishedSolution
+    outcome <- Task.io $ Refinements.decide False old new
+    case outcome of
+      Refinements.Stopped -> return ()
+      Refinements.Decided verdicts -> writeDiff verdicts oldDocs newDocs
 
 -- GENERATE DOCS
 
-generateDocs :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Diff Docs.Documentation
+generateDocs :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Diff (Docs.Documentation, [Core.Module])
 generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _ _) sources solution =
   do
     details <-
@@ -75,13 +82,13 @@ generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _ _) sources s
         Task.throw Exit.DiffNoExposed
       e : es ->
         Task.eio Exit.DiffBadBuild $
-          Build.fromExposed Reporting.silent root details sources Build.KeepDocs (NE.List e es)
+          Build.fromExposed Reporting.silent root details sources Build.KeepDocsAndCore (NE.List e es)
 
 -- WRITE DIFF
 
-writeDiff :: Docs.Documentation -> Docs.Documentation -> Task ()
-writeDiff oldDocs newDocs =
-  let changes = DD.diff oldDocs newDocs
+writeDiff :: DD.Verdicts -> Docs.Documentation -> Docs.Documentation -> Task ()
+writeDiff verdicts oldDocs newDocs =
+  let changes = DD.diff verdicts oldDocs newDocs
       localizer = L.fromNames (Map.union oldDocs newDocs)
    in Task.io $ Help.toStdout $ toDoc localizer changes <> "\n"
 
@@ -139,7 +146,7 @@ chunkToDoc (Chunk title magnitude details) =
         ]
 
 changesToChunk :: L.Localizer -> (Name.Name, ModuleChanges) -> Chunk
-changesToChunk localizer (name, changes@(ModuleChanges unions aliases values binops)) =
+changesToChunk localizer (name, changes@(ModuleChanges unions aliases values binops verdicts)) =
   let magnitude =
         DD.moduleChangeMagnitude changes
 
@@ -150,7 +157,7 @@ changesToChunk localizer (name, changes@(ModuleChanges unions aliases values bin
         changesToDocTriple (aliasToDoc localizer) aliases
 
       (valueAdd, valueChange, valueRemove) =
-        changesToDocTriple (valueToDoc localizer) values
+        withReasons localizer verdicts (changesToDocTriple (valueToDoc localizer) values) values
 
       (binopAdd, binopChange, binopRemove) =
         changesToDocTriple (binopToDoc localizer) binops
@@ -179,6 +186,24 @@ changesToDocTriple entryToDoc (Changes added changed removed) =
         map indented (Map.toList removed)
       )
 
+-- | Each changed value's lines with, under them, why the refinement checker
+-- gave it its magnitude, when it did (D855).
+withReasons :: L.Localizer -> Map Name.Name DD.Verdict -> ([D.Doc], [D.Doc], [D.Doc]) -> Changes Name.Name Docs.Value -> ([D.Doc], [D.Doc], [D.Doc])
+withReasons localizer verdicts (added, _, removed) (Changes _ changedValues _) =
+  let reasons name =
+        case Map.lookup name verdicts of
+          Just (DD.Verdict _ why) -> map (D.indent 4 . D.reflow) why
+          Nothing -> []
+
+      diffed (name, (oldValue, newValue)) =
+        D.vcat $
+          [ "  - " <> valueToDoc localizer name oldValue,
+            "  + " <> valueToDoc localizer name newValue
+          ]
+            ++ reasons name
+            ++ [""]
+   in (added, map diffed (Map.toList changedValues), removed)
+
 changesToDoc :: String -> [D.Doc] -> [D.Doc] -> [D.Doc] -> [D.Doc] -> Maybe D.Doc
 changesToDoc categoryName unions aliases values binops =
   if null unions && null aliases && null values && null binops
@@ -204,8 +229,46 @@ aliasToDoc localizer name (Docs.Alias _ tvars tipe) =
    in D.hang 4 (D.sep [declaration, typeDoc localizer tipe])
 
 valueToDoc :: L.Localizer -> Name.Name -> Docs.Value -> D.Doc
-valueToDoc localizer name (Docs.Value _ tipe) =
-  D.hang 4 $ D.sep [D.fromName name <+> ":", typeDoc localizer tipe]
+valueToDoc localizer name (Docs.Value _ tipe named) =
+  D.hang 4 $ D.sep [D.fromName name <+> ":", signatureDoc localizer named tipe]
+
+-- | A value's type with the names its signature gives, each with its
+-- predicate, as written (geng-lang @m4-refine.md@ §RF29, D854): what a caller
+-- is asked and what it is given are part of the interface the diff shows.
+signatureDoc :: L.Localizer -> [Docs.Named] -> Type.Type -> D.Doc
+signatureDoc localizer named =
+  place [] Type.None
+  where
+    place path context tipe =
+      case List.find (\n -> Docs._namedPath n == path) named of
+        Just (Docs.Named _ name source) ->
+          "("
+            <> D.fromName name
+            <+> ":"
+            <+> inner path Type.None tipe
+            <> (if null source then D.empty else " where" <+> D.fromChars source)
+            <> ")"
+        Nothing ->
+          inner path context tipe
+
+    inner path context tipe =
+      let parts = collect tipe
+          below = any (\n -> List.isPrefixOf path (Docs._namedPath n) && Docs._namedPath n /= path) named
+       in case parts of
+            a : b : cs
+              | below ->
+                  let args = zipWith (\i t -> place (path ++ [Can.Arg i]) Type.Func t) [0 ..] (init parts)
+                      result = place (path ++ [Can.Result]) Type.Func (last parts)
+                   in case args ++ [result] of
+                        x : y : zs -> RT.lambda context x y zs
+                        _ -> RT.lambda context (Type.toDoc localizer Type.Func a) (Type.toDoc localizer Type.Func b) (map (Type.toDoc localizer Type.Func) cs)
+            _ ->
+              Type.toDoc localizer context tipe
+
+    collect tipe =
+      case tipe of
+        Type.Lambda a b -> a : collect b
+        _ -> [tipe]
 
 binopToDoc :: L.Localizer -> Name.Name -> Docs.Binop -> D.Doc
 binopToDoc localizer name (Docs.Binop _ tipe associativity (Docs.Precedence n)) =

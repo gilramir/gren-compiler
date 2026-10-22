@@ -12,6 +12,7 @@ module Gren.Docs
     Union (..),
     Alias (..),
     Value (..),
+    Named (..),
     Binop (..),
     Binop.Associativity (..),
     Binop.Precedence (..),
@@ -70,7 +71,20 @@ data Alias = Alias Comment [Name.Name] Type.Type
 
 data Union = Union Comment [Name.Name] [(Name.Name, [Type.Type])]
 
-data Value = Value Comment Type.Type
+-- | An exposed value: its comment, its type with every refinement erased, and
+-- the names its signature gives, each with its predicate as written, empty when
+-- it names nothing (geng-lang @m4-refine.md@ §RF29, D854).
+data Value = Value Comment Type.Type [Named]
+
+-- | A name a signature gives an argument or its result, where in the type it is
+-- (as 'Can.Refinement' says it), and the predicate as written (D812), empty
+-- when the name has none. The documentation prints the signature with them, so
+-- that a precondition is read where the call is written.
+data Named = Named
+  { _namedPath :: [Can.RefinementStep],
+    _namedName :: Name.Name,
+    _namedSource :: String
+  }
 
 data Binop = Binop Comment Type.Type Binop.Associativity Binop.Precedence
 
@@ -188,18 +202,51 @@ alias =
 -- VALUE JSON
 
 encodeValue :: (Name.Name, Value) -> E.Value
-encodeValue (name, Value comment tipe) =
-  E.object
+encodeValue (name, Value comment tipe names) =
+  E.object $
     [ "name" ==> E.name name,
       "comment" ==> E.string comment,
       "type" ==> Type.encode tipe
     ]
+      ++ ["named" ==> E.list encodeNamed names | not (null names)]
 
 value :: D.Decoder Error Value
 value =
   Value
     <$> D.field "comment" D.string
     <*> D.field "type" typeDecoder
+    <*> D.oneOf [D.field "named" (D.list namedDecoder), pure []]
+
+-- | A name, its path written as steps, @"arg 1"@ for the second argument and
+-- @"result"@ for the last arrow's target, outermost first.
+encodeNamed :: Named -> E.Value
+encodeNamed (Named path name source) =
+  E.object
+    [ "path" ==> E.list (E.chars . stepText) path,
+      "name" ==> E.name name,
+      "predicate" ==> E.chars source
+    ]
+  where
+    stepText step =
+      case step of
+        Can.Arg i -> "arg " ++ show i
+        Can.Result -> "result"
+
+namedDecoder :: D.Decoder Error Named
+namedDecoder =
+  Named
+    <$> D.field "path" (D.list stepDecoder)
+    <*> D.field "name" nameDecoder
+    <*> D.field "predicate" (Json.toChars <$> D.string)
+
+stepDecoder :: D.Decoder Error Can.RefinementStep
+stepDecoder =
+  do
+    text <- Json.toChars <$> D.string
+    case words text of
+      ["result"] -> return Can.Result
+      ["arg", n] | not (null n), all (`elem` ['0' .. '9']) n -> return (Can.Arg (read n))
+      _ -> D.failure BadType
 
 -- BINOP JSON
 
@@ -408,7 +455,7 @@ emptyModule (ModuleName.Canonical _ name) (Src.DocComment overview) =
 
 data Info = Info
   { _iComments :: Map.Map Name.Name Src.DocComment,
-    _iValues :: Map.Map Name.Name (Either A.Region Can.Type),
+    _iValues :: Map.Map Name.Name (Either A.Region (Can.Type, [Can.Refinement])),
     _iUnions :: Map.Map Name.Name Can.Union,
     _iAliases :: Map.Map Name.Name Can.Alias,
     _iBinops :: Map.Map Name.Name Can.Binop
@@ -419,14 +466,14 @@ checkExport info name (A.At region export) =
   case export of
     Can.ExportValue ->
       do
-        tipe <- getType name info
+        (tipe, names) <- getType name info
         comment <- getComment region name info
         Result.ok $ \m ->
-          m {_values = Map.insert name (Value comment tipe) (_values m)}
+          m {_values = Map.insert name (Value comment tipe names) (_values m)}
     Can.ExportBinop ->
       do
         let (Can.Binop_ assoc prec realName) = _iBinops info ! name
-        tipe <- getType realName info
+        (tipe, _) <- getType realName info
         comment <- getComment region realName info
         Result.ok $ \m ->
           m {_binops = Map.insert name (Binop comment tipe assoc prec) (_binops m)}
@@ -459,13 +506,16 @@ getComment region name info =
     Just (Src.DocComment snippet) ->
       Result.ok (Json.fromComment snippet)
 
-getType :: Name.Name -> Info -> Result.Result i w E.DefProblem Type.Type
+getType :: Name.Name -> Info -> Result.Result i w E.DefProblem (Type.Type, [Named])
 getType name info =
   case _iValues info ! name of
     Left region ->
       Result.throw (E.NoAnnotation name region)
-    Right tipe ->
-      Result.ok (Extract.fromType tipe)
+    Right (tipe, refinements) ->
+      Result.ok (Extract.fromType tipe, map toNamed refinements)
+  where
+    toNamed ref =
+      Named (Can._ref_path ref) (A.toValue (Can._ref_name ref)) (Can._ref_source ref)
 
 dector :: Can.Ctor -> (Name.Name, [Type.Type])
 dector (Can.Ctor name _ _ args) =
@@ -474,7 +524,7 @@ dector (Can.Ctor name _ _ args) =
 -- GATHER TYPES
 
 type Types =
-  Map.Map Name.Name (Either A.Region Can.Type)
+  Map.Map Name.Name (Either A.Region (Can.Type, [Can.Refinement]))
 
 gatherTypes :: Can.Decls -> Types -> Types
 gatherTypes decls types =
@@ -491,6 +541,6 @@ addDef types def =
   case def of
     Can.Def _ (A.At region name) _ _ ->
       Map.insert name (Left region) types
-    Can.TypedDef (A.At _ name) _ typedArgs _ resultType _ ->
+    Can.TypedDef (A.At _ name) _ typedArgs _ resultType refinements ->
       let tipe = foldr Can.TLambda resultType (map snd typedArgs)
-       in Map.insert name (Right tipe) types
+       in Map.insert name (Right (tipe, refinements)) types

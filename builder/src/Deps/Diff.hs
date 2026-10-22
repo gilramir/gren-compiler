@@ -1,5 +1,8 @@
 module Deps.Diff
   ( diff,
+    Verdict (..),
+    Verdicts,
+    refinementCandidates,
     PackageChanges (..),
     ModuleChanges (..),
     Changes (..),
@@ -34,8 +37,39 @@ data ModuleChanges = ModuleChanges
   { _unions :: Changes Name.Name Docs.Union,
     _aliases :: Changes Name.Name Docs.Alias,
     _values :: Changes Name.Name Docs.Value,
-    _binops :: Changes Name.Name Docs.Binop
+    _binops :: Changes Name.Name Docs.Binop,
+    -- | The verdict on each changed value whose erased type is the same and
+    -- whose refinements are not (D855). A changed value not here is MAJOR.
+    _valueVerdicts :: Map.Map Name.Name Verdict
   }
+
+-- | What the refinement checker says of a value whose erased type did not
+-- change and whose signature's names did (geng-lang @m4-refine.md@ §RF29,
+-- D855): the magnitude entailment gives it (D807), and a line for each
+-- predicate that changed, saying how.
+data Verdict = Verdict M.Magnitude [String]
+
+-- | The verdicts, by module and value.
+type Verdicts =
+  Map.Map (ModuleName.Raw, Name.Name) Verdict
+
+-- | The values the type comparison cannot decide: exposed in both versions,
+-- their erased types equivalent, and the names their signatures give, with
+-- their predicates, not the same. The refinement checker decides each (D810).
+refinementCandidates :: Docs.Documentation -> Docs.Documentation -> [(ModuleName.Raw, Name.Name)]
+refinementCandidates oldDocs newDocs =
+  [ (home, name)
+  | (home, (Docs.Module _ _ _ _ oldValues _, Docs.Module _ _ _ _ newValues _)) <- Map.toList (Map.intersectionWith (,) oldDocs newDocs),
+    (name, (old, new)) <- Map.toList (Map.intersectionWith (,) oldValues newValues),
+    isEquivalentValue old new,
+    not (sameNamed old new)
+  ]
+
+sameNamed :: Docs.Value -> Docs.Value -> Bool
+sameNamed (Docs.Value _ _ n1) (Docs.Value _ _ n2) =
+  map key n1 == map key n2
+  where
+    key (Docs.Named path name source) = (path, name, source)
 
 data Changes k v = Changes
   { _added :: Map.Map k v,
@@ -51,8 +85,11 @@ getChanges isEquivalent old new =
 
 -- DIFF
 
-diff :: Docs.Documentation -> Docs.Documentation -> PackageChanges
-diff oldDocs newDocs =
+-- | The changes from one version's documentation to the next. A value whose
+-- erased type is the same and whose refinements are not has the magnitude its
+-- verdict gives, and is no change at all when that is PATCH (D855).
+diff :: Verdicts -> Docs.Documentation -> Docs.Documentation -> PackageChanges
+diff verdicts oldDocs newDocs =
   let filterOutPatches chngs =
         Map.filter (\chng -> moduleChangeMagnitude chng /= M.PATCH) chngs
 
@@ -60,16 +97,43 @@ diff oldDocs newDocs =
         getChanges (\_ _ -> False) oldDocs newDocs
    in PackageChanges
         (Map.keys added)
-        (filterOutPatches (Map.map diffModule changed))
+        (filterOutPatches (Map.mapWithKey (diffModule verdicts) changed))
         (Map.keys removed)
 
-diffModule :: (Docs.Module, Docs.Module) -> ModuleChanges
-diffModule (Docs.Module _ _ u1 a1 v1 b1, Docs.Module _ _ u2 a2 v2 b2) =
-  ModuleChanges
-    (getChanges isEquivalentUnion u1 u2)
-    (getChanges isEquivalentAlias a1 a2)
-    (getChanges isEquivalentValue v1 v2)
-    (getChanges isEquivalentBinop b1 b2)
+diffModule :: Verdicts -> ModuleName.Raw -> (Docs.Module, Docs.Module) -> ModuleChanges
+diffModule verdicts home (Docs.Module _ _ u1 a1 v1 b1, Docs.Module _ _ u2 a2 v2 b2) =
+  let verdictOf name old new
+        | not (isEquivalentValue old new) = Nothing
+        | sameNamed old new = Just (Verdict M.PATCH [])
+        | otherwise =
+            Just $
+              Map.findWithDefault
+                (Verdict M.MAJOR ["The refinement checker did not compare this signature's refinements."])
+                (home, name)
+                verdicts
+
+      equivalent name old new =
+        case verdictOf name old new of
+          Just (Verdict M.PATCH _) -> True
+          _ -> False
+
+      values =
+        getChangesWithKey equivalent v1 v2
+
+      valueVerdicts =
+        Map.mapMaybeWithKey (\name (old, new) -> verdictOf name old new) (_changed values)
+   in ModuleChanges
+        (getChanges isEquivalentUnion u1 u2)
+        (getChanges isEquivalentAlias a1 a2)
+        values
+        (getChanges isEquivalentBinop b1 b2)
+        valueVerdicts
+
+getChangesWithKey :: (Ord k) => (k -> v -> v -> Bool) -> Map.Map k v -> Map.Map k v -> Changes k v
+getChangesWithKey isEquivalent old new =
+  let overlap = Map.intersectionWith (,) old new
+      changed = Map.filterWithKey (\k (o, n) -> not (isEquivalent k o n)) overlap
+   in Changes (Map.difference new old) changed (Map.difference old new)
 
 -- EQUIVALENCE
 
@@ -99,7 +163,7 @@ isEquivalentAlias (Docs.Alias _ oldVars oldType) (Docs.Alias _ newVars newType) 
         && isEquivalentRenaming (zip oldVars newVars ++ renamings)
 
 isEquivalentValue :: Docs.Value -> Docs.Value -> Bool
-isEquivalentValue (Docs.Value c1 t1) (Docs.Value c2 t2) =
+isEquivalentValue (Docs.Value c1 t1 _) (Docs.Value c2 t2 _) =
   isEquivalentAlias (Docs.Alias c1 [] t1) (Docs.Alias c2 [] t2)
 
 isEquivalentBinop :: Docs.Binop -> Docs.Binop -> Bool
@@ -224,13 +288,26 @@ toMagnitude (PackageChanges added changed removed) =
    in maximum (addMag : removeMag : changeMags)
 
 moduleChangeMagnitude :: ModuleChanges -> M.Magnitude
-moduleChangeMagnitude (ModuleChanges unions aliases values binops) =
+moduleChangeMagnitude (ModuleChanges unions aliases values binops verdicts) =
   maximum
     [ unionChangeMagnitude unions,
       changeMagnitude aliases,
-      changeMagnitude values,
+      valueChangeMagnitude values verdicts,
       changeMagnitude binops
     ]
+
+-- | A changed value is MAJOR unless the refinement checker's verdict on it
+-- says less (D855).
+valueChangeMagnitude :: Changes Name.Name Docs.Value -> Map.Map Name.Name Verdict -> M.Magnitude
+valueChangeMagnitude (Changes added changed removed) verdicts
+  | Map.size removed > 0 = M.MAJOR
+  | otherwise =
+      maximum
+        ( (if Map.size added > 0 then M.MINOR else M.PATCH)
+            : [ maybe M.MAJOR (\(Verdict m _) -> m) (Map.lookup name verdicts)
+              | name <- Map.keys changed
+              ]
+        )
 
 changeMagnitude :: Changes k v -> M.Magnitude
 changeMagnitude (Changes added changed removed)

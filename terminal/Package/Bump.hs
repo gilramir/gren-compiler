@@ -9,10 +9,12 @@ where
 
 import Build qualified
 import Command qualified
+import Core.AST qualified as Core
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.NonEmptyList qualified as NE
 import Deps.Diff qualified as Diff
+import Deps.Refinements qualified as Refinements
 import Deps.Package qualified as Package
 import Gren.Details qualified as Details
 import Gren.Docs qualified as Docs
@@ -71,9 +73,18 @@ bump flags@(Flags _ _ knownVersions _ _) currentOutline@(Outline.PkgOutline _ _ 
 suggestVersion :: Flags -> Outline.PkgOutline -> Outline.PkgOutline -> Task.Task Exit.Bump ()
 suggestVersion flags@(Flags _ root _ (Command.ProjectInfo _ currentSources currentDeps) (Command.ProjectInfo _ publishedSources publishedDeps)) currentOutline@(Outline.PkgOutline _ _ _ vsn _ _ _ _ _) publishedOutline =
   do
-    newDocs <- generateDocs root currentOutline currentSources currentDeps
-    oldDocs <- generateDocs root publishedOutline publishedSources publishedDeps
-    let changes = Diff.diff oldDocs newDocs
+    new@(newDocs, _) <- generateDocs root currentOutline currentSources currentDeps
+    old@(oldDocs, _) <- generateDocs root publishedOutline publishedSources publishedDeps
+    outcome <- Task.io $ Refinements.decide True old new
+    case outcome of
+      Refinements.Stopped ->
+        return ()
+      Refinements.Decided verdicts ->
+        suggest flags root vsn (Diff.diff verdicts oldDocs newDocs)
+
+suggest :: Flags -> FilePath -> V.Version -> Diff.PackageChanges -> Task.Task Exit.Bump ()
+suggest flags root vsn changes =
+  do
     let newVersion = Diff.bump changes vsn
     Task.io $
       changeVersion flags root newVersion $
@@ -95,7 +106,7 @@ suggestVersion flags@(Flags _ root _ (Command.ProjectInfo _ currentSources curre
               <> new
               <> ") in geng.toml? [Y/n] "
 
-generateDocs :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Bump Docs.Documentation
+generateDocs :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Bump (Docs.Documentation, [Core.Module])
 generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _ _) sources solution =
   do
     details <-
@@ -107,7 +118,7 @@ generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _ _) sources s
         Task.throw Exit.BumpNoExposed
       e : es ->
         Task.eio Exit.BumpBadBuild $
-          Build.fromExposed Reporting.silent root details sources Build.KeepDocs (NE.List e es)
+          Build.fromExposed Reporting.silent root details sources Build.KeepDocsAndCore (NE.List e es)
 
 -- CHANGE VERSION
 

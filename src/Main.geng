@@ -293,6 +293,27 @@ parseUserArgs context compilerPath =
                         , encodedCommand = encodeFor backendCommand
                         }
 
+                -- `geng package diff`, `bump` and `validate`'s run of the
+                -- binary, the refinements compared by the checker (D855).
+                versionsBackend backendCommand =
+                    Terminal.Refine.compareVersions
+                        { fs = context.fsPermission
+                        , envVars = context.envVars
+                        , sources = { projectPath = Path.empty, root = Dict.empty, dependencies = Dict.empty }
+                        , toString = context.pathToString
+                        , fromString = context.pathFromString
+                        , run =
+                            \extra ->
+                                startBackend context compilerPath extra
+                                    |> Task.andThen
+                                        (talkWith context
+                                            { headless = False
+                                            , encodedCommand = encodeFor backendCommand
+                                            , readInput = Basics.not (Dict.member "GENG_REFINE_STAGE" extra)
+                                            }
+                                        )
+                        }
+
                 backend backendCommand =
                     startBackend context compilerPath Dict.empty
                         |> Task.andThen
@@ -878,7 +899,7 @@ parseUserArgs context compilerPath =
                                     projectOutline
                                     |> Task.mapError Terminal.PackageValidate.prettifyError
                             )
-                        |> Task.andThen (\backendFlags -> backend (Compiler.Backend.PackageValidate backendFlags))
+                        |> Task.andThen (\backendFlags -> versionsBackend (Compiler.Backend.PackageValidate backendFlags))
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
 
                 CliParser.PackageBump ->
@@ -899,7 +920,7 @@ parseUserArgs context compilerPath =
                                     projectOutline
                                     |> Task.mapError Terminal.PackageBump.prettifyError
                             )
-                        |> Task.andThen (\backendFlags -> backend (Compiler.Backend.PackageBump backendFlags))
+                        |> Task.andThen (\backendFlags -> versionsBackend (Compiler.Backend.PackageBump backendFlags))
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
 
                 CliParser.PackageDiff args ->
@@ -980,7 +1001,7 @@ parseUserArgs context compilerPath =
                                         |> Task.mapError Terminal.PackageDiff.prettifyGlobalError
                     in
                     diffTask
-                        |> Task.andThen (\backendFlags -> backend (Compiler.Backend.PackageDiff backendFlags))
+                        |> Task.andThen (\backendFlags -> versionsBackend (Compiler.Backend.PackageDiff backendFlags))
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
 
                 CliParser.Paths opts ->

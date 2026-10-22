@@ -1,4 +1,4 @@
-module Terminal.Refine exposing (Config, Sources, build, sourcesOf)
+module Terminal.Refine exposing (Config, Sources, build, compareVersions, sourcesOf)
 
 {-| A build checked by the refinement checker (geng-lang `m4-refine.md`
 §RF24, D833).
@@ -34,6 +34,11 @@ them.
 D845): `core` is the compiler's, its goals the same in every program, and
 `harness/refine.py` holds them. `GENG_REFINE_CORE` checks them too, which is
 how the gate does, and `GENG_REFINE_EVERY_MODULE` implies it.
+
+`geng package diff`, `bump` and `validate` are run the same way, by
+[compareVersions](#compareVersions) (§RF29, D855): the binary compares the
+erased types, and the checker the refinements of each value whose erased type
+is the same in both versions.
 -}
 
 import Bytes
@@ -46,6 +51,7 @@ import Geng.Core as Core
 import Geng.Core.Wire as Wire
 import Geng.Refine.Check as Check
 import Geng.Refine.Error as Error
+import Geng.Refine.Semver as Semver
 import Task exposing (Task)
 
 
@@ -106,6 +112,119 @@ build config =
                     |> Task.andThen (\exitCode -> remove config dir |> Task.map (\_ -> exitCode))
                     |> Task.onError (\report -> remove config dir |> Task.andThen (\_ -> Task.fail report))
             )
+
+
+{-| A package command that compares two versions (geng-lang `m4-refine.md`
+§RF29, D855). The first run is asked with `GENG_REFINE_STAGE`; when it stopped,
+it wrote `values` there, a line for each value whose erased type is the same in
+both versions and whose refinements are not, and each version's Core of their
+modules under `old` and `new`. Each is decided by entailment (D807), and the
+second run is given the verdicts in `GENG_REFINE_VERDICTS` and is the command.
+A first run that did not stop was the command.
+-}
+compareVersions : Config -> Task Report Int
+compareVersions config =
+    FileSystem.makeTempDirectory config.fs "geng-semver-"
+        |> Task.mapError (\e -> failure "I cannot make a directory for the refinement checker" (FileSystem.errorToString e))
+        |> Task.andThen
+            (\dir ->
+                config.run (Dict.singleton "GENG_REFINE_STAGE" (config.toString dir))
+                    |> Task.andThen
+                        (\exitCode ->
+                            if exitCode /= 0 then
+                                Task.succeed exitCode
+
+                            else
+                                FileSystem.readFile config.fs (Path.append (Path.fromPosixString "values") dir)
+                                    |> Task.map (\data -> Just (Bytes.toString data |> Maybe.withDefault ""))
+                                    |> Task.onError (\_ -> Task.succeed Nothing)
+                                    |> Task.andThen
+                                        (\values ->
+                                            when values is
+                                                Nothing ->
+                                                    Task.succeed exitCode
+
+                                                Just text ->
+                                                    decideVersions config dir text
+                                        )
+                        )
+                    |> Task.andThen (\exitCode -> remove config dir |> Task.map (\_ -> exitCode))
+                    |> Task.onError (\report -> remove config dir |> Task.andThen (\_ -> Task.fail report))
+            )
+
+
+decideVersions : Config -> Path -> String -> Task Report Int
+decideVersions config dir text =
+    let
+        values =
+            String.split "\n" text
+                |> Array.mapAndKeepJust
+                    (\line ->
+                        when String.split " " line is
+                            [ home, value ] ->
+                                Just { home = home, value = value }
+
+                            _ ->
+                                Nothing
+                    )
+
+        modulesIn sub =
+            if Array.isEmpty values then
+                Task.succeed []
+
+            else
+                readModules config.fs (Path.append (Path.fromPosixString sub) dir)
+    in
+    Task.map2
+        (\old new ->
+            Array.map
+                (\v ->
+                    { home = v.home
+                    , value = v.value
+                    , verdict = Semver.compare v (namedOf v old) (namedOf v new)
+                    }
+                )
+                values
+        )
+        (modulesIn "old")
+        (modulesIn "new")
+        |> Task.andThen
+            (\decided ->
+                let
+                    verdictsFile =
+                        Path.append (Path.fromPosixString "verdicts") dir
+
+                    verdictsText =
+                        decided
+                            |> Array.map
+                                (\d ->
+                                    Array.map (\reason -> "  " ++ reason) d.verdict.reasons
+                                        |> Array.pushFirst (d.home ++ " " ++ d.value ++ " " ++ Semver.magnitudeText d.verdict.magnitude)
+                                        |> String.join "\n"
+                                )
+                            |> Array.map (\block -> block ++ "\n")
+                            |> String.join ""
+                in
+                writeQueries config (Array.mapAndFlatten (\d -> d.verdict.queries) decided)
+                    |> Task.andThen
+                        (\_ ->
+                            FileSystem.writeFile config.fs (Bytes.fromString verdictsText) verdictsFile
+                                |> Task.mapError (\e -> failure "I cannot write the refinement checker's verdicts" (FileSystem.errorToString e))
+                        )
+                    |> Task.andThen (\_ -> config.run (Dict.singleton "GENG_REFINE_VERDICTS" (config.toString verdictsFile)))
+            )
+
+
+{-| The names a value's signature gives in the version whose modules are
+`modules`, none when it names nothing.
+-}
+namedOf : { home : String, value : String } -> Array Core.Module -> Array Core.Named
+namedOf { home, value } modules =
+    modules
+        |> Array.findFirst (\m -> m.name.module_ == home)
+        |> Maybe.andThen (\found -> Array.findFirst (\sig -> sig.binder.name == value) found.value.signatures)
+        |> Maybe.map (\found -> found.value.named)
+        |> Maybe.withDefault []
 
 
 {-| After a first run that succeeded: the build it was, when it wrote no Core;

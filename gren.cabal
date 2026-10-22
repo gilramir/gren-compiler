@@ -52,6 +52,7 @@ Library common
         AbsoluteSrcDir
         Build
         Deps.Diff
+        Deps.Refinements
         Deps.Package
         File
         Generate

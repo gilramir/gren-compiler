@@ -8,10 +8,12 @@ where
 
 import Build qualified
 import Command qualified
+import Core.AST qualified as Core
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.NonEmptyList qualified as NE
 import Deps.Diff qualified as Diff
+import Deps.Refinements qualified as Refinements
 import Deps.Package qualified as Pkg
 import Gren.Details qualified as Details
 import Gren.Docs qualified as Docs
@@ -50,14 +52,19 @@ validate (Flags root knownVersions (Command.ProjectInfo currentOutline currentSo
       error "Previous version is app"
     (Outline.Pkg currentPkgOutline@(Outline.PkgOutline _ _ _ vsn _ _ _ _ _), Just (Command.ProjectInfo (Outline.Pkg previousOutline) previousSources previousDeps)) ->
       do
-        currentDocs <- buildProject root currentPkgOutline currentSources currentDeps
-        previousDocs <- buildProject root previousOutline previousSources previousDeps
+        current@(currentDocs, _) <- buildProject root currentPkgOutline currentSources currentDeps
+        previous@(previousDocs, _) <- buildProject root previousOutline previousSources previousDeps
 
-        _ <- Task.eio id $ verifyBump vsn currentDocs previousDocs knownVersions
+        outcome <- Task.io $ Refinements.decide False previous current
+        case outcome of
+          Refinements.Stopped ->
+            return ()
+          Refinements.Decided verdicts ->
+            do
+              _ <- Task.eio id $ verifyBump verdicts vsn currentDocs previousDocs knownVersions
+              Task.io $ putStrLn "Everything looks good!"
 
-        Task.io $ putStrLn "Everything looks good!"
-
-buildProject :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Validate Docs.Documentation
+buildProject :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Validate (Docs.Documentation, [Core.Module])
 buildProject root pkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _ _) sources solution =
   do
     details@(Details.Details _ outline _ _ _ _) <-
@@ -71,13 +78,13 @@ buildProject root pkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _ _) sources solu
         Details.ValidPkg _ _ (e : es) _ -> return (NE.List e es)
 
     Task.eio Exit.ValidateBuildProblem $
-      Build.fromExposed Reporting.silent root details sources Build.KeepDocs exposed
+      Build.fromExposed Reporting.silent root details sources Build.KeepDocsAndCore exposed
 
 data GoodVersion
   = GoodBump V.Version M.Magnitude
 
-verifyBump :: V.Version -> Docs.Documentation -> Docs.Documentation -> [V.Version] -> IO (Either Exit.Validate GoodVersion)
-verifyBump vsn newDocs oldDocs knownVersions =
+verifyBump :: Diff.Verdicts -> V.Version -> Docs.Documentation -> Docs.Documentation -> [V.Version] -> IO (Either Exit.Validate GoodVersion)
+verifyBump verdicts vsn newDocs oldDocs knownVersions =
   case reverse knownVersions of
     [] ->
       error "Known versions field was empty"
@@ -92,7 +99,7 @@ verifyBump vsn newDocs oldDocs knownVersions =
                 Left $
                   Exit.ValidateInvalidBump vsn latest
         Just (old, new, magnitude) ->
-          let changes = Diff.diff oldDocs newDocs
+          let changes = Diff.diff verdicts oldDocs newDocs
               realNew = Diff.bump changes old
            in if new == realNew
                 then return $ Right $ GoodBump old magnitude
