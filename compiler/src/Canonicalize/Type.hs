@@ -431,6 +431,30 @@ canonicalizePredicate env scope (A.At region expression) =
                  in Result.ok (Can.at region (Can.VarCtor opts home name index (Can.Forall freeVars tipe)))
           _ ->
             Result.throw (Error.RefinementNotCore region name)
+    Src.Call (A.At funcRegion (Src.VarQual Src.LowVar prefix name)) [(_, A.At argRegion (Src.Var Src.LowVar argName))]
+      | ModuleName.Canonical _ own <- Env._home env,
+        prefix == own,
+        Just (Env.TopLevel _) <- Map.lookup name (Env._vars env),
+        (Env._home env, name) `elem` measures ->
+          -- A measure's own module names it by its own name, which no import
+          -- gives it, so that @core@'s primitives can be refined with the
+          -- predicate every other module writes (@m4-refine.md@ §RF27, D846).
+          --
+          -- It is made a foreign reference typed from its argument, which must
+          -- be of the module's own container type. A top-level reference would
+          -- need the measure in scope where the signature is solved, and a
+          -- predicate is no dependency of its definition, so @unsafeGet@ can
+          -- be solved before @length@ is.
+          do
+            argType <- findName argRegion scope argName
+            case Type.iteratedDealias argType of
+              Can.TType typeHome _ typeArgs
+                | typeHome == Env._home env ->
+                    let vars = Map.fromList [(v, []) | Can.TVar v <- typeArgs]
+                        annotation = Can.Forall vars (Can.TLambda argType (Can.TType ModuleName.basics Name.int []))
+                     in Result.ok (Can.at region (Can.Call (Can.at funcRegion (Can.VarForeign (Env._home env) name annotation)) [Can.at argRegion (Can.VarLocal argName)]))
+              _ ->
+                Result.throw (Error.RefinementNotMeasure funcRegion prefix name)
     Src.Call (A.At funcRegion (Src.Var Src.LowVar name)) [(_, arg)] ->
       do
         func <-
@@ -488,7 +512,9 @@ measures =
     (ModuleName.bytes, Name.fromChars "length"),
     (ModuleName.string, Name.fromChars "count"),
     (ModuleName.dict, Name.fromChars "count"),
-    (ModuleName.Canonical Pkg.core (Name.fromChars "Set"), Name.fromChars "count")
+    (ModuleName.Canonical Pkg.core (Name.fromChars "Set"), Name.fromChars "count"),
+    -- Not exposed by @core@, so only @core@'s primitives name it (D846).
+    (ModuleName.Canonical Pkg.core (Name.fromChars "Array.Transient"), Name.fromChars "length")
   ]
 
 -- | An operator of D808's, resolved as any operator is.

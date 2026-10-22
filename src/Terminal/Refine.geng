@@ -29,6 +29,11 @@ solver, as SMT-LIB with the solver's verdict, which `harness/oracle.py` puts
 to Z3 (§RF25, D803); `GENG_REFINE_EVERY_MODULE` has the checker walk every
 module of the program, so that the questions `core`'s loops raise are among
 them.
+
+`core`'s modules are read for their signatures and not checked (§RF27,
+D845): `core` is the compiler's, its goals the same in every program, and
+`harness/refine.py` holds them. `GENG_REFINE_CORE` checks them too, which is
+how the gate does, and `GENG_REFINE_EVERY_MODULE` implies it.
 -}
 
 import Bytes
@@ -118,8 +123,12 @@ checked config modules =
                     { recording = Dict.member "GENG_REFINE_QUERIES" config.envVars
                     , everyModule = Dict.member "GENG_REFINE_EVERY_MODULE" config.envVars
                     }
-                    (\_ -> True)
+                    (\name -> withCore || name.package /= "core")
                     modules
+
+            withCore =
+                Dict.member "GENG_REFINE_CORE" config.envVars
+                    || Dict.member "GENG_REFINE_EVERY_MODULE" config.envVars
 
             goals =
                 checkedRun.goals

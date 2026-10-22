@@ -15,6 +15,7 @@ import Core.Dump qualified as Dump
 import Core.Pass qualified as Pass
 import Core.Pretty qualified as Pretty
 import Core.Program qualified as Program
+import Core.Refs qualified as Refs
 import Core.Stage qualified as Stage
 import Core.Target qualified as Target
 import Core.Whole qualified as Whole
@@ -158,13 +159,13 @@ make target details sources artifacts request =
 -- (geng-lang @m4-refine.md@ §RF24, D833).
 --
 -- The checker is a Geng program the CLI runs (D826), so a program with a
--- refinement in any of its modules, a dependency's among them, is built in two
--- processes. The CLI's first asks with @GENG_REFINE_STAGE=dir@: every module's
+-- module outside @core@ that has a signature or calls a refined function, a
+-- dependency's among them, is built in two processes ('owesCheck', D845). The CLI's first asks with @GENG_REFINE_STAGE=dir@: every module's
 -- Core goes to that directory as @GENG_DUMP_WIRE@ writes it, and the build stops
 -- with nothing written. The CLI checks it and either refuses the program or asks
 -- again with @GENG_REFINE_CHECKED@, and this build goes on as one with no
 -- refinements does. A program with none is built in one process, and the cut
--- costs it a look at each module's signature table.
+-- costs it a look at each module's signature table and references.
 --
 -- __Neither variable set is a refusal__, since nothing will check the program:
 -- the binary run by itself, not by the CLI. @GENG_UNCHECKED_REFINEMENTS@ lets
@@ -178,7 +179,7 @@ refinementCut :: Details.Details -> Build.Artifacts -> Task Bool
 refinementCut details artifacts =
   do
     cores <- Task.io (programCore details artifacts)
-    if all (null . Core._moduleSignatures) (Map.elems cores)
+    if not (owesCheck cores)
       then return True
       else do
         stage <- Task.io (Env.lookupEnv "GENG_REFINE_STAGE")
@@ -195,6 +196,33 @@ refinementCut details artifacts =
             | otherwise -> Task.throw Exit.GenerateRefinementsUnchecked
   where
     isSet name = maybe False (/= "") <$> Env.lookupEnv name
+
+-- | Whether a module outside @core@ has a signature or calls a refined function,
+-- which is what the checker checks (geng-lang @m4-refine.md@ §RF27, D845).
+--
+-- @core@'s own goals are not checked in a build. @core@ is the compiler's, at
+-- the version beside it that no manifest may ask for (D307), so its goals are
+-- the same in every program, and @harness/refine.py@ holds every one of them.
+-- Checking them here would cut every build, since every program has @core@.
+owesCheck :: Map.Map ModuleName.Canonical Core.Module -> Bool
+owesCheck cores =
+  any owes modules
+  where
+    modules = Map.elems cores
+    refined =
+      Set.fromList
+        [ Core.QualName (Core._moduleName m) name
+        | m <- modules,
+          let tops = Set.fromList [Core._binderName (Core._bindBinder b) | b <- Core._moduleDefs m],
+          Core.Signature binder _ <- Core._moduleSignatures m,
+          let name = Core._binderName binder,
+          Set.member name tops
+        ]
+    owes m =
+      ModuleName._package (Core._moduleName m) /= Pkg.core
+        && ( not (null (Core._moduleSignatures m))
+               || any (not . Set.disjoint refined . Refs._refGlobals . Refs.refsIn . Core._bindValue) (Core._moduleDefs m)
+           )
 
 -- | The passes, and then either a stop or the rest of the build.
 afterFront :: Maybe Backend -> Details.Details -> ExtSources -> Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> Request -> Task (Maybe B.Builder)
