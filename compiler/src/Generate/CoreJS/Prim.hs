@@ -532,10 +532,11 @@ bytes p args =
     (BGetU8, [b, i]) -> JS.Call (JS.Access b (JsName.fromLocalHumanReadable "getUint8")) [i]
     (BSlice, _) -> helper "_BytesPrim_slice" args
     (BEq, _) -> helper "_BytesPrim_eq" args
-    (BtNew, [n]) -> JS.New (ref "DataView") [JS.New (ref "ArrayBuffer") [n]]
+    (BtNew, _) -> helper "_BytesPrim_new" args
     (BtSetU8, _) -> helper "_BytesPrim_setU8" args
     (BtToBytes, [t]) -> t
     (BtSetBytes, _) -> helper "_BytesPrim_setBytes" args
+    (BtLength, [t]) -> JS.Access t (JsName.fromLocalHumanReadable "byteLength")
     _ -> arityError (BytesOp p) args
   where
     ref name = JS.Ref (JsName.fromLocalHumanReadable name)
@@ -559,6 +560,13 @@ isBytes op =
 bytesHelpers :: B.Builder
 bytesHelpers =
   [r|
+// A zero-filled transient. A size below 0 stands for one past 2^31 - 1, which
+// ends the program naming the limit, as the native Array.append does (D863).
+function _BytesPrim_new(n) {
+  if (n < 0) throw new Error("Bytes: the result is longer than 2^31 - 1 bytes");
+  return new DataView(new ArrayBuffer(n));
+}
+
 // A view onto the same buffer, O(1) (docs/m1b-bytes-prim.md §BY4).
 function _BytesPrim_slice(b, i, j) { return new DataView(b.buffer, b.byteOffset + i, j - i); }
 

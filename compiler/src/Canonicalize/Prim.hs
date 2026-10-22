@@ -232,6 +232,7 @@ bytesType p =
     BtSetU8 -> Just (fn [tTransient, tInt, tInt] tTransient)
     BtToBytes -> Just (fn [tTransient] tBytes)
     BtSetBytes -> Just (fn [tTransient, tInt, tBytes] tTransient)
+    BtLength -> Just (fn [tTransient] tInt)
   where
     tTransient = Can.TType ModuleName.bytesTransient "Transient" []
 

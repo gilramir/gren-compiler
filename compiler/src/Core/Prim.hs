@@ -293,6 +293,10 @@ data BytesPrim
     -- fits. Added by D233: as a Geng loop over 'BtSetU8', flattening a
     -- megabyte took five times as long (@docs/m1b-bytes-prim.md@ §BY4).
     BtSetBytes
+  | -- | The transient's length, as 'BtNew' was given it. Added by D863 as the
+    -- measure @Bytes.Transient.length@, so that the refinement checker proves
+    -- every write into a transient within it (geng-lang @m4-refine.md@ §RF32).
+    BtLength
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | C7's contract: @Array@ is flat and dense, @get@ and @length@ are O(1) and
@@ -479,6 +483,8 @@ allPrims =
     ++ [TaskOp TaskMap]
     -- Appended by D582 (m3-fold.md §FL10).
     ++ map DictOp [minBound .. maxBound]
+    -- Appended by D863 (m4-refine.md §RF32).
+    ++ [BytesOp BtLength]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -625,6 +631,7 @@ bytesPrimName p =
     BtSetU8 -> "bt_set_u8"
     BtToBytes -> "bt_to_bytes"
     BtSetBytes -> "bt_set_bytes"
+    BtLength -> "bt_length"
 
 arrPrimName :: ArrPrim -> Text
 arrPrimName p =
@@ -773,6 +780,7 @@ primArity op =
         BtSetU8 -> 3
         -- transient, offset, bytes
         BtSetBytes -> 3
+        BtLength -> 1
     ArrOp p ->
       case p of
         ALength -> 1

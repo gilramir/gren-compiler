@@ -87,6 +87,9 @@ spec = do
     it "`bt_set_bytes` copies a Bytes in at an offset (D233)" $
       typeOf "bt_set_bytes" `shouldBe` Just (fn [tTransient, tInt, tBytes] tTransient)
 
+    it "`bt_length` is the bytes transient's length, the checker's measure (D863)" $
+      typeOf "bt_length" `shouldBe` Just (fn [tTransient] tInt)
+
     it "`bytes_slice` answers Bytes" $
       typeOf "bytes_slice" `shouldBe` Just (fn [tBytes, tInt, tInt] tBytes)
 

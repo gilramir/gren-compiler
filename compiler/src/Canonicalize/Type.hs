@@ -514,7 +514,9 @@ measures =
     (ModuleName.dict, Name.fromChars "count"),
     (ModuleName.Canonical Pkg.core (Name.fromChars "Set"), Name.fromChars "count"),
     -- Not exposed by @core@, so only @core@'s primitives name it (D846).
-    (ModuleName.Canonical Pkg.core (Name.fromChars "Array.Transient"), Name.fromChars "length")
+    (ModuleName.Canonical Pkg.core (Name.fromChars "Array.Transient"), Name.fromChars "length"),
+    -- The same for the bytes transient (D863, @m4-refine.md@ §RF32).
+    (ModuleName.Canonical Pkg.core (Name.fromChars "Bytes.Transient"), Name.fromChars "length")
   ]
 
 -- | An operator of D808's, resolved as any operator is.
