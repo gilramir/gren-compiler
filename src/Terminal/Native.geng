@@ -500,6 +500,7 @@ serve fs fromString request =
 
                             Ok out ->
                                 FileSystem.writeFile fs (Bytes.fromString out.text) (Path.append (Path.fromPosixString "program.c") thePlan.work)
+                                    |> Task.andThen (\_ -> FileSystem.writeFile fs (Bytes.fromString out.rows) (Path.append (Path.fromPosixString "geng_rows.h") thePlan.work))
                                     |> Task.mapError (\e -> { what = "I cannot write the C", why = FileSystem.errorToString e })
                                     |> Task.map
                                         (\_ ->
@@ -725,6 +726,65 @@ which are every flag the program's own C has, and then the `--cflags`. The rest
 of `externs` is compiled with the program, as it was before D890. -}
 compileLinked : Config -> Plan -> Array String -> Array Path -> Task Report Compiled
 compileLinked config thePlan flags externs =
+    checkRows config thePlan externs
+        |> Task.andThen (compileApart config thePlan flags externs)
+
+
+{-| Each `src/Ext/*.c` to be compiled through a file of the build's own that
+includes it and then `geng_rows.h`, the backend's prototype of every `c` row
+the program calls, as the program calls it (`ffi.md` F1, D893). A row defined
+at another type, or as a pure function where the program calls a `Task` row,
+is then a declaration that conflicts with its definition, which the C
+compiler refuses. The header comes after the row's C, so whatever the file
+defines before its own includes, `_GNU_SOURCE` among them, still comes first;
+and the runtime's C and the program's are compiled without it. A file's own
+`#include "…"` still looks in its own directory first, since that is where the
+included file is. -}
+checkRows : Config -> Plan -> Array Path -> Task Report (Dict String Path)
+checkRows config thePlan externs =
+    let
+        quoted path =
+            "\""
+                ++ (config.toString path
+                        |> String.replace "\\" "\\\\"
+                        |> String.replace "\"" "\\\""
+                   )
+                ++ "\""
+    in
+    externs
+        |> Array.indexedMap
+            (\index file ->
+                let
+                    name =
+                        "geng_row_check_" ++ String.fromInt index ++ ".c"
+
+                    wrapper =
+                        Path.append (Path.fromPosixString name) thePlan.work
+                in
+                write config.fs
+                    thePlan.work
+                    [ { name = name
+                      , text =
+                            "/* The c rows of "
+                                ++ Path.filenameWithExtension file
+                                ++ ", then how the program calls them (D893). */\n#include "
+                                ++ quoted file
+                                ++ "\n#include \"geng_rows.h\"\n"
+                      }
+                    ]
+                    |> Task.map (\_ -> { key = config.toString file, value = wrapper })
+            )
+        |> Task.sequence
+        |> Task.map (Array.foldl (\entry acc -> Dict.set entry.key entry.value acc) Dict.empty)
+
+
+compileApart : Config -> Plan -> Array String -> Array Path -> Dict String Path -> Task Report Compiled
+compileApart config thePlan flags externs checked =
+    let
+        through file =
+            Dict.get (config.toString file) checked
+                |> Maybe.withDefault file
+    in
     config.linked
         |> Array.keepIf (\linked -> not (Array.isEmpty linked.modules))
         |> Array.indexedMap
@@ -749,7 +809,7 @@ compileLinked config thePlan flags externs =
                                                                                 thePlan.work
                                                                             )
                                                                 in
-                                                                cc config ([ "-c" ] ++ flags ++ cflags ++ [ "-o", object, config.toString file ])
+                                                                cc config ([ "-c" ] ++ flags ++ cflags ++ [ "-o", object, config.toString (through file) ])
                                                                     |> Task.map (\_ -> object)
                                                             )
                                                         |> Task.sequence
@@ -765,7 +825,7 @@ compileLinked config thePlan flags externs =
                     apart =
                         Array.mapAndFlatten .files done
                 in
-                { sources = Array.keepIf (\file -> not (Array.member file apart)) externs
+                { sources = Array.keepIf (\file -> not (Array.member file apart)) externs |> Array.map through
                 , objects = Array.mapAndFlatten .objects done
                 , libraries = Array.mapAndFlatten .libs done
                 }
