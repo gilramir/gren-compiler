@@ -44,8 +44,11 @@ import Gren.Platform qualified as Platform
 import Nitpick.Debug qualified as Nitpick
 import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
+import Control.Exception qualified as Exception
+import Data.ByteString.Char8 qualified as BSC
 import System.Environment qualified as Env
 import System.FilePath ((</>))
+import System.IO qualified as IO
 import Prelude hiding (cycle, print)
 
 -- GENERATORS
@@ -169,6 +172,18 @@ make target details sources artifacts request =
 -- refinements does. A program with none is built in one process, and the cut
 -- costs it a look at each module's signature table and references.
 --
+-- __With @GENG_REFINE_HOLD@ the first run is the build__ (geng-lang
+-- @m4-refine.md@ §RF37, D876). Once the stage is written it says so on its
+-- standard output with 'stagedLine', and waits for one line on its standard
+-- input: @go@ is the checker's proof, and the build goes on in this run as one
+-- with @GENG_REFINE_CHECKED@ would; anything else, the input closed among it,
+-- stops it with nothing written, as an unheld first run stops. The front end
+-- is not run twice. The CLI's @make@ holds; @validate@, @bump@ and @diff@,
+-- which run twice to compare versions (D855), do not.
+--
+-- Only what the checker reads is staged ('checkerReads', D874), unless a gate
+-- asks for every module.
+--
 -- __Neither variable set is a refusal__, since nothing will check the program:
 -- the binary run by itself, not by the CLI. @GENG_UNCHECKED_REFINEMENTS@ lets
 -- it build anyway (D825), a development switch whose program has promises
@@ -208,13 +223,34 @@ cutAt sub cores =
         Just dir
           | dir /= "" ->
               do
-                _ <- Task.io (roundTrip (Just (if null sub then dir else dir </> sub)) cores)
-                return False
+                everything <- Task.io (or <$> mapM isSet ["GENG_REFINE_CORE", "GENG_REFINE_EVERY_MODULE"])
+                let staged = if everything then cores else checkerReads cores
+                _ <- Task.io (roundTrip (Just (if null sub then dir else dir </> sub)) staged)
+                held <- Task.io (isSet "GENG_REFINE_HOLD")
+                if held then Task.io awaitVerdict else return False
         _
           | afterCheck || unchecked -> return True
           | otherwise -> Task.throw Exit.GenerateRefinementsUnchecked
   where
     isSet name = maybe False (/= "") <$> Env.lookupEnv name
+
+-- | The line a held first run writes when its stage is complete (D876): NUL
+-- on each side, which no build's progress or report contains, and the CLI
+-- leaves it out of what it shows.
+stagedLine :: BS.ByteString
+stagedLine =
+  BSC.pack "\0geng-refine-staged\0\n"
+
+-- | Say the stage is written, and wait for the CLI's verdict: 'True' is @go@.
+-- The output before it is flushed first, so that the line follows it.
+awaitVerdict :: IO Bool
+awaitVerdict =
+  do
+    IO.hFlush IO.stdout
+    BS.hPut IO.stdout stagedLine
+    IO.hFlush IO.stdout
+    answer <- Exception.try BSC.getLine :: IO (Either Exception.IOException BS.ByteString)
+    return (answer == Right (BSC.pack "go"))
 
 -- | Whether a module outside @core@ has a signature or calls a refined function,
 -- which is what the checker checks (geng-lang @m4-refine.md@ §RF27, D845).
@@ -228,7 +264,13 @@ cutAt sub cores =
 -- Checking them here would cut every build, since every program has @core@.
 owesCheck :: Map.Map ModuleName.Canonical Core.Module -> Bool
 owesCheck cores =
-  any owes modules
+  not (Map.null (owing cores))
+
+-- | The modules 'owesCheck' finds owing, which are the modules the checker
+-- walks (@Geng.Refine.Check.checkWith@ without @GENG_REFINE_EVERY_MODULE@).
+owing :: Map.Map ModuleName.Canonical Core.Module -> Map.Map ModuleName.Canonical Core.Module
+owing cores =
+  Map.filter owes cores
   where
     modules = Map.elems cores
     refined =
@@ -251,6 +293,61 @@ owesCheck cores =
         && ( not (null (Core._moduleSignatures m))
                || any (not . Set.disjoint refined . Refs._refGlobals . Refs.refsIn . Core._bindValue) (Core._moduleDefs m)
            )
+
+-- | What the checker reads of a program (geng-lang @m4-refine.md@ §RF36,
+-- D874): the modules it walks in full, and of every other module only the
+-- top-level definitions those name, each with its signature, closed over the
+-- names the signatures' predicates read. The checker reads another module's
+-- definition only at a reference, as a signature, an @Int@ or array literal
+-- (D835) or a primitive's wrapper, so the rest of the program is decoding it
+-- would not use. A module none of whose definitions is named is not written.
+checkerReads :: Map.Map ModuleName.Canonical Core.Module -> Map.Map ModuleName.Canonical Core.Module
+checkerReads cores =
+  Map.union walked (Map.mapMaybe cut others)
+  where
+    walked = owing cores
+    others = Map.difference cores walked
+    refsOf = Refs._refGlobals . Refs.refsIn
+    predicateRefs sig =
+      Set.unions [refsOf p | n <- Core._sigNamed sig, Just p <- [Core._namedPredicate n]]
+    start =
+      Set.unions
+        ( [refsOf (Core._bindValue b) | m <- Map.elems walked, b <- Core._moduleDefs m]
+            ++ [predicateRefs sig | m <- Map.elems walked, sig <- Core._moduleSignatures m]
+        )
+    topSignatures =
+      Map.fromList
+        [ (Core.QualName (Core._moduleName m) (Core._binderName (Core._sigBinder sig)), sig)
+        | m <- Map.elems others,
+          let binders = map Core._bindBinder (Core._moduleDefs m),
+          sig <- Core._moduleSignatures m,
+          Core._sigBinder sig `elem` binders
+        ]
+    close seen frontier
+      | Set.null frontier = seen
+      | otherwise =
+          let seen' = Set.union seen frontier
+              next =
+                Set.unions [predicateRefs sig | q <- Set.toList frontier, Just sig <- [Map.lookup q topSignatures]]
+           in close seen' (Set.difference next seen')
+    needed = close Set.empty start
+    cut m =
+      let home = Core._moduleName m
+          named q = Set.member q needed
+          kept = [b | b <- Core._moduleDefs m, named (Core.QualName home (Core._binderName (Core._bindBinder b)))]
+          binders = map Core._bindBinder kept
+       in if null kept
+            then Nothing
+            else
+              Just
+                m
+                  { Core._moduleDefs = kept,
+                    Core._moduleDefsRec = filter (not . null) (map (filter named) (Core._moduleDefsRec m)),
+                    Core._moduleExports = filter named (Core._moduleExports m),
+                    Core._moduleInline = filter named (Core._moduleInline m),
+                    Core._moduleExterns = filter (named . Core.QualName home . Core._binderName . Core._externBinder) (Core._moduleExterns m),
+                    Core._moduleSignatures = [sig | sig <- Core._moduleSignatures m, Core._sigBinder sig `elem` binders]
+                  }
 
 -- | The passes, and then either a stop or the rest of the build.
 afterFront :: Maybe Backend -> Details.Details -> ExtSources -> Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> Request -> Task (Maybe B.Builder)

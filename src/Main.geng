@@ -1266,8 +1266,9 @@ nativeSources context resolved =
 
 
 {-| A build's run of the backend, checked by the refinement checker (geng-lang
-`m4-refine.md` §RF24, D833): `Terminal.Refine` runs it once, and a second time
-when it stopped for the checker and the checker refused nothing.
+`m4-refine.md` §RF24, D833): `Terminal.Refine` runs it once, held at the cut
+when the program owes a goal, and tells it to go on when the checker refused
+nothing (§RF37, D876).
 -}
 checkedBackend : Context -> Path -> Dict String String -> Terminal.Refine.Sources -> { headless : Bool, encodedCommand : Bytes } -> Task Report Int
 checkedBackend context compilerPath environment sources talk =
@@ -1288,6 +1289,234 @@ checkedBackend context compilerPath environment sources talk =
                             }
                         )
         }
+        (\extra verdict ->
+            startBackend context compilerPath (Dict.union extra environment)
+                |> Task.andThen (talkHeld context talk verdict)
+        )
+
+
+{-| The line a held run writes when its stage is complete (geng-lang
+`m4-refine.md` §RF37, D876), which the binary's `Generate.stagedLine` is: it is
+left out of what is shown.
+-}
+stagedLine : Bytes
+stagedLine =
+    Bytes.fromString "\u{0000}geng-refine-staged\u{0000}\n"
+
+
+{-| `talkWith` for a run held at the refinement cut (D876). Its output is
+watched for `stagedLine`; when it comes, `verdict` is the check, and the
+binary is told `go` when it answers `True` and `stop` otherwise. A check that
+refuses the program stops the binary, and once the binary has exited the
+refusal is this task's failure. A run that never writes the line was a build
+with nothing to check. Our standard input is not copied: nothing the build
+does after the cut reads it, and the verdict is written there.
+-}
+talkHeld : Context -> { headless : Bool, encodedCommand : Bytes } -> Task Report Bool -> ChildProcess.Child -> Task Report Int
+talkHeld context { headless, encodedCommand } verdict child =
+    let
+        exited =
+            ChildProcess.waitForExit child
+    in
+    when ChildProcess.streams child is
+        Nothing ->
+            exited
+
+        Just streams ->
+            let
+                answer =
+                    verdict
+                        |> Task.map
+                            (\goOn ->
+                                { line =
+                                    if goOn then
+                                        "go\n"
+
+                                    else
+                                        "stop\n"
+                                , refusal = Nothing
+                                }
+                            )
+                        |> Task.onError (\report -> Task.succeed { line = "stop\n", refusal = Just report })
+                        |> Task.andThen
+                            (\decided ->
+                                Stream.write (Bytes.fromString decided.line) streams.input
+                                    |> Task.map (\_ -> decided.refusal)
+                                    |> Task.onError (\_ -> Task.succeed decided.refusal)
+                            )
+
+                shown =
+                    if headless then
+                        Nothing
+
+                    else
+                        Just context.stdout
+
+                logged error =
+                    Stream.Log.line context.stderr ("Something went wrong when communicating with compiler backend: " ++ Stream.errorToString error)
+                        |> Task.map (\_ -> Nothing)
+            in
+            Task.concurrent
+                [ Stream.write encodedCommand streams.input
+                    |> Task.map (\_ -> Nothing)
+                    |> Task.onError logged
+                , watchFor stagedLine streams.output shown answer
+                    |> Task.onError logged
+                , copy streams.error context.stderr
+                    |> Task.map (\_ -> Nothing)
+                    |> Task.onError logged
+                ]
+                |> Task.andThen
+                    (\results ->
+                        exited
+                            |> Task.andThen
+                                (\exitCode ->
+                                    when Array.mapAndKeepJust identity results |> Array.first is
+                                        Just report ->
+                                            Task.fail report
+
+                                        Nothing ->
+                                            Task.succeed exitCode
+                                )
+                    )
+
+
+{-| Copy `source` to `target`, or read it and show nothing when there is no
+target, leaving out the first `line` and running `onLine` when it comes. A
+chunk can end inside the line, so the bytes that could be its start are kept
+back until the next chunk says whether they are.
+-}
+watchFor : Bytes -> Stream.Readable Bytes -> Maybe (Stream.Writable Bytes) -> Task Stream.Error (Maybe a) -> Task Stream.Error (Maybe a)
+watchFor line source target onLine =
+    let
+        size =
+            Bytes.length line
+
+        put bytes =
+            when target is
+                Just writable ->
+                    if Bytes.isEmpty bytes then
+                        Task.succeed {}
+
+                    else
+                        Stream.write bytes writable |> Task.map (\_ -> {})
+
+                Nothing ->
+                    Task.succeed {}
+
+        rest =
+            when target is
+                Just writable ->
+                    copy source writable
+
+                Nothing ->
+                    drain source
+
+        loop held =
+            Stream.read source
+                |> Task.map Just
+                |> Task.onError
+                    (\error ->
+                        when error is
+                            Stream.Closed ->
+                                Task.succeed Nothing
+
+                            _ ->
+                                Task.fail error
+                    )
+                |> Task.andThen
+                    (\chunk ->
+                        when chunk is
+                            Nothing ->
+                                put held |> Task.map (\_ -> Nothing)
+
+                            Just bytes ->
+                                let
+                                    joined =
+                                        Bytes.flatten [ held, bytes ]
+
+                                    total =
+                                        Bytes.length joined
+                                in
+                                when findBytes line joined is
+                                    Just at ->
+                                        put (Bytes.slice 0 at joined)
+                                            |> Task.andThen (\_ -> onLine)
+                                            |> Task.andThen
+                                                (\result ->
+                                                    put (Bytes.slice (at + size) total joined)
+                                                        |> Task.andThen (\_ -> rest)
+                                                        |> Task.map (\_ -> result)
+                                                )
+
+                                    Nothing ->
+                                        let
+                                            cut =
+                                                max 0 (total - (size - 1))
+                                        in
+                                        put (Bytes.slice 0 cut joined)
+                                            |> Task.andThen (\_ -> loop (Bytes.slice cut total joined))
+                    )
+    in
+    loop Bytes.empty
+
+
+{-| Where `needle` first starts in `haystack`. -}
+findBytes : Bytes -> Bytes -> Maybe Int
+findBytes needle haystack =
+    let
+        size =
+            Bytes.length needle
+
+        total =
+            Bytes.length haystack
+
+        matchesAt position offset =
+            if offset >= size then
+                True
+
+            else if Bytes.get (position + offset) haystack == Bytes.get offset needle then
+                matchesAt position (offset + 1)
+
+            else
+                False
+
+        from position =
+            if position + size > total then
+                Nothing
+
+            else if matchesAt position 0 then
+                Just position
+
+            else
+                from (position + 1)
+    in
+    from 0
+
+
+{-| Read `source` until it closes, keeping nothing. -}
+drain : Stream.Readable Bytes -> Task Stream.Error {}
+drain source =
+    Stream.read source
+        |> Task.map Just
+        |> Task.onError
+            (\error ->
+                when error is
+                    Stream.Closed ->
+                        Task.succeed Nothing
+
+                    _ ->
+                        Task.fail error
+            )
+        |> Task.andThen
+            (\chunk ->
+                when chunk is
+                    Just _ ->
+                        drain source
+
+                    Nothing ->
+                        Task.succeed {}
+            )
 
 
 {-| The backend, started, with `environment` set in it on top of ours.
