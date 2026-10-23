@@ -183,6 +183,7 @@ trackBuild style callback =
     Terminal mvar held ->
       do
         chan <- newChan
+        finished <- newEmptyMVar
 
         _ <- forkIO $
           do
@@ -190,9 +191,16 @@ trackBuild style callback =
             putStrFlush "Compiling ..."
             buildLoop chan held 0
             putMVar mvar ()
+            putMVar finished ()
 
         result <- callback (Key (writeChan chan . Left))
         writeChan chan (Right result)
+        -- The build's last line is written, or held, before this returns.
+        -- @readMVar mvar@ alone does not wait for it: a reporter thread not
+        -- yet started has not taken the 'MVar', and the line it then writes
+        -- comes after whatever the caller does next ('releaseHeld' finding
+        -- nothing held, a report, the process's exit).
+        takeMVar finished
         return result
 
 data BMsg
