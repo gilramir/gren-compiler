@@ -19,6 +19,7 @@ module AST.Canonical
     -- definitions
     Def (..),
     Refinement (..),
+    AliasRefinement (..),
     RefinementStep (..),
     Enclosing (..),
     Decls (..),
@@ -413,8 +414,27 @@ data Module = Module
 data ExternBody = ExternBody [ExternImpl] Bool
   deriving (Show)
 
-data Alias = Alias [Name] Type
+-- | A type alias: its variables, its body with any name taken off, and the
+-- name and predicate the body gives its value when it is refined, as
+-- @type alias Nat = (n : Int where 0 <= n)@ is (geng-lang @m4-refine.md@
+-- §RF35, D867).
+data Alias = Alias [Name] Type (Maybe AliasRefinement)
   deriving (Eq, Show)
+
+-- | A refined alias's name and predicate. The predicate is canonical, over the
+-- one name, and goes in the interface (D871): a module that uses another's
+-- alias expands it into its own signatures, so a changed predicate is a
+-- changed interface. Two are the same when their name and source are, the
+-- predicate being canonicalized from the source in the alias's module.
+data AliasRefinement = AliasRefinement
+  { _ar_name :: Name,
+    _ar_predicate :: Expr,
+    _ar_source :: String
+  }
+  deriving (Show)
+
+instance Eq AliasRefinement where
+  a == b = _ar_name a == _ar_name b && _ar_source a == _ar_source b
 
 -- | @class Eq a where eq : a -> a -> Bool@, canonicalized.
 --
@@ -642,8 +662,62 @@ data Export
 -- BINARY
 
 instance Binary Alias where
-  get = liftM2 Alias get get
-  put (Alias a b) = put a >> put b
+  get = liftM3 Alias get get get
+  put (Alias a b c) = put a >> put b >> put c
+
+instance Binary AliasRefinement where
+  get = liftM3 AliasRefinement get getPredicate get
+  put (AliasRefinement a b c) = put a >> putPredicate b >> put c
+
+-- | A predicate, which D808 keeps to literals, names, @core@'s measures, the
+-- operators and @True@ and @False@: only those nodes are written, unnumbered,
+-- since the module that reads it numbers its own (D871).
+putPredicate :: Expr -> Put
+putPredicate (Expr _ region expr) =
+  do
+    put region
+    case expr of
+      Int i -> putWord8 0 >> put i
+      Negate a -> putWord8 1 >> putPredicate a
+      VarLocal a -> putWord8 2 >> put a
+      VarForeign a b c -> putWord8 3 >> put a >> put b >> put c
+      VarCtor a b c d e -> putWord8 4 >> put a >> put b >> put c >> put d >> put e
+      Call f args -> putWord8 5 >> putPredicate f >> putPredicates args
+      Binop a b c l r -> putWord8 6 >> put a >> putOpTarget b >> put c >> putPredicate l >> putPredicate r
+      _ -> error "a refined alias's predicate holds a node D808 does not allow"
+  where
+    putPredicates xs = put (length xs) >> mapM_ putPredicate xs
+
+getPredicate :: Get Expr
+getPredicate =
+  do
+    region <- get
+    n <- getWord8
+    Expr unnumbered region
+      <$> case n of
+        0 -> Int <$> get
+        1 -> Negate <$> getPredicate
+        2 -> VarLocal <$> get
+        3 -> liftM3 VarForeign get get get
+        4 -> VarCtor <$> get <*> get <*> get <*> get <*> get
+        5 -> Call <$> getPredicate <*> (get >>= \len -> replicateM len getPredicate)
+        6 -> Binop <$> get <*> getOpTarget <*> get <*> getPredicate <*> getPredicate
+        _ -> fail "binary encoding of a refined alias's predicate was corrupted"
+
+putOpTarget :: OpTarget -> Put
+putOpTarget target =
+  case target of
+    OpValue a b -> putWord8 0 >> put a >> put b
+    OpMethod a b c -> putWord8 1 >> put a >> put b >> put c
+
+getOpTarget :: Get OpTarget
+getOpTarget =
+  do
+    n <- getWord8
+    case n of
+      0 -> liftM2 OpValue get get
+      1 -> liftM3 OpMethod get get get
+      _ -> fail "binary encoding of OpTarget was corrupted"
 
 instance Binary ClassDecl where
   get = liftM2 ClassDecl get get

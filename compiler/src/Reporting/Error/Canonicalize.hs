@@ -49,6 +49,7 @@ data Error
   | ClassMethodWithoutParam A.Region Name.Name Name.Name Name.Name
   | ConstraintDuplicate A.Region Name.Name Name.Name
   | RefinementMisplaced A.Region Bool RefinementPlace
+  | RefinedAliasMisplaced A.Region Name.Name RefinementPlace
   | RefinementNameUnknown A.Region Name.Name [Name.Name]
   | RefinementNameOutOfScope A.Region Name.Name Bool
   | RefinementNameDuplicate Name.Name A.Region A.Region
@@ -416,6 +417,17 @@ toReport source err =
             D.reflow $
               "A name or a refinement goes on an argument or the result of a value's signature, top-level or in a `let`, "
                 ++ placeHint place
+          )
+    RefinedAliasMisplaced region name place ->
+      Report.Report "MISPLACED REFINEMENT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`" ++ Name.toChars name ++ "` is a refined type alias, and " ++ placeText place ++ ":",
+            D.reflow $
+              "A refined alias goes where a signature names a value, an argument or the result of a value's signature, top-level or in a `let`, since its predicate is about that value (D869)."
           )
     RefinementNameUnknown region name seen ->
       Report.Report "UNKNOWN NAME IN REFINEMENT" region [] $
@@ -1901,7 +1913,7 @@ placeText place =
 placeHint :: RefinementPlace -> String
 placeHint place =
   case place of
-    InAlias -> "and a refined type alias waits until programs show it is wanted (D816)."
+    InAlias -> "and a type alias is refined only as the whole of its body, `type alias Nat = (n : Int where 0 <= n)` (D867)."
     InRecordField -> "and a refined record field waits until programs show it is wanted (D816)."
     InAnnotation -> "and a refined expression annotation waits until programs show it is wanted (D816)."
     InTypeArgument -> "where it names a value the function takes or gives; an argument of a type is no such value."

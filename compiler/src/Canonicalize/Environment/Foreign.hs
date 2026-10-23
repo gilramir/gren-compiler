@@ -166,8 +166,8 @@ aliasToType home name alias =
   aliasToTypeHelp home name <$> I.toPublicAlias alias
 
 aliasToTypeHelp :: ModuleName.Canonical -> Name.Name -> Can.Alias -> (Env.Type, Env.Exposed Env.Ctor)
-aliasToTypeHelp home _ (Can.Alias vars tipe) =
-  (Env.Alias (length vars) home vars tipe, Map.empty)
+aliasToTypeHelp home _ (Can.Alias vars tipe refinement) =
+  (Env.Alias (length vars) home vars tipe refinement, Map.empty)
 
 -- BINOP
 
@@ -211,7 +211,7 @@ addExposedValue home vars types binops classes (State vs ts cs bs cls ms qvs qts
                 Env.Union _ _ ->
                   let !ts2 = Map.insert name (Env.Specific home tipe) ts
                    in Result.ok (State vs ts2 cs bs cls ms qvs qts qcs qcls qms)
-                Env.Alias _ _ _ _ ->
+                Env.Alias _ _ _ _ _ ->
                   let !ts2 = Map.insert name (Env.Specific home tipe) ts
                       !cs2 = addExposed cs ctors
                    in Result.ok (State vs ts2 cs2 bs cls ms qvs qts qcs qcls qms)
@@ -235,7 +235,7 @@ addExposedValue home vars types binops classes (State vs ts cs bs cls ms qvs qts
                   let !ts2 = Map.insert name (Env.Specific home tipe) ts
                       !cs2 = addExposed cs ctors
                    in Result.ok (State vs ts2 cs2 bs cls ms qvs qts qcs qcls qms)
-                Env.Alias _ _ _ _ ->
+                Env.Alias _ _ _ _ _ ->
                   Result.throw (Error.ImportOpenAlias dotDotRegion name)
             Nothing ->
               if Map.member name classes

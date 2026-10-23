@@ -223,10 +223,10 @@ unionToDoc localizer name (Docs.Union _ tvars ctors) =
    in D.hang 4 (D.sep (setup : zipWith (<+>) ("=" : repeat "|") (map ctorDoc ctors)))
 
 aliasToDoc :: L.Localizer -> Name.Name -> Docs.Alias -> D.Doc
-aliasToDoc localizer name (Docs.Alias _ tvars tipe) =
+aliasToDoc localizer name (Docs.Alias _ tvars tipe named) =
   let declaration =
         "type" <+> "alias" <+> D.hsep (map D.fromName (name : tvars)) <+> "="
-   in D.hang 4 (D.sep [declaration, typeDoc localizer tipe])
+   in D.hang 4 (D.sep [declaration, signatureDoc localizer named tipe])
 
 valueToDoc :: L.Localizer -> Name.Name -> Docs.Value -> D.Doc
 valueToDoc localizer name (Docs.Value _ tipe named) =

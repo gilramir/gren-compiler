@@ -4,6 +4,7 @@ module Canonicalize.Type
     Signature (..),
     checkBody,
     canonicalize,
+    canonicalizeAliasBody,
     addFreeVars,
   )
 where
@@ -19,6 +20,7 @@ import Control.Monad (foldM)
 import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Maybe qualified as Maybe
+import Data.Char qualified as Char
 import Data.Name qualified as Name
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
@@ -100,10 +102,12 @@ canonicalize place env (A.At typeRegion tipe) =
     Src.TVar x ->
       Result.ok (Can.TVar x)
     Src.TType region name args ->
-      canonicalizeType env typeRegion name (fmap snd args)
+      refuseRefined place typeRegion name
+        =<< canonicalizeType env typeRegion name (fmap snd args)
         =<< Env.findType region env name
     Src.TTypeQual region home name args ->
-      canonicalizeType env typeRegion name (fmap snd args)
+      refuseRefined place typeRegion name
+        =<< canonicalizeType env typeRegion name (fmap snd args)
         =<< Env.findTypeQual region env home name
     Src.TLambda a b _ ->
       Can.TLambda
@@ -117,6 +121,76 @@ canonicalize place env (A.At typeRegion tipe) =
       canonicalize place env inner
     Src.TNamed _ _ maybePredicate ->
       Result.throw (Error.RefinementMisplaced typeRegion (Maybe.isJust maybePredicate) place)
+
+-- | A refined alias anywhere a signature does not name a value: in a type's
+-- argument, a record's field, a variant, another alias's body, an annotation
+-- or a method's signature (geng-lang @m4-refine.md@ §RF35, D869). There is no
+-- value there for the predicate to be about, and erasing it would promise a
+-- reader what nothing checks.
+refuseRefined :: Error.RefinementPlace -> A.Region -> Name.Name -> (Can.Type, Maybe Can.AliasRefinement) -> Result i w Can.Type
+refuseRefined place region name (tipe, refinement) =
+  case refinement of
+    Nothing -> Result.ok tipe
+    Just _ -> Result.throw (Error.RefinedAliasMisplaced region name place)
+
+-- | A type alias's body (D867): a refined alias is D814's name and predicate as
+-- the whole of it, @type alias Nat = (n : Int where 0 <= n)@, the predicate
+-- reading only that name. Anything else is an ordinary alias, where a name is
+-- refused as it is in any type that is not a signature's.
+--
+-- The module's aliases are put in scope before its classes, values and
+-- operators, which a predicate reads, so the first pass is asked with
+-- @readPredicate@ false: it says which aliases are refined, with a predicate of
+-- no meaning, and 'Canonicalize.Environment.Local' reads each predicate once
+-- the scope is complete.
+canonicalizeAliasBody :: Bool -> Env.Env -> Src.Type -> Result i w (Can.Type, Maybe Can.AliasRefinement)
+canonicalizeAliasBody readPredicate env srcType@(A.At region tipe) =
+  case tipe of
+    Src.TParens inner _
+      | isNamed inner ->
+          canonicalizeAliasBody readPredicate env inner
+    Src.TNamed name@(A.At nameRegion nameValue) inner maybePredicate ->
+      do
+        innerType <- canonicalize Error.InAlias env inner
+        case maybePredicate of
+          Nothing ->
+            Result.throw (Error.RefinementNameUnused nameRegion nameValue)
+          Just (predicate, source)
+            | readPredicate ->
+                do
+                  let self = Named region [Can.Result] name innerType (Just predicate) source Nothing False
+                  cpredicate <- canonicalizePredicate env (Scope self [self] []) predicate
+                  Result.ok (innerType, Just (Can.AliasRefinement nameValue cpredicate source))
+            | otherwise ->
+                Result.ok (innerType, Just (Can.AliasRefinement nameValue (Can.at region (Can.Int 0)) source))
+    _ ->
+      (\t -> (t, Nothing)) <$> canonicalize Error.InAlias env srcType
+
+-- | The refined alias a signature's position is written as, when it is one,
+-- canonicalized: its type, and its name and predicate (D872).
+refinedAliasAt :: Env.Env -> Src.Type -> Result i w (Maybe (Can.Type, Can.AliasRefinement))
+refinedAliasAt env (A.At typeRegion tipe) =
+  let resolved found =
+        case found of
+          Env.Alias _ _ _ _ (Just _) -> True
+          _ -> False
+      expand name args info =
+        do
+          (ctype, refinement) <- canonicalizeType env typeRegion name (fmap snd args) info
+          Result.ok ((,) ctype <$> refinement)
+   in case tipe of
+        Src.TParens inner _ ->
+          refinedAliasAt env inner
+        Src.TType region name args ->
+          do
+            info <- Env.findType region env name
+            if resolved info then expand name args info else Result.ok Nothing
+        Src.TTypeQual region home name args ->
+          do
+            info <- Env.findTypeQual region env home name
+            if resolved info then expand name args info else Result.ok Nothing
+        _ ->
+          Result.ok Nothing
 
 canonicalizeFields :: Env.Env -> [Src.TRecordField] -> [(A.Located Name.Name, Result i w Can.FieldType, ())]
 canonicalizeFields env fields =
@@ -195,7 +269,12 @@ data Named = Named
     _name :: A.Located Name.Name,
     _type :: Can.Type,
     _predicate :: Maybe Src.Expr,
-    _source :: String
+    _source :: String,
+    -- | The refined alias the position is written as (D872), whose predicate is
+    -- the position's too.
+    _alias :: Maybe Can.AliasRefinement,
+    -- | Written as the alias alone, with no name of its own.
+    _bare :: Bool
   }
 
 -- | The arrows of a signature, or of a callback inside one: each argument a
@@ -226,13 +305,27 @@ position env path srcType@(A.At region tipe) =
   case tipe of
     Src.TNamed name inner maybePredicate ->
       do
-        (innerType, innerNamed) <- positionType env path inner
-        Result.ok (innerType, Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) : innerNamed)
+        aliased <- refinedAliasAt env inner
+        case aliased of
+          Just (innerType, refinement) ->
+            Result.ok (innerType, [Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) (Just refinement) False])
+          Nothing ->
+            do
+              (innerType, innerNamed) <- positionType env path inner
+              Result.ok (innerType, Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) Nothing False : innerNamed)
     Src.TParens inner _
       | isNamed inner ->
           position env path inner
     _ ->
-      positionType env path srcType
+      do
+        aliased <- refinedAliasAt env srcType
+        case aliased of
+          -- A refined alias with no name of its own here is the alias's name,
+          -- made distinct from the signature's other names in 'refine'.
+          Just (innerType, refinement) ->
+            Result.ok (innerType, [Named region path (A.At region (Can._ar_name refinement)) innerType Nothing "" (Just refinement) True])
+          Nothing ->
+            positionType env path srcType
 
 positionType :: Env.Env -> [Can.RefinementStep] -> Src.Type -> Result i w (Can.Type, [Named])
 positionType env path srcType =
@@ -262,8 +355,9 @@ isNamed (A.At _ tipe) =
 -- could read, an argument of the signature's own arrows, comes back unread,
 -- to be checked against the body; any other is refused here.
 refine :: Env.Env -> [Named] -> Result i w ([Can.Refinement], [A.Located Name.Name])
-refine env named =
+refine env given =
   do
+    let named = distinctAliasNames (Env._signatures env) given
     checkDuplicates named
     traverse_ (checkShadows (Env._signatures env)) named
     refinements <- traverse (refineOne env named) named
@@ -292,6 +386,8 @@ checkRead :: [Name.Name] -> Named -> Result i w [A.Located Name.Name]
 checkRead readNames n =
   case _predicate n of
     Just _ -> Result.ok []
+    Nothing
+      | Maybe.isJust (_alias n) -> Result.ok []
     Nothing ->
       let A.At region name = _name n
        in if name `elem` readNames
@@ -324,7 +420,8 @@ refineOne :: Env.Env -> [Named] -> Named -> Result i w Can.Refinement
 refineOne env named n =
   do
     let enclosing = Env._signatures env
-    predicate <- traverse (canonicalizePredicate env (Scope n named enclosing)) (_predicate n)
+    written <- traverse (canonicalizePredicate env (Scope n named enclosing)) (_predicate n)
+    (predicate, source) <- withAlias env n written
     let readNames = maybe [] predicateLocals predicate
     Result.ok $
       Can.Refinement
@@ -333,9 +430,86 @@ refineOne env named n =
           Can._ref_name = _name n,
           Can._ref_type = _type n,
           Can._ref_predicate = predicate,
-          Can._ref_source = _source n,
+          Can._ref_source = source,
           Can._ref_enclosing = filter ((`elem` readNames) . A.toValue . Can._enc_name) enclosing
         }
+
+-- | A position written as a refined alias (D872): the alias's predicate read
+-- of the position's name, and with a predicate written there too, both, the
+-- alias's first. The source is the alias's with its name replaced, so an
+-- error and the documentation say what is asked of this argument.
+withAlias :: Env.Env -> Named -> Maybe Can.Expr -> Result i w (Maybe Can.Expr, String)
+withAlias env n written =
+  case _alias n of
+    Nothing ->
+      Result.ok (written, _source n)
+    Just (Can.AliasRefinement aliasName aliasPredicate aliasSource) ->
+      let A.At region name = _name n
+          own = renamePredicate aliasName name region aliasPredicate
+          ownSource = renameSource aliasName name aliasSource
+       in case written of
+            Nothing ->
+              Result.ok (Just own, ownSource)
+            Just more ->
+              do
+                binop <- predicateOperator env region (Name.fromChars "&&")
+                Result.ok
+                  ( Just (Can.at region (Can.Binop (Env._op binop) (Env._op_target binop) (Env._op_annotation binop) own more)),
+                    grouped ownSource ++ " && " ++ grouped (_source n)
+                  )
+  where
+    grouped text =
+      if "||" `List.isInfixOf` text then "(" ++ text ++ ")" else text
+
+-- | The alias's predicate over the position's name, every node at the
+-- position, since the alias's own regions are in the module that wrote it.
+renamePredicate :: Name.Name -> Name.Name -> A.Region -> Can.Expr -> Can.Expr
+renamePredicate from to region (Can.Expr nid _ expr) =
+  let go = renamePredicate from to region
+   in Can.Expr nid region $
+        case expr of
+          Can.VarLocal name | name == from -> Can.VarLocal to
+          Can.Negate inner -> Can.Negate (go inner)
+          Can.Call func args -> Can.Call (go func) (map go args)
+          Can.Binop op target annotation left right -> Can.Binop op target annotation (go left) (go right)
+          other -> other
+
+-- | The alias's source with its name replaced wherever it is a name of its
+-- own, not part of a longer one or a qualified measure's.
+renameSource :: Name.Name -> Name.Name -> String -> String
+renameSource from to =
+  go ' '
+  where
+    old = Name.toChars from
+    new = Name.toChars to
+    isNameChar c = Char.isAlphaNum c || c == '_'
+    go _ [] = []
+    go before text@(c : rest)
+      | isNameChar c =
+          let (word, after) = span isNameChar text
+           in (if word == old && before /= '.' then new else word) ++ go (lastOf word) after
+      | otherwise = c : go c rest
+    lastOf word = if null word then ' ' else last word
+
+-- | A refined alias written with no name of its own is named as the alias
+-- names its value, unless the signature, or one around it, already gives that
+-- name; then a number is added until it is one neither gives.
+distinctAliasNames :: [Can.Enclosing] -> [Named] -> [Named]
+distinctAliasNames enclosing named =
+  let written = [A.toValue (_name n) | n <- named, not (isBare n)] ++ map (A.toValue . Can._enc_name) enclosing
+      isBare = _bare
+      fresh taken base =
+        let numbered i = if i == (1 :: Int) then base else Name.fromChars (Name.toChars base ++ show i)
+            go i = if numbered i `elem` taken then go (i + 1) else numbered i
+         in go 1
+      step (taken, out) n =
+        if isBare n
+          then
+            let A.At region base = _name n
+                name = fresh taken base
+             in (name : taken, out ++ [n {_name = A.At region name}])
+          else (taken, out ++ [n])
+   in snd (foldl step (written, []) named)
 
 predicateLocals :: Can.Expr -> [Name.Name]
 predicateLocals (Can.Expr _ _ expr) =
@@ -586,17 +760,19 @@ isLiteral (Can.Expr _ _ expr) =
 
 -- CANONICALIZE TYPE
 
-canonicalizeType :: Env.Env -> A.Region -> Name.Name -> [Src.Type] -> Env.Type -> Result i w Can.Type
+-- | A type named with its arguments, and the alias's refinement when it is a
+-- refined alias (D872), which the caller places or refuses.
+canonicalizeType :: Env.Env -> A.Region -> Name.Name -> [Src.Type] -> Env.Type -> Result i w (Can.Type, Maybe Can.AliasRefinement)
 canonicalizeType env region name args info =
   do
     cargs <- traverse (canonicalize Error.InTypeArgument env) args
     case info of
-      Env.Alias arity home argNames aliasedType ->
+      Env.Alias arity home argNames aliasedType refinement ->
         checkArity arity region name args $
-          Can.TAlias home name (zip argNames cargs) (Can.Holey aliasedType)
+          (Can.TAlias home name (zip argNames cargs) (Can.Holey aliasedType), refinement)
       Env.Union arity home ->
         checkArity arity region name args $
-          Can.TType home name cargs
+          (Can.TType home name cargs, Nothing)
 
 checkArity :: Int -> A.Region -> Name.Name -> [A.Located arg] -> answer -> Result i w answer
 checkArity expected region name args answer =

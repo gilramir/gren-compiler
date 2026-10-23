@@ -133,7 +133,7 @@ extractTransitive types (Deps seenAliases seenUnions) (Deps nextAliases nextUnio
 
 extractAlias :: Types -> Core.QualName -> Extractor T.Alias
 extractAlias (Types dict) (Core.QualName home name) =
-  let (Can.Alias args aliasType) = _alias_info (dict ! home) ! name
+  let (Can.Alias args aliasType _) = _alias_info (dict ! home) ! name
    in T.Alias (toPublicName home name) args <$> extract aliasType
 
 extractUnion :: Types -> Core.QualName -> Extractor T.Union

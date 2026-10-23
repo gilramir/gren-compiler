@@ -191,7 +191,7 @@ lowerUnion transparency home name (Can.Union vars ctors _ _) =
 -- to name the record by (geng-lang @m3-embed.md@ D630); any other alias has
 -- nothing to name there.
 lowerAlias :: ModuleName.Canonical -> Name -> Can.Alias -> Maybe Core.Alias
-lowerAlias home name (Can.Alias vars body) =
+lowerAlias home name (Can.Alias vars body _) =
   case lowerType body of
     tipe@(Core.TRecord (_ : _) Nothing) ->
       Just (Core.Alias (Core.QualName home name) vars tipe)

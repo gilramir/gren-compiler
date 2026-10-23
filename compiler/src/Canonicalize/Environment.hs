@@ -105,7 +105,9 @@ data Var
 -- TYPES
 
 data Type
-  = Alias Int ModuleName.Canonical [Name.Name] Can.Type
+  = -- | Its arity, home, variables and body, and its name and predicate when
+    -- it is refined (geng-lang @m4-refine.md@ §RF35, D872).
+    Alias Int ModuleName.Canonical [Name.Name] Can.Type (Maybe Can.AliasRefinement)
   | Union Int ModuleName.Canonical
 
 -- METHODS

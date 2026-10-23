@@ -148,27 +148,35 @@ isEquivalentUnion (Docs.Union oldComment oldVars oldCtors) (Docs.Union newCommen
       let allEquivalent =
             zipWith
               isEquivalentAlias
-              (map (Docs.Alias oldComment oldVars) oldTypes)
-              (map (Docs.Alias newComment newVars) newTypes)
+              (map (\t -> Docs.Alias oldComment oldVars t []) oldTypes)
+              (map (\t -> Docs.Alias newComment newVars t []) newTypes)
        in length oldTypes == length newTypes
             && and allEquivalent
 
 isEquivalentAlias :: Docs.Alias -> Docs.Alias -> Bool
-isEquivalentAlias (Docs.Alias _ oldVars oldType) (Docs.Alias _ newVars newType) =
+isEquivalentAlias (Docs.Alias _ oldVars oldType oldNamed) (Docs.Alias _ newVars newType newNamed) =
   case diffType oldType newType of
     Nothing ->
       False
     Just renamings ->
       length oldVars == length newVars
         && isEquivalentRenaming (zip oldVars newVars ++ renamings)
+        && map namedKey oldNamed == map namedKey newNamed
+
+-- | A refined alias is the same only when its name and predicate are written
+-- the same (geng-lang @m4-refine.md@ §RF35, D872): its users' callers and
+-- their own proofs both read it, so a change either way is MAJOR.
+namedKey :: Docs.Named -> (Name.Name, String)
+namedKey (Docs.Named _ name source) =
+  (name, source)
 
 isEquivalentValue :: Docs.Value -> Docs.Value -> Bool
 isEquivalentValue (Docs.Value c1 t1 _) (Docs.Value c2 t2 _) =
-  isEquivalentAlias (Docs.Alias c1 [] t1) (Docs.Alias c2 [] t2)
+  isEquivalentAlias (Docs.Alias c1 [] t1 []) (Docs.Alias c2 [] t2 [])
 
 isEquivalentBinop :: Docs.Binop -> Docs.Binop -> Bool
 isEquivalentBinop (Docs.Binop c1 t1 a1 p1) (Docs.Binop c2 t2 a2 p2) =
-  isEquivalentAlias (Docs.Alias c1 [] t1) (Docs.Alias c2 [] t2)
+  isEquivalentAlias (Docs.Alias c1 [] t1 []) (Docs.Alias c2 [] t2 [])
     && a1 == a2
     && p1 == p2
 

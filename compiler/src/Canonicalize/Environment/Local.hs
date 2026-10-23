@@ -46,8 +46,69 @@ add module_ env =
     envWithTypes <- addTypes module_ env
     (envWithClasses, classes) <- addClasses module_ envWithTypes
     envWithVars <- addVars module_ classes envWithClasses
-    (envWithCtors, unions, aliases) <- addCtors module_ envWithVars
+    envWithOps <- addOwnBinops module_ classes envWithVars
+    envWithRefined <- refineAliases module_ envWithOps
+    (envWithCtors, unions, aliases) <- addCtors module_ envWithRefined
     Result.ok (envWithCtors, unions, aliases, classes)
+
+-- OWN OPERATORS
+
+-- | The operators this module declares, in its own scope (geng-lang
+-- @m4-refine.md@ §RF35, D870). Only @core@'s @Basics@ declares any, and before
+-- this it could not use them, so no refinement could be written there: a
+-- predicate is made of D808's operators. Each is given what an importer gets
+-- from the interface, its target and that target's written signature or
+-- method annotation; a target with no signature is left out.
+addOwnBinops :: Src.Module -> Classes -> Env.Env -> Result i w Env.Env
+addOwnBinops module_ classes env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs) =
+  do
+    let (_, infixes) = Src._binops module_
+        signatures =
+          Map.fromList
+            [ (name, annotation)
+              | (_, A.At _ (Src.Value (A.At _ name) _ _ (Just annotation) _)) <- Src._values module_
+            ]
+        method func =
+          case [ (className, param, annotation)
+                 | (className, Can.ClassDecl param methods) <- Map.toList classes,
+                   Just annotation <- [Map.lookup func methods]
+               ] of
+            found : _ -> Just found
+            [] -> Nothing
+        one (A.At _ (Src.Infix op associativity precedence func)) =
+          case method func of
+            Just (className, param, annotation) ->
+              Result.ok [(op, Env.Binop op (Can.OpMethod (Can.Class home className) param func) annotation associativity precedence)]
+            Nothing ->
+              case Map.lookup func signatures of
+                Just (Src.Annotation maybeContext srcType _) ->
+                  do
+                    signature <- Type.toSignature env func maybeContext srcType
+                    Result.ok [(op, Env.Binop op (Can.OpValue home func) (Type._annotation signature) associativity precedence)]
+                Nothing ->
+                  Result.ok []
+    found <- concat <$> traverse one infixes
+    let bs2 = foldr (\(op, binop) acc -> Map.insert op (Env.Specific home binop) acc) bs found
+    if null found
+      then Result.ok env
+      else Result.ok (Env.Env home vs ts cs bs2 cls ms qvs qts qcs qcls qms sigs)
+
+-- | Each refined alias of the module with its predicate read, now that the
+-- scope holds what a predicate reads (D872).
+refineAliases :: Src.Module -> Env.Env -> Result i w Env.Env
+refineAliases module_ env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs) =
+  let refined (A.At _ (Src.Alias (A.At _ name) args tipe)) =
+        do
+          (ctype, refinement) <- Type.canonicalizeAliasBody True env tipe
+          Result.ok $
+            case refinement of
+              Just _ -> [(name, Env.Specific home (Env.Alias (length args) home (map A.toValue args) ctype refinement))]
+              Nothing -> []
+   in do
+        found <- concat <$> traverse refined (fmap snd (Src._aliases module_))
+        if null found
+          then Result.ok env
+          else Result.ok (Env.Env home vs (foldr (uncurry Map.insert) ts found) cs bs cls ms qvs qts qcs qcls qms sigs)
 
 -- ADD VARS
 
@@ -231,8 +292,8 @@ addAlias env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs) scc =
     Graph.AcyclicSCC alias@(A.At _ (Src.Alias (A.At _ name) _ tipe)) ->
       do
         args <- checkAliasFreeVars alias
-        ctype <- Type.canonicalize Error.InAlias env tipe
-        let one = Env.Specific home (Env.Alias (length args) home args ctype)
+        (ctype, refinement) <- Type.canonicalizeAliasBody False env tipe
+        let one = Env.Specific home (Env.Alias (length args) home args ctype refinement)
         let ts1 = Map.insert name one ts
         Result.ok $ Env.Env home vs ts1 cs bs cls ms qvs qts qcs qcls qms sigs
     Graph.CyclicSCC [] ->
@@ -359,9 +420,9 @@ canonicalizeAlias :: Env.Env -> A.Located Src.Alias -> Result i w ((Name.Name, C
 canonicalizeAlias env (A.At _ (Src.Alias (A.At _ name) args tipe)) =
   do
     let vars = map A.toValue args
-    ctipe <- Type.canonicalize Error.InAlias env tipe
+    (ctipe, refinement) <- Type.canonicalizeAliasBody True env tipe
     Result.ok
-      ((name, Can.Alias vars ctipe), Dups.none)
+      ((name, Can.Alias vars ctipe refinement), Dups.none)
 
 -- CANONICALIZE UNION
 

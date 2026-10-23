@@ -67,7 +67,10 @@ data Module = Module
 
 type Comment = Json.String
 
-data Alias = Alias Comment [Name.Name] Type.Type
+-- | A type alias: its comment, variables and body with any name taken off,
+-- and the name and predicate of a refined alias (geng-lang @m4-refine.md@
+-- §RF35, D867), one 'Named' whose path is empty, the whole body.
+data Alias = Alias Comment [Name.Name] Type.Type [Named]
 
 data Union = Union Comment [Name.Name] [(Name.Name, [Type.Type])]
 
@@ -184,13 +187,14 @@ caseDecoder =
 -- ALIAS JSON
 
 encodeAlias :: (Name.Name, Alias) -> E.Value
-encodeAlias (name, Alias comment args tipe) =
-  E.object
+encodeAlias (name, Alias comment args tipe names) =
+  E.object $
     [ "name" ==> E.name name,
       "comment" ==> E.string comment,
       "args" ==> E.list E.name args,
       "type" ==> Type.encode tipe
     ]
+      ++ ["named" ==> E.list encodeNamed names | not (null names)]
 
 alias :: D.Decoder Error Alias
 alias =
@@ -198,6 +202,7 @@ alias =
     <$> D.field "comment" D.string
     <*> D.field "args" (D.list nameDecoder)
     <*> D.field "type" typeDecoder
+    <*> D.oneOf [D.field "named" (D.list namedDecoder), pure []]
 
 -- VALUE JSON
 
@@ -481,10 +486,11 @@ checkExport info name (A.At region export) =
       Result.throw (E.ClassNotDocumentable name region)
     Can.ExportAlias ->
       do
-        let (Can.Alias tvars tipe) = _iAliases info ! name
+        let (Can.Alias tvars tipe refinement) = _iAliases info ! name
+            names = [Named [] (Can._ar_name r) (Can._ar_source r) | Just r <- [refinement]]
         comment <- getComment region name info
         Result.ok $ \m ->
-          m {_aliases = Map.insert name (Alias comment tvars (Extract.fromType tipe)) (_aliases m)}
+          m {_aliases = Map.insert name (Alias comment tvars (Extract.fromType tipe) names) (_aliases m)}
     Can.ExportUnionOpen ->
       do
         let (Can.Union tvars ctors _ _) = _iUnions info ! name
