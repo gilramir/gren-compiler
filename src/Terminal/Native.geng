@@ -1,5 +1,6 @@
 module Terminal.Native exposing
     ( Config
+    , Linked
     , Plan
     , abandon
     , build
@@ -69,7 +70,20 @@ library `probe`, whose functions are `probe_init` and the rest, and writes
 beside it, compiled with `GENG_LIBRARY` defined to the name, and its Boehm is
 single-threaded and hidden (D616). The library is linked `-z nodelete`,
 since the fault handler it installs and the collector's roots point into it
-(§EM11), and links nothing but libc and libm.
+(§EM11), and links nothing but libc and libm, and the libraries its packages
+name.
+
+**A package names the C libraries it links** (geng-lang D890, D891). A
+package's `geng.toml`, or a native application's, may have a `[native]` table
+whose `pkg-config` list names the `pkg-config` modules its `src/Ext/*.c` needs.
+That package's C is then compiled on its own, with every flag the rest of the C
+has and the modules' `--cflags` after them, and linked as objects; the
+modules' `--libs` come after every object and before the runtime's own
+libraries, so a linker that drops a library nothing before it needs keeps
+them. A package with no such table is compiled with the program, as before.
+`pkg-config` is the one on `PATH`, or the one `GENG_PKG_CONFIG` names, and its
+search path is the environment's (`PKG_CONFIG_PATH`). A module it does not
+know is a report naming the package and the module.
 
 -}
 
@@ -114,6 +128,16 @@ type alias Plan =
 type alias Toolchain =
     { cc : String
     , flags : Array String
+    , pkgConfig : String
+    }
+
+
+{-| A package whose `[native]` table names `pkg-config` modules (D890): its
+name, which a report gives, its root and the modules. -}
+type alias Linked =
+    { name : String
+    , root : Path
+    , modules : Array String
     }
 
 
@@ -126,6 +150,7 @@ type alias Config =
     , optimization : String
     , debugInfo : Bool
     , packages : Array Path
+    , linked : Array Linked
     , sources : Array { name : String, path : String }
     }
 
@@ -216,10 +241,12 @@ sourceMaps toString project =
             project.packages
 
 
-{-| `GENG_CC`, else `clang`; and `GENG_CFLAGS`, split on spaces. -}
+{-| `GENG_CC`, else `clang`; `GENG_CFLAGS`, split on spaces; and
+`GENG_PKG_CONFIG`, else `pkg-config` (D890). -}
 toolchain : Dict String String -> Toolchain
 toolchain envVars =
     { cc = Maybe.withDefault "clang" (Dict.get "GENG_CC" envVars)
+    , pkgConfig = Maybe.withDefault "pkg-config" (Dict.get "GENG_PKG_CONFIG" envVars)
     , flags =
         Dict.get "GENG_CFLAGS" envVars
             |> Maybe.withDefault ""
@@ -418,7 +445,8 @@ buildStage config thePlan =
                             |> Task.andThen
                                 (\externs ->
                                     compileBoehm config thePlan [ "-DGC_THREADS" ]
-                                        |> Task.andThen (\_ -> compile config thePlan externs)
+                                        |> Task.andThen (\_ -> compileLinked config thePlan (executableFlags config thePlan) externs)
+                                        |> Task.andThen (\linked -> compile config thePlan linked)
                                 )
                             |> Task.andThen (\_ -> finish config thePlan)
                             |> Task.map (\_ -> 0)
@@ -533,7 +561,8 @@ buildLibrary config thePlan header =
                 |> Task.andThen
                     (\externs ->
                         compileBoehm config thePlan []
-                            |> Task.andThen (\_ -> compileLibrary config thePlan name externs)
+                            |> Task.andThen (\_ -> compileLinked config thePlan (Array.keepIf (\flag -> not (linkOnly flag)) (libraryFlags config thePlan name)) externs)
+                            |> Task.andThen (\linked -> compileLibrary config thePlan name linked)
                     )
                 |> Task.andThen (\_ -> finish config thePlan)
                 |> Task.map (\_ -> 0)
@@ -645,23 +674,7 @@ write fs directory files =
 externSources : Config -> Task Report (Array Path)
 externSources config =
     config.packages
-        |> Array.map
-            (\root ->
-                let
-                    directory =
-                        Path.append (Path.fromPosixString "Ext") (Path.append (Path.fromPosixString "src") root)
-                in
-                FileSystem.listDirectory config.fs directory
-                    |> Task.map
-                        (\entries ->
-                            entries
-                                |> Array.map (\entry -> Path.filenameWithExtension entry.path)
-                                |> Array.keepIf (String.endsWith ".c")
-                                |> Array.sort
-                                |> Array.map (\name -> Path.append (Path.fromPosixString name) directory)
-                        )
-                    |> Task.onError (\_ -> Task.succeed [])
-            )
+        |> Array.map (extFiles config)
         |> Task.sequence
         |> Task.map
             (Array.flatten
@@ -677,10 +690,199 @@ externSources config =
             )
 
 
+{-| A package's `src/Ext/*.c`, sorted, or none when it has no `src/Ext`. -}
+extFiles : Config -> Path -> Task Report (Array Path)
+extFiles config root =
+    let
+        directory =
+            Path.append (Path.fromPosixString "Ext") (Path.append (Path.fromPosixString "src") root)
+    in
+    FileSystem.listDirectory config.fs directory
+        |> Task.map
+            (\entries ->
+                entries
+                    |> Array.map (\entry -> Path.filenameWithExtension entry.path)
+                    |> Array.keepIf (String.endsWith ".c")
+                    |> Array.sort
+                    |> Array.map (\name -> Path.append (Path.fromPosixString name) directory)
+            )
+        |> Task.onError (\_ -> Task.succeed [])
+
+
+{-| What a build's C is, once D890's packages are compiled apart: the C still
+compiled with the program, the objects those packages made, and their modules'
+`--libs`, in the order the packages came. -}
+type alias Compiled =
+    { sources : Array Path
+    , objects : Array String
+    , libraries : Array String
+    }
+
+
+{-| Each package that names `pkg-config` modules (D890): its modules' `--cflags`
+and `--libs`, and each of its `src/Ext/*.c` compiled to an object with `flags`,
+which are every flag the program's own C has, and then the `--cflags`. The rest
+of `externs` is compiled with the program, as it was before D890. -}
+compileLinked : Config -> Plan -> Array String -> Array Path -> Task Report Compiled
+compileLinked config thePlan flags externs =
+    config.linked
+        |> Array.keepIf (\linked -> not (Array.isEmpty linked.modules))
+        |> Array.indexedMap
+            (\index linked ->
+                pkgConfig config linked "--cflags"
+                    |> Task.andThen
+                        (\cflags ->
+                            pkgConfig config linked "--libs"
+                                |> Task.andThen
+                                    (\libs ->
+                                        extFiles config linked.root
+                                            |> Task.andThen
+                                                (\files ->
+                                                    files
+                                                        |> Array.map
+                                                            (\file ->
+                                                                let
+                                                                    object =
+                                                                        config.toString
+                                                                            (Path.append
+                                                                                (Path.fromPosixString ("linked-" ++ String.fromInt index ++ "-" ++ String.dropLast 2 (Path.filenameWithExtension file) ++ ".o"))
+                                                                                thePlan.work
+                                                                            )
+                                                                in
+                                                                cc config ([ "-c" ] ++ flags ++ cflags ++ [ "-o", object, config.toString file ])
+                                                                    |> Task.map (\_ -> object)
+                                                            )
+                                                        |> Task.sequence
+                                                        |> Task.map (\objects -> { files = files, objects = objects, libs = libs })
+                                                )
+                                    )
+                        )
+            )
+        |> Task.sequence
+        |> Task.map
+            (\done ->
+                let
+                    apart =
+                        Array.mapAndFlatten .files done
+                in
+                { sources = Array.keepIf (\file -> not (Array.member file apart)) externs
+                , objects = Array.mapAndFlatten .objects done
+                , libraries = Array.mapAndFlatten .libs done
+                }
+            )
+
+
+{-| `pkg-config` asked for one kind of flag for a package's modules, split on
+white space. A module it does not know is a report naming the package and the
+module, found by asking it of each module once the whole list failed. A flag
+holding a backslash, which is how `pkg-config` writes a space in a path, is
+refused rather than split wrong. -}
+pkgConfig : Config -> Linked -> String -> Task Report (Array String)
+pkgConfig config linked kind =
+    let
+        options =
+            { shell = ChildProcess.NoShell
+            , workingDirectory = ChildProcess.InheritWorkingDirectory
+            , environmentVariables = ChildProcess.InheritEnvironmentVariables
+            , maximumBytesWrittenToStreams = 1024 * 1024
+            , runDuration = ChildProcess.NoLimit
+            }
+
+        text bytes =
+            Bytes.toString bytes |> Maybe.withDefault ""
+
+        unknown module_ =
+            ChildProcess.run config.cp config.tools.pkgConfig [ "--exists", module_ ] options
+                |> Task.map (\_ -> Nothing)
+                |> Task.onError (\_ -> Task.succeed (Just module_))
+
+        refuse message =
+            Report.create "A PACKAGE'S C LIBRARY IS NOT FOUND" Nothing (PP.verticalBlock message)
+    in
+    ChildProcess.run config.cp config.tools.pkgConfig (Array.pushFirst kind linked.modules) options
+        |> Task.onError
+            (\failed ->
+                when failed is
+                    ChildProcess.InitError err ->
+                        Task.fail <|
+                            Report.create
+                                "I CANNOT RUN PKG-CONFIG"
+                                Nothing
+                                (PP.verticalBlock
+                                    [ PP.words (linked.name ++ " names the C libraries it links in its [native] table, which a native build asks pkg-config about, and I could not start " ++ config.tools.pkgConfig ++ ": " ++ err.errorCode ++ ".")
+                                    , PP.empty
+                                    , PP.words "Put pkg-config on your PATH, or tell me which one to run with the GENG_PKG_CONFIG environment variable."
+                                    ]
+                                )
+
+                    ChildProcess.ProgramError err ->
+                        linked.modules
+                            |> Array.map unknown
+                            |> Task.sequence
+                            |> Task.andThen
+                                (\answers ->
+                                    when Array.mapAndKeepJust identity answers |> Array.first is
+                                        Just module_ ->
+                                            Task.fail <|
+                                                refuse
+                                                    [ PP.words (linked.name ++ " links the C library pkg-config calls " ++ module_ ++ ", in its [native] table, and pkg-config does not know it.")
+                                                    , PP.empty
+                                                    , PP.words "Install its development files, or add the directory holding its .pc file to PKG_CONFIG_PATH."
+                                                    ]
+
+                                        Nothing ->
+                                            Task.fail <|
+                                                refuse
+                                                    [ PP.words (linked.name ++ " links " ++ String.join ", " linked.modules ++ ", in its [native] table, and pkg-config " ++ kind ++ " failed with status " ++ String.fromInt err.exitCode ++ ":")
+                                                    , PP.empty
+                                                    , PP.words (String.trim (text err.stderr))
+                                                    ]
+                                )
+            )
+        |> Task.andThen
+            (\ran ->
+                let
+                    output =
+                        text ran.stdout
+                in
+                if String.contains "\\" output then
+                    Task.fail <|
+                        refuse
+                            [ PP.words (linked.name ++ "'s pkg-config modules answer " ++ kind ++ " with a backslash, which is how pkg-config writes a space in a path, and a path with a space is not something I can pass on yet:")
+                            , PP.empty
+                            , PP.words (String.trim output)
+                            ]
+
+                else
+                    Task.succeed
+                        (output
+                            |> String.replace "\n" " "
+                            |> String.replace "\t" " "
+                            |> String.split " "
+                            |> Array.keepIf (\flag -> flag /= "")
+                        )
+            )
+
+
+{-| Every flag the executable's C is compiled with but its sources and output,
+which a package's C compiled apart is given too (D890). -}
+executableFlags : Config -> Plan -> Array String
+executableFlags config thePlan =
+    let
+        boehm file =
+            config.toString (Path.append (Path.fromPosixString file) (boehmDirectory thePlan))
+    in
+    programFlags config thePlan
+        ++ [ "-I", boehm "include/gc", "-I", boehm "include" ]
+        ++ config.tools.flags
+        ++ [ "-I", config.toString thePlan.work ]
+
+
 {-| The executable: the program and the runtime, and Boehm's object, its
-headers ahead of any `GENG_CFLAGS` names, as a library's are. -}
-compile : Config -> Plan -> Array Path -> Task Report {}
-compile config thePlan externs =
+headers ahead of any `GENG_CFLAGS` names, as a library's are; then the objects
+of the packages compiled apart, their libraries, and the runtime's (D890). -}
+compile : Config -> Plan -> Compiled -> Task Report {}
+compile config thePlan compiled =
     let
         in_ name =
             config.toString (Path.append (Path.fromPosixString name) thePlan.work)
@@ -689,12 +891,12 @@ compile config thePlan externs =
             config.toString (Path.append (Path.fromPosixString file) (boehmDirectory thePlan))
     in
     cc config
-        (programFlags config thePlan
-            ++ [ "-I", boehm "include/gc", "-I", boehm "include" ]
-            ++ config.tools.flags
-            ++ [ "-I", config.toString thePlan.work, "-o", config.toString thePlan.exe ]
+        (executableFlags config thePlan
+            ++ [ "-o", config.toString thePlan.exe ]
             ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c", boehm "gc.o" ]
-            ++ Array.map config.toString externs
+            ++ Array.map config.toString compiled.sources
+            ++ compiled.objects
+            ++ compiled.libraries
             ++ [ "-lpthread", "-lm" ]
         )
 
@@ -748,10 +950,31 @@ compileBoehm config thePlan defines =
         )
 
 
+{-| Every flag the library is built with but its sources and output. A package's
+C compiled apart is given them less the two that are the link's, `-shared`
+and `-z nodelete` (D890). -}
+libraryFlags : Config -> Plan -> String -> Array String
+libraryFlags config thePlan name =
+    let
+        boehm file =
+            config.toString (Path.append (Path.fromPosixString file) (boehmDirectory thePlan))
+    in
+    programFlags config thePlan
+        ++ [ "-fPIC", "-shared", "-fvisibility=hidden", "-Wl,-z,nodelete", "-DGENG_LIBRARY=" ++ name ]
+        ++ [ "-I", config.toString thePlan.work, "-I", boehm "include/gc", "-I", boehm "include" ]
+        ++ config.tools.flags
+
+
+linkOnly : String -> Bool
+linkOnly flag =
+    flag == "-shared" || flag == "-Wl,-z,nodelete"
+
+
 {-| The library: the program and the runtime with the boundary, under its name,
-every symbol hidden but the ones the header names, and Boehm's object. -}
-compileLibrary : Config -> Plan -> String -> Array Path -> Task Report {}
-compileLibrary config thePlan name externs =
+every symbol hidden but the ones the header names, and Boehm's object; then the
+objects of the packages compiled apart, and their libraries (D890). -}
+compileLibrary : Config -> Plan -> String -> Compiled -> Task Report {}
+compileLibrary config thePlan name compiled =
     let
         in_ file =
             config.toString (Path.append (Path.fromPosixString file) thePlan.work)
@@ -760,13 +983,12 @@ compileLibrary config thePlan name externs =
             config.toString (Path.append (Path.fromPosixString file) (boehmDirectory thePlan))
     in
     cc config
-        (programFlags config thePlan
-            ++ [ "-fPIC", "-shared", "-fvisibility=hidden", "-Wl,-z,nodelete", "-DGENG_LIBRARY=" ++ name ]
-            ++ [ "-I", config.toString thePlan.work, "-I", boehm "include/gc", "-I", boehm "include" ]
-            ++ config.tools.flags
+        (libraryFlags config thePlan name
             ++ [ "-o", config.toString thePlan.exe ]
             ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c", in_ "geng_embed.c", boehm "gc.o" ]
-            ++ Array.map config.toString externs
+            ++ Array.map config.toString compiled.sources
+            ++ compiled.objects
+            ++ compiled.libraries
             ++ [ "-lm" ]
         )
 

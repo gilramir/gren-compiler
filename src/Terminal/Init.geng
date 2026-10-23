@@ -186,6 +186,7 @@ generateManifest config projectPath deps =
                     , license = License.bsd3
                     , version = { major = 1, minor = 0, patch = 0 }
                     , exposedModules = Outline.ExposedArray []
+                    , pkgConfig = []
                     , gengVersion = compiler
                     , dependencies = dependencies
                     , sources = Dict.empty
@@ -200,6 +201,7 @@ generateManifest config projectPath deps =
                     , name = Nothing
                     , version = Nothing
                     , supervisor = Nothing
+                    , pkgConfig = []
                     , gengVersion = compiler
                     , dependencies = dependencies
                     , sources = Dict.empty

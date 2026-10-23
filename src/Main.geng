@@ -1225,6 +1225,7 @@ nativeMakeBuild context compilerPath flags resolved ordinary =
                                         , optimization = flags.optimization
                                         , debugInfo = flags.debugInfo
                                         , packages = beamPackages context resolved
+                                        , linked = nativeLinked resolved
                                         , sources = nativeSources context resolved
                                         }
                                         thePlan
@@ -1247,6 +1248,27 @@ beamPackages : Context -> Terminal.PackageInstall.PackageResolution -> Array Pat
 beamPackages context resolved =
     [ resolved.projectPath, context.corePath ]
         ++ Array.map .path (Dict.values resolved.dependencies)
+
+
+{-| The packages of a native build whose `[native]` table names `pkg-config`
+modules (geng-lang D890), the application among them (D891), which a report
+calls "This application". -}
+nativeLinked : Terminal.PackageInstall.PackageResolution -> Array Terminal.Native.Linked
+nativeLinked resolved =
+    let
+        own =
+            when resolved.outline is
+                Outline.App app ->
+                    [ { name = "This application", root = resolved.projectPath, modules = app.pkgConfig } ]
+
+                Outline.Pkg pkg ->
+                    [ { name = PackageName.toString pkg.name, root = resolved.projectPath, modules = pkg.pkgConfig } ]
+    in
+    Dict.foldl
+        (\name dependency acc -> Array.pushLast { name = name, root = dependency.path, modules = dependency.outline.pkgConfig } acc)
+        own
+        resolved.dependencies
+        |> Array.keepIf (\linked -> not (Array.isEmpty linked.modules))
 
 
 {-| Where the files a native program's `#line`s name are on this machine
