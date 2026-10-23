@@ -133,6 +133,7 @@ Library common
         Core.Pass.Case
         Core.Pass.Inline
         Core.Pass.Float
+        Core.Pass.FloatIn
         Core.Pass.FoldSpec
         Core.Pass.Mono
         Core.Pass.Mutual

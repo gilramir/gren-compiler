@@ -4,7 +4,7 @@
 --
 -- @docs/core.md@ C11 puts the passes in Haskell through M1b. M1a's pipeline
 -- had none of them; since D169 they all run (four since D442, five since D479,
--- six since D483), except @inline@ on JavaScript since D487, which runs
+-- six since D483, seven since D879), except @inline@ on JavaScript since D487, which runs
 -- @inlinematch@ in its place since D792, unless @GENG_CORE_PASSES@ says
 -- otherwise ('Core.Dump.corePasses'):
 --
@@ -16,6 +16,7 @@
 -- > GENG_CORE_PASSES=inlinematch   -- only where a case matches them, and @prim wrappers (JavaScript's, D792)
 -- > GENG_CORE_PASSES=mutual        -- local mutual tail calls, one function ("Core.Pass.Mutual")
 -- > GENG_CORE_PASSES=float         -- a let in a let's right-hand side floated out ("Core.Pass.Float")
+-- > GENG_CORE_PASSES=floatin       -- a let binding moved into the one branch that reads it ("Core.Pass.FloatIn")
 -- > GENG_CORE_PASSES=mono          -- every type variable copied away by shape ("Core.Pass.Mono")
 -- > GENG_CORE_PASSES=foldspec      -- a fold copied for the function it is handed ("Core.Pass.FoldSpec")
 -- > GENG_CORE_PASSES=transient     -- a Dict a loop threads updated in place ("Core.Pass.Transient")
@@ -45,6 +46,15 @@
 -- @let@ in a @let@'s right-hand side, which JavaScript and C can only compile as
 -- a function called on the spot. "Core.Pass.Float" moves those bindings out
 -- beside the one they were inside, per module.
+--
+-- __Floating in follows that__ (D879, geng-lang @m3-floatin.md@): a @let@
+-- binding one alternative of a @case@ reads moves into it, so that a step
+-- pushing onto one @Array@ twice and keeping one pushes once, and a binding
+-- nothing reads goes, when evaluating either writes no @debug_log@. It needs
+-- every module, to know which globals reach a @debug_log@ and which data types
+-- hold a function, and runs on every target. It comes after @float@, whose
+-- flat runs of bindings are what it moves from, and before @case@, whose
+-- joins it would otherwise have to see through.
 --
 -- __Mutual tail calls are next__ (D479): a local group whose calls to one
 -- another are all tail calls becomes one self-recursive function, which the
@@ -121,6 +131,7 @@ import Core.Dump qualified as Dump
 import Core.Pass.ArrayTransient qualified as ArrayTransient
 import Core.Pass.Case qualified as Case
 import Core.Pass.Float qualified as Float
+import Core.Pass.FloatIn qualified as FloatIn
 import Core.Pass.FoldSpec qualified as FoldSpec
 import Core.Pass.Inline qualified as Inline
 import Core.Pass.Mono qualified as Mono
@@ -147,9 +158,9 @@ names target =
 defaults :: Target.Target -> [String]
 defaults target =
   case target of
-    Target.Js -> ["specialize", "foldspec", "transient", "arraypop", "inlinematch", "float", "mutual", "case", "tailcall"]
-    Target.Native -> ["specialize", "foldspec", "transient", "arraypop", "mono", "inline", "float", "mutual", "case", "tailcall"]
-    _ -> ["specialize", "foldspec", "inline", "float", "mutual", "case", "tailcall"]
+    Target.Js -> ["specialize", "foldspec", "transient", "arraypop", "inlinematch", "float", "floatin", "mutual", "case", "tailcall"]
+    Target.Native -> ["specialize", "foldspec", "transient", "arraypop", "mono", "inline", "float", "floatin", "mutual", "case", "tailcall"]
+    _ -> ["specialize", "foldspec", "inline", "float", "floatin", "mutual", "case", "tailcall"]
 
 run :: Target.Target -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
 run target cores =
@@ -161,6 +172,7 @@ run target cores =
       monomorphized = pass "mono" (Mono.run (Target.language target) Dump.externBodies) arrays
       inlined = pass "inlinematch" (Inline.runWith Inline.Matched) (pass "inline" Inline.run monomorphized)
       floated = pass "float" (Map.map Float.run) inlined
-      grouped = pass "mutual" (Map.map Mutual.run) floated
+      floatedIn = pass "floatin" (\cs -> Map.map (FloatIn.run (FloatIn.program cs)) cs) floated
+      grouped = pass "mutual" (Map.map Mutual.run) floatedIn
       tbl = Case.table (Map.elems grouped)
    in Map.map (pass "case" (Case.run tbl) . pass "tailcall" TailCall.run) grouped
