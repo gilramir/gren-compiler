@@ -1590,52 +1590,145 @@ function _Arr_append(a, b) {
   return new _Slice(buf, front, al + bl);
 }
 
-function _ArrayPrim_Transient(live, escaped, array) {
+// A handle on an array (D903, geng-lang m4-visiterm.md §VA10). Only the
+// newest handle on an array, its owner (state 0), writes it in place; the
+// handle a write in place was given is then passed (2): its `link` is the
+// handle the write answered, and its `index` and `undo` the item the write
+// replaced (-1 for a push, which writes past every older handle's view),
+// Baker's persistent array. The record is the older handle's, which a linear
+// use drops, so that the newest keeps nothing the write replaced alive.
+// `depth` is how many handles have passed the array on since it was made: an
+// owner whose depth reaches the array's length (and 8 more, since a push
+// lengthens it) copies instead, so that an older handle something still
+// holds keeps at most that many handles alive, where its links would
+// otherwise keep every write after it. A read through a passed handle follows the links
+// to the first record of its index, or to the array; a write or `toArray`
+// through one rebuilds its items in a copy. A frozen handle's (1) array is
+// written by nothing any more (an `Array`'s, or one `toArray` handed out), so
+// it reads and copies it as it is.
+function _ArrayPrim_Transient(live, state, link, depth) {
   this.live = live;
-  this.escaped = escaped;
-  this.array = array;
+  this.state = state;
+  this.link = link;
+  this.depth = depth;
+  this.index = -1;
+  this.undo = undefined;
 }
 
 function _ArrayPrim_trNew(capacity) {
-  return new _ArrayPrim_Transient(0, false, new Array(capacity));
+  return new _ArrayPrim_Transient(0, 0, new Array(capacity), 0);
 }
 
 function _ArrayPrim_trFromArray(array) {
   array = _Arr_flat(array);
-  return new _ArrayPrim_Transient(array.length, true, array);
+  return new _ArrayPrim_Transient(array.length, 1, array, 0);
 }
 
-// The array to write into: its own when nothing else holds it, a copy of the
-// live elements when it has escaped.
-function _ArrayPrim_trOwn(t) {
-  if (t.escaped) return t.array.slice(0, t.live);
-  t.escaped = true;
-  return t.array;
+// A passed handle's items: the array at the end of its links, with the first
+// record of each index along them put back.
+function _ArrayPrim_trRebuild(t) {
+  var live = t.live;
+  var h = t;
+  var seen = new Uint8Array((live >>> 3) + 1);
+  var records = [];
+  while (h.state === 2) {
+    var i = h.index;
+    if (i >= 0 && i < live && !(seen[i >>> 3] & (1 << (i & 7)))) {
+      seen[i >>> 3] |= 1 << (i & 7);
+      records.push(h);
+    }
+    h = h.link;
+  }
+  var array = h.link.slice(0, live);
+  for (var k = 0; k < records.length; k++) array[records[k].index] = records[k].undo;
+  return array;
+}
+
+// A passed handle's walk to the array longer than 32 links freezes it on a
+// copy, so that reading one handle many writes old costs its copy once.
+function _ArrayPrim_trGetPassed(t, index) {
+  var h = t;
+  var steps = 0;
+  do {
+    if (h.index === index) return h.undo;
+    h = h.link;
+    steps++;
+  } while (h.state === 2);
+  if (steps > 32) {
+    var own = _ArrayPrim_trRebuild(t);
+    t.state = 1;
+    t.link = own;
+    return own[index];
+  }
+  return h.link[index];
+}
+
+// Whether a write through `t` goes into its array in place.
+function _ArrayPrim_trInPlace(t) {
+  return t.state === 0 && t.depth < t.link.length + 8;
+}
+
+// A copy of a handle's items to write into, the handle frozen if it was the
+// owner.
+function _ArrayPrim_trCopy(t) {
+  if (t.state === 2) return _ArrayPrim_trRebuild(t);
+  t.state = 1;
+  return t.link.slice(0, t.live);
 }
 
 function _ArrayPrim_trPush(t, value) {
-  var array = _ArrayPrim_trOwn(t);
   var live = t.live;
-  if (live < array.length) { array[live] = value; } else { array.push(value); }
-  return new _ArrayPrim_Transient(live + 1, false, array);
+  var it;
+  if (_ArrayPrim_trInPlace(t)) {
+    var array = t.link;
+    if (live < array.length) { array[live] = value; } else { array.push(value); }
+    it = new _ArrayPrim_Transient(live + 1, 0, array, t.depth + 1);
+    t.state = 2;
+    t.link = it;
+    return it;
+  }
+  var copy = _ArrayPrim_trCopy(t);
+  copy.push(value);
+  return new _ArrayPrim_Transient(live + 1, 0, copy, 0);
 }
 
 function _ArrayPrim_trSet(t, index, value) {
-  var array = _ArrayPrim_trOwn(t);
-  array[index] = value;
-  return new _ArrayPrim_Transient(t.live, false, array);
+  var it;
+  if (_ArrayPrim_trInPlace(t)) {
+    var array = t.link;
+    it = new _ArrayPrim_Transient(t.live, 0, array, t.depth + 1);
+    t.state = 2;
+    t.link = it;
+    t.index = index;
+    t.undo = array[index];
+    array[index] = value;
+    return it;
+  }
+  var copy = _ArrayPrim_trCopy(t);
+  copy[index] = value;
+  return new _ArrayPrim_Transient(t.live, 0, copy, 0);
 }
 
-function _ArrayPrim_trGet(t, index) { return t.array[index]; }
+function _ArrayPrim_trGet(t, index) {
+  return t.state !== 2 ? t.link[index] : _ArrayPrim_trGetPassed(t, index);
+}
 
 function _ArrayPrim_trLength(t) { return t.live; }
 
+// The owner hands its array out, which nothing writes after; a frozen handle
+// answers a copy, and a passed one freezes on its rebuilt items.
 function _ArrayPrim_trToArray(t) {
-  var array = t.array;
-  if (t.escaped) return array.slice(0, t.live);
-  t.escaped = true;
-  array.length = t.live;
-  return array;
+  var array = t.link;
+  if (t.state === 0) {
+    t.state = 1;
+    array.length = t.live;
+    return array;
+  }
+  if (t.state === 1) return array.slice(0, t.live);
+  var own = _ArrayPrim_trRebuild(t);
+  t.state = 1;
+  t.link = own;
+  return own;
 }
 |]
 
