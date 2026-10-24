@@ -253,7 +253,7 @@ parseUserArgs context compilerPath =
         succeeded task =
             Task.map (\_ -> 0) task
     in
-    when Cli.Parser.run context.args CliParser.parser is
+    when Cli.Parser.run CliParser.parser context.args is
         Cli.Parser.UnknownCommand commandName ->
             endWithErrorString ("I don't recognize this command: " ++ commandName ++ "\n")
 
