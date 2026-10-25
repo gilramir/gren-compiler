@@ -330,6 +330,23 @@ data TransientPrim
   | TrGet
   | TrLength
   | TrToArray
+  | -- | D904 and D905's four (geng-lang @m4-visiterm.md@ §VA11), __appended__
+    -- after every other primitive and not with the seven above, so that no
+    -- earlier code moved. Each is one call and one handle where a loop of
+    -- @push@ or @set@ was a handle an item.
+    --
+    -- @tr_fill t i n v@: @v@ at @i@ to @i + n - 1@. Precondition: @0 <= i <=
+    -- length@, @0 <= n@; past the end it lengthens the transient, as a push.
+    TrFill
+  | -- | @tr_set_array t i a@: @a@'s items at @i@ onwards, as 'TrFill' does.
+    TrSetArray
+  | -- | @tr_copy_within t to from n@: the @n@ items from @from@ copied to @to@,
+    -- as JavaScript's @copyWithin@ and C's @memmove@ do when the two overlap.
+    -- Precondition: both runs within the length.
+    TrCopyWithin
+  | -- | @tr_generate t first n f@: pushes @f first@ to @f (first + n - 1)@.
+    -- Precondition: @0 <= n@.
+    TrGenerate
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | The reified @Task@ tree the runtime steps. @map@, @sequence@ and friends
@@ -458,7 +475,7 @@ allPrims =
     ++ map StrOp [minBound .. SUtf8Valid]
     ++ map BytesOp [minBound .. BtToBytes]
     ++ map ArrOp [minBound .. maxBound]
-    ++ map TransientOp [minBound .. maxBound]
+    ++ map TransientOp [minBound .. TrToArray]
     ++ map TaskOp [minBound .. SourceClose]
     ++ [DebugLog]
     -- Appended by D206 and D210 (m1b-str-prim.md §Z9). Everything above keeps
@@ -485,6 +502,8 @@ allPrims =
     ++ map DictOp [minBound .. maxBound]
     -- Appended by D863 (m4-refine.md §RF32).
     ++ [BytesOp BtLength]
+    -- Appended by D904 and D905 (m4-visiterm.md §VA11).
+    ++ map TransientOp [TrFill .. maxBound]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -654,6 +673,10 @@ transientPrimName p =
     TrGet -> "get"
     TrLength -> "length"
     TrToArray -> "to_array"
+    TrFill -> "fill"
+    TrSetArray -> "set_array"
+    TrCopyWithin -> "copy_within"
+    TrGenerate -> "generate"
 
 taskPrimName :: TaskPrim -> Text
 taskPrimName p =
@@ -799,6 +822,14 @@ primArity op =
         TrGet -> 2
         TrPush -> 2
         TrSet -> 3
+        -- transient, index, array
+        TrSetArray -> 3
+        -- transient, index, count, value
+        TrFill -> 4
+        -- transient, to, from, count
+        TrCopyWithin -> 4
+        -- transient, first argument, count, function
+        TrGenerate -> 4
     TaskOp p ->
       case p of
         TaskSucceed -> 1

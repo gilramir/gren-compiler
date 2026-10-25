@@ -627,6 +627,10 @@ transient p args =
     (TrGet, [_, _]) -> helper "_ArrayPrim_trGet" args
     (TrLength, [_]) -> helper "_ArrayPrim_trLength" args
     (TrToArray, [_]) -> helper "_ArrayPrim_trToArray" args
+    (TrFill, [_, _, _, _]) -> helper "_ArrayPrim_trFill" args
+    (TrSetArray, [_, _, _]) -> helper "_ArrayPrim_trSetArray" args
+    (TrCopyWithin, [_, _, _, _]) -> helper "_ArrayPrim_trCopyWithin" args
+    (TrGenerate, [_, _, _, _]) -> helper "_ArrayPrim_trGenerate" args
     _ -> arityError (TransientOp p) args
   where
     helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
@@ -1606,6 +1610,12 @@ function _Arr_append(a, b) {
 // through one rebuilds its items in a copy. A frozen handle's (1) array is
 // written by nothing any more (an `Array`'s, or one `toArray` handed out), so
 // it reads and copies it as it is.
+//
+// A write of a run in place (D904, §VA11) leaves the handle it was given in
+// state 3, its record the run it replaced: `index` its first item and `undo`
+// an array of the items. Its cost against `depth` is the items it records,
+// so that what an older handle keeps alive stays bounded by the array's
+// length, as it is for single writes.
 function _ArrayPrim_Transient(live, state, link, depth) {
   this.live = live;
   this.state = state;
@@ -1630,17 +1640,23 @@ function _ArrayPrim_trRebuild(t) {
   var live = t.live;
   var h = t;
   var seen = new Uint8Array((live >>> 3) + 1);
-  var records = [];
-  while (h.state === 2) {
-    var i = h.index;
-    if (i >= 0 && i < live && !(seen[i >>> 3] & (1 << (i & 7)))) {
-      seen[i >>> 3] |= 1 << (i & 7);
-      records.push(h);
+  var at = [];
+  var values = [];
+  while (h.state >= 2) {
+    var first = h.index;
+    var run = h.state === 2 ? 1 : h.undo.length;
+    for (var j = 0; j < run; j++) {
+      var i = first + j;
+      if (i >= 0 && i < live && !(seen[i >>> 3] & (1 << (i & 7)))) {
+        seen[i >>> 3] |= 1 << (i & 7);
+        at.push(i);
+        values.push(h.state === 2 ? h.undo : h.undo[j]);
+      }
     }
     h = h.link;
   }
   var array = h.link.slice(0, live);
-  for (var k = 0; k < records.length; k++) array[records[k].index] = records[k].undo;
+  for (var k = 0; k < at.length; k++) array[at[k]] = values[k];
   return array;
 }
 
@@ -1650,10 +1666,14 @@ function _ArrayPrim_trGetPassed(t, index) {
   var h = t;
   var steps = 0;
   do {
-    if (h.index === index) return h.undo;
+    if (h.state === 2) {
+      if (h.index === index) return h.undo;
+    } else if (index - h.index >= 0 && index - h.index < h.undo.length) {
+      return h.undo[index - h.index];
+    }
     h = h.link;
     steps++;
-  } while (h.state === 2);
+  } while (h.state >= 2);
   if (steps > 32) {
     var own = _ArrayPrim_trRebuild(t);
     t.state = 1;
@@ -1668,10 +1688,16 @@ function _ArrayPrim_trInPlace(t) {
   return t.state === 0 && t.depth < t.link.length + 8;
 }
 
+// Whether a write that records `cost` items goes in place: `depth` counts
+// items recorded, not writes, for a run (§VA11).
+function _ArrayPrim_trRunInPlace(t, cost) {
+  return t.state === 0 && t.depth + (cost > 1 ? cost : 1) <= t.link.length + 8;
+}
+
 // A copy of a handle's items to write into, the handle frozen if it was the
 // owner.
 function _ArrayPrim_trCopy(t) {
-  if (t.state === 2) return _ArrayPrim_trRebuild(t);
+  if (t.state >= 2) return _ArrayPrim_trRebuild(t);
   t.state = 1;
   return t.link.slice(0, t.live);
 }
@@ -1710,7 +1736,96 @@ function _ArrayPrim_trSet(t, index, value) {
 }
 
 function _ArrayPrim_trGet(t, index) {
-  return t.state !== 2 ? t.link[index] : _ArrayPrim_trGetPassed(t, index);
+  return t.state < 2 ? t.link[index] : _ArrayPrim_trGetPassed(t, index);
+}
+
+// A run written at `index` (D904, §VA11): `write(array, index)` stores its
+// `count` items there, and the handle it was given records what it replaced
+// below `live`, which a push past the end does not need to. In place, the
+// owner passes the array on; otherwise the handle's items are copied first.
+function _ArrayPrim_trRun(t, index, count, write) {
+  var live = t.live;
+  var end = index + count;
+  var over = (end < live ? end : live) - index;
+  if (over < 0) over = 0;
+  var it;
+  if (_ArrayPrim_trRunInPlace(t, over)) {
+    var array = t.link;
+    var depth = t.depth + (over > 1 ? over : 1);
+    it = new _ArrayPrim_Transient(end > live ? end : live, 0, array, depth);
+    if (over === 1) {
+      t.state = 2;
+      t.index = index;
+      t.undo = array[index];
+    } else if (over > 1) {
+      t.state = 3;
+      t.index = index;
+      t.undo = array.slice(index, index + over);
+    } else {
+      t.state = 2;
+      t.index = -1;
+    }
+    t.link = it;
+    write(array, index);
+    return it;
+  }
+  var copy = _ArrayPrim_trCopy(t);
+  write(copy, index);
+  return new _ArrayPrim_Transient(end > live ? end : live, 0, copy, 0);
+}
+
+function _ArrayPrim_trFill(t, index, count, value) {
+  if (count <= 0) return t;
+  return _ArrayPrim_trRun(t, index, count, function (array, at) {
+    for (var k = 0; k < count; k++) array[at + k] = value;
+  });
+}
+
+function _ArrayPrim_trSetArray(t, index, values) {
+  values = _Arr_flat(values);
+  var count = values.length;
+  if (count === 0) return t;
+  return _ArrayPrim_trRun(t, index, count, function (array, at) {
+    for (var k = 0; k < count; k++) array[at + k] = values[k];
+  });
+}
+
+// `copyWithin`'s, which reads its source before it writes where they overlap:
+// a loop in the direction that does, since V8's own `copyWithin` takes its
+// generic path on an array made by `new Array(n)`, which is holey, and cost
+// four times a loop of `trSet` over 24 rows (§VA11).
+function _ArrayPrim_trCopyWithin(t, to, from, count) {
+  if (count <= 0 || to === from) return t;
+  return _ArrayPrim_trRun(t, to, count, function (array, at) {
+    var k;
+    if (at < from) { for (k = 0; k < count; k++) array[at + k] = array[from + k]; }
+    else { for (k = count - 1; k >= 0; k--) array[at + k] = array[from + k]; }
+  });
+}
+
+// `count` pushes of `f(first)` onward, one handle: the items go past every
+// older handle's view, so nothing is recorded. `f` may read the transient's
+// older handles, which see nothing of the run, since `live` moves only once
+// it is written.
+function _ArrayPrim_trGenerate(t, first, count, f) {
+  if (count <= 0) return t;
+  var live = t.live;
+  var array;
+  var it;
+  if (_ArrayPrim_trInPlace(t)) {
+    array = t.link;
+    it = new _ArrayPrim_Transient(live + count, 0, array, t.depth + 1);
+    t.state = 2;
+    t.link = it;
+  } else {
+    array = _ArrayPrim_trCopy(t);
+    it = new _ArrayPrim_Transient(live + count, 0, array, 0);
+  }
+  for (var k = 0; k < count; k++) {
+    var v = f((first + k) | 0);
+    if (live + k < array.length) { array[live + k] = v; } else { array.push(v); }
+  }
+  return it;
 }
 
 function _ArrayPrim_trLength(t) { return t.live; }

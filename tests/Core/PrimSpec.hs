@@ -19,7 +19,7 @@ spec = do
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
       -- someone noticing.
-      length allPrims `shouldBe` 191
+      length allPrims `shouldBe` 195
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -94,6 +94,16 @@ spec = do
       )
         `shouldBe` ([(186, "dict_owner", 1), (187, "dict_node", 6), (188, "dict_edit", 5), (189, "dict_edit_value", 3)], 185)
 
+    it "appends D904's and D905's tr_ primitives after every code that existed" $
+      -- A run, a fill, a block move and a generated push, each one handle
+      -- (geng-lang m4-visiterm.md §VA11), after `bt_length`, which did not
+      -- move, and apart from the seven `tr_` codes, which did not either.
+      ( map (\p -> (primCode (TransientOp p), primName (TransientOp p), primArity (TransientOp p))) [TrFill .. maxBound],
+        primCode (BytesOp BtLength),
+        primCode (TransientOp TrToArray)
+      )
+        `shouldBe` ([(191, "tr_fill", 4), (192, "tr_set_array", 3), (193, "tr_copy_within", 4), (194, "tr_generate", 4)], 190, 145)
+
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved
       -- either (m1b-bytes-prim.md §BY12).
@@ -140,6 +150,7 @@ spec = do
       primName (FloatOp F32 FSqrt) `shouldBe` "f32_sqrt"
       primName (ArrOp AGet) `shouldBe` "arr_get"
       primName (TransientOp TrToArray) `shouldBe` "tr_to_array"
+      primName (TransientOp TrCopyWithin) `shouldBe` "tr_copy_within"
       primName (StrOp SFromCodepoints) `shouldBe` "str_from_codepoints"
       primName (BytesOp BGetU8) `shouldBe` "bytes_get_u8"
       primName (TaskOp TaskAndThen) `shouldBe` "task_and_then"
