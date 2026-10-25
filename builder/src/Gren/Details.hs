@@ -19,6 +19,7 @@ module Gren.Details
     Kernels,
     loadKernels,
     toHeader,
+    packageFingerprints,
   )
 where
 
@@ -289,7 +290,8 @@ encodeCore core =
 -- | Every package's artifact fingerprint: what it was compiled from, as a
 -- number (D101).
 --
--- One package's fingerprint is its name, its version, every byte of every one
+-- One package's fingerprint is its name, its version, the parts of its
+-- manifest that reach its artifacts ('manifestOf'), every byte of every one
 -- of its sources, and then __the fingerprints of the packages it is compiled
 -- against__, all length-prefixed and in ascending order. That last part is what
 -- makes it a Merkle hash rather than a checksum of a directory, and it is what
@@ -319,7 +321,8 @@ packageFingerprints solution =
     one pkg (Dependency outline sources) =
       let named = FP.chars (Pkg.toChars pkg) FP.empty
           versioned = FP.chars (V.toChars (versionOf outline)) named
-          sourced = List.foldl' oneModule versioned (Map.toAscList sources)
+          manifested = manifestOf outline versioned
+          sourced = List.foldl' oneModule manifested (Map.toAscList sources)
        in List.foldl' oneDep sourced (Map.toAscList (Map.intersection prints (depsOf outline)))
 
     oneModule acc (name, source) =
@@ -327,6 +330,23 @@ packageFingerprints solution =
 
     oneDep acc (pkg, fingerprint) =
       FP.fingerprint fingerprint (FP.chars (Pkg.toChars pkg) acc)
+
+-- | What of a package's manifest decides what compiling it produces (D911):
+-- its exposed modules, which are where the crawl starts and which interfaces
+-- the artifacts make public, and its platform, which 'compile' is handed. The
+-- exposed modules go in ascending order, as many as there are first, since
+-- their grouping and order in @geng.toml@ are documentation. A manifest's
+-- @target@ is not here: it is checked against the artifacts each time they are
+-- read (D321), and the rest of the manifest does not reach them.
+manifestOf :: Outline -> Fingerprint -> Fingerprint
+manifestOf outline acc =
+  case outline of
+    Outline.Pkg pkgOutline ->
+      let exposed = List.sort (Outline.flattenExposed (Outline._pkg_exposed pkgOutline))
+          counted = FP.word64 (fromIntegral (length exposed)) acc
+          listed = List.foldl' (\a name -> FP.chars (ModuleName.toChars name) a) counted exposed
+       in FP.chars (P.toChars (Outline._pkg_platform pkgOutline)) listed
+    Outline.App _ -> acc
 
 -- | A dependency that is an application has no version and no dependencies of
 -- its own worth reading: 'build' rejects it a moment later. Answering here
