@@ -103,7 +103,11 @@ data Env = Env
     -- | The context inferred for each unannotated definition (§G33), keyed by
     -- the node id of the definition. A definition with an entry here is
     -- constrained, and is quantified in Core exactly as a written one is.
-    _inferred :: Resolve.Inferred
+    _inferred :: Resolve.Inferred,
+    -- | How many record literals and updates the node being lowered sits in a
+    -- field of. It names the binders 'writtenOrder' invents, so that one
+    -- record's shadow none of another's.
+    _recordDepth :: !Int
   }
 
 -- | The type recorded for a node.
@@ -700,13 +704,21 @@ expr env (Can.Expr nid region value) =
         Can.Access record (A.At _ field) ->
           node (Core.EAccess (expr env record) field)
         Can.Update record fields ->
-          node $
-            Core.EUpdate
-              (expr env record)
-              [(name, expr env value') | (A.At _ name, Can.FieldUpdate _ value') <- Map.toAscList fields]
+          let inner = env {_recordDepth = _recordDepth env + 1}
+           in writtenOrder
+                env
+                tipe
+                sp
+                [(fieldRegion, name, expr inner value') | (A.At fieldRegion name, Can.FieldUpdate _ value') <- Map.toAscList fields]
+                (Core.EUpdate (expr env record))
         Can.Record fields ->
-          node
-            (Core.ERecord [(name, expr env value') | (A.At _ name, value') <- Map.toAscList fields])
+          let inner = env {_recordDepth = _recordDepth env + 1}
+           in writtenOrder
+                env
+                tipe
+                sp
+                [(fieldRegion, name, expr inner value') | (A.At fieldRegion name, value') <- Map.toAscList fields]
+                Core.ERecord
 
 -- | A numeric literal: the value, or @fromInt@ / @fromFloat@ applied to it
 -- (D170, @docs/m1b-classes.md@ §G49).
@@ -869,6 +881,65 @@ accessor tipe sp field =
     _ ->
       error ("Core.Lower.Expression: an accessor is not a one-argument function: " ++ show tipe)
 
+-- RECORD FIELDS
+
+-- | A record literal's or update's fields, evaluated in the order they are
+-- written (D934, @docs/m4-own.md@ §OW15).
+--
+-- Core keeps a record's fields alphabetically ('Core.Field'), and a backend
+-- evaluates them in Core's order, so a record written @{ size = .., items = .. }@
+-- ran @items@ first. Where the fields that can do anything are already written
+-- in name order, nothing changes. Otherwise each of them is bound, in the order
+-- written, by a @let@ of its own, and the record is built from the binders, so
+-- what a field reads and what it moves happen in the order a reader sees.
+--
+-- An update's record is always a name (the parser takes nothing else), and the
+-- update takes it after its fields, as before: @{ s | extent = Builder.pushLast
+-- 1 s.extent }@ reads @s.extent@ and then hands @s@ on.
+--
+-- A literal or a global is left in place: it reads nothing local and does
+-- nothing. A binder is named by its field, @$fzebra@, followed by @$@ and the
+-- depth when the record is in a field of another ('_recordDepth'). No source
+-- name holds a @$@; no two fields of a record share a name; and a record whose
+-- binders are in scope of another's sits in one of that record's fields, a
+-- level deeper. So no binder shadows another, as Core's passes assume (D63).
+-- The names say nothing of where the fields are written, so formatting a file
+-- leaves its Core alone.
+writtenOrder ::
+  Env ->
+  Core.Type ->
+  Core.Span ->
+  [(A.Region, Name, Core.Expr)] ->
+  ([(Core.Field, Core.Expr)] -> Core.Expr_) ->
+  Core.Expr
+writtenOrder env tipe sp fields build =
+  let inert e =
+        case Core._exprValue e of
+          Core.ELit _ -> True
+          Core.EGlobal _ -> True
+          _ -> False
+      active = [(region, name) | (region, name, e) <- fields, not (inert e)]
+      written = List.sortOn (position . span env . fst) active
+      suffix = if _recordDepth env == 0 then "" else "$" ++ show (_recordDepth env)
+   in if map snd written == map snd active
+        then Core.Expr (build [(name, e) | (_, name, e) <- fields]) tipe sp
+        else
+          let bound =
+                Map.fromList
+                  [ (name, (Core.Binder (Name.fromChars ("$f" ++ Name.toChars name ++ suffix)) (Core._exprType e) (Core._exprSpan e), e))
+                  | (_, name, e) <- fields,
+                    not (inert e)
+                  ]
+              record =
+                Core.Expr
+                  (build [(name, maybe e (variable (Core._exprSpan e) . fst) (Map.lookup name bound)) | (_, name, e) <- fields])
+                  tipe
+                  sp
+              bindOne (_, name) inner =
+                let (b, e) = bound Map.! name
+                 in Core.Expr (Core.ELet [Core.Bind b e] inner) tipe sp
+           in List.foldr bindOne record written
+
 -- LET RUNS
 
 -- | A run of @let@ bindings, lowered and put in C14's order.
@@ -878,16 +949,17 @@ accessor tipe sp field =
 -- destructuring — nested one inside the next, and the nesting is the order
 -- @Data.Graph.stronglyConnComp@ happened to produce. C14 replaces it: the run's
 -- items are grouped by mutual recursion and the groups come out in dependency
--- order, least-named ready group first, exactly as a module's definitions and a
--- linked program's bindings do.
+-- order, as a module's definitions and a linked program's bindings do. Where
+-- several groups are ready, the one written first goes first (D941,
+-- @docs/m4-own.md@ §OW19), not the least-named as at the other two levels: a
+-- run is all in one file, so its order can be the reader's, and a read of a
+-- builder and its push in two bindings are judged by where they are written
+-- rather than by what they are called.
 --
 -- __A destructuring is an item like any other__, rather than a wall the
 -- reordering stops at. It has to be: where Canonical put it in the chain is the
 -- same unspecified choice, so leaving it in place would leave the order half
--- specified. It is named by the least name its pattern binds; one that binds
--- nothing — @_ = Debug.log "here" x@ — has only its source position to be known
--- by, and sorts before named items that are equally ready, which is where a
--- reader writes it.
+-- specified. It is ordered by where it is written, like a binding.
 --
 -- Every frame in a run carries the same type and the same span: @detectCycles@
 -- builds all of them with @Can.at letRegion@, so the whole run is one region and
@@ -922,10 +994,10 @@ letRun env tipe sp value =
 
 -- | One step of a @let@ run: a group of bindings, or a destructuring.
 data Item = Item
-  { -- | What orders it: the least name it binds, and where it is written. The
-    -- position only decides between two items that bind no names at all, since
-    -- shadowing is forbidden (D63) and a run's names are therefore distinct.
-    _itemKey :: !(Maybe Name, (Word32, Word32)),
+  { -- | What orders it: where it is written (D941), then the least name it
+    -- binds. No two items of a run are written in one place, so the name only
+    -- keeps the key distinct if some item ever arrives without a real span.
+    _itemKey :: !((Word32, Word32), Maybe Name),
     _itemNames :: !(Set.Set Name),
     _itemUses :: !(Set.Set Name),
     _itemWhat :: !What
@@ -938,7 +1010,7 @@ data What
 bindsItem :: [Core.Bind] -> Item
 bindsItem binds =
   Item
-    { _itemKey = minimum [(Just (bindName b), position (Core._binderSpan (Core._bindBinder b))) | b <- binds],
+    { _itemKey = minimum [(position (Core._binderSpan (Core._bindBinder b)), Just (bindName b)) | b <- binds],
       _itemNames = Set.fromList (map bindName binds),
       _itemUses = Set.unions (map (Refs.freeLocals . Core._bindValue) binds),
       _itemWhat = Binds binds
@@ -948,7 +1020,7 @@ destructItem :: Env -> Core.Pattern -> A.Region -> Core.Expr -> Item
 destructItem env p region scrutinee =
   let names = Refs.patternBinders p
    in Item
-        { _itemKey = (fst <$> Set.minView names, position (span env region)),
+        { _itemKey = (position (span env region), fst <$> Set.minView names),
           _itemNames = names,
           _itemUses = Refs.freeLocals scrutinee,
           _itemWhat = Destructure p scrutinee

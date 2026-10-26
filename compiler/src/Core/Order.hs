@@ -7,6 +7,9 @@
 -- > with the least name goes first, and a group's own members are in codepoint
 -- > order of their names.
 --
+-- A @let@ run's keys are where each item is written rather than its name
+-- (D941), so there "least" is "written first"; the algorithm is the same.
+--
 -- That sentence is the specification, and this module is the only
 -- implementation of it: a module's definitions ("Core.Lower.Module"), a @let@
 -- run's bindings ("Core.Lower.Expression") and a linked program's bindings

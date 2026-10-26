@@ -183,31 +183,57 @@ topLevel p home (Core.Bind b v) =
 walk :: Program -> Core.Expr -> (Core.Expr, [Line])
 walk p e =
   case Core._exprValue e of
-    Core.ELet binds body ->
-      let (kept, body', lines1) = sinkRun p binds body
+    Core.ELet _ _ ->
+      let (frames, body) = chain e
+          -- Each binding is known by its place in the chain, not its name: a
+          -- pass before this one may bind a name twice in one chain.
+          numbered = zip [0 :: Int ..] [(i, b) | (i, (_, binds)) <- zip [0 :: Int ..] frames, b <- binds]
+          (kept, body', lines1) = sinkRun p [(k, b) | (k, (_, b)) <- numbered] body
+          walked = [let (v', l) = walk p v in (k, (Core.Bind x v', l)) | (k, Core.Bind x v) <- kept]
+          keptAt = Map.fromList [(k, b) | (k, (b, _)) <- walked]
+          frameOf = Map.fromList [(k, i) | (k, (i, _)) <- numbered]
+          inFrame = Map.fromListWith (flip (++)) [(frameOf Map.! k, [b]) | (k, b) <- Map.toList keptAt]
           (body'', lines2) = walk p body'
-          walked = [let (v', l) = walk p v in (Core.Bind x v', l) | Core.Bind x v <- kept]
-          e' = if null kept then body'' else e {Core._exprValue = Core.ELet (map fst walked) body''}
-       in (e', lines1 ++ concatMap snd walked ++ lines2)
+          rebuild (i, (frame, _)) inner =
+            case Map.lookup i inFrame of
+              Nothing -> inner
+              Just found -> frame {Core._exprValue = Core.ELet found inner}
+          e' = foldr rebuild body'' (zip [0 :: Int ..] frames)
+       in (e', lines1 ++ concatMap (snd . snd) walked ++ lines2)
     _ ->
       ( runIdentity (Specialize.childrenA (Identity . fst . walk p) e),
         Specialize.children_ (snd . walk p) e
       )
 
+-- | A chain of non-recursive @let@s, one directly in the next's body, and the
+-- body under the last: each frame with its bindings, outermost first. It is one
+-- run to 'sinkRun', so that whether the body reads a binding is asked of the
+-- body once rather than of the rest of the chain at every level. Lowering puts
+-- a @let@ run's bindings in a frame each, and D934 binds a record's fields so
+-- (geng-lang @docs/m4-own.md@ §OW20): N bindings that only the body under them
+-- reads were N searches of the rest, N² (@source/records@' @update@ probe).
+chain :: Core.Expr -> ([(Core.Expr, [Core.Bind])], Core.Expr)
+chain e =
+  case Core._exprValue e of
+    Core.ELet binds body ->
+      let (frames, final) = chain body
+       in ((e, binds) : frames, final)
+    _ -> ([], e)
+
 -- | A run's bindings, last first, each moved into the body or dropped when it
 -- may be. C14's order is kept among those that stay.
 --
 -- What the bindings already kept read and bind is carried as two sets, and
--- whether the body reads a name is 'occursFree', which stops at the first
--- read: a chain of N one-binding @let@s, each reading the last, is then
--- looked at in time linear in N, where building the free set of the rest at
--- each level was N² (@source/let@'s probe, §FI12).
-sinkRun :: Program -> [Core.Bind] -> Core.Expr -> ([Core.Bind], Core.Expr, [Line])
+-- so is what the body reads, 'Refs.freeLocals' of it, taken once and again
+-- only when a binding moves into it. A chain of N one-binding @let@s is one
+-- run ('chain'), so it is looked at in time linear in N whether each reads the
+-- last (@source/let@'s probe, §FI12) or only the body does.
+sinkRun :: Program -> [(Int, Core.Bind)] -> Core.Expr -> ([(Int, Core.Bind)], Core.Expr, [Line])
 sinkRun p binds body =
-  let (kept, _, _, body', lines_) = foldr step ([], Set.empty, Set.empty, body, []) binds
+  let (kept, _, _, (body', _), lines_) = foldr step ([], Set.empty, Set.empty, (body, Refs.freeLocals body), []) binds
    in (kept, body', lines_)
   where
-    step b (after, afterNames, afterReads, body0, lines_) =
+    step (k, b) (after, afterNames, afterReads, bodied@(body0, bodyFree), lines_) =
       let x = name b
           rhs = Core._bindValue b
           rhsFree = Refs.freeLocals rhs
@@ -215,18 +241,18 @@ sinkRun p binds body =
           crossesAfter = Set.member x afterNames || not (Set.disjoint rhsFree afterNames)
           line outcome = [Name.toChars x, outcome, if growsArray rhs then "grows" else "-"]
           keep why =
-            ( b : after,
+            ( (k, b) : after,
               Set.insert x afterNames,
               Set.union rhsFree afterReads,
-              body0,
+              bodied,
               maybe lines_ (\w -> line w : lines_) why
             )
        in if readAfter
             then keep Nothing
             else
-              if not (occursFree x body0)
+              if not (Set.member x bodyFree)
                 then case refusal p rhs of
-                  Nothing -> (after, afterNames, afterReads, body0, line "dropped" : lines_)
+                  Nothing -> (after, afterNames, afterReads, bodied, line "dropped" : lines_)
                   Just why -> keep (Just ("refused-" ++ why))
                 else
                   if crossesAfter
@@ -236,8 +262,10 @@ sinkRun p binds body =
                       Just body1 ->
                         case refusal p rhs of
                           Just why -> keep (Just ("refused-" ++ why))
-                          Nothing -> (after, afterNames, afterReads, body1, line "moved" : lines_)
-    name = Core._binderName . Core._bindBinder
+                          Nothing -> (after, afterNames, afterReads, (body1, Refs.freeLocals body1), line "moved" : lines_)
+
+name :: Core.Bind -> Name
+name = Core._binderName . Core._bindBinder
 
 -- | Whether a local is read, unbound, in an expression: 'Refs.freeLocals'
 -- asked about one name, stopping at the first read it finds.

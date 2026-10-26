@@ -148,6 +148,26 @@ spec = do
         )
         `shouldBe` ["a", "b"]
 
+    -- D934: `{ b = y, a = x }` evaluates `y` first, so `b` is bound first.
+    it "binds fields written out of name order, in the order written" $
+      let lowered =
+            value
+              [(1, Can.TRecord (Map.fromList [("b", Can.FieldType 0 intT), ("a", Can.FieldType 1 intT)]) Nothing), (2, intT), (3, intT)]
+              (at 1 (Can.Record (Map.fromList [(locatedOn 1 "b", at 2 (Can.VarLocal "y")), (locatedOn 2 "a", at 3 (Can.VarLocal "x"))])))
+       in case letChain lowered of
+            (names, Core.ERecord fields) -> do
+              names `shouldBe` ["$fb", "$fa"]
+              [(f, Core._exprValue e) | (f, e) <- fields] `shouldBe` [("a", Core.EVar "$fa"), ("b", Core.EVar "$fb")]
+            other -> expectationFailure ("expected lets around a record, got " ++ show other)
+
+    it "leaves fields written in name order alone" $
+      letChain
+        ( value
+            [(1, Can.TRecord (Map.fromList [("b", Can.FieldType 0 intT), ("a", Can.FieldType 1 intT)]) Nothing), (2, intT), (3, intT)]
+            (at 1 (Can.Record (Map.fromList [(locatedOn 2 "b", at 2 (Can.VarLocal "y")), (locatedOn 1 "a", at 3 (Can.VarLocal "x"))])))
+        )
+        `shouldBe` ([], Core.ERecord [("a", expr (core intT) (Core.EVar "x")), ("b", expr (core intT) (Core.EVar "y"))])
+
     it "orders the fields of a pattern alphabetically" $
       -- Canonical keeps a record pattern in source order; Core does not.
       case Lower.pattern (env []) (core recordAB) (A.At here' (Can.PRecord [recordField "b" (Can.PVar "y"), recordField "a" (Can.PVar "x")])) of
@@ -443,12 +463,26 @@ at i = Can.Expr (Can.NodeId i) here'
 located :: Name.Name -> A.Located Name.Name
 located = A.At here'
 
+-- | A field name written on a line of its own.
+locatedOn :: Int -> Name.Name -> A.Located Name.Name
+locatedOn row = A.At (A.Region (A.Position (fromIntegral row) 1) (A.Position (fromIntegral row) 2))
+
+-- | The names a chain of one-binding lets binds, outermost first, and the
+-- expression under them.
+letChain :: Core.Expr_ -> ([Name.Name], Core.Expr_)
+letChain v =
+  case v of
+    Core.ELet [Core.Bind b inner] body ->
+      let (names, under) = letChain (Core._exprValue body)
+       in (Core._binderName b : names, under)
+    _ -> ([], v)
+
 recordField :: Name.Name -> Can.Pattern_ -> Can.PatternRecordField
 recordField name p = A.At here' (Can.PRFieldPattern name (A.At here' p))
 
 env :: [(Int, Can.Type)] -> Lower.Env
 env types =
-  Lower.Env (Core.FileId 0) (Map.fromList [(Can.NodeId i, t) | (i, t) <- types]) Map.empty Map.empty Map.empty Map.empty
+  Lower.Env (Core.FileId 0) (Map.fromList [(Can.NodeId i, t) | (i, t) <- types]) Map.empty Map.empty Map.empty Map.empty 0
 
 value :: [(Int, Can.Type)] -> Can.Expr -> Core.Expr_
 value types = Core._exprValue . Lower.expr (env types)

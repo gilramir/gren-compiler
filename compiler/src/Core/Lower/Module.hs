@@ -70,6 +70,7 @@ lower platform annotations types coreTypes elaboration modul =
           (Resolve._uses elaboration)
           (Resolve._params elaboration)
           (Resolve._inferred elaboration)
+          0
       witnessesOf i =
         Map.findWithDefault [] (Can.instanceKey (Can._in_head i)) (Resolve._instanceParams elaboration)
       instances = Map.elems (Can._instances modul)
