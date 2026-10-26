@@ -1,18 +1,21 @@
-module Terminal.Own exposing (report)
+module Terminal.Own exposing (checkerVariables, report)
 
-{-| The ownership checker's report (geng-lang `m4-own.md` §OW22, D947), run in a
-build's held run beside the refinement checker (D938).
+{-| The ownership checker's report (geng-lang `m4-own.md` §OW22, D948), run in a
+build's held run beside the refinement checker (D938), with each module's check
+kept as a record so that a later build checks only what changed (§OW26).
 
 `GENG_OWN_REPORT` names a file the build's lines are appended to, in
 `Geng.Own.Check`'s columns, the census's: a program whose suite builds it more
-than once writes each build's. With it set, the binary stages every module and
-holds, as it does for a program that owes a refinement goal, so a build asked
-for the report reads its whole program; one not asked pays nothing. The report
-refuses nothing.
+than once writes each build's. With it set, the binary holds at the cut, as it
+does for a program that owes a refinement goal, and writes
+`ownership/manifest` in the stage: where the records are, and each module's
+record key and whether the record is there (`Generate.ownStage`). The Core of
+each module with no record is beside it, and only that is read and checked;
+the rest is read from its record. The report refuses nothing.
 
 `GENG_OWN_RULES` picks the rules: the ones decided when it is unset, or one of
 the census's rule sets, `plain`, `borrow` or `open`, which is how the checker is
-held to the census (`bench/own/census.py`).
+held to the census (`bench/own/census.py`). The records of each are kept apart.
 -}
 
 import Bytes
@@ -20,15 +23,41 @@ import Cli.PrettyPrinter as PP
 import Cli.Report as Report exposing (Report)
 import Dict exposing (Dict)
 import FileSystem
-import FileSystem.Path exposing (Path)
+import FileSystem.Path as Path exposing (Path)
 import Geng.Core as Core
+import Geng.Core.Wire as Wire
 import Geng.Own.Check as Check
 import Task exposing (Task)
 
 
-{-| The report of a build's modules, when one is asked for. -}
-report : { c | fs : FileSystem.Permission, envVars : Dict String String, fromString : String -> Path } -> Array Core.Module -> Task Report {}
-report config modules =
+{-| What the binary is told when the report is asked for: the script of the CLI
+that will check, whose bytes are the checker's part of every record's key.
+-}
+checkerVariables : Dict String String -> String -> Dict String String
+checkerVariables envVars script =
+    if Dict.member "GENG_OWN_REPORT" envVars && script /= "" then
+        Dict.singleton "GENG_OWN_CHECKER" script
+
+    else
+        Dict.empty
+
+
+type alias Entry =
+    { name : Core.ModuleName
+    , key : Maybe String
+    , present : Bool
+    }
+
+
+type alias Manifest =
+    { records : Maybe Path
+    , entries : Array Entry
+    }
+
+
+{-| The report of a build's modules, when one is asked for: `dir` is the stage. -}
+report : { c | fs : FileSystem.Permission, envVars : Dict String String, fromString : String -> Path } -> Path -> Task Report {}
+report config dir =
     when Dict.get "GENG_OWN_REPORT" config.envVars is
         Nothing ->
             Task.succeed {}
@@ -42,21 +71,244 @@ report config modules =
 
                         Just name ->
                             Check.census name
+
+                stage =
+                    Path.append (Path.fromPosixString "ownership") dir
             in
             when chosen is
                 Nothing ->
                     Task.fail (failure "GENG_OWN_RULES names no rules" "It may be plain, borrow or open, or unset for the rules decided.")
 
                 Just rules ->
+                    readManifest config stage
+                        |> Task.andThen
+                            (\manifest ->
+                                Task.map2 (\records modules -> { records = records, modules = modules })
+                                    (loadRecords config manifest)
+                                    (readModules config.fs stage)
+                                    |> Task.andThen
+                                        (\read ->
+                                            let
+                                                done =
+                                                    Check.checkAll rules read.records read.modules
+
+                                                text =
+                                                    done.lines
+                                                        |> Array.map (\line -> line ++ "\n")
+                                                        |> String.join ""
+                                            in
+                                            writeRecords config dir manifest done.records
+                                                |> Task.andThen
+                                                    (\_ ->
+                                                        FileSystem.appendToFile config.fs (Bytes.fromString text) (config.fromString out)
+                                                            |> Task.map (\_ -> {})
+                                                            |> Task.mapError (\e -> failure "I cannot write the ownership report" (FileSystem.errorToString e))
+                                                    )
+                                        )
+                            )
+
+
+readManifest : { c | fs : FileSystem.Permission, fromString : String -> Path } -> Path -> Task Report Manifest
+readManifest config stage =
+    FileSystem.readFile config.fs (Path.append (Path.fromPosixString "manifest") stage)
+        |> Task.mapError (\e -> failure "I cannot read what the build staged for the ownership checker" (FileSystem.errorToString e))
+        |> Task.andThen
+            (\data ->
+                let
+                    rows =
+                        Bytes.toString data
+                            |> Maybe.withDefault ""
+                            |> String.split "\n"
+                            |> Array.keepIf (\l -> l /= "")
+                            |> Array.map (String.split "\t")
+
+                    records =
+                        rows
+                            |> Array.findFirst (\r -> Array.get 0 r == Just "records")
+                            |> Maybe.andThen (\found -> Array.get 1 found.value)
+                            |> Maybe.andThen
+                                (\d ->
+                                    if d == "" then
+                                        Nothing
+
+                                    else
+                                        Just (config.fromString d)
+                                )
+
+                    entries =
+                        Array.mapAndKeepJust
+                            (\r ->
+                                when r is
+                                    [ package, module_, key, status ] ->
+                                        Just
+                                            { name = { package = package, module_ = module_ }
+                                            , key =
+                                                if key == "-" then
+                                                    Nothing
+
+                                                else
+                                                    Just key
+                                            , present = status == "present"
+                                            }
+
+                                    _ ->
+                                        Nothing
+                            )
+                            rows
+                in
+                Task.succeed { records = records, entries = entries }
+            )
+
+
+{-| The record of every module the manifest says has one. -}
+loadRecords : { c | fs : FileSystem.Permission } -> Manifest -> Task Report (Array Check.Record)
+loadRecords config manifest =
+    when manifest.records is
+        Nothing ->
+            Task.succeed []
+
+        Just recordDir ->
+            manifest.entries
+                |> Array.mapAndKeepJust
+                    (\e ->
+                        if e.present then
+                            e.key
+
+                        else
+                            Nothing
+                    )
+                |> Array.map
+                    (\key ->
+                        let
+                            at ext =
+                                Path.append (Path.fromPosixString (key ++ ext)) recordDir
+
+                            cannot e =
+                                failure ("I cannot read the ownership record " ++ key) (FileSystem.errorToString e)
+                        in
+                        Task.map2 (\facts core -> { facts = facts, core = core })
+                            (FileSystem.readFile config.fs (at ".facts") |> Task.mapError cannot)
+                            (FileSystem.readFile config.fs (at ".corepb") |> Task.mapError cannot)
+                            |> Task.andThen
+                                (\found ->
+                                    when Wire.read found.core is
+                                        Err e ->
+                                            Task.fail (failure ("I cannot read the ownership record " ++ key) (Wire.errorToString e))
+
+                                        Ok declarations ->
+                                            when Check.recordFromText (Bytes.toString found.facts |> Maybe.withDefault "") declarations is
+                                                Ok record ->
+                                                    Task.succeed record
+
+                                                Err why ->
+                                                    Task.fail (failure ("I cannot read the ownership record " ++ key) why)
+                                )
+                    )
+                |> Task.sequence
+
+
+{-| A record for every module checked now that has a key: its declarations'
+Core first, then its facts, each written beside its name and moved there, so
+that a record whose facts are there is whole. Two builds writing one record
+write the same bytes. -}
+writeRecords : { c | fs : FileSystem.Permission } -> Path -> Manifest -> Array Check.Record -> Task Report {}
+writeRecords config dir manifest records =
+    when manifest.records is
+        Nothing ->
+            Task.succeed {}
+
+        Just recordDir ->
+            let
+                keys =
+                    Array.foldl
+                        (\e acc ->
+                            when e.key is
+                                Just key ->
+                                    if e.present then
+                                        acc
+
+                                    else
+                                        Dict.set (e.name.package ++ "\t" ++ e.name.module_) key acc
+
+                                Nothing ->
+                                    acc
+                        )
+                        Dict.empty
+                        manifest.entries
+
+                unique =
+                    Path.filenameWithExtension dir
+
+                cannot e =
+                    failure "I cannot write an ownership record" (FileSystem.errorToString e)
+
+                put name bytes =
                     let
-                        text =
-                            Check.check rules modules
-                                |> Array.map (\line -> line ++ "\n")
-                                |> String.join ""
+                        final =
+                            Path.append (Path.fromPosixString name) recordDir
+
+                        temporary =
+                            Path.append (Path.fromPosixString (name ++ "." ++ unique ++ ".tmp")) recordDir
                     in
-                    FileSystem.appendToFile config.fs (Bytes.fromString text) (config.fromString out)
+                    FileSystem.writeFile config.fs bytes temporary
+                        |> Task.andThen (\_ -> FileSystem.move config.fs final temporary)
                         |> Task.map (\_ -> {})
-                        |> Task.mapError (\e -> failure "I cannot write the ownership report" (FileSystem.errorToString e))
+                        |> Task.mapError cannot
+
+                one record =
+                    when Dict.get (record.name.package ++ "\t" ++ record.name.module_) keys is
+                        Nothing ->
+                            Task.succeed {}
+
+                        Just key ->
+                            when Wire.write record.declarations is
+                                Err why ->
+                                    Task.fail (failure ("I cannot write the ownership record of " ++ record.name.module_) why)
+
+                                Ok core ->
+                                    put (key ++ ".corepb") core
+                                        |> Task.andThen (\_ -> put (key ++ ".facts") (Bytes.fromString (Check.recordToText record)))
+            in
+            if Dict.isEmpty keys then
+                Task.succeed {}
+
+            else
+                FileSystem.makeDirectory config.fs { recursive = True } recordDir
+                    |> Task.mapError cannot
+                    |> Task.andThen (\_ -> records |> Array.map one |> Task.sequence)
+                    |> Task.map (\_ -> {})
+
+
+readModules : FileSystem.Permission -> Path -> Task Report (Array Core.Module)
+readModules fs directory =
+    let
+        cannot e =
+            failure "I cannot read the Core the build wrote" (FileSystem.errorToString e)
+    in
+    FileSystem.listDirectory fs directory
+        |> Task.mapError cannot
+        |> Task.andThen
+            (\entries ->
+                entries
+                    |> Array.map (\entry -> Path.filenameWithExtension entry.path)
+                    |> Array.keepIf (String.endsWith ".corepb")
+                    |> Array.sort
+                    |> Array.map
+                        (\name ->
+                            FileSystem.readFile fs (Path.append (Path.fromPosixString name) directory)
+                                |> Task.mapError cannot
+                                |> Task.andThen
+                                    (\data ->
+                                        when Wire.read data is
+                                            Ok m ->
+                                                Task.succeed m
+
+                                            Err e ->
+                                                Task.fail (failure ("I cannot read " ++ name) (Wire.errorToString e))
+                                    )
+                        )
+                    |> Task.sequence
+            )
 
 
 failure : String -> String -> Report

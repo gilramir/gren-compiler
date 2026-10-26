@@ -45,9 +45,14 @@ import Nitpick.Debug qualified as Nitpick
 import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
 import Control.Exception qualified as Exception
+import Control.Monad (forM, forM_, unless)
 import Data.ByteString.Char8 qualified as BSC
+import Data.ByteString.UTF8 qualified as BS_UTF8
+import Directories qualified as Dirs
+import Gren.Fingerprint qualified as FP
+import System.Directory qualified as Dir
 import System.Environment qualified as Env
-import System.FilePath ((</>))
+import System.FilePath ((<.>), (</>))
 import System.IO qualified as IO
 import Prelude hiding (cycle, print)
 
@@ -193,10 +198,11 @@ make target details sources artifacts request =
 -- with no @main@, a @--output=/dev/null@ one and a @beam@ library reach no
 -- backend and would be built unchecked.
 refinementCut :: Details.Details -> Build.Artifacts -> Task Bool
-refinementCut details artifacts =
+refinementCut details artifacts@(Build.Artifacts pkg _ _ _) =
   do
     cores <- Task.io (programCore details artifacts)
-    cutAt "" cores
+    let own = Set.fromList [ModuleName.Canonical pkg name | name <- Map.keys (ownCore artifacts)]
+    cutAt "" (Details._fingerprint details) own cores
 
 -- | The same cut for a package built as the project, from its exposed modules
 -- rather than from a program's roots (geng-lang @m4-refine.md@ §RF30, D858,
@@ -209,25 +215,26 @@ packageCut sub details own =
   do
     let ownCores = Map.fromList [(Core._moduleName m, m) | m <- own]
     cores <- Task.io (throughWire (Map.union ownCores (Details.loadCores details)))
-    cutAt sub cores
+    cutAt sub (Details._fingerprint details) (Map.keysSet ownCores) cores
 
-cutAt :: FilePath -> Map.Map ModuleName.Canonical Core.Module -> Task Bool
-cutAt sub cores =
+cutAt :: FilePath -> FP.Fingerprint -> Set.Set ModuleName.Canonical -> Map.Map ModuleName.Canonical Core.Module -> Task Bool
+cutAt sub depsPrint own cores =
   do
     stage <- Task.io (Env.lookupEnv "GENG_REFINE_STAGE")
-    -- The ownership checker's report (geng-lang @m4-own.md@ §OW22, D947)
+    -- The ownership checker's report (geng-lang @m4-own.md@ §OW22, D948)
     -- reads every module, so @GENG_OWN_REPORT@ with a stage cuts every build
-    -- and stages all of it. Without a stage nothing would read it.
+    -- and stages what has no record of its check ('ownStage', §OW26).
+    -- Without a stage nothing would read it.
     ownReport <- Task.io (isSet "GENG_OWN_REPORT")
     let staging = maybe False (/= "") stage
     if not (owesCheck cores || (ownReport && staging))
       then return True
-      else cutStaged sub cores stage ownReport
+      else cutStaged sub depsPrint own cores stage ownReport
   where
     isSet name = maybe False (/= "") <$> Env.lookupEnv name
 
-cutStaged :: FilePath -> Map.Map ModuleName.Canonical Core.Module -> Maybe FilePath -> Bool -> Task Bool
-cutStaged sub cores stage ownReport =
+cutStaged :: FilePath -> FP.Fingerprint -> Set.Set ModuleName.Canonical -> Map.Map ModuleName.Canonical Core.Module -> Maybe FilePath -> Bool -> Task Bool
+cutStaged sub depsPrint own cores stage ownReport =
   do
     afterCheck <- Task.io (isSet "GENG_REFINE_CHECKED")
     unchecked <- Task.io (isSet "GENG_UNCHECKED_REFINEMENTS")
@@ -235,9 +242,11 @@ cutStaged sub cores stage ownReport =
       Just dir
         | dir /= "" ->
             do
-              everything <- Task.io ((ownReport ||) . or <$> mapM isSet ["GENG_REFINE_CORE", "GENG_REFINE_EVERY_MODULE"])
+              everything <- Task.io (or <$> mapM isSet ["GENG_REFINE_CORE", "GENG_REFINE_EVERY_MODULE"])
               let staged = if everything then cores else checkerReads cores
-              _ <- Task.io (roundTrip (Just (if null sub then dir else dir </> sub)) staged)
+              let target = if null sub then dir else dir </> sub
+              _ <- Task.io (roundTrip (Just target) staged)
+              Task.io (if ownReport then ownStage depsPrint own cores target else return ())
               held <- Task.io (isSet "GENG_REFINE_HOLD")
               if held then Task.io awaitVerdict else return False
       _
@@ -245,6 +254,70 @@ cutStaged sub cores stage ownReport =
         | otherwise -> Task.throw Exit.GenerateRefinementsUnchecked
   where
     isSet name = maybe False (/= "") <$> Env.lookupEnv name
+
+-- | What the ownership checker reads (geng-lang @m4-own.md@ §OW26, D957):
+-- @ownership/manifest@, a line for each module of the build with the key of
+-- its record, and in @ownership/@ the Core of every module that has none.
+--
+-- A record is a module's check, kept by the CLI under
+-- @$GENG_HOME/<artifact key>/ownership/<checker>/@, where the checker is the
+-- fingerprint of the CLI's own script (@GENG_OWN_CHECKER@ names it) and of
+-- @GENG_OWN_RULES@. A dependency's key is that, the dependency set's
+-- fingerprint, which covers every package's version and every byte of its
+-- sources, and the module's name; a module of the project's adds the
+-- fingerprint of every project module's encoded Core, so an edit to any of
+-- them checks all of them again and no dependency. A module whose record is
+-- there is not encoded or written, which is the build a cache saves (D958).
+-- Without @GENG_OWN_CHECKER@ there are no keys, and every module is staged.
+ownStage :: FP.Fingerprint -> Set.Set ModuleName.Canonical -> Map.Map ModuleName.Canonical Core.Module -> FilePath -> IO ()
+ownStage depsPrint own cores dir =
+  do
+    let target = dir </> "ownership"
+    Dir.createDirectoryIfMissing True target
+    checker <- Env.lookupEnv "GENG_OWN_CHECKER"
+    rules <- maybe "" id <$> Env.lookupEnv "GENG_OWN_RULES"
+    records <-
+      case checker of
+        Just path
+          | path /= "" ->
+              do
+                script <- BS.readFile path
+                home <- Dirs.getGengHome
+                let checkerPrint = FP.chars rules (FP.ofBytes script)
+                return (Just (home </> Dirs.artifactKey </> "ownership" </> FP.toName checkerPrint, checkerPrint))
+        _ -> return Nothing
+    let encoded = Map.mapWithKey encodeOne cores
+        ownPrint =
+          List.foldl'
+            (\acc home -> maybe acc (\bs -> FP.bytes bs (FP.chars (nameChars home) acc)) (Map.lookup home encoded))
+            FP.empty
+            (Set.toAscList own)
+        keyOf checkerPrint home =
+          FP.toName (FP.chars (nameChars home) (FP.fingerprint (if Set.member home own then ownPrint else FP.empty) (FP.fingerprint depsPrint checkerPrint)))
+    rows <-
+      forM (Map.keys cores) $ \home ->
+        case records of
+          Nothing -> return (home, Nothing, False)
+          Just (recordDir, checkerPrint) ->
+            do
+              let key = keyOf checkerPrint home
+              present <- Dir.doesFileExist (recordDir </> key <.> "facts")
+              return (home, Just key, present)
+    forM_ rows $ \(home, _, present) ->
+      unless present (maybe (return ()) (Dump.writeWire target home . B.byteString) (Map.lookup home encoded))
+    BS.writeFile (target </> "manifest") $
+      BS_UTF8.fromString $
+        unlines $
+          ("records\t" ++ maybe "" fst records)
+            : [ List.intercalate "\t" [Pkg.toChars pkg, ModuleName.toChars modul, maybe "-" id key, if present then "present" else "absent"]
+              | (ModuleName.Canonical pkg modul, key, present) <- rows
+              ]
+  where
+    nameChars (ModuleName.Canonical pkg modul) = Pkg.toChars pkg ++ " " ++ ModuleName.toChars modul
+    encodeOne home core =
+      case Wire.encode core of
+        Left problems -> error (unlines (("Core.Wire: " ++ ModuleName.toChars (ModuleName._module home)) : problems))
+        Right bytes -> bytes
 
 -- | The line a held first run writes when its stage is complete (D876): NUL
 -- on each side, which no build's progress or report contains, and the CLI

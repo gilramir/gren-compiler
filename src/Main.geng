@@ -117,6 +117,7 @@ type alias Context =
     , pathToString : Path -> String
     , pathFromString : String -> Path
     , envVars : Dict String String
+    , script : String
     }
 
 
@@ -153,6 +154,7 @@ start env =
 
             context =
                 { args = Array.dropFirst 2 env.args
+                , script = Array.get 1 env.args |> Maybe.withDefault ""
                 , stdout = env.stdout
                 , stderr = env.stderr
                 , stdin = env.stdin
@@ -303,6 +305,7 @@ parseUserArgs context compilerPath =
                         , sources = sources
                         , toString = context.pathToString
                         , fromString = context.pathFromString
+                        , script = context.script
                         , run =
                             \extra ->
                                 startBackend context compilerPath extra
@@ -1300,6 +1303,7 @@ checkedBackend context compilerPath environment sources talk =
         , sources = sources
         , toString = context.pathToString
         , fromString = context.pathFromString
+        , script = context.script
         , run =
             \extra ->
                 startBackend context compilerPath (Dict.union extra environment)

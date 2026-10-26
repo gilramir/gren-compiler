@@ -73,6 +73,7 @@ type alias Config =
     , toString : Path -> String
     , fromString : String -> Path
     , run : Dict String String -> Task Report Int
+    , script : String
     }
 
 
@@ -113,9 +114,10 @@ build config runHeld =
                 runHeld
                     (Dict.singleton "GENG_REFINE_STAGE" (config.toString dir)
                         |> Dict.set "GENG_REFINE_HOLD" "1"
+                        |> Dict.union (Terminal.Own.checkerVariables config.envVars config.script)
                     )
-                    (readModules config.fs dir
-                        |> Task.andThen (\modules -> Terminal.Own.report config modules |> Task.map (\_ -> modules))
+                    (Terminal.Own.report config dir
+                        |> Task.andThen (\_ -> readModules config.fs dir)
                         |> Task.andThen (checkGoals config)
                         |> Task.map (\_ -> True)
                     )
