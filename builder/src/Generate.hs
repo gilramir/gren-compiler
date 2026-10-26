@@ -221,11 +221,12 @@ cutAt :: FilePath -> FP.Fingerprint -> Set.Set ModuleName.Canonical -> Map.Map M
 cutAt sub depsPrint own cores =
   do
     stage <- Task.io (Env.lookupEnv "GENG_REFINE_STAGE")
-    -- The ownership checker's report (geng-lang @m4-own.md@ §OW22, D948)
-    -- reads every module, so @GENG_OWN_REPORT@ with a stage cuts every build
-    -- and stages what has no record of its check ('ownStage', §OW26).
-    -- Without a stage nothing would read it.
-    ownReport <- Task.io (isSet "GENG_OWN_REPORT")
+    -- The ownership checker (geng-lang @m4-own.md@ §OW27, D963) checks every
+    -- build: with @GENG_OWN_CHECKER@, which the CLI sets on every build it
+    -- holds, or @GENG_OWN_REPORT@, a stage cuts every build and stages what
+    -- has no record of its check ('ownStage', §OW26). Without a stage nothing
+    -- would read it.
+    ownReport <- Task.io (or <$> mapM isSet ["GENG_OWN_CHECKER", "GENG_OWN_REPORT"])
     let staging = maybe False (/= "") stage
     if not (owesCheck cores || (ownReport && staging))
       then return True

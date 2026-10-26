@@ -29,6 +29,7 @@ import Terminal.Format
 import Terminal.Help
 import Terminal.Init
 import Terminal.Native
+import Terminal.Own
 import Terminal.PackageBump
 import Terminal.PackageDiff
 import Terminal.PackageInstall
@@ -67,7 +68,9 @@ main =
 {-| A backend's part of a build, on the thread a build started for it (D645,
 `Terminal.BackendWorker`): the request is the one `Terminal.Native.buildStage`
 or `Terminal.Beam.buildStage` wrote, and the answer is the one it reads. `geng
-fmt`'s files are formatted the same way (`Terminal.Format.serve`, D786).
+fmt`'s files are formatted the same way (`Terminal.Format.serve`, D786), and
+every build's ownership check is run so (`Terminal.Own.serve`, geng-lang
+`m4-own.md` D963).
 -}
 serveBackend : String -> Task Never String
 serveBackend request =
@@ -97,6 +100,9 @@ serveBackend request =
 
             Ok { target = "fmt", value = value } ->
                 Terminal.Format.serve fsPermission toString fromString value
+
+            Ok { target = "own", value = value } ->
+                Terminal.Own.serve fsPermission fromString value
 
             _ ->
                 Task.succeed (Json.encode 0 (Json.object [ { key = "refused", value = Json.string ("The backend's request was not one it reads: " ++ request) } ]))

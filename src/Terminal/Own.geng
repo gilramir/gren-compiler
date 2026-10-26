@@ -1,21 +1,32 @@
-module Terminal.Own exposing (checkerVariables, report)
+module Terminal.Own exposing (check, checkerVariables, serve)
 
-{-| The ownership checker's report (geng-lang `m4-own.md` §OW22, D948), run in a
-build's held run beside the refinement checker (D938), with each module's check
-kept as a record so that a later build checks only what changed (§OW26).
+{-| The ownership checker (geng-lang `m4-own.md` §OW27, D963), run on every
+build in its held run beside the refinement checker (D938), with each module's
+check kept as a record so that a later build checks only what changed (§OW26).
 
-`GENG_OWN_REPORT` names a file the build's lines are appended to, in
-`Geng.Own.Check`'s columns, the census's: a program whose suite builds it more
-than once writes each build's. With it set, the binary holds at the cut, as it
-does for a program that owes a refinement goal, and writes
-`ownership/manifest` in the stage: where the records are, and each module's
-record key and whether the record is there (`Generate.ownStage`). The Core of
-each module with no record is beside it, and only that is read and checked;
-the rest is read from its record. The report refuses nothing.
+The binary holds at the cut and writes `ownership/manifest` in the stage:
+where the records are, and each module's record key and whether the record is
+there (`Generate.ownStage`). The Core of each module with no record is beside
+it, and only that is read and checked; the rest is read from its record. That
+part runs on a worker thread with the backends' stack (`Terminal.BackendWorker`,
+D645), since the checker and Core's reader recurse once a level of the Core,
+and on node's own stack a record 1,000 deep is more than they reach.
+
+What the check finds refuses the build: each of `Geng.Own.Error`'s errors, laid
+out by `Terminal.Refine` beside the refinement checker's. `GENG_OWN_REPORT`
+names a file the build's lines are appended to, in `Geng.Own.Check`'s columns,
+the census's: a program whose suite builds it more than once writes each
+build's. `GENG_OWN_ERRORS` names a file for the errors' text, without colour,
+whether or not they refuse the build, which `harness/own.py` pins.
+`GENG_UNCHECKED_OWNERSHIP` builds a program the check refuses anyway: a
+development switch, as `GENG_UNCHECKED_REFINEMENTS` is (D825), so that the gate
+can report on cases written to be refused.
 
 `GENG_OWN_RULES` picks the rules: the ones decided when it is unset, or one of
 the census's rule sets, `plain`, `borrow` or `open`, which is how the checker is
-held to the census (`bench/own/census.py`). The records of each are kept apart.
+held to the census (`bench/own/census.py`). The records of each are kept apart,
+and a census rule set refuses nothing, since its lines carry no spans to draw an
+error from.
 -}
 
 import Bytes
@@ -27,19 +38,135 @@ import FileSystem.Path as Path exposing (Path)
 import Geng.Core as Core
 import Geng.Core.Wire as Wire
 import Geng.Own.Check as Check
+import Geng.Own.Error as Error
+import Json.Decode as Decode
+import Json.Encode as Encode
 import Task exposing (Task)
+import Terminal.BackendWorker as BackendWorker
 
 
-{-| What the binary is told when the report is asked for: the script of the CLI
-that will check, whose bytes are the checker's part of every record's key.
+{-| What the binary is told on every build: the script of the CLI that will
+check, whose bytes are the checker's part of every record's key. With it, the
+binary holds at the cut and stages what has no record (`Generate.ownStage`).
 -}
 checkerVariables : Dict String String -> String -> Dict String String
-checkerVariables envVars script =
-    if Dict.member "GENG_OWN_REPORT" envVars && script /= "" then
+checkerVariables _ script =
+    if script /= "" then
         Dict.singleton "GENG_OWN_CHECKER" script
 
     else
         Dict.empty
+
+
+{-| The check of a build's modules, `dir` the stage: the worker checks them and
+answers the lines, which are appended to `GENG_OWN_REPORT` when it names a file;
+the answer is the violations, which the caller turns into errors and refuses
+the build with unless `GENG_UNCHECKED_OWNERSHIP` is set.
+-}
+check : { c | fs : FileSystem.Permission, envVars : Dict String String, fromString : String -> Path, toString : Path -> String } -> Path -> Task Report (Array Error.Violation)
+check config dir =
+    let
+        rules =
+            Dict.get "GENG_OWN_RULES" config.envVars |> Maybe.withDefault "rules"
+
+        request =
+            Encode.object
+                [ { key = "target", value = Encode.string "own" }
+                , { key = "stage", value = Encode.string (config.toString dir) }
+                , { key = "rules", value = Encode.string rules }
+                ]
+
+        answered =
+            Decode.oneOf
+                [ Decode.field "lines" (Decode.array Decode.string) |> Decode.map Ok
+                , Decode.map2 (\what why -> Err (report what why)) (Decode.field "failed" Decode.string) (Decode.field "why" Decode.string)
+                ]
+    in
+    BackendWorker.call "ownership checker" request answered
+        |> Task.andThen
+            (\result ->
+                when result is
+                    Err stopped ->
+                        Task.fail stopped
+
+                    Ok lines ->
+                        let
+                            text =
+                                lines
+                                    |> Array.map (\line -> line ++ "\n")
+                                    |> String.join ""
+                        in
+                        (when Dict.get "GENG_OWN_REPORT" config.envVars is
+                            Just out ->
+                                FileSystem.appendToFile config.fs (Bytes.fromString text) (config.fromString out)
+                                    |> Task.map (\_ -> {})
+                                    |> Task.mapError (\e -> report "I cannot write the ownership report" (FileSystem.errorToString e))
+
+                            Nothing ->
+                                Task.succeed {}
+                        )
+                            |> Task.map (\_ -> Array.mapAndKeepJust Error.parse lines)
+            )
+
+
+{-| The worker's part (D645): the stage's manifest read, the records it names
+loaded, the modules staged without one decoded, every module checked, a record
+written for each module checked, and the lines answered, in every module's
+order whichever were records; or a failure, as `check` reads it.
+-}
+serve : FileSystem.Permission -> (String -> Path) -> Decode.Value -> Task Never String
+serve fs fromString value =
+    let
+        config =
+            { fs = fs, fromString = fromString }
+
+        answer lines =
+            Encode.encode 0 (Encode.object [ { key = "lines", value = Encode.array Encode.string lines } ])
+
+        failed what why =
+            Encode.encode 0 (Encode.object [ { key = "failed", value = Encode.string what }, { key = "why", value = Encode.string why } ])
+    in
+    when Decode.decodeValue (Decode.map2 (\stage rules -> { stage = stage, rules = rules }) (Decode.field "stage" Decode.string) (Decode.field "rules" Decode.string)) value is
+        Err e ->
+            Task.succeed (failed "The ownership checker's request was not one it reads" (Decode.errorToString e))
+
+        Ok request ->
+            let
+                chosen =
+                    if request.rules == "rules" then
+                        Just Check.rules
+
+                    else
+                        Check.census request.rules
+
+                dir =
+                    fromString request.stage
+
+                stage =
+                    Path.append (Path.fromPosixString "ownership") dir
+            in
+            when chosen is
+                Nothing ->
+                    Task.succeed (failed "GENG_OWN_RULES names no rules" "It may be plain, borrow or open, or unset for the rules decided.")
+
+                Just rules ->
+                    readManifest config stage
+                        |> Task.andThen
+                            (\manifest ->
+                                Task.map2 (\records modules -> { records = records, modules = modules })
+                                    (loadRecords config manifest)
+                                    (readModules fs stage)
+                                    |> Task.andThen
+                                        (\read ->
+                                            let
+                                                done =
+                                                    Check.checkAll rules read.records read.modules
+                                            in
+                                            writeRecords config dir manifest done.records
+                                                |> Task.map (\_ -> answer done.lines)
+                                        )
+                            )
+                        |> Task.onError (\e -> Task.succeed (failed e.what e.why))
 
 
 type alias Entry =
@@ -55,60 +182,7 @@ type alias Manifest =
     }
 
 
-{-| The report of a build's modules, when one is asked for: `dir` is the stage. -}
-report : { c | fs : FileSystem.Permission, envVars : Dict String String, fromString : String -> Path } -> Path -> Task Report {}
-report config dir =
-    when Dict.get "GENG_OWN_REPORT" config.envVars is
-        Nothing ->
-            Task.succeed {}
-
-        Just out ->
-            let
-                chosen =
-                    when Dict.get "GENG_OWN_RULES" config.envVars is
-                        Nothing ->
-                            Just Check.rules
-
-                        Just name ->
-                            Check.census name
-
-                stage =
-                    Path.append (Path.fromPosixString "ownership") dir
-            in
-            when chosen is
-                Nothing ->
-                    Task.fail (failure "GENG_OWN_RULES names no rules" "It may be plain, borrow or open, or unset for the rules decided.")
-
-                Just rules ->
-                    readManifest config stage
-                        |> Task.andThen
-                            (\manifest ->
-                                Task.map2 (\records modules -> { records = records, modules = modules })
-                                    (loadRecords config manifest)
-                                    (readModules config.fs stage)
-                                    |> Task.andThen
-                                        (\read ->
-                                            let
-                                                done =
-                                                    Check.checkAll rules read.records read.modules
-
-                                                text =
-                                                    done.lines
-                                                        |> Array.map (\line -> line ++ "\n")
-                                                        |> String.join ""
-                                            in
-                                            writeRecords config dir manifest done.records
-                                                |> Task.andThen
-                                                    (\_ ->
-                                                        FileSystem.appendToFile config.fs (Bytes.fromString text) (config.fromString out)
-                                                            |> Task.map (\_ -> {})
-                                                            |> Task.mapError (\e -> failure "I cannot write the ownership report" (FileSystem.errorToString e))
-                                                    )
-                                        )
-                            )
-
-
-readManifest : { c | fs : FileSystem.Permission, fromString : String -> Path } -> Path -> Task Report Manifest
+readManifest : { c | fs : FileSystem.Permission, fromString : String -> Path } -> Path -> Task Problem Manifest
 readManifest config stage =
     FileSystem.readFile config.fs (Path.append (Path.fromPosixString "manifest") stage)
         |> Task.mapError (\e -> failure "I cannot read what the build staged for the ownership checker" (FileSystem.errorToString e))
@@ -161,7 +235,7 @@ readManifest config stage =
 
 
 {-| The record of every module the manifest says has one. -}
-loadRecords : { c | fs : FileSystem.Permission } -> Manifest -> Task Report (Array Check.Record)
+loadRecords : { c | fs : FileSystem.Permission } -> Manifest -> Task Problem (Array Check.Record)
 loadRecords config manifest =
     when manifest.records is
         Nothing ->
@@ -211,7 +285,7 @@ loadRecords config manifest =
 Core first, then its facts, each written beside its name and moved there, so
 that a record whose facts are there is whole. Two builds writing one record
 write the same bytes. -}
-writeRecords : { c | fs : FileSystem.Permission } -> Path -> Manifest -> Array Check.Record -> Task Report {}
+writeRecords : { c | fs : FileSystem.Permission } -> Path -> Manifest -> Array Check.Record -> Task Problem {}
 writeRecords config dir manifest records =
     when manifest.records is
         Nothing ->
@@ -279,7 +353,7 @@ writeRecords config dir manifest records =
                     |> Task.map (\_ -> {})
 
 
-readModules : FileSystem.Permission -> Path -> Task Report (Array Core.Module)
+readModules : FileSystem.Permission -> Path -> Task Problem (Array Core.Module)
 readModules fs directory =
     let
         cannot e =
@@ -311,8 +385,21 @@ readModules fs directory =
             )
 
 
-failure : String -> String -> Report
+{-| What went wrong on the worker, which is answered and made a report on the
+main thread. -}
+type alias Problem =
+    { what : String
+    , why : String
+    }
+
+
+failure : String -> String -> Problem
 failure what why =
+    { what = what, why = why }
+
+
+report : String -> String -> Report
+report what why =
     Report.create
         "CANNOT CHECK OWNERSHIP"
         Nothing

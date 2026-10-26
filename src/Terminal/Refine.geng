@@ -55,6 +55,7 @@ import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Geng.Core as Core
 import Geng.Core.Wire as Wire
+import Geng.Own.Error as OwnError
 import Geng.Refine.Check as Check
 import Geng.Refine.Error as Error
 import Geng.Refine.Semver as Semver
@@ -116,9 +117,14 @@ build config runHeld =
                         |> Dict.set "GENG_REFINE_HOLD" "1"
                         |> Dict.union (Terminal.Own.checkerVariables config.envVars config.script)
                     )
-                    (Terminal.Own.report config dir
-                        |> Task.andThen (\_ -> readModules config.fs dir)
-                        |> Task.andThen (checkGoals config)
+                    (Task.map2 (\owned modules -> { owned = owned, modules = modules })
+                        (Terminal.Own.check config dir)
+                        (readModules config.fs dir)
+                        |> Task.andThen
+                            (\staged ->
+                                goalErrors config staged.modules
+                                    |> Task.andThen (\refusing -> refuseWith config staged.owned refusing)
+                            )
                         |> Task.map (\_ -> True)
                     )
                     |> Task.andThen (\exitCode -> remove config dir |> Task.map (\_ -> exitCode))
@@ -293,8 +299,59 @@ when a goal is not proved. No modules is nothing to check.
 -}
 checkGoals : Config -> Array Core.Module -> Task Report {}
 checkGoals config modules =
+    goalErrors config modules
+        |> Task.andThen (refuseWith config [])
+
+
+{-| The ownership checker's violations and the goals not proved, written where
+`GENG_OWN_ERRORS` and `GENG_REFINE_ERRORS` ask, and the build refused with all
+of them, the ownership errors first, unless what each would refuse is let
+through by its development switch.
+-}
+refuseWith : Config -> Array OwnError.Violation -> Array Check.Goal -> Task Report {}
+refuseWith config violations refusing =
+    let
+        ownErrors =
+            OwnError.errors (ownSource config.sources) violations
+                |> Array.map (fromOwn config)
+
+        goalErrors_ =
+            Array.map (fromGoal config) refusing
+
+        refusedOwn =
+            if Dict.member "GENG_UNCHECKED_OWNERSHIP" config.envVars then
+                []
+
+            else
+                ownErrors
+
+        refusedGoals =
+            if Dict.member "GENG_UNCHECKED_REFINEMENTS" config.envVars then
+                []
+
+            else
+                goalErrors_
+    in
+    writeErrors config goalErrors_
+        |> Task.andThen (\_ -> writeOwnErrors config ownErrors)
+        |> Task.andThen
+            (\_ ->
+                if Array.isEmpty refusedOwn && Array.isEmpty refusedGoals then
+                    Task.succeed {}
+
+                else
+                    Task.fail (layout config (refusedOwn ++ refusedGoals))
+            )
+
+
+{-| The goals not proved of every module outside `core` (D845), with the
+report and the questions written where they are asked for. No modules is
+nothing to check.
+-}
+goalErrors : Config -> Array Core.Module -> Task Report (Array Check.Goal)
+goalErrors config modules =
     if Array.isEmpty modules then
-        Task.succeed {}
+        Task.succeed []
 
     else
         let
@@ -318,15 +375,7 @@ checkGoals config modules =
         in
         writeReport config goals
             |> Task.andThen (\_ -> writeQueries config checkedRun.queries)
-            |> Task.andThen (\_ -> writeErrors config refusing)
-            |> Task.andThen
-                (\_ ->
-                    if Array.isEmpty refusing || Dict.member "GENG_UNCHECKED_REFINEMENTS" config.envVars then
-                        Task.succeed {}
-
-                    else
-                        Task.fail (refusal config refusing)
-                )
+            |> Task.map (\_ -> refusing)
 
 
 writeReport : Config -> Array Check.Goal -> Task Report {}
@@ -353,55 +402,112 @@ writeQueries config queries =
             Task.succeed {}
 
 
-writeErrors : Config -> Array Check.Goal -> Task Report {}
-writeErrors config goals =
-    when Dict.get "GENG_REFINE_ERRORS" config.envVars is
+writeErrors : Config -> Array Laid -> Task Report {}
+writeErrors config errors =
+    writeText config "GENG_REFINE_ERRORS" "the refinement errors" errors
+
+
+writeOwnErrors : Config -> Array Laid -> Task Report {}
+writeOwnErrors config errors =
+    writeText config "GENG_OWN_ERRORS" "the ownership errors" errors
+
+
+writeText : Config -> String -> String -> Array Laid -> Task Report {}
+writeText config variable what errors =
+    when Dict.get variable config.envVars is
         Just out ->
             let
                 text =
-                    if Array.isEmpty goals then
+                    if Array.isEmpty errors then
                         ""
 
                     else
-                        Report.toString (Report.Terminal { useColor = False }) config.toString (refusal config goals)
+                        Report.toString (Report.Terminal { useColor = False }) config.toString (layout config errors)
             in
             FileSystem.writeFile config.fs (Bytes.fromString text) (config.fromString out)
                 |> Task.map (\_ -> {})
-                |> Task.mapError (\e -> failure "I cannot write the refinement errors" (FileSystem.errorToString e))
+                |> Task.mapError (\e -> failure ("I cannot write " ++ what) (FileSystem.errorToString e))
 
         Nothing ->
             Task.succeed {}
 
 
-{-| The refusal (D811): each goal not proved as an error of its own, the
-first as the report and each after it under a bar of its own, drawn as
-`Cli.Report` draws one, so that the report stays one report for `--report`.
--}
-refusal : Config -> Array Check.Goal -> Report
-refusal config goals =
+{-| An error and the file it is in, ready to be laid out. -}
+type alias Laid =
+    { error : Error.Error
+    , path : Maybe Path
+    }
+
+
+{-| A goal not proved as an error (D811), with whose it is when it is a
+dependency's (D861). -}
+fromGoal : Config -> Check.Goal -> Laid
+fromGoal config goal =
     let
-        errors =
-            Array.map
-                (\goal ->
-                    let
-                        found =
-                            locate config.sources goal
+        found =
+            locate config.sources goal
 
-                        error =
-                            Error.fromGoal (Maybe.map .data found) goal
-                    in
-                    { error =
-                        when Dict.get goal.package config.sources.dependencies is
-                            Just dep ->
-                                { error | blocks = Array.pushLast (Error.Prose (dependencyLine goal.package dep.version)) error.blocks }
+        error =
+            Error.fromGoal (Maybe.map .data found) goal
+    in
+    { error = withDependency config goal.package error
+    , path = Maybe.map .path found
+    }
 
-                            Nothing ->
-                                error
-                    , path = Maybe.map .path found
-                    }
-                )
-                goals
 
+{-| An ownership violation as an error (geng-lang `m4-own.md` D962), in the
+same form. -}
+fromOwn : Config -> OwnError.Error -> Laid
+fromOwn config own =
+    let
+        found =
+            locate config.sources own
+
+        error =
+            { title = own.title
+            , package = own.package
+            , module_ = own.module_
+            , blocks =
+                Array.map
+                    (\block ->
+                        when block is
+                            OwnError.Prose text ->
+                                Error.Prose text
+
+                            OwnError.Code lines ->
+                                Error.Code lines
+                    )
+                    own.blocks
+            }
+    in
+    { error = withDependency config own.package error
+    , path = Maybe.map .path found
+    }
+
+
+withDependency : Config -> String -> Error.Error -> Error.Error
+withDependency config package error =
+    when Dict.get package config.sources.dependencies is
+        Just dep ->
+            { error | blocks = Array.pushLast (Error.Prose (dependencyLine package dep.version)) error.blocks }
+
+        Nothing ->
+            error
+
+
+{-| A module's source by package and module, for the ownership errors' excerpts. -}
+ownSource : Sources -> String -> String -> Maybe String
+ownSource sources package module_ =
+    locate sources { package = package, module_ = module_ } |> Maybe.map .data
+
+
+{-| The refusal (D811): each error as one of its own, the first as the report
+and each after it under a bar of its own, drawn as `Cli.Report` draws one, so
+that the report stays one report for `--report`.
+-}
+layout : Config -> Array Laid -> Report
+layout config errors =
+    let
         later =
             Array.dropFirst 1 errors
                 |> Array.mapAndFlatten
@@ -479,7 +585,7 @@ bar config title maybePath =
 project: a dependency's when the goal's package is one, the application's
 otherwise.
 -}
-locate : Sources -> Check.Goal -> Maybe { path : Path, data : String }
+locate : Sources -> { g | package : String, module_ : String } -> Maybe { path : Path, data : String }
 locate sources goal =
     when Dict.get goal.package sources.dependencies is
         Just dep ->
