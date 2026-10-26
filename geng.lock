@@ -34,6 +34,11 @@ version = "6.1.3"
 path = "../../gren-lang/node"
 
 [[package]]
+name = "github.com/geng-language/own"
+version = "0.1.0"
+path = "../../../packages/own"
+
+[[package]]
 name = "github.com/geng-language/protobuf"
 version = "0.1.0"
 path = "../../../packages/protobuf"

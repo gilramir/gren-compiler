@@ -60,6 +60,7 @@ import Geng.Refine.Error as Error
 import Geng.Refine.Semver as Semver
 import SemanticVersion exposing (SemanticVersion)
 import Task exposing (Task)
+import Terminal.Own
 
 
 {-| What a checked build needs: `run` runs the compiler binary once with the
@@ -114,6 +115,7 @@ build config runHeld =
                         |> Dict.set "GENG_REFINE_HOLD" "1"
                     )
                     (readModules config.fs dir
+                        |> Task.andThen (\modules -> Terminal.Own.report config modules |> Task.map (\_ -> modules))
                         |> Task.andThen (checkGoals config)
                         |> Task.map (\_ -> True)
                     )

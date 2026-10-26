@@ -213,24 +213,36 @@ packageCut sub details own =
 
 cutAt :: FilePath -> Map.Map ModuleName.Canonical Core.Module -> Task Bool
 cutAt sub cores =
-  if not (owesCheck cores)
-    then return True
-    else do
-      stage <- Task.io (Env.lookupEnv "GENG_REFINE_STAGE")
-      afterCheck <- Task.io (isSet "GENG_REFINE_CHECKED")
-      unchecked <- Task.io (isSet "GENG_UNCHECKED_REFINEMENTS")
-      case stage of
-        Just dir
-          | dir /= "" ->
-              do
-                everything <- Task.io (or <$> mapM isSet ["GENG_REFINE_CORE", "GENG_REFINE_EVERY_MODULE"])
-                let staged = if everything then cores else checkerReads cores
-                _ <- Task.io (roundTrip (Just (if null sub then dir else dir </> sub)) staged)
-                held <- Task.io (isSet "GENG_REFINE_HOLD")
-                if held then Task.io awaitVerdict else return False
-        _
-          | afterCheck || unchecked -> return True
-          | otherwise -> Task.throw Exit.GenerateRefinementsUnchecked
+  do
+    stage <- Task.io (Env.lookupEnv "GENG_REFINE_STAGE")
+    -- The ownership checker's report (geng-lang @m4-own.md@ §OW22, D947)
+    -- reads every module, so @GENG_OWN_REPORT@ with a stage cuts every build
+    -- and stages all of it. Without a stage nothing would read it.
+    ownReport <- Task.io (isSet "GENG_OWN_REPORT")
+    let staging = maybe False (/= "") stage
+    if not (owesCheck cores || (ownReport && staging))
+      then return True
+      else cutStaged sub cores stage ownReport
+  where
+    isSet name = maybe False (/= "") <$> Env.lookupEnv name
+
+cutStaged :: FilePath -> Map.Map ModuleName.Canonical Core.Module -> Maybe FilePath -> Bool -> Task Bool
+cutStaged sub cores stage ownReport =
+  do
+    afterCheck <- Task.io (isSet "GENG_REFINE_CHECKED")
+    unchecked <- Task.io (isSet "GENG_UNCHECKED_REFINEMENTS")
+    case stage of
+      Just dir
+        | dir /= "" ->
+            do
+              everything <- Task.io ((ownReport ||) . or <$> mapM isSet ["GENG_REFINE_CORE", "GENG_REFINE_EVERY_MODULE"])
+              let staged = if everything then cores else checkerReads cores
+              _ <- Task.io (roundTrip (Just (if null sub then dir else dir </> sub)) staged)
+              held <- Task.io (isSet "GENG_REFINE_HOLD")
+              if held then Task.io awaitVerdict else return False
+      _
+        | afterCheck || unchecked -> return True
+        | otherwise -> Task.throw Exit.GenerateRefinementsUnchecked
   where
     isSet name = maybe False (/= "") <$> Env.lookupEnv name
 

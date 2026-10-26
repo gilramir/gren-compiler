@@ -1,0 +1,72 @@
+module Terminal.Own exposing (report)
+
+{-| The ownership checker's report (geng-lang `m4-own.md` §OW22, D947), run in a
+build's held run beside the refinement checker (D938).
+
+`GENG_OWN_REPORT` names a file the build's lines are appended to, in
+`Geng.Own.Check`'s columns, the census's: a program whose suite builds it more
+than once writes each build's. With it set, the binary stages every module and
+holds, as it does for a program that owes a refinement goal, so a build asked
+for the report reads its whole program; one not asked pays nothing. The report
+refuses nothing.
+
+`GENG_OWN_RULES` picks the rules: the ones decided when it is unset, or one of
+the census's rule sets, `plain`, `borrow` or `open`, which is how the checker is
+held to the census (`bench/own/census.py`).
+-}
+
+import Bytes
+import Cli.PrettyPrinter as PP
+import Cli.Report as Report exposing (Report)
+import Dict exposing (Dict)
+import FileSystem
+import FileSystem.Path exposing (Path)
+import Geng.Core as Core
+import Geng.Own.Check as Check
+import Task exposing (Task)
+
+
+{-| The report of a build's modules, when one is asked for. -}
+report : { c | fs : FileSystem.Permission, envVars : Dict String String, fromString : String -> Path } -> Array Core.Module -> Task Report {}
+report config modules =
+    when Dict.get "GENG_OWN_REPORT" config.envVars is
+        Nothing ->
+            Task.succeed {}
+
+        Just out ->
+            let
+                chosen =
+                    when Dict.get "GENG_OWN_RULES" config.envVars is
+                        Nothing ->
+                            Just Check.rules
+
+                        Just name ->
+                            Check.census name
+            in
+            when chosen is
+                Nothing ->
+                    Task.fail (failure "GENG_OWN_RULES names no rules" "It may be plain, borrow or open, or unset for the rules decided.")
+
+                Just rules ->
+                    let
+                        text =
+                            Check.check rules modules
+                                |> Array.map (\line -> line ++ "\n")
+                                |> String.join ""
+                    in
+                    FileSystem.appendToFile config.fs (Bytes.fromString text) (config.fromString out)
+                        |> Task.map (\_ -> {})
+                        |> Task.mapError (\e -> failure "I cannot write the ownership report" (FileSystem.errorToString e))
+
+
+failure : String -> String -> Report
+failure what why =
+    Report.create
+        "CANNOT CHECK OWNERSHIP"
+        Nothing
+        (PP.verticalBlock
+            [ PP.words (what ++ ":")
+            , PP.empty
+            , PP.words why
+            ]
+        )
