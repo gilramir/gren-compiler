@@ -181,6 +181,7 @@ data Attribute
   | AttributeAfterExtern Name.Name Row Col
   | AttributeCapabilityAnnotation Row Col
   | AttributeInlineNotOnValue Row Col
+  | AttributeAffineNotOnCustomType Row Col
   | --
     AttributeIndentName Row Col
   | AttributeIndentOpen Row Col
@@ -1721,6 +1722,12 @@ toAttributeReport source attribute startRow startCol =
               "I was expecting a value declaration with a type annotation after this attribute.\
               \ `@inline` says the inliner opens every call to a value, and its annotation is\
               \ the line the attribute stands above."
+        AttributeAffineNotOnCustomType row col ->
+          stuck row col "MISPLACED ATTRIBUTE" $
+            D.reflow
+              "I was expecting a custom type after this attribute. `@affine` says a value of\
+              \ a type is used at most once. A record is affine when one of its fields is, so\
+              \ a type alias has nothing to declare."
         AttributeIndentName row col ->
           stuck row col "UNFINISHED ATTRIBUTE" $
             D.reflow "I was expecting the name of an attribute next."

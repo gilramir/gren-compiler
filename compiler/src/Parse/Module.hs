@@ -92,10 +92,10 @@ checkModule (Module maybeHeader imports infixes decls) =
   let (values, classes, instances, unions, aliases, topLevelComments) = categorizeDecls [] [] [] [] [] [] 0 decls
    in case maybeHeader of
         Just (Header name exports docs comments) ->
-          Src.Module (Just name) exports (toDocs docs decls) imports values classes instances unions aliases infixes topLevelComments comments (capabilities decls) (inlines decls)
+          Src.Module (Just name) exports (toDocs docs decls) imports values classes instances unions aliases infixes topLevelComments comments (capabilities decls) (inlines decls) (affines decls)
         Nothing ->
           let comments = SC.HeaderComments [] [] [] [] [] []
-           in Src.Module Nothing (A.At A.one Src.Open) (Src.NoDocs A.one) imports values classes instances unions aliases infixes topLevelComments comments (capabilities decls) (inlines decls)
+           in Src.Module Nothing (A.At A.one Src.Open) (Src.NoDocs A.one) imports values classes instances unions aliases infixes topLevelComments comments (capabilities decls) (inlines decls) (affines decls)
 
 categorizeDecls ::
   [(Src.SourceOrder, A.Located Src.Value)] ->
@@ -124,6 +124,7 @@ categorizeDecls values classes instances unions aliases topLevelComments index d
         Decl.Inline _ value -> categorizeDecls ((index, value) : values) classes instances unions aliases topLevelComments (index + 1) otherDecls
         Decl.Class _ class_ -> categorizeDecls values ((index, class_) : classes) instances unions aliases topLevelComments (index + 1) otherDecls
         Decl.Instance _ instance_ -> categorizeDecls values classes ((index, instance_) : instances) unions aliases topLevelComments (index + 1) otherDecls
+        Decl.Affine _ union -> categorizeDecls values classes instances ((index, union) : unions) aliases topLevelComments (index + 1) otherDecls
         Decl.Union _ union -> categorizeDecls values classes instances ((index, union) : unions) aliases topLevelComments (index + 1) otherDecls
         Decl.Alias _ alias -> categorizeDecls values classes instances unions ((index, alias) : aliases) topLevelComments (index + 1) otherDecls
         Decl.TopLevelComments comments -> categorizeDecls values classes instances unions aliases ((index, comments) : topLevelComments) (index + 1) otherDecls
@@ -137,6 +138,11 @@ capabilities decls =
 inlines :: [Decl.Decl] -> [A.Located Name.Name]
 inlines decls =
   [name | Decl.Inline _ (A.At _ (Src.Value name _ _ _ _)) <- decls]
+
+-- | The custom types declared under @\@affine@ (geng-lang @m4-own.md@ D921).
+affines :: [Decl.Decl] -> [A.Located Name.Name]
+affines decls =
+  [name | Decl.Affine _ (A.At _ (Src.Union name _ _ _ _)) <- decls]
 
 -- TO DOCS
 
@@ -161,6 +167,7 @@ getDocComments decls comments =
         Decl.Class c (A.At _ (Src.Class n _ _ _)) -> getDocComments otherDecls (addComment c n comments)
         Decl.Instance _ _ -> getDocComments otherDecls comments
         Decl.Union c (A.At _ (Src.Union n _ _ _ _)) -> getDocComments otherDecls (addComment c n comments)
+        Decl.Affine c (A.At _ (Src.Union n _ _ _ _)) -> getDocComments otherDecls (addComment c n comments)
         Decl.Alias c (A.At _ (Src.Alias n _ _)) -> getDocComments otherDecls (addComment c n comments)
         Decl.TopLevelComments _ -> getDocComments otherDecls comments
 

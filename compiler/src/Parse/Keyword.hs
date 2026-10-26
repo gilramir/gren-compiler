@@ -22,6 +22,7 @@ module Parse.Keyword
     exposing_,
     as_,
     where_,
+    moved_,
     k4,
     k5,
   )
@@ -112,6 +113,11 @@ as_ tx = k2 0x61 0x73 tx
 
 where_ :: (Row -> Col -> x) -> Parser x ()
 where_ tx = k5 0x77 0x68 0x65 0x72 0x65 tx
+
+-- | @moved@, before a name in a signature (geng-lang @m4-own.md@ D920). It is
+-- a keyword only there, @(moved b : Builder a)@; @(moved : Int)@ is a name.
+moved_ :: (Row -> Col -> x) -> Parser x ()
+moved_ tx = k5 0x6D 0x6F 0x76 0x65 0x64 tx
 
 -- KEYWORDS
 

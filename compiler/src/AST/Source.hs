@@ -195,7 +195,10 @@ data Type_
     -- grammar (D815), with its source text, the bytes from its first token to
     -- its last exactly as written, which Core carries (D812). Comments inside
     -- are not kept as comments: nothing reads a type's comments from this AST.
-    TNamed (A.Located Name) Type (Maybe (Expr, String))
+    -- The first field is where @moved@ is written, @(moved b : Builder a)@,
+    -- when it is (geng-lang @m4-own.md@ D920, §OW21): the function takes the
+    -- argument's value.
+    TNamed (Maybe A.Region) (A.Located Name) Type (Maybe (Expr, String))
   deriving (Show)
 
 type TRecordField = (A.Located Name, Type, SC.RecordFieldComments)
@@ -254,12 +257,15 @@ data Module = Module
     _capabilities :: [A.Located Name],
     -- | The values declared under @\@inline@ (D545), which only @core@ may
     -- write and the inliner opens whatever their size.
-    _inlines :: [A.Located Name]
+    _inlines :: [A.Located Name],
+    -- | The custom types declared under @\@affine@ (geng-lang @m4-own.md@
+    -- D921): a value of one is used at most once.
+    _affines :: [A.Located Name]
   }
   deriving (Show)
 
 getName :: Module -> Name
-getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _ _ _) =
+getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _ _ _ _) =
   case maybeName of
     Just (A.At _ name) ->
       name

@@ -856,14 +856,15 @@ constraintP =
 
 dataDeclP :: P DataDecl
 dataDeclP =
-  message "DataDecl" 5 $
+  message "DataDecl" 6 $
     do
       name <- qual "name" 1
       params <- repText "params" 2
       transparency <- enum_ "transparency" 3 transparencyFromCode
       ctors <- rep "ctors" 4 ctorP
       classes <- repQual "classes" 5
-      pure (DataDecl name params transparency ctors classes)
+      affine <- bool_ "affine" 6
+      pure (DataDecl name params transparency ctors classes affine)
 
 ctorP :: P Ctor
 ctorP =
@@ -1028,7 +1029,7 @@ signatureP =
 
 namedP :: P Named
 namedP =
-  message "Named" 4 $
+  message "Named" 5 $
     do
       here <- offset
       got <- next "path" 1 WBytes (submessage packedVarints)
@@ -1041,8 +1042,9 @@ namedP =
       predicate <- optMsg "predicate" 3 exprP
       sourceAt <- offset
       source <- text "source" 4
+      moved <- bool_ "moved" 5
       if Utf8.isEmpty source == Maybe.isNothing predicate
-        then pure (Named path b predicate source)
+        then pure (Named path b predicate source moved)
         else failAt sourceAt "a name has source text without a predicate, or a predicate without its source text"
   where
     stepOf code =

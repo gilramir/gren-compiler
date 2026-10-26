@@ -288,9 +288,12 @@ owing cores =
     asks n =
       Maybe.isJust (Core._namedPredicate n)
         && odd (length [() | Core.StepArg _ <- Core._namedPath n])
+    -- A signature whose names only say @moved@ (geng-lang @m4-own.md@ D920)
+    -- asks the refinement checker nothing.
+    refines sig = any (Maybe.isJust . Core._namedPredicate) (Core._sigNamed sig)
     owes m =
       ModuleName._package (Core._moduleName m) /= Pkg.core
-        && ( not (null (Core._moduleSignatures m))
+        && ( any refines (Core._moduleSignatures m)
                || any (not . Set.disjoint refined . Refs._refGlobals . Refs.refsIn . Core._bindValue) (Core._moduleDefs m)
            )
 

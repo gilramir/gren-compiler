@@ -86,6 +86,7 @@ lower platform annotations types coreTypes elaboration modul =
           Core._moduleData =
             [ lowerUnion
                 (if Can.isAbstract (Can._exports modul) name then Core.Abstract else Core.Transparent)
+                (Set.member name (Can._affines modul))
                 home
                 name
                 union

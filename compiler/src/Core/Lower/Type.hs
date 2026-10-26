@@ -176,15 +176,17 @@ lowerClass home name (Can.ClassDecl param methods) =
 -- (@Can.isAbstract@), which a native library's header reads to decide whether
 -- a host may look inside one (geng-lang @m3-embed.md@ D631); 'Core.Transparent'
 -- otherwise. Every class set is empty: published class sets are @classes.md@
--- §2.5, and recording a guess here would be a fabricated answer.
-lowerUnion :: Core.Transparency -> ModuleName.Canonical -> Name -> Can.Union -> Core.DataDecl
-lowerUnion transparency home name (Can.Union vars ctors _ _) =
+-- §2.5, and recording a guess here would be a fabricated answer. 'Core._dataAffine'
+-- is whether the type is declared @\@affine@ (geng-lang @m4-own.md@ D921).
+lowerUnion :: Core.Transparency -> Bool -> ModuleName.Canonical -> Name -> Can.Union -> Core.DataDecl
+lowerUnion transparency affine home name (Can.Union vars ctors _ _) =
   Core.DataDecl
     { Core._dataName = Core.QualName home name,
       Core._dataParams = vars,
       Core._dataTransparency = transparency,
       Core._dataCtors = map (lowerCtor home) ctors,
-      Core._dataClasses = []
+      Core._dataClasses = [],
+      Core._dataAffine = affine
     }
 
 -- | A type alias whose body is a closed record, for a native library's header

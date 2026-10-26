@@ -44,6 +44,9 @@ data Decl
     -- collects for the inliner. Only @core@ may write one, which
     -- canonicalization checks, as it does for @\@prim@.
     Inline (Maybe Src.DocComment) (A.Located Src.Value)
+  | -- | A custom type under @\@affine@ (geng-lang @m4-own.md@ D921): an
+    -- ordinary custom type, and a name "Parse.Module" collects for Core.
+    Affine (Maybe Src.DocComment) (A.Located Src.Union)
   | Class (Maybe Src.DocComment) (A.Located Src.Class)
   | Instance (Maybe Src.DocComment) (A.Located Src.Instance)
   | Union (Maybe Src.DocComment) (A.Located Src.Union)
@@ -103,6 +106,19 @@ declaration =
                 _ -> inlineNotOnValue start,
             inlineNotOnValue start
           ]
+      Just AffineAttribute ->
+        -- A custom type and nothing else (D944): a record is affine by its
+        -- fields, so a type alias has nothing to declare, and a value is not a
+        -- type.
+        oneOf
+          E.DeclStart
+          [ do
+              ((decl, comments), end) <- typeDecl maybeDocs start []
+              case decl of
+                Union docs union -> return ((Affine docs union, comments), end)
+                _ -> affineNotOnCustomType start,
+            affineNotOnCustomType start
+          ]
       Nothing ->
         oneOf
           E.DeclStart
@@ -130,6 +146,9 @@ data Attribute
   | -- | @\@inline@, bare, on a value in @core@ that the inliner opens whatever
     -- its size (D545).
     InlineAttribute
+  | -- | @\@affine@, bare, on a custom type whose values are used at most once
+    -- (geng-lang @m4-own.md@ D921).
+    AffineAttribute
 
 chompAttribute :: Parser E.Decl (Maybe Attribute)
 chompAttribute =
@@ -144,6 +163,8 @@ chompAttribute =
             then Just CapabilityAttribute <$ chompBareAttributeEnd
             else if name == Name.fromChars "inline"
             then Just InlineAttribute <$ chompBareAttributeEnd
+            else if name == Name.fromChars "affine"
+            then Just AffineAttribute <$ chompBareAttributeEnd
             else
               if name == Name.fromChars "prim"
                 then Just . Prim <$> chompPrimArg
@@ -327,6 +348,11 @@ capabilityNeedsAnnotation :: A.Position -> Space.Parser E.Decl (Decl, [Src.Comme
 capabilityNeedsAnnotation (A.Position row col) =
   P.Parser $ \_ _ _ cerr _ ->
     cerr row col (E.DeclAttribute (E.AttributeCapabilityAnnotation row col))
+
+affineNotOnCustomType :: A.Position -> Space.Parser E.Decl (Decl, [Src.Comment])
+affineNotOnCustomType (A.Position row col) =
+  P.Parser $ \_ _ _ cerr _ ->
+    cerr row col (E.DeclAttribute (E.AttributeAffineNotOnCustomType row col))
 
 inlineNotOnValue :: A.Position -> Space.Parser E.Decl (Decl, [Src.Comment])
 inlineNotOnValue (A.Position row col) =

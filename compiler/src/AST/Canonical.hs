@@ -257,6 +257,9 @@ data Refinement = Refinement
     _ref_predicate :: Maybe Expr,
     -- | The predicate as written (D812), empty when there is none.
     _ref_source :: String,
+    -- | Whether @moved@ is written before the name (geng-lang @m4-own.md@
+    -- D920): the function takes the argument's value.
+    _ref_moved :: Bool,
     _ref_enclosing :: [Enclosing]
   }
   deriving (Show)
@@ -405,7 +408,10 @@ data Module = Module
     _capabilities :: Set.Set Name,
     -- | The values declared under @\@inline@ (D545), which lowering hands
     -- Core for the inliner.
-    _inlines :: Set.Set Name
+    _inlines :: Set.Set Name,
+    -- | The custom types declared under @\@affine@ (geng-lang @m4-own.md@
+    -- D921), which lowering marks in Core for the ownership checker.
+    _affines :: Set.Set Name
   }
   deriving (Show)
 

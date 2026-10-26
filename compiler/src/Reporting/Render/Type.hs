@@ -129,7 +129,7 @@ srcToDoc context (A.At _ tipe) =
         (fmap (D.fromName . A.toValue . fst) ext)
     Src.TParens inner _ ->
       srcToDoc context inner
-    Src.TNamed _ inner _ ->
+    Src.TNamed _ _ inner _ ->
       srcToDoc context inner
 
 srcFieldToDocs :: Src.TRecordField -> (Doc, Doc)

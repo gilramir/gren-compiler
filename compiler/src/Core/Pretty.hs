@@ -84,9 +84,10 @@ signatureDecl opts (Signature b nameds) =
     <> "\n"
     <> mconcat (map namedDecl nameds)
   where
-    namedDecl (Named path nb predicate source) =
+    namedDecl (Named path nb predicate source moved) =
       "  "
         <> mconcat [step st <> " " | st <- path]
+        <> (if moved then "moved " else "")
         <> name (_binderName nb)
         <> " : "
         <> typeToBuilder opts (_binderType nb)
@@ -153,6 +154,7 @@ dataDecl :: Options -> DataDecl -> B.Builder
 dataDecl opts d =
   mconcat
     [ transparency (_dataTransparency d),
+      if _dataAffine d then "affine " else "",
       "data " <> qual (_dataName d),
       mconcat [" " <> name p | p <- _dataParams d],
       classes (_dataClasses d),

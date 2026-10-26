@@ -6,6 +6,7 @@ module Reporting.Error.Canonicalize
     DuplicatePatternContext (..),
     PossibleNames (..),
     RefinementPlace (..),
+    MovedPlace (..),
     VarKind (..),
     toReport,
   )
@@ -50,6 +51,7 @@ data Error
   | ConstraintDuplicate A.Region Name.Name Name.Name
   | RefinementMisplaced A.Region Bool RefinementPlace
   | RefinedAliasMisplaced A.Region Name.Name RefinementPlace
+  | MovedMisplaced A.Region MovedPlace
   | RefinementNameUnknown A.Region Name.Name [Name.Name]
   | RefinementNameOutOfScope A.Region Name.Name Bool
   | RefinementNameDuplicate Name.Name A.Region A.Region
@@ -137,6 +139,13 @@ data RefinementPlace
   | InExtern
   | InTypeArgument
   | InRecordField
+
+-- | Where @moved@ was written that is not an argument of a signature's own
+-- arrows (geng-lang @m4-own.md@ D943).
+data MovedPlace
+  = MovedOnResult
+  | MovedInCallback
+  | MovedInAlias
 
 data BadArityContext
   = TypeArity
@@ -428,6 +437,24 @@ toReport source err =
               "`" ++ Name.toChars name ++ "` is a refined type alias, and " ++ placeText place ++ ":",
             D.reflow $
               "A refined alias goes where a signature names a value, an argument or the result of a value's signature, top-level or in a `let`, since its predicate is about that value (D869)."
+          )
+    MovedMisplaced region place ->
+      Report.Report "MISPLACED MOVED" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              case place of
+                MovedOnResult -> "This signature says its result is `moved`:"
+                MovedInCallback -> "This signature says a callback's argument is `moved`:"
+                MovedInAlias -> "This type alias says its value is `moved`:",
+            D.reflow $
+              "`moved` says that a function takes the value of one of its arguments, so that its caller cannot use it after the call. It goes on an argument of a value's signature, top-level or in a `let`, and nowhere else. "
+                ++ case place of
+                  MovedOnResult -> "A function's result is its own to give."
+                  MovedInCallback -> "What a callback does with its arguments is worked out from the function that calls it, and never written."
+                  MovedInAlias -> "Write it on the argument that has this type."
           )
     RefinementNameUnknown region name seen ->
       Report.Report "UNKNOWN NAME IN REFINEMENT" region [] $

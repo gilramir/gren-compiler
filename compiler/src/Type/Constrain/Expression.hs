@@ -630,7 +630,7 @@ constrainRefinements rtv refinements =
   if null refinements
     then return CTrue
     else do
-      let own = [(name, tipe) | Can.Refinement _ _ name tipe _ _ _ <- refinements]
+      let own = [(name, tipe) | Can.Refinement _ _ name tipe _ _ _ _ <- refinements]
           enclosing = [(Can._enc_name e, Can._enc_type e) | r <- refinements, e <- Can._ref_enclosing r]
       header <-
         Map.fromList
@@ -641,7 +641,7 @@ constrainRefinements rtv refinements =
             (own ++ enclosing)
       predicateCons <-
         traverse
-          ( \(Can.Refinement _ _ (A.At _ name) _ maybePredicate _ _) ->
+          ( \(Can.Refinement _ _ (A.At _ name) _ maybePredicate _ _ _) ->
               case maybePredicate of
                 Nothing ->
                   return CTrue

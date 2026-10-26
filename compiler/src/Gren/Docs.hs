@@ -33,6 +33,7 @@ import Data.Map.Merge.Strict qualified as Map
 import Data.Name qualified as Name
 import Data.NonEmptyList qualified as NE
 import Data.OneOrMore qualified as OneOrMore
+import Data.Set qualified as Set
 import Data.Word (Word8)
 import Foreign.Ptr (Ptr, plusPtr)
 import Gren.Compiler.Type qualified as Type
@@ -72,7 +73,9 @@ type Comment = Json.String
 -- §RF35, D867), one 'Named' whose path is empty, the whole body.
 data Alias = Alias Comment [Name.Name] Type.Type [Named]
 
-data Union = Union Comment [Name.Name] [(Name.Name, [Type.Type])]
+-- | A custom type: its comment, variables and constructors, and whether it is
+-- declared @\@affine@ (geng-lang @m4-own.md@ D921).
+data Union = Union Comment [Name.Name] [(Name.Name, [Type.Type])] Bool
 
 -- | An exposed value: its comment, its type with every refinement erased, and
 -- the names its signature gives, each with its predicate as written, empty when
@@ -82,11 +85,13 @@ data Value = Value Comment Type.Type [Named]
 -- | A name a signature gives an argument or its result, where in the type it is
 -- (as 'Can.Refinement' says it), and the predicate as written (D812), empty
 -- when the name has none. The documentation prints the signature with them, so
--- that a precondition is read where the call is written.
+-- that a precondition is read where the call is written. A moved name is an
+-- argument whose value the function takes (geng-lang @m4-own.md@ D920).
 data Named = Named
   { _namedPath :: [Can.RefinementStep],
     _namedName :: Name.Name,
-    _namedSource :: String
+    _namedSource :: String,
+    _namedMoved :: Bool
   }
 
 data Binop = Binop Comment Type.Type Binop.Associativity Binop.Precedence
@@ -161,13 +166,14 @@ typeDecoder =
 -- UNION JSON
 
 encodeUnion :: (Name.Name, Union) -> E.Value
-encodeUnion (name, Union comment args cases) =
-  E.object
+encodeUnion (name, Union comment args cases affine) =
+  E.object $
     [ "name" ==> E.name name,
       "comment" ==> E.string comment,
       "args" ==> E.list E.name args,
       "cases" ==> E.list encodeCase cases
     ]
+      ++ ["affine" ==> E.bool True | affine]
 
 union :: D.Decoder Error Union
 union =
@@ -175,6 +181,7 @@ union =
     <$> D.field "comment" D.string
     <*> D.field "args" (D.list nameDecoder)
     <*> D.field "cases" (D.list caseDecoder)
+    <*> D.oneOf [D.field "affine" D.bool, pure False]
 
 encodeCase :: (Name.Name, [Type.Type]) -> E.Value
 encodeCase (tag, args) =
@@ -225,12 +232,13 @@ value =
 -- | A name, its path written as steps, @"arg 1"@ for the second argument and
 -- @"result"@ for the last arrow's target, outermost first.
 encodeNamed :: Named -> E.Value
-encodeNamed (Named path name source) =
-  E.object
+encodeNamed (Named path name source moved) =
+  E.object $
     [ "path" ==> E.list (E.chars . stepText) path,
       "name" ==> E.name name,
       "predicate" ==> E.chars source
     ]
+      ++ ["moved" ==> E.bool True | moved]
   where
     stepText step =
       case step of
@@ -243,6 +251,7 @@ namedDecoder =
     <$> D.field "path" (D.list stepDecoder)
     <*> D.field "name" nameDecoder
     <*> D.field "predicate" (Json.toChars <$> D.string)
+    <*> D.oneOf [D.field "moved" D.bool, pure False]
 
 stepDecoder :: D.Decoder Error Can.RefinementStep
 stepDecoder =
@@ -308,7 +317,7 @@ precDecoder =
 -- FROM MODULE
 
 fromModule :: Can.Module -> Either E.Error Module
-fromModule modul@(Can.Module _ exports docs _ _ _ _ _ _ _ _ _) =
+fromModule modul@(Can.Module _ exports docs _ _ _ _ _ _ _ _ _ _) =
   case exports of
     Can.ExportEverything region ->
       Left (E.ImplicitExposing region)
@@ -447,9 +456,9 @@ onlyInExports name (A.At region _) =
 -- CHECK DEFS
 
 checkDefs :: Map.Map Name.Name (A.Located Can.Export) -> Src.DocComment -> Map.Map Name.Name Src.DocComment -> Can.Module -> Either E.Error Module
-checkDefs exportDict overview comments (Can.Module name _ _ decls unions aliases _ _ infixes _ _ _) =
+checkDefs exportDict overview comments (Can.Module name _ _ decls unions aliases _ _ infixes _ _ _ affines) =
   let types = gatherTypes decls Map.empty
-      info = Info comments types unions aliases infixes
+      info = Info comments types unions aliases infixes affines
    in case Result.run (Map.traverseWithKey (checkExport info) exportDict) of
         (_, Left problems) -> Left $ E.DefProblems (OneOrMore.destruct NE.List problems)
         (_, Right inserters) -> Right $ foldr ($) (emptyModule name overview) inserters
@@ -463,7 +472,8 @@ data Info = Info
     _iValues :: Map.Map Name.Name (Either A.Region (Can.Type, [Can.Refinement])),
     _iUnions :: Map.Map Name.Name Can.Union,
     _iAliases :: Map.Map Name.Name Can.Alias,
-    _iBinops :: Map.Map Name.Name Can.Binop
+    _iBinops :: Map.Map Name.Name Can.Binop,
+    _iAffines :: Set.Set Name.Name
   }
 
 checkExport :: Info -> Name.Name -> A.Located Can.Export -> Result.Result i w E.DefProblem (Module -> Module)
@@ -487,7 +497,7 @@ checkExport info name (A.At region export) =
     Can.ExportAlias ->
       do
         let (Can.Alias tvars tipe refinement) = _iAliases info ! name
-            names = [Named [] (Can._ar_name r) (Can._ar_source r) | Just r <- [refinement]]
+            names = [Named [] (Can._ar_name r) (Can._ar_source r) False | Just r <- [refinement]]
         comment <- getComment region name info
         Result.ok $ \m ->
           m {_aliases = Map.insert name (Alias comment tvars (Extract.fromType tipe) names) (_aliases m)}
@@ -496,13 +506,13 @@ checkExport info name (A.At region export) =
         let (Can.Union tvars ctors _ _) = _iUnions info ! name
         comment <- getComment region name info
         Result.ok $ \m ->
-          m {_unions = Map.insert name (Union comment tvars (map dector ctors)) (_unions m)}
+          m {_unions = Map.insert name (Union comment tvars (map dector ctors) (Set.member name (_iAffines info))) (_unions m)}
     Can.ExportUnionClosed ->
       do
         let (Can.Union tvars _ _ _) = _iUnions info ! name
         comment <- getComment region name info
         Result.ok $ \m ->
-          m {_unions = Map.insert name (Union comment tvars []) (_unions m)}
+          m {_unions = Map.insert name (Union comment tvars [] (Set.member name (_iAffines info))) (_unions m)}
 
 getComment :: A.Region -> Name.Name -> Info -> Result.Result i w E.DefProblem Comment
 getComment region name info =
@@ -521,7 +531,7 @@ getType name info =
       Result.ok (Extract.fromType tipe, map toNamed refinements)
   where
     toNamed ref =
-      Named (Can._ref_path ref) (A.toValue (Can._ref_name ref)) (Can._ref_source ref)
+      Named (Can._ref_path ref) (A.toValue (Can._ref_name ref)) (Can._ref_source ref) (Can._ref_moved ref)
 
 dector :: Can.Ctor -> (Name.Name, [Type.Type])
 dector (Can.Ctor name _ _ args) =

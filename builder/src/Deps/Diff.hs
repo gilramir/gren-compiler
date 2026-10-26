@@ -67,9 +67,12 @@ refinementCandidates oldDocs newDocs =
 
 sameNamed :: Docs.Value -> Docs.Value -> Bool
 sameNamed (Docs.Value _ _ n1) (Docs.Value _ _ n2) =
-  map key n1 == map key n2
+  map key (filter refines n1) == map key (filter refines n2)
   where
-    key (Docs.Named path name source) = (path, name, source)
+    key (Docs.Named path name source _) = (path, name, source)
+    -- A name there only to say @moved@ refines nothing; what a change to
+    -- @moved@ is, is geng-lang @m4-own.md@ §OW16.6's sixth piece.
+    refines n = not (Docs._namedMoved n && null (Docs._namedSource n))
 
 data Changes k v = Changes
   { _added :: Map.Map k v,
@@ -138,7 +141,7 @@ getChangesWithKey isEquivalent old new =
 -- EQUIVALENCE
 
 isEquivalentUnion :: Docs.Union -> Docs.Union -> Bool
-isEquivalentUnion (Docs.Union oldComment oldVars oldCtors) (Docs.Union newComment newVars newCtors) =
+isEquivalentUnion (Docs.Union oldComment oldVars oldCtors _) (Docs.Union newComment newVars newCtors _) =
   length oldCtors == length newCtors
     && and (zipWith (==) (map fst oldCtors) (map fst newCtors))
     && and (Map.elems (Map.intersectionWith equiv (Map.fromList oldCtors) (Map.fromList newCtors)))
@@ -167,7 +170,7 @@ isEquivalentAlias (Docs.Alias _ oldVars oldType oldNamed) (Docs.Alias _ newVars 
 -- the same (geng-lang @m4-refine.md@ §RF35, D872): its users' callers and
 -- their own proofs both read it, so a change either way is MAJOR.
 namedKey :: Docs.Named -> (Name.Name, String)
-namedKey (Docs.Named _ name source) =
+namedKey (Docs.Named _ name source _) =
   (name, source)
 
 isEquivalentValue :: Docs.Value -> Docs.Value -> Bool
@@ -334,7 +337,7 @@ unionChangesMagnitude :: Map.Map Name.Name (Docs.Union, Docs.Union) -> M.Magnitu
 unionChangesMagnitude unionChanges =
   if Monoid.getAll $
     Map.foldMapWithKey
-      ( \_ (Docs.Union _ _ oldConstructors, Docs.Union _ _ newConstructors) ->
+      ( \_ (Docs.Union _ _ oldConstructors _, Docs.Union _ _ newConstructors _) ->
           Monoid.All (List.null oldConstructors && not (List.null newConstructors))
       )
       unionChanges

@@ -178,8 +178,8 @@ modul defs =
     { Core._moduleName = home,
       Core._moduleFiles = Map.singleton (Core.FileId 0) home,
       Core._moduleData =
-        [ Core.DataDecl (q "M") [] Core.Transparent [ctorDecl "N" 0 [], ctorDecl "J" 1 [intT]] [],
-          Core.DataDecl (q "Box") [] Core.Transparent [ctorDecl "Box" 0 [intT]] []
+        [ Core.DataDecl (q "M") [] Core.Transparent [ctorDecl "N" 0 [], ctorDecl "J" 1 [intT]] [] False,
+          Core.DataDecl (q "Box") [] Core.Transparent [ctorDecl "Box" 0 [intT]] [] False
         ],
       Core._moduleClasses = [],
       Core._moduleInstances = [],

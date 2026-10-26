@@ -446,7 +446,8 @@ dataDecl name ctorName =
       Core._dataParams = [],
       Core._dataTransparency = Core.Transparent,
       Core._dataCtors = [Core.Ctor {Core._ctorName = q ctorName, Core._ctorTag = 0, Core._ctorFields = []}],
-      Core._dataClasses = []
+      Core._dataClasses = [],
+      Core._dataAffine = False
     }
 
 modul :: ModuleName.Canonical -> [Core.Bind] -> Core.Module

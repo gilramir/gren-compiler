@@ -1157,7 +1157,8 @@ named env r =
         { Core._namedPath = map step (Can._ref_path r),
           Core._namedBinder = Core.Binder name (lowerType (Can._ref_type r)) (span env region),
           Core._namedPredicate = expr env <$> Can._ref_predicate r,
-          Core._namedSource = Utf8.fromChars (Can._ref_source r)
+          Core._namedSource = Utf8.fromChars (Can._ref_source r),
+          Core._namedMoved = Can._ref_moved r
         }
   where
     step s =

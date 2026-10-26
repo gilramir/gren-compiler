@@ -208,7 +208,7 @@ spec = do
               ]
               2
               Can.Normal
-       in lowerUnion Core.Transparent home "Maybe" union
+       in lowerUnion Core.Transparent False home "Maybe" union
             `shouldBe` Core.DataDecl
               { Core._dataName = qual "Maybe",
                 Core._dataParams = ["a"],
@@ -217,7 +217,8 @@ spec = do
                   [ Core.Ctor (qual "Nothing") 0 [],
                     Core.Ctor (qual "Just") 1 [Core.TVar "a"]
                   ],
-                Core._dataClasses = []
+                Core._dataClasses = [],
+                Core._dataAffine = False
               }
 
 -- FIXTURES

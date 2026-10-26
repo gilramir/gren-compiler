@@ -665,12 +665,13 @@ constraintEnc (CClass cls t) = qual 1 cls <> typ 2 t
 -- DECLARATIONS
 
 dataDeclEnc :: DataDecl -> Enc
-dataDeclEnc (DataDecl name params transparency ctors classes) =
+dataDeclEnc (DataDecl name params transparency ctors classes affine) =
   qual 1 name
     <> repText 2 params
     <> enum_ 3 (transparencyCode transparency)
     <> rep 4 ctorEnc ctors
     <> repQual 5 classes
+    <> bool_ 6 affine
 
 ctorEnc :: Ctor -> Enc
 ctorEnc (Ctor name tag fields) =
@@ -743,11 +744,12 @@ signatureEnc (Signature b nameds) =
     <> rep 2 namedEnc nameds
 
 namedEnc :: Named -> Enc
-namedEnc (Named path b predicate source) =
+namedEnc (Named path b predicate source moved) =
   repU32 1 (map stepCode path)
     <> msg 2 (binderEnc b)
     <> optMsg 3 exprEnc predicate
     <> text 4 source
+    <> bool_ 5 moved
 
 -- | A path's step: the result is 0 and argument @i@ is @i + 1@.
 stepCode :: Step -> Word32

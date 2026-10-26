@@ -133,9 +133,9 @@ spec = do
         refused ((moduleWith []) {_moduleSignatures = [signatureAt 1, signatureAt 1]})
         refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) []]})
         refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) (reverse (_sigNamed (signatureAt 1)))]})
-        refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [StepArg 0] (Binder "n" intType (at 1 6 1 7)) (Just var) (utf8 "")]]})
-        refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [StepArg 0] (Binder "n" intType (at 1 6 1 7)) Nothing (utf8 "n > 0")]]})
-        refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [] (Binder "n" intType (at 1 6 1 7)) Nothing (utf8 "")]]})
+        refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [StepArg 0] (Binder "n" intType (at 1 6 1 7)) (Just var) (utf8 "") False]]})
+        refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [StepArg 0] (Binder "n" intType (at 1 6 1 7)) Nothing (utf8 "n > 0") False]]})
+        refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [] (Binder "n" intType (at 1 6 1 7)) Nothing (utf8 "") False]]})
 
     it "carries each kind of main" $
       mapM_ (\m -> roundTrip ((moduleWith []) {_moduleMain = Just m})) everyMain
@@ -373,10 +373,10 @@ signatureAt :: Word32 -> Signature
 signatureAt row =
   Signature
     (Binder "f" intType (at row 1 row 2))
-    [ Named [StepArg 0] (Binder "n" intType (at row 6 row 7)) (Just (Expr (EVar "n") intType (at row 20 row 21))) (utf8 "n > 0"),
-      Named [StepArg 1] (Binder "b" intType (at row 30 row 31)) Nothing (utf8 ""),
-      Named [StepArg 2, StepArg 0] (Binder "i" intType (at row 40 row 41)) (Just (Expr (EVar "i") intType (at row 44 row 45))) (utf8 "i < n"),
-      Named [StepResult] (Binder "r" intType (at (row + 1) 3 (row + 1) 4)) (Just (Expr (EVar "r") intType (at (row + 1) 8 (row + 1) 9))) (utf8 "r >= 0")
+    [ Named [StepArg 0] (Binder "n" intType (at row 6 row 7)) (Just (Expr (EVar "n") intType (at row 20 row 21))) (utf8 "n > 0") False,
+      Named [StepArg 1] (Binder "b" intType (at row 30 row 31)) Nothing (utf8 "") True,
+      Named [StepArg 2, StepArg 0] (Binder "i" intType (at row 40 row 41)) (Just (Expr (EVar "i") intType (at row 44 row 45))) (utf8 "i < n") False,
+      Named [StepResult] (Binder "r" intType (at (row + 1) 3 (row + 1) 4)) (Just (Expr (EVar "r") intType (at (row + 1) 8 (row + 1) 9))) (utf8 "r >= 0") False
     ]
 
 moduleWith :: [Bind] -> Module
@@ -506,7 +506,8 @@ dataDecl =
         [ Ctor (qual "Nothing") 0 [],
           Ctor (qual "Just") 1 [TVar "a"]
         ],
-      _dataClasses = [qual "Eq", qual "Ord"]
+      _dataClasses = [qual "Eq", qual "Ord"],
+      _dataAffine = True
     }
 
 classDecl :: ClassDecl

@@ -353,7 +353,11 @@ data DataDecl = DataDecl
     _dataTransparency :: !Transparency,
     _dataCtors :: ![Ctor],
     -- | The published class set.
-    _dataClasses :: ![QualName]
+    _dataClasses :: ![QualName],
+    -- | Whether the type is declared @\@affine@ (geng-lang @m4-own.md@ D921):
+    -- a value of it is used at most once. No pass reads it; the ownership
+    -- checker does.
+    _dataAffine :: !Bool
   }
   deriving (Eq, Show)
 
@@ -467,12 +471,15 @@ data Signature = Signature
 -- name's span. The predicate is a 'Bool' expression whose 'EVar's are the
 -- names of this signature or, in a @let@, of a signature around it (D823),
 -- lowered as a body's expression is; the source is the predicate as written
--- (D812), empty when there is no predicate.
+-- (D812), empty when there is no predicate. A moved name is an argument whose
+-- value the function takes (geng-lang @m4-own.md@ D920); it may have no
+-- predicate, and nothing but the ownership checker reads it.
 data Named = Named
   { _namedPath :: ![Step],
     _namedBinder :: !Binder,
     _namedPredicate :: !(Maybe Expr),
-    _namedSource :: !Text
+    _namedSource :: !Text,
+    _namedMoved :: !Bool
   }
   deriving (Eq, Show)
 

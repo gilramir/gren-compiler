@@ -214,7 +214,7 @@ changesToDoc categoryName unions aliases values binops =
           D.fromChars categoryName <> ":" : unions ++ aliases ++ binops ++ values
 
 unionToDoc :: L.Localizer -> Name.Name -> Docs.Union -> D.Doc
-unionToDoc localizer name (Docs.Union _ tvars ctors) =
+unionToDoc localizer name (Docs.Union _ tvars ctors _) =
   let setup =
         "type" <+> D.fromName name <+> D.hsep (map D.fromName tvars)
 
@@ -241,8 +241,9 @@ signatureDoc localizer named =
   where
     place path context tipe =
       case List.find (\n -> Docs._namedPath n == path) named of
-        Just (Docs.Named _ name source) ->
+        Just (Docs.Named _ name source moved) ->
           "("
+            <> (if moved then "moved " else D.empty)
             <> D.fromName name
             <+> ":"
             <+> inner path Type.None tipe

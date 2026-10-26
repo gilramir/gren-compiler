@@ -51,10 +51,15 @@ term =
         inContext E.TParenthesis (word1 0x28 {-(-} E.TStart) $
           do
             commentsAfterOpeningParen <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisIndentOpen
-            named <- oneOfWithFallback [lookAhead namedHead >> return True] False
-            if named
-              then namedType start
-              else do
+            named <-
+              oneOfWithFallback
+                [ lookAhead movedHead >> return (Just True),
+                  lookAhead namedHead >> return (Just False)
+                ]
+                Nothing
+            case named of
+              Just moved -> namedType moved start
+              Nothing -> do
                 ((tipe, commentsBeforeClosingParen), end) <- specialize E.TParenthesisType expression
                 Space.checkIndent end E.TParenthesisIndentEnd
                 word1 0x29 {-)-} E.TParenthesisEnd
@@ -106,11 +111,31 @@ namedHead =
     _ <- Space.chomp E.TParenthesisSpace
     word1 0x3A {-:-} E.TParenthesisEnd
 
--- | @(name : Type)@ or @(name : Type where predicate)@ (geng-lang
--- @m4-refine.md@ D814), after its @(@.
-namedType :: A.Position -> Parser E.TParenthesis Src.Type
-namedType start =
+-- | Whether a parenthesis opens a moved name, @(moved b : Builder a)@
+-- (geng-lang @m4-own.md@ D920): @moved@, a name and a colon. @(moved : Int)@
+-- is not one, and 'namedHead' reads it as a name.
+movedHead :: Parser E.TParenthesis ()
+movedHead =
   do
+    Keyword.moved_ E.TParenthesisEnd
+    _ <- Space.chomp E.TParenthesisSpace
+    namedHead
+
+-- | @(name : Type)@ or @(name : Type where predicate)@ (geng-lang
+-- @m4-refine.md@ D814), after its @(@, with @moved@ before the name when
+-- 'movedHead' saw it (@m4-own.md@ D920).
+namedType :: Bool -> A.Position -> Parser E.TParenthesis Src.Type
+namedType moved start =
+  do
+    movedAt <-
+      if moved
+        then do
+          movedStart <- getPosition
+          Keyword.moved_ E.TParenthesisEnd
+          movedEnd <- getPosition
+          _ <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisIndentEnd
+          return (Just (A.Region movedStart movedEnd))
+        else return Nothing
     name <- addLocation (Var.lower E.TParenthesisEnd)
     _ <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisIndentEnd
     word1 0x3A {-:-} E.TParenthesisEnd
@@ -128,7 +153,7 @@ namedType start =
         ]
         Nothing
     word1 0x29 {-)-} E.TParenthesisEnd
-    addEnd start (Src.TNamed name tipe maybePredicate)
+    addEnd start (Src.TNamed movedAt name tipe maybePredicate)
 
 -- PREDICATES
 

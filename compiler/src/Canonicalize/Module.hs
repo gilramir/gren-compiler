@@ -48,7 +48,7 @@ type Result i w a =
 -- MODULES
 
 canonicalize :: Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Result i [W.Warning] Can.Module
-canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ capabilities inlines) =
+canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ capabilities inlines affines) =
   do
     checkClassesAreFirstParty pkg (fmap snd classes)
     checkInlinesAreCore pkg inlines
@@ -86,7 +86,7 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
 
     checkClosedClassesCovered home (fmap snd classes) cclasses cinstances
 
-    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities)) (Set.fromList (map A.toValue inlines))
+    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities)) (Set.fromList (map A.toValue inlines)) (Set.fromList (map A.toValue affines))
 
 -- | Every member of a closed class this module declares has an instance here.
 --

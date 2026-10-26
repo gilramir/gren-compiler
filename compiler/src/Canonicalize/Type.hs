@@ -119,7 +119,7 @@ canonicalize place env (A.At typeRegion tipe) =
         return $ Can.TRecord cfields (fmap (A.toValue . fst) ext)
     Src.TParens inner _ ->
       canonicalize place env inner
-    Src.TNamed _ _ maybePredicate ->
+    Src.TNamed _ _ _ maybePredicate ->
       Result.throw (Error.RefinementMisplaced typeRegion (Maybe.isJust maybePredicate) place)
 
 -- | A refined alias anywhere a signature does not name a value: in a type's
@@ -149,8 +149,9 @@ canonicalizeAliasBody readPredicate env srcType@(A.At region tipe) =
     Src.TParens inner _
       | isNamed inner ->
           canonicalizeAliasBody readPredicate env inner
-    Src.TNamed name@(A.At nameRegion nameValue) inner maybePredicate ->
+    Src.TNamed movedAt name@(A.At nameRegion nameValue) inner maybePredicate ->
       do
+        maybe (Result.ok ()) (\at -> Result.throw (Error.MovedMisplaced at Error.MovedInAlias)) movedAt
         innerType <- canonicalize Error.InAlias env inner
         case maybePredicate of
           Nothing ->
@@ -158,7 +159,7 @@ canonicalizeAliasBody readPredicate env srcType@(A.At region tipe) =
           Just (predicate, source)
             | readPredicate ->
                 do
-                  let self = Named region [Can.Result] name innerType (Just predicate) source Nothing False
+                  let self = Named region [Can.Result] name innerType (Just predicate) source Nothing False Nothing
                   cpredicate <- canonicalizePredicate env (Scope self [self] []) predicate
                   Result.ok (innerType, Just (Can.AliasRefinement nameValue cpredicate source))
             | otherwise ->
@@ -274,7 +275,10 @@ data Named = Named
     -- the position's too.
     _alias :: Maybe Can.AliasRefinement,
     -- | Written as the alias alone, with no name of its own.
-    _bare :: Bool
+    _bare :: Bool,
+    -- | Where @moved@ is written before the name, when it is (geng-lang
+    -- @m4-own.md@ D920).
+    _moved :: Maybe A.Region
   }
 
 -- | The arrows of a signature, or of a callback inside one: each argument a
@@ -303,16 +307,16 @@ spine env prefix =
 position :: Env.Env -> [Can.RefinementStep] -> Src.Type -> Result i w (Can.Type, [Named])
 position env path srcType@(A.At region tipe) =
   case tipe of
-    Src.TNamed name inner maybePredicate ->
+    Src.TNamed movedAt name inner maybePredicate ->
       do
         aliased <- refinedAliasAt env inner
         case aliased of
           Just (innerType, refinement) ->
-            Result.ok (innerType, [Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) (Just refinement) False])
+            Result.ok (innerType, [Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) (Just refinement) False movedAt])
           Nothing ->
             do
               (innerType, innerNamed) <- positionType env path inner
-              Result.ok (innerType, Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) Nothing False : innerNamed)
+              Result.ok (innerType, Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) Nothing False movedAt : innerNamed)
     Src.TParens inner _
       | isNamed inner ->
           position env path inner
@@ -323,7 +327,7 @@ position env path srcType@(A.At region tipe) =
           -- A refined alias with no name of its own here is the alias's name,
           -- made distinct from the signature's other names in 'refine'.
           Just (innerType, refinement) ->
-            Result.ok (innerType, [Named region path (A.At region (Can._ar_name refinement)) innerType Nothing "" (Just refinement) True])
+            Result.ok (innerType, [Named region path (A.At region (Can._ar_name refinement)) innerType Nothing "" (Just refinement) True Nothing])
           Nothing ->
             positionType env path srcType
 
@@ -359,6 +363,7 @@ refine env given =
   do
     let named = distinctAliasNames (Env._signatures env) given
     checkDuplicates named
+    traverse_ checkMoved named
     traverse_ (checkShadows (Env._signatures env)) named
     refinements <- traverse (refineOne env named) named
     let readNames = concatMap (maybe [] predicateLocals . Can._ref_predicate) refinements
@@ -379,15 +384,32 @@ checkDuplicates named =
         )
         (Map.toList byName)
 
+-- | @moved@ says the function takes an argument's value (geng-lang
+-- @m4-own.md@ D920), so it is written on an argument of the signature's own
+-- arrows and nowhere else (D943): the result is the function's to give, and
+-- what a callback does with its arguments is inferred and never written
+-- (D936).
+checkMoved :: Named -> Result i w ()
+checkMoved n =
+  case _moved n of
+    Nothing -> Result.ok ()
+    Just at ->
+      case _path n of
+        [Can.Arg _] -> Result.ok ()
+        [Can.Result] -> Result.throw (Error.MovedMisplaced at Error.MovedOnResult)
+        _ -> Result.throw (Error.MovedMisplaced at Error.MovedInCallback)
+
 -- | A name that nothing reads and that is not refined is refused, as D819
 -- refused it: it would look as if it meant something (D821). One a @let@
--- could still read is handed back.
+-- could still read is handed back. A moved name means something unread
+-- (D942).
 checkRead :: [Name.Name] -> Named -> Result i w [A.Located Name.Name]
 checkRead readNames n =
   case _predicate n of
     Just _ -> Result.ok []
     Nothing
       | Maybe.isJust (_alias n) -> Result.ok []
+      | Maybe.isJust (_moved n) -> Result.ok []
     Nothing ->
       let A.At region name = _name n
        in if name `elem` readNames
@@ -431,6 +453,7 @@ refineOne env named n =
           Can._ref_type = _type n,
           Can._ref_predicate = predicate,
           Can._ref_source = source,
+          Can._ref_moved = Maybe.isJust (_moved n),
           Can._ref_enclosing = filter ((`elem` readNames) . A.toValue . Can._enc_name) enclosing
         }
 

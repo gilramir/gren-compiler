@@ -306,7 +306,8 @@ bySum home prefix sp members =
           Core._dataParams = vars,
           Core._dataTransparency = Core.Transparent,
           Core._dataCtors = ctors,
-          Core._dataClasses = []
+          Core._dataClasses = [],
+          Core._dataAffine = False
         }
     pure ([arg], Core.Expr (Core.EVar (Core._binderName arg)) dataType sp, zipWith alt ctors members, callOf)
 
