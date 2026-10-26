@@ -14,19 +14,13 @@ and on node's own stack a record 1,000 deep is more than they reach.
 
 What the check finds refuses the build: each of `Geng.Own.Error`'s errors, laid
 out by `Terminal.Refine` beside the refinement checker's. `GENG_OWN_REPORT`
-names a file the build's lines are appended to, in `Geng.Own.Check`'s columns,
-the census's: a program whose suite builds it more than once writes each
+names a file the build's lines are appended to, in `Geng.Own.Check`'s columns:
+a program whose suite builds it more than once writes each
 build's. `GENG_OWN_ERRORS` names a file for the errors' text, without colour,
 whether or not they refuse the build, which `harness/own.py` pins.
 `GENG_UNCHECKED_OWNERSHIP` builds a program the check refuses anyway: a
 development switch, as `GENG_UNCHECKED_REFINEMENTS` is (D825), so that the gate
 can report on cases written to be refused.
-
-`GENG_OWN_RULES` picks the rules: the ones decided when it is unset, or one of
-the census's rule sets, `plain`, `borrow` or `open`, which is how the checker is
-held to the census (`bench/own/census.py`). The records of each are kept apart,
-and a census rule set refuses nothing, since its lines carry no spans to draw an
-error from.
 -}
 
 import Bytes
@@ -66,14 +60,10 @@ the build with unless `GENG_UNCHECKED_OWNERSHIP` is set.
 check : { c | fs : FileSystem.Permission, envVars : Dict String String, fromString : String -> Path, toString : Path -> String } -> Path -> Task Report (Array Error.Violation)
 check config dir =
     let
-        rules =
-            Dict.get "GENG_OWN_RULES" config.envVars |> Maybe.withDefault "rules"
-
         request =
             Encode.object
                 [ { key = "target", value = Encode.string "own" }
                 , { key = "stage", value = Encode.string (config.toString dir) }
-                , { key = "rules", value = Encode.string rules }
                 ]
 
         answered =
@@ -126,47 +116,35 @@ serve fs fromString value =
         failed what why =
             Encode.encode 0 (Encode.object [ { key = "failed", value = Encode.string what }, { key = "why", value = Encode.string why } ])
     in
-    when Decode.decodeValue (Decode.map2 (\stage rules -> { stage = stage, rules = rules }) (Decode.field "stage" Decode.string) (Decode.field "rules" Decode.string)) value is
+    when Decode.decodeValue (Decode.field "stage" Decode.string) value is
         Err e ->
             Task.succeed (failed "The ownership checker's request was not one it reads" (Decode.errorToString e))
 
-        Ok request ->
+        Ok staged ->
             let
-                chosen =
-                    if request.rules == "rules" then
-                        Just Check.rules
-
-                    else
-                        Check.census request.rules
-
                 dir =
-                    fromString request.stage
+                    fromString staged
 
                 stage =
                     Path.append (Path.fromPosixString "ownership") dir
             in
-            when chosen is
-                Nothing ->
-                    Task.succeed (failed "GENG_OWN_RULES names no rules" "It may be plain, borrow or open, or unset for the rules decided.")
-
-                Just rules ->
-                    readManifest config stage
-                        |> Task.andThen
-                            (\manifest ->
-                                Task.map2 (\records modules -> { records = records, modules = modules })
-                                    (loadRecords config manifest)
-                                    (readModules fs stage)
-                                    |> Task.andThen
-                                        (\read ->
-                                            let
-                                                done =
-                                                    Check.checkAll rules read.records read.modules
-                                            in
-                                            writeRecords config dir manifest done.records
-                                                |> Task.map (\_ -> answer done.lines)
-                                        )
-                            )
-                        |> Task.onError (\e -> Task.succeed (failed e.what e.why))
+            readManifest config stage
+                |> Task.andThen
+                    (\manifest ->
+                        Task.map2 (\records modules -> { records = records, modules = modules })
+                            (loadRecords config manifest)
+                            (readModules fs stage)
+                            |> Task.andThen
+                                (\read ->
+                                    let
+                                        done =
+                                            Check.checkAll read.records read.modules
+                                    in
+                                    writeRecords config dir manifest done.records
+                                        |> Task.map (\_ -> answer done.lines)
+                                )
+                    )
+                |> Task.onError (\e -> Task.succeed (failed e.what e.why))
 
 
 type alias Entry =

@@ -262,10 +262,10 @@ cutStaged sub depsPrint own cores stage ownReport =
 --
 -- A record is a module's check, kept by the CLI under
 -- @$GENG_HOME/<artifact key>/ownership/<checker>/@, where the checker is the
--- fingerprint of the CLI's own script (@GENG_OWN_CHECKER@ names it) and of
--- @GENG_OWN_RULES@. A dependency's key is that, the dependency set's
--- fingerprint, which covers every package's version and every byte of its
--- sources, and the module's name; a module of the project's adds the
+-- fingerprint of the CLI's own script (@GENG_OWN_CHECKER@ names it). A
+-- dependency's key is that, the dependency set's fingerprint, which covers
+-- every package's version and every byte of its sources, and the module's
+-- name; a module of the project's adds the
 -- fingerprint of every project module's encoded Core, so an edit to any of
 -- them checks all of them again and no dependency. A module whose record is
 -- there is not encoded or written, which is the build a cache saves (D958).
@@ -276,7 +276,6 @@ ownStage depsPrint own cores dir =
     let target = dir </> "ownership"
     Dir.createDirectoryIfMissing True target
     checker <- Env.lookupEnv "GENG_OWN_CHECKER"
-    rules <- maybe "" id <$> Env.lookupEnv "GENG_OWN_RULES"
     records <-
       case checker of
         Just path
@@ -284,7 +283,7 @@ ownStage depsPrint own cores dir =
               do
                 script <- BS.readFile path
                 home <- Dirs.getGengHome
-                let checkerPrint = FP.chars rules (FP.ofBytes script)
+                let checkerPrint = FP.ofBytes script
                 return (Just (home </> Dirs.artifactKey </> "ownership" </> FP.toName checkerPrint, checkerPrint))
         _ -> return Nothing
     let encoded = Map.mapWithKey encodeOne cores
