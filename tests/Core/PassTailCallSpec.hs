@@ -141,5 +141,6 @@ modul defs =
       Core._moduleExterns = [],
       Core._moduleInline = [],
       Core._moduleAliases = [],
-      Core._moduleSignatures = []
+      Core._moduleSignatures = [],
+      Core._moduleTyped = []
     }

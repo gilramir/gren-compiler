@@ -52,6 +52,7 @@ module Core.Lower.Expression
     expr,
     def,
     signatures,
+    typed,
     pattern,
     span,
   )
@@ -1148,6 +1149,18 @@ signatures env defs =
         (map (named env) refinements)
     | Can.TypedDef (A.At region name) freeVars args _ result refinements <- concatMap definitionsIn defs,
       not (null refinements)
+    ]
+
+-- | The binder of every definition among these and the @let@s inside them
+-- that is written with a type signature, sorted by where it starts
+-- (geng-lang @m4-own.md@ D920, §OW28), whether or not the signature names
+-- anything: the ownership checker holds those to their @moved@ marks.
+typed :: Env -> [Can.Def] -> [Core.Binder]
+typed env defs =
+  List.sortOn
+    (\(Core.Binder _ _ (Core.Span _ row col _ _)) -> (row, col))
+    [ definitionBinder (span env region) name freeVars (foldr (Can.TLambda . snd) result args)
+    | Can.TypedDef (A.At region name) freeVars args _ result _ <- concatMap definitionsIn defs
     ]
 
 named :: Env -> Can.Refinement -> Core.Named

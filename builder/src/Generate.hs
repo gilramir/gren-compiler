@@ -435,7 +435,9 @@ checkerReads cores =
                     Core._moduleExports = filter named (Core._moduleExports m),
                     Core._moduleInline = filter named (Core._moduleInline m),
                     Core._moduleExterns = filter (named . Core.QualName home . Core._binderName . Core._externBinder) (Core._moduleExterns m),
-                    Core._moduleSignatures = [sig | sig <- Core._moduleSignatures m, Core._sigBinder sig `elem` binders]
+                    Core._moduleSignatures = [sig | sig <- Core._moduleSignatures m, Core._sigBinder sig `elem` binders],
+                    -- the ownership checker's, which the refinement checker does not read
+                    Core._moduleTyped = []
                   }
 
 -- | The passes, and then either a stop or the rest of the build.

@@ -58,6 +58,7 @@ moduleToBuilder opts m =
       section "inline" (map qual (_moduleInline m)),
       section "aliases" (map (alias opts) (_moduleAliases m)),
       section "files" (map fileEntry (Map.toList (_moduleFiles m))),
+      section "typed" (map typedEntry (_moduleTyped m)),
       block (map (dataDecl opts) (_moduleData m)),
       block (map (classDecl opts) (_moduleClasses m)),
       block (map (instanceDecl opts) (_moduleInstances m)),
@@ -144,6 +145,13 @@ section label items =
 block :: [B.Builder] -> B.Builder
 block [] = ""
 block items = "\n" <> mconcat (map (<> "\n") items)
+
+-- | A definition written with a type signature (D920, @m4-own.md@ §OW28):
+-- its name. Not where it starts, since @harness/fmt.py@ holds a formatted
+-- program's dump to the golden, and formatting moves a definition.
+typedEntry :: Binder -> B.Builder
+typedEntry b =
+  name (_binderName b)
 
 -- | A record alias (D630): its name, its parameters and its body.
 alias :: Options -> Alias -> B.Builder

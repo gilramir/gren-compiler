@@ -443,7 +443,13 @@ data Module = Module
     -- starts (geng-lang @m4-refine.md@ §RF18, D824): what the refinement
     -- checker reads. No pass reads them, and a backend drops them with the
     -- module, which is the erasure D797 asks for.
-    _moduleSignatures :: ![Signature]
+    _moduleSignatures :: ![Signature],
+    -- | The binder of every definition in the module written with a type
+    -- signature, top-level and @let@ alike, exactly as its 'Bind' has it,
+    -- sorted by where it starts (geng-lang @m4-own.md@ D920, §OW28): the
+    -- ownership checker holds such a definition's affine parameters to the
+    -- signature's @moved@ marks, and infers the rest. No pass reads them.
+    _moduleTyped :: ![Binder]
   }
   deriving (Eq, Show)
 

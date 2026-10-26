@@ -137,6 +137,12 @@ spec = do
         refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [StepArg 0] (Binder "n" intType (at 1 6 1 7)) Nothing (utf8 "n > 0") False]]})
         refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [] (Binder "n" intType (at 1 6 1 7)) Nothing (utf8 "") False]]})
 
+    it "carries the definitions written with a signature, and refuses them out of order (D920)" $
+      do
+        roundTrip ((moduleWith []) {_moduleTyped = [Binder "f" intType (at 1 1 1 2), Binder "g" intType (at 3 1 3 2)]})
+        refused ((moduleWith []) {_moduleTyped = [Binder "g" intType (at 3 1 3 2), Binder "f" intType (at 1 1 1 2)]})
+        refused ((moduleWith []) {_moduleTyped = [Binder "f" intType (at 1 1 1 2), Binder "f" intType (at 1 1 1 2)]})
+
     it "carries each kind of main" $
       mapM_ (\m -> roundTrip ((moduleWith []) {_moduleMain = Just m})) everyMain
 
@@ -394,7 +400,8 @@ moduleWith defs =
       _moduleExterns = [],
       _moduleInline = [],
       _moduleAliases = [],
-      _moduleSignatures = []
+      _moduleSignatures = [],
+      _moduleTyped = []
     }
 
 -- | All 21 of them (C2). The list is the point: adding a node to 'Expr_' and

@@ -993,6 +993,11 @@ moduleBodyP =
     if not (strictlyAscending starts)
       then failAt signaturesAt "signatures is not sorted by where each binder starts, or has two that start together"
       else pure ()
+    typedAt <- offset
+    typed <- rep "typed" 19 binderP
+    if not (strictlyAscending (map (spanStart . _binderSpan) typed))
+      then failAt typedAt "typed is not sorted by where each binder starts, or has two that start together"
+      else pure ()
     pure
       Module
         { _moduleName = name,
@@ -1007,7 +1012,8 @@ moduleBodyP =
           _moduleExterns = externs,
           _moduleInline = inline,
           _moduleAliases = aliases,
-          _moduleSignatures = signatures
+          _moduleSignatures = signatures,
+          _moduleTyped = typed
         }
 
 -- | A signature (D824): its binder, then at least one name, in the order
