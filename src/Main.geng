@@ -324,6 +324,27 @@ parseUserArgs context compilerPath =
                                         )
                         }
 
+                -- `geng docs`'s two runs of the binary, each exposed
+                -- function's ownership facts found between them (geng-lang
+                -- `m4-own.md` §OW33, D972).
+                docsBackend backendCommand =
+                    Terminal.Own.docs
+                        { fs = context.fsPermission
+                        , envVars = context.envVars
+                        , toString = context.pathToString
+                        , script = context.script
+                        , run =
+                            \extra ->
+                                startBackend context compilerPath extra
+                                    |> Task.andThen
+                                        (talkWith context
+                                            { headless = False
+                                            , encodedCommand = encodeFor backendCommand
+                                            , readInput = Basics.not (Dict.member "GENG_OWN_STAGE" extra)
+                                            }
+                                        )
+                        }
+
                 noSources =
                     { projectPath = Path.empty, root = Dict.empty, dependencies = Dict.empty }
 
@@ -810,7 +831,7 @@ parseUserArgs context compilerPath =
                         |> Task.andThen (\output -> resolveProject { context | stdout = output })
                         |> Task.andThen
                             (\resolved ->
-                                backend <|
+                                docsBackend <|
                                     Compiler.Backend.Docs
                                         { output = flags.output
                                         , report = flags.report

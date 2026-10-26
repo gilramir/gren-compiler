@@ -11,6 +11,7 @@ import Build qualified
 import Data.ByteString.Builder qualified as B
 import Data.Map (Map)
 import Data.NonEmptyList qualified as NE
+import Generate qualified
 import Gren.Details qualified as Details
 import Gren.Docs qualified as Docs
 import Gren.ModuleName qualified as ModuleName
@@ -20,6 +21,9 @@ import Json.Encode qualified as Json
 import Reporting qualified
 import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
+import System.Directory qualified as Dir
+import System.Environment qualified as Env
+import System.FilePath ((</>))
 import System.IO qualified as IO
 
 -- FLAGS
@@ -50,26 +54,67 @@ run flags@(Flags _ report _ _ _ _) =
     Reporting.attemptWithStyle style Exit.docsToReport $
       runHelp style flags
 
+-- | The documentation, with each exposed value's ownership facts (geng-lang
+-- @m4-own.md@ §OW33, D970–D973), in two runs as a checked build is: the CLI's
+-- first asks with @GENG_OWN_STAGE=dir@, and the package is built quietly and
+-- staged for the ownership checker under @dir/new@ with every dependency's Core
+-- ('Generate.packageOwnStage'), and nothing is written. The CLI checks it and
+-- asks again with @GENG_OWN_FACTS@ naming a directory holding @new.tsv@, the
+-- checker's @I@ lines, which this run gives the values before it writes them.
+-- With neither, the binary run by itself, the documentation has no facts.
 runHelp :: Reporting.Style -> Flags -> IO (Either Exit.Docs ())
 runHelp style (Flags maybeOutput _ root outline sources dependencies) =
   Task.run $
     do
       details <- Task.eio Exit.DocsBadDetails (Details.load root outline dependencies)
       exposed <- getExposed details
-      case maybeOutput of
-        Just DevNull ->
+      stage <- Task.io (nonEmpty "GENG_OWN_STAGE")
+      facts <- Task.io (nonEmpty "GENG_OWN_FACTS")
+      case stage of
+        Just dir ->
           do
-            _ <- buildExposed style root details sources Build.KeepDocs exposed
-            return ()
-        Just DevStdOut ->
-          do
-            docs <- buildExposed Reporting.silent root details sources Build.KeepDocs exposed
-            let builder = Json.encodeUgly $ Docs.encode docs
-            Task.io $ B.hPutBuilder IO.stdout builder
+            (_, cores) <- buildExposed Reporting.silent root details sources Build.KeepDocsAndCore exposed
+            Task.io (Generate.packageOwnStage details cores (dir </> "new"))
         Nothing ->
-          buildExposed style root details sources (Build.WriteDocs "docs.json") exposed
-        Just (JSON target) ->
-          buildExposed style root details sources (Build.WriteDocs target) exposed
+          let build buildStyle =
+                do
+                  docs <- buildExposed buildStyle root details sources Build.KeepDocs exposed
+                  Task.io (factsFrom facts details docs)
+           in case maybeOutput of
+                Just DevNull ->
+                  do
+                    _ <- build style
+                    return ()
+                Just DevStdOut ->
+                  do
+                    docs <- build Reporting.silent
+                    let builder = Json.encodeUgly $ Docs.encode docs
+                    Task.io $ B.hPutBuilder IO.stdout builder
+                Nothing ->
+                  build style >>= Task.io . Json.writeUgly "docs.json" . Docs.encode
+                Just (JSON target) ->
+                  build style >>= Task.io . Json.writeUgly target . Docs.encode
+
+nonEmpty :: String -> IO (Maybe String)
+nonEmpty name =
+  do
+    value <- Env.lookupEnv name
+    return $ case value of
+      Just v | v /= "" -> Just v
+      _ -> Nothing
+
+factsFrom :: Maybe FilePath -> Details.Details -> Docs.Documentation -> IO Docs.Documentation
+factsFrom facts details docs =
+  case (facts, Details._outline details) of
+    (Just dir, Details.ValidPkg _ pkg _ _) ->
+      do
+        let path = dir </> "new.tsv"
+        present <- Dir.doesFileExist path
+        if present
+          then (\text -> Docs.withFacts (Package.toChars pkg) (lines text) docs) <$> readFile path
+          else return docs
+    _ ->
+      return docs
 
 -- GET INFORMATION
 

@@ -1,4 +1,4 @@
-module Terminal.Own exposing (check, checkerVariables, serve)
+module Terminal.Own exposing (check, checkerVariables, docs, interface, serve)
 
 {-| The ownership checker (geng-lang `m4-own.md` §OW27, D963), run on every
 build in its held run beside the refinement checker (D938), with each module's
@@ -59,6 +59,99 @@ the build with unless `GENG_UNCHECKED_OWNERSHIP` is set.
 -}
 check : { c | fs : FileSystem.Permission, envVars : Dict String String, fromString : String -> Path, toString : Path -> String } -> Path -> Task Report (Array Error.Violation)
 check config dir =
+    checkStage config dir
+        |> Task.andThen
+            (\lines ->
+                let
+                    text =
+                        lines
+                            |> Array.map (\line -> line ++ "\n")
+                            |> String.join ""
+                in
+                (when Dict.get "GENG_OWN_REPORT" config.envVars is
+                    Just out ->
+                        FileSystem.appendToFile config.fs (Bytes.fromString text) (config.fromString out)
+                            |> Task.map (\_ -> {})
+                            |> Task.mapError (\e -> report "I cannot write the ownership report" (FileSystem.errorToString e))
+
+                    Nothing ->
+                        Task.succeed {}
+                )
+                    |> Task.map (\_ -> Array.mapAndKeepJust Error.parse lines)
+            )
+
+
+{-| The `I` lines of a package staged under `dir` (geng-lang `m4-own.md`
+§OW33, D970): each exposed function's facts a caller's check reads, which
+`geng docs` writes into the documentation and `geng package diff`, `bump` and
+`validate` compare (`Generate.packageOwnStage` stages it). The dependencies'
+lines come too; the binary keeps the package's own.
+-}
+interface : { c | toString : Path -> String } -> Path -> Task Report (Array String)
+interface config dir =
+    checkStage config dir
+        |> Task.map (Array.keepIf (String.startsWith "I\t"))
+
+
+{-| `geng docs`, each exposed function's ownership facts in the documentation
+(geng-lang `m4-own.md` §OW33, D970–D973): `run` runs the binary with the
+variables given. Its first run, with `GENG_OWN_STAGE`, builds the package and
+stages it for the checker under `new` (`Generate.packageOwnStage`); the `I`
+lines the checker finds go to `facts/new.tsv`, and the second run, given that
+directory as `GENG_OWN_FACTS`, writes the documentation with them.
+-}
+docs :
+    { fs : FileSystem.Permission
+    , envVars : Dict String String
+    , toString : Path -> String
+    , script : String
+    , run : Dict String String -> Task Report Int
+    }
+    -> Task Report Int
+docs config =
+    FileSystem.makeTempDirectory config.fs "geng-docs-"
+        |> Task.mapError (\e -> report "I cannot make a directory for the ownership checker" (FileSystem.errorToString e))
+        |> Task.andThen
+            (\dir ->
+                let
+                    staged =
+                        Path.append (Path.fromPosixString "new") dir
+
+                    facts =
+                        Path.append (Path.fromPosixString "facts") dir
+
+                    removed =
+                        FileSystem.remove config.fs { recursive = True } dir
+                            |> Task.map (\_ -> {})
+                            |> Task.onError (\_ -> Task.succeed {})
+                in
+                config.run
+                    (Dict.singleton "GENG_OWN_STAGE" (config.toString dir)
+                        |> Dict.union (checkerVariables config.envVars config.script)
+                    )
+                    |> Task.andThen
+                        (\exitCode ->
+                            if exitCode /= 0 then
+                                Task.succeed exitCode
+
+                            else
+                                interface config staged
+                                    |> Task.andThen
+                                        (\lines ->
+                                            FileSystem.makeDirectory config.fs { recursive = True } facts
+                                                |> Task.andThen (\_ -> FileSystem.writeFile config.fs (Bytes.fromString (String.join "" (Array.map (\l -> l ++ "\n") lines))) (Path.append (Path.fromPosixString "new.tsv") facts))
+                                                |> Task.mapError (\e -> report "I cannot write the ownership checker's facts" (FileSystem.errorToString e))
+                                        )
+                                    |> Task.andThen (\_ -> config.run (Dict.singleton "GENG_OWN_FACTS" (config.toString facts)))
+                        )
+                    |> Task.andThen (\exitCode -> removed |> Task.map (\_ -> exitCode))
+                    |> Task.onError (\problem -> removed |> Task.andThen (\_ -> Task.fail problem))
+            )
+
+
+{-| Every line of the check of what is staged under `dir`. -}
+checkStage : { c | toString : Path -> String } -> Path -> Task Report (Array String)
+checkStage config dir =
     let
         request =
             Encode.object
@@ -80,22 +173,7 @@ check config dir =
                         Task.fail stopped
 
                     Ok lines ->
-                        let
-                            text =
-                                lines
-                                    |> Array.map (\line -> line ++ "\n")
-                                    |> String.join ""
-                        in
-                        (when Dict.get "GENG_OWN_REPORT" config.envVars is
-                            Just out ->
-                                FileSystem.appendToFile config.fs (Bytes.fromString text) (config.fromString out)
-                                    |> Task.map (\_ -> {})
-                                    |> Task.mapError (\e -> report "I cannot write the ownership report" (FileSystem.errorToString e))
-
-                            Nothing ->
-                                Task.succeed {}
-                        )
-                            |> Task.map (\_ -> Array.mapAndKeepJust Error.parse lines)
+                        Task.succeed lines
             )
 
 

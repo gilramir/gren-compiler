@@ -16,7 +16,6 @@ import Control.Monad (zipWithM)
 import Data.Function (on)
 import Data.List qualified as List
 import Data.Map qualified as Map
-import Data.Monoid qualified as Monoid
 import Data.Name qualified as Name
 import Data.Set qualified as Set
 import Gren.Compiler.Type qualified as Type
@@ -49,6 +48,41 @@ data ModuleChanges = ModuleChanges
 -- predicate that changed, saying how.
 data Verdict = Verdict M.Magnitude [String]
 
+-- | Two verdicts on one value: the larger magnitude, and both's reasons.
+instance Semigroup Verdict where
+  Verdict m1 r1 <> Verdict m2 r2 = Verdict (max m1 m2) (r1 ++ r2)
+
+-- | What a value's ownership facts say of a change to it (geng-lang
+-- @m4-own.md@ §OW33, D974): each fact restricts its callers, so one the new
+-- version has and the old does not is MAJOR, and one it lost is MINOR. A fact
+-- is matched by its parameter's index, not its name, and a type parameter's
+-- by the renaming the type comparison found.
+ownershipVerdict :: Docs.Value -> Docs.Value -> Verdict
+ownershipVerdict (Docs.Value _ oldType _ oldFacts) (Docs.Value _ newType _ newFacts) =
+  let renamed = Map.fromList (maybe [] id (diffType oldType newType))
+      rename fact =
+        case fact of
+          Docs.KeepsTwice v -> Docs.KeepsTwice (Map.findWithDefault v v renamed)
+          _ -> fact
+      oldKeys = map (Docs.factKey . rename) oldFacts
+      newKeys = map Docs.factKey newFacts
+      gained = [f | f <- newFacts, Docs.factKey f `notElem` oldKeys]
+      lost = [f | f <- oldFacts, Docs.factKey (rename f) `notElem` newKeys]
+      magnitude
+        | not (null gained) = M.MAJOR
+        | not (null lost) = M.MINOR
+        | otherwise = M.PATCH
+   in Verdict magnitude (map (now . Docs.factWords) gained ++ map (noLonger . Docs.factWords) lost)
+  where
+    now said =
+      case List.stripPrefix "may " said of
+        Just rest -> "It may now " ++ rest ++ ", which asks more of a caller."
+        Nothing -> "It now " ++ said ++ ", which asks more of a caller."
+    noLonger said =
+      case List.stripPrefix "may " said of
+        Just rest -> "It can no longer " ++ rest ++ ", which asks less of a caller."
+        Nothing -> "It no longer " ++ said ++ ", which asks less of a caller."
+
 -- | The verdicts, by module and value.
 type Verdicts =
   Map.Map (ModuleName.Raw, Name.Name) Verdict
@@ -66,7 +100,7 @@ refinementCandidates oldDocs newDocs =
   ]
 
 sameNamed :: Docs.Value -> Docs.Value -> Bool
-sameNamed (Docs.Value _ _ n1) (Docs.Value _ _ n2) =
+sameNamed (Docs.Value _ _ n1 _) (Docs.Value _ _ n2 _) =
   map key (filter refines n1) == map key (filter refines n2)
   where
     key (Docs.Named path name source _) = (path, name, source)
@@ -107,13 +141,15 @@ diffModule :: Verdicts -> ModuleName.Raw -> (Docs.Module, Docs.Module) -> Module
 diffModule verdicts home (Docs.Module _ _ u1 a1 v1 b1, Docs.Module _ _ u2 a2 v2 b2) =
   let verdictOf name old new
         | not (isEquivalentValue old new) = Nothing
-        | sameNamed old new = Just (Verdict M.PATCH [])
         | otherwise =
-            Just $
-              Map.findWithDefault
-                (Verdict M.MAJOR ["The refinement checker did not compare this signature's refinements."])
-                (home, name)
-                verdicts
+            let refined
+                  | sameNamed old new = Verdict M.PATCH []
+                  | otherwise =
+                      Map.findWithDefault
+                        (Verdict M.MAJOR ["The refinement checker did not compare this signature's refinements."])
+                        (home, name)
+                        verdicts
+             in Just (refined <> ownershipVerdict old new)
 
       equivalent name old new =
         case verdictOf name old new of
@@ -141,7 +177,12 @@ getChangesWithKey isEquivalent old new =
 -- EQUIVALENCE
 
 isEquivalentUnion :: Docs.Union -> Docs.Union -> Bool
-isEquivalentUnion (Docs.Union oldComment oldVars oldCtors _) (Docs.Union newComment newVars newCtors _) =
+isEquivalentUnion old@(Docs.Union _ _ _ oldAffine) new@(Docs.Union _ _ _ newAffine) =
+  oldAffine == newAffine && isEquivalentShape old new
+
+-- | Two unions the same but for @\@affine@.
+isEquivalentShape :: Docs.Union -> Docs.Union -> Bool
+isEquivalentShape (Docs.Union oldComment oldVars oldCtors _) (Docs.Union newComment newVars newCtors _) =
   length oldCtors == length newCtors
     && and (zipWith (==) (map fst oldCtors) (map fst newCtors))
     && and (Map.elems (Map.intersectionWith equiv (Map.fromList oldCtors) (Map.fromList newCtors)))
@@ -174,7 +215,7 @@ namedKey (Docs.Named _ name source _) =
   (name, source)
 
 isEquivalentValue :: Docs.Value -> Docs.Value -> Bool
-isEquivalentValue (Docs.Value c1 t1 _) (Docs.Value c2 t2 _) =
+isEquivalentValue (Docs.Value c1 t1 _ _) (Docs.Value c2 t2 _ _) =
   isEquivalentAlias (Docs.Alias c1 [] t1 []) (Docs.Alias c2 [] t2 [])
 
 isEquivalentBinop :: Docs.Binop -> Docs.Binop -> Bool
@@ -333,13 +374,15 @@ unionChangeMagnitude (Changes added changed removed)
   | Map.size added > 0 = M.MINOR
   | otherwise = M.PATCH
 
+-- | A type that was opaque and shows its constructors is MINOR, as one that
+-- loses @\@affine@ is; one that gains it is MAJOR, since a value of it may no
+-- longer be used twice (geng-lang @m4-own.md@ §OW33, D974).
 unionChangesMagnitude :: Map.Map Name.Name (Docs.Union, Docs.Union) -> M.Magnitude
 unionChangesMagnitude unionChanges =
-  if Monoid.getAll $
-    Map.foldMapWithKey
-      ( \_ (Docs.Union _ _ oldConstructors _, Docs.Union _ _ newConstructors _) ->
-          Monoid.All (List.null oldConstructors && not (List.null newConstructors))
-      )
-      unionChanges
-    then M.MINOR
-    else M.MAJOR
+  maximum (M.PATCH : map one (Map.elems unionChanges))
+  where
+    one (old@(Docs.Union _ _ oldConstructors oldAffine), new@(Docs.Union _ _ newConstructors newAffine))
+      | newAffine && not oldAffine = M.MAJOR
+      | isEquivalentShape old new = M.MINOR
+      | List.null oldConstructors && not (List.null newConstructors) = M.MINOR
+      | otherwise = M.MAJOR

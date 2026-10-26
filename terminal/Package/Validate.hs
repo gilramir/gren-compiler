@@ -54,8 +54,8 @@ validate (Flags root knownVersions (Command.ProjectInfo currentOutline currentSo
       error "Previous version is app"
     (Outline.Pkg currentPkgOutline@(Outline.PkgOutline _ _ _ vsn _ _ _ _ _), Just (Command.ProjectInfo (Outline.Pkg previousOutline) previousSources previousDeps)) ->
       do
-        (current@(currentDocs, _), goesOn) <- buildChecked root currentPkgOutline currentSources currentDeps
-        previous@(previousDocs, _) <- buildProject root previousOutline previousSources previousDeps
+        (current, goesOn) <- buildChecked root currentPkgOutline currentSources currentDeps
+        previous <- buildProject root previousOutline previousSources previousDeps
 
         -- A first run that stopped for the package's own goals stops for the
         -- comparison too, so that the CLI does both between the same two runs.
@@ -63,7 +63,7 @@ validate (Flags root knownVersions (Command.ProjectInfo currentOutline currentSo
         case outcome of
           Refinements.Stopped ->
             return ()
-          Refinements.Decided verdicts ->
+          Refinements.Decided verdicts previousDocs currentDocs ->
             do
               _ <- Task.eio id $ verifyBump verdicts vsn currentDocs previousDocs knownVersions
               Task.io $ putStrLn "Everything looks good!"
@@ -73,16 +73,16 @@ validate (Flags root knownVersions (Command.ProjectInfo currentOutline currentSo
 -- @own@ under @GENG_REFINE_STAGE@, the first run stops, and the CLI checks it
 -- and refuses the version on a goal not proved. 'False' is that stop. The
 -- previous version is not checked; it is already published.
-buildChecked :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Validate ((Docs.Documentation, [Core.Module]), Bool)
+buildChecked :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Validate (Refinements.Version, Bool)
 buildChecked root pkgOutline sources solution =
   do
-    (details, built@(_, cores)) <- buildWith root pkgOutline sources solution
+    (details, (docs, cores)) <- buildWith root pkgOutline sources solution
     goesOn <- Task.mapError Exit.ValidateBadGenerate (Generate.packageCut "own" details cores)
-    return (built, goesOn)
+    return (Refinements.Version docs cores details, goesOn)
 
-buildProject :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Validate (Docs.Documentation, [Core.Module])
+buildProject :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Validate Refinements.Version
 buildProject root pkgOutline sources solution =
-  snd <$> buildWith root pkgOutline sources solution
+  (\(details, (docs, cores)) -> Refinements.Version docs cores details) <$> buildWith root pkgOutline sources solution
 
 buildWith :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Validate (Details.Details, (Docs.Documentation, [Core.Module]))
 buildWith root pkgOutline@(Outline.PkgOutline _ _ _ _ _ _ _ _ _) sources solution =

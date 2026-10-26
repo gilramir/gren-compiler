@@ -16,8 +16,19 @@
 --
 -- __Neither variable set__, the binary run by itself, leaves each such value
 -- MAJOR, with a line saying it was not compared.
+--
+-- __The ownership facts__ (geng-lang @m4-own.md@ §OW33, D970–D974) are compared
+-- in the same two runs. Any body can change a fact, so there is no candidate
+-- to stage by: the first run always stops, with each version staged for the
+-- ownership checker under @dir/old@ and @dir/new@ ('Generate.packageOwnStage').
+-- The CLI checks both with the checker it runs and asks again with
+-- @GENG_OWN_FACTS@ naming a directory of the @I@ lines it found, @old.tsv@ and
+-- @new.tsv@, which this run gives each version's values ('Docs.withFacts')
+-- before the comparison. Without it the values have no facts and none is
+-- compared: the binary run by itself.
 module Deps.Refinements
-  ( Outcome (..),
+  ( Version (..),
+    Outcome (..),
     decide,
   )
 where
@@ -32,39 +43,71 @@ import Data.Map qualified as Map
 import Data.Name qualified as Name
 import Data.Set qualified as Set
 import Deps.Diff qualified as Diff
+import Generate qualified
+import Gren.Details qualified as Details
 import Gren.Docs qualified as Docs
 import Gren.Magnitude qualified as M
 import Gren.ModuleName qualified as ModuleName
+import Gren.Package qualified as Pkg
+import System.Directory qualified as Dir
 import System.Environment qualified as Env
 import System.FilePath ((</>))
 
--- | Whether the command goes on, and with which verdicts.
+-- | One version: its documentation, its modules' Core, and its details, whose
+-- dependencies' Core the ownership checker reads too.
+data Version = Version Docs.Documentation [Core.Module] Details.Details
+
+-- | Whether the command goes on, with which verdicts, and each version's
+-- documentation with its ownership facts, the old and then the new.
 data Outcome
   = Stopped
-  | Decided Diff.Verdicts
+  | Decided Diff.Verdicts Docs.Documentation Docs.Documentation
 
--- | The verdicts for comparing @old@ with @new@, or a stop for the checker.
+-- | The verdicts for comparing @old@ with @new@, or a stop for the checkers.
 -- @alwaysStop@ is @bump@'s, and @validate@'s when its first run stopped for the
--- version's own goals (D858).
-decide :: Bool -> (Docs.Documentation, [Core.Module]) -> (Docs.Documentation, [Core.Module]) -> IO Outcome
-decide alwaysStop (oldDocs, oldCores) (newDocs, newCores) =
+-- version's own goals (D858): it writes the values file even when there is no
+-- value to compare, which is how the CLI knows to ask again.
+decide :: Bool -> Version -> Version -> IO Outcome
+decide alwaysStop (Version oldDocs oldCores oldDetails) (Version newDocs newCores newDetails) =
   do
     let candidates = Diff.refinementCandidates oldDocs newDocs
     stage <- nonEmpty "GENG_REFINE_STAGE"
     given <- nonEmpty "GENG_REFINE_VERDICTS"
+    facts <- nonEmpty "GENG_OWN_FACTS"
     case (given, stage) of
-      (Just file, _) ->
-        Decided . parseVerdicts <$> readFile file
-      (Nothing, Just dir)
-        | alwaysStop || not (null candidates) ->
-            do
-              let homes = Set.fromList (map fst candidates)
+      (Nothing, Just dir) ->
+        do
+          let homes = Set.fromList (map fst candidates)
+          if alwaysStop || not (null candidates)
+            then do
               writeCores (dir </> "old") homes oldCores
               writeCores (dir </> "new") homes newCores
               writeFile (dir </> "values") (unlines [Name.toChars home ++ " " ++ Name.toChars name | (home, name) <- candidates])
-              return Stopped
+            else return ()
+          Generate.packageOwnStage oldDetails oldCores (dir </> "old")
+          Generate.packageOwnStage newDetails newCores (dir </> "new")
+          return Stopped
       _ ->
-        return (Decided Map.empty)
+        do
+          verdicts <- maybe (return Map.empty) (fmap parseVerdicts . readFile) given
+          oldWith <- withFactsIn facts "old.tsv" oldDetails oldDocs
+          newWith <- withFactsIn facts "new.tsv" newDetails newDocs
+          return (Decided verdicts oldWith newWith)
+
+-- | A version's documentation with the facts the CLI's checker found in it,
+-- when it was asked for them.
+withFactsIn :: Maybe FilePath -> FilePath -> Details.Details -> Docs.Documentation -> IO Docs.Documentation
+withFactsIn facts file details docs =
+  case (facts, Details._outline details) of
+    (Just dir, Details.ValidPkg _ pkg _ _) ->
+      do
+        let path = dir </> file
+        present <- Dir.doesFileExist path
+        if present
+          then (\text -> Docs.withFacts (Pkg.toChars pkg) (lines text) docs) <$> readFile path
+          else return docs
+    _ ->
+      return docs
 
 nonEmpty :: String -> IO (Maybe String)
 nonEmpty name =

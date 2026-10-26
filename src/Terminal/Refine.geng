@@ -151,33 +151,46 @@ compareVersions config =
         |> Task.mapError (\e -> failure "I cannot make a directory for the refinement checker" (FileSystem.errorToString e))
         |> Task.andThen
             (\dir ->
-                config.run (Dict.singleton "GENG_REFINE_STAGE" (config.toString dir))
+                config.run
+                    (Dict.singleton "GENG_REFINE_STAGE" (config.toString dir)
+                        |> Dict.union (Terminal.Own.checkerVariables config.envVars config.script)
+                    )
                     |> Task.andThen
                         (\exitCode ->
                             if exitCode /= 0 then
                                 Task.succeed exitCode
 
                             else
-                                Task.map2 (\own values -> { own = own, values = values })
+                                Task.map3 (\own values facts -> { own = own, values = values, facts = facts })
                                     (ownModules config dir)
                                     (FileSystem.readFile config.fs (Path.append (Path.fromPosixString "values") dir)
                                         |> Task.map (\data -> Just (Bytes.toString data |> Maybe.withDefault ""))
                                         |> Task.onError (\_ -> Task.succeed Nothing)
                                     )
+                                    (versionFacts config dir)
                                     |> Task.andThen
                                         (\staged ->
                                             when staged is
-                                                { own = [], values = Nothing } ->
+                                                { own = [], values = Nothing, facts = Nothing } ->
                                                     Task.succeed exitCode
 
                                                 _ ->
                                                     let
                                                         checkedVars =
-                                                            if Array.isEmpty staged.own then
+                                                            (if Array.isEmpty staged.own then
                                                                 Dict.empty
 
-                                                            else
+                                                             else
                                                                 Dict.singleton "GENG_REFINE_CHECKED" "1"
+                                                            )
+                                                                |> Dict.union
+                                                                    (when staged.facts is
+                                                                        Just facts ->
+                                                                            Dict.singleton "GENG_OWN_FACTS" (config.toString facts)
+
+                                                                        Nothing ->
+                                                                            Dict.empty
+                                                                    )
                                                     in
                                                     checkGoals config staged.own
                                                         |> Task.andThen
@@ -194,6 +207,55 @@ compareVersions config =
                         )
                     |> Task.andThen (\exitCode -> remove config dir |> Task.map (\_ -> exitCode))
                     |> Task.onError (\report -> remove config dir |> Task.andThen (\_ -> Task.fail report))
+            )
+
+
+{-| Each version's ownership facts (geng-lang `m4-own.md` §OW33, D972): the
+binary stages the old and the new version for the ownership checker under
+`old` and `new` (`Generate.packageOwnStage`), and each one's `I` lines, from
+the checker run here, go to `facts/old.tsv` and `facts/new.tsv`, the directory
+the second run is given as `GENG_OWN_FACTS`. Nothing, when the binary staged
+neither.
+-}
+versionFacts : Config -> Path -> Task Report (Maybe Path)
+versionFacts config dir =
+    let
+        facts =
+            Path.append (Path.fromPosixString "facts") dir
+
+        one version =
+            let
+                staged =
+                    Path.append (Path.fromPosixString version) dir
+            in
+            FileSystem.checkAccess config.fs [] (Path.append (Path.fromPosixString "ownership/manifest") staged)
+                |> Task.map (\_ -> True)
+                |> Task.onError (\_ -> Task.succeed False)
+                |> Task.andThen
+                    (\present ->
+                        if present then
+                            Terminal.Own.interface config staged
+                                |> Task.andThen
+                                    (\lines ->
+                                        FileSystem.writeFile config.fs (Bytes.fromString (String.join "" (Array.map (\l -> l ++ "\n") lines))) (Path.append (Path.fromPosixString (version ++ ".tsv")) facts)
+                                            |> Task.mapError (\e -> failure "I cannot write the ownership checker's facts" (FileSystem.errorToString e))
+                                            |> Task.map (\_ -> True)
+                                    )
+
+                        else
+                            Task.succeed False
+                    )
+    in
+    FileSystem.makeDirectory config.fs { recursive = True } facts
+        |> Task.mapError (\e -> failure "I cannot make a directory for the ownership checker's facts" (FileSystem.errorToString e))
+        |> Task.andThen (\_ -> Task.map2 (\old new -> old || new) (one "old") (one "new"))
+        |> Task.map
+            (\found ->
+                if found then
+                    Just facts
+
+                else
+                    Nothing
             )
 
 

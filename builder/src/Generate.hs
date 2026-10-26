@@ -5,6 +5,7 @@ module Generate
     make,
     refinementCut,
     packageCut,
+    packageOwnStage,
     ExtSources,
     extSources,
   )
@@ -216,6 +217,17 @@ packageCut sub details own =
     let ownCores = Map.fromList [(Core._moduleName m, m) | m <- own]
     cores <- Task.io (throughWire (Map.union ownCores (Details.loadCores details)))
     cutAt sub (Details._fingerprint details) (Map.keysSet ownCores) cores
+
+-- | A package built from its exposed modules, staged for the ownership
+-- checker under @dir@ as a build's is ('ownStage'), with every dependency's
+-- Core, so that the CLI can give each exposed value its facts: @geng docs@ and
+-- the two versions @geng package diff@, @bump@ and @validate@ compare
+-- (geng-lang @m4-own.md@ §OW33, D970, D972).
+packageOwnStage :: Details.Details -> [Core.Module] -> FilePath -> IO ()
+packageOwnStage details own dir =
+  do
+    let ownCores = Map.fromList [(Core._moduleName m, m) | m <- own]
+    ownStage (Details._fingerprint details) (Map.keysSet ownCores) (Map.union ownCores (Details.loadCores details)) dir
 
 cutAt :: FilePath -> FP.Fingerprint -> Set.Set ModuleName.Canonical -> Map.Map ModuleName.Canonical Core.Module -> Task Bool
 cutAt sub depsPrint own cores =

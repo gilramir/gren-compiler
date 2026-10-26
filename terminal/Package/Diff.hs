@@ -9,7 +9,6 @@ where
 import AST.Canonical qualified as Can
 import Build qualified
 import Command qualified
-import Core.AST qualified as Core
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -61,16 +60,16 @@ type Task a =
 diff :: Flags -> Outline.PkgOutline -> Outline.PkgOutline -> Task ()
 diff (Flags _ root (Command.ProjectInfo _ currentSources currentSolution) (Command.ProjectInfo _ publishedSources publishedSolution)) currentOutline publishedOutline =
   do
-    new@(newDocs, _) <- generateDocs root currentOutline currentSources currentSolution
-    old@(oldDocs, _) <- generateDocs root publishedOutline publishedSources publishedSolution
+    new <- generateDocs root currentOutline currentSources currentSolution
+    old <- generateDocs root publishedOutline publishedSources publishedSolution
     outcome <- Task.io $ Refinements.decide False old new
     case outcome of
       Refinements.Stopped -> return ()
-      Refinements.Decided verdicts -> writeDiff verdicts oldDocs newDocs
+      Refinements.Decided verdicts oldDocs newDocs -> writeDiff verdicts oldDocs newDocs
 
 -- GENERATE DOCS
 
-generateDocs :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Diff (Docs.Documentation, [Core.Module])
+generateDocs :: FilePath -> Outline.PkgOutline -> Build.Sources -> Map Pkg.Name Details.Dependency -> Task.Task Exit.Diff Refinements.Version
 generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _ _) sources solution =
   do
     details <-
@@ -81,8 +80,8 @@ generateDocs root outline@(Outline.PkgOutline _ _ _ _ exposed _ _ _ _) sources s
       [] ->
         Task.throw Exit.DiffNoExposed
       e : es ->
-        Task.eio Exit.DiffBadBuild $
-          Build.fromExposed Reporting.silent root details sources Build.KeepDocsAndCore (NE.List e es)
+        (\(docs, cores) -> Refinements.Version docs cores details)
+          <$> Task.eio Exit.DiffBadBuild (Build.fromExposed Reporting.silent root details sources Build.KeepDocsAndCore (NE.List e es))
 
 -- WRITE DIFF
 
@@ -214,9 +213,9 @@ changesToDoc categoryName unions aliases values binops =
           D.fromChars categoryName <> ":" : unions ++ aliases ++ binops ++ values
 
 unionToDoc :: L.Localizer -> Name.Name -> Docs.Union -> D.Doc
-unionToDoc localizer name (Docs.Union _ tvars ctors _) =
+unionToDoc localizer name (Docs.Union _ tvars ctors affine) =
   let setup =
-        "type" <+> D.fromName name <+> D.hsep (map D.fromName tvars)
+        (if affine then "@affine type" else "type") <+> D.fromName name <+> D.hsep (map D.fromName tvars)
 
       ctorDoc (ctor, tipes) =
         typeDoc localizer (Type.Type ctor tipes)
@@ -229,8 +228,10 @@ aliasToDoc localizer name (Docs.Alias _ tvars tipe named) =
    in D.hang 4 (D.sep [declaration, signatureDoc localizer named tipe])
 
 valueToDoc :: L.Localizer -> Name.Name -> Docs.Value -> D.Doc
-valueToDoc localizer name (Docs.Value _ tipe named) =
-  D.hang 4 $ D.sep [D.fromName name <+> ":", signatureDoc localizer named tipe]
+valueToDoc localizer name (Docs.Value _ tipe named facts) =
+  D.vcat $
+    D.hang 4 (D.sep [D.fromName name <+> ":", signatureDoc localizer named tipe])
+      : map (\fact -> D.indent 4 ("--" <+> D.fromChars (Docs.factWords fact))) facts
 
 -- | A value's type with the names its signature gives, each with its
 -- predicate, as written (geng-lang @m4-refine.md@ §RF29, D854): what a caller
