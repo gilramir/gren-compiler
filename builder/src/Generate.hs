@@ -203,7 +203,14 @@ refinementCut details artifacts@(Build.Artifacts pkg _ _ _) =
   do
     cores <- Task.io (programCore details artifacts)
     let own = Set.fromList [ModuleName.Canonical pkg name | name <- Map.keys (ownCore artifacts)]
+    -- A program is built only checked (geng-lang @m4-own.md@ D977): its
+    -- builders are written in place, and one the checker would refuse can
+    -- answer wrong. The CLI names its checker on every build it holds.
+    held <- Task.io (or <$> mapM isSet ["GENG_OWN_CHECKER", "GENG_OWN_REPORT"])
+    if held then return () else Task.throw Exit.GenerateOwnershipUnchecked
     cutAt "" (Details._fingerprint details) own cores
+  where
+    isSet name = maybe False (/= "") <$> Env.lookupEnv name
 
 -- | The same cut for a package built as the project, from its exposed modules
 -- rather than from a program's roots (geng-lang @m4-refine.md@ §RF30, D858,

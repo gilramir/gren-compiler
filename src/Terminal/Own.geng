@@ -18,9 +18,10 @@ names a file the build's lines are appended to, in `Geng.Own.Check`'s columns:
 a program whose suite builds it more than once writes each
 build's. `GENG_OWN_ERRORS` names a file for the errors' text, without colour,
 whether or not they refuse the build, which `harness/own.py` pins.
-`GENG_UNCHECKED_OWNERSHIP` builds a program the check refuses anyway: a
-development switch, as `GENG_UNCHECKED_REFINEMENTS` is (D825), so that the gate
-can report on cases written to be refused.
+Nothing builds a program the check refuses (geng-lang `m4-own.md` D977): a
+builder is written in place, and such a program may answer wrong. A refused
+build has written its Core by then, for `GENG_DUMP_WIRE`, and its lines and
+errors.
 -}
 
 import Bytes
@@ -55,7 +56,7 @@ checkerVariables _ script =
 {-| The check of a build's modules, `dir` the stage: the worker checks them and
 answers the lines, which are appended to `GENG_OWN_REPORT` when it names a file;
 the answer is the violations, which the caller turns into errors and refuses
-the build with unless `GENG_UNCHECKED_OWNERSHIP` is set.
+the build with.
 -}
 check : { c | fs : FileSystem.Permission, envVars : Dict String String, fromString : String -> Path, toString : Path -> String } -> Path -> Task Report (Array Error.Violation)
 check config dir =

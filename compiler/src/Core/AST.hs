@@ -355,8 +355,8 @@ data DataDecl = DataDecl
     -- | The published class set.
     _dataClasses :: ![QualName],
     -- | Whether the type is declared @\@affine@ (geng-lang @m4-own.md@ D921):
-    -- a value of it is used at most once. No pass reads it; the ownership
-    -- checker does.
+    -- a value of it is used at most once. The ownership checker reads it,
+    -- and "Core.Pass.FloatIn", which moves nothing that names one (D976).
     _dataAffine :: !Bool
   }
   deriving (Eq, Show)

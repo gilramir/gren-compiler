@@ -380,12 +380,10 @@ refuseWith config violations refusing =
         goalErrors_ =
             Array.map (fromGoal config) refusing
 
+        -- No switch lets a refused program through (geng-lang `m4-own.md`
+        -- D977): its builders are written in place, and it may answer wrong.
         refusedOwn =
-            if Dict.member "GENG_UNCHECKED_OWNERSHIP" config.envVars then
-                []
-
-            else
-                ownErrors
+            ownErrors
 
         refusedGoals =
             if Dict.member "GENG_UNCHECKED_REFINEMENTS" config.envVars then

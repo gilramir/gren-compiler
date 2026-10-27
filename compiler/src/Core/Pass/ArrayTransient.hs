@@ -44,12 +44,13 @@
 -- place; the loop keeps its name as the entry, which hands the copy
 -- @tr_from_array@ of the array and turns its answer back with @tr_to_array@.
 --
--- __A cost rule, not a safety rule__ (§PL5), unlike D583's. Natively and on
--- JavaScript a write through a transient that has been written through or
--- handed out copies first, and on the BEAM a transient is Erlang's persistent
--- @array@; so a version used twice costs a copy, never a wrong answer, and
--- nothing here checks that a version is used once. What the rule must refuse
--- is a version that leaves the loop each step, where the entry's
+-- __A safety rule__ (geng-lang @m4-own.md@ D976), as D583's is. Natively and
+-- on JavaScript a transient is written in place with no record of what a
+-- write replaced, so the rule above, which lets a version be grown twice or
+-- read after it grew, is held to 'linear' on the copy it makes: a loop whose
+-- copy uses a transient after giving it up is refused. Until D976 a version
+-- used twice cost a copy and nothing checked it (§PL5). The rule must still
+-- refuse a version that leaves the loop each step, where the entry's
 -- @tr_to_array@ would add a copy to the one it saves.
 --
 -- __The whole, as @arraytr@__ (D703, D716): natively and on JavaScript an
@@ -398,7 +399,7 @@ attempt popsOnly q ps ts r sp body pos w s =
       ck = Ck q qt copyType (length ps) pos s w
    in do
         body' <- top ck (Map.singleton (Core._binderName p) (topKind ck)) body
-        if grows body' && (not popsOnly || writes body')
+        if grows body' && (not popsOnly || writes body') && linear (Core._binderName p) body'
           then
             let ps' = [if j == pos then b {Core._binderType = tt} else b | (j, b) <- zip [0 :: Int ..] ps]
                 copy = Core.Expr (Core.ELam ps' body') copyType sp
@@ -409,6 +410,123 @@ attempt popsOnly q ps ts r sp body pos w s =
           else Nothing
   where
     var b = Core.Expr (Core.EVar (Core._binderName b)) (Core._binderType b) (Core._binderSpan b)
+
+-- THE SAFETY CHECK
+
+-- | Whether the copy uses each transient once (geng-lang @m4-own.md@ D976):
+-- every local whose type holds one is read (@tr_length@, @tr_get@, or a
+-- field of it that holds none) only while it is live, and used any other way
+-- at most once on each path, in the order Core evaluates. A transient is
+-- written in place, so the rule's shapes that a version used twice made a
+-- copy of are refused here: two growths of one version, or its length read
+-- after it grew. Nothing the transient is in may be captured by a lambda, and
+-- a join or a recursive group that names one refuses the loop.
+linear :: Name -> Core.Expr -> Bool
+linear version body = maybe False (const True) (useIn (Map.singleton version True) body)
+
+-- | What is live after an expression, or 'Nothing' where a transient is used
+-- after it was given up. A name maps to whether it is still live; a record's
+-- field that holds a transient is tracked as a part of its own,
+-- @record.field@, so that taking one field leaves the record's others to be
+-- read. A field that holds no transient is never written in place, and is
+-- read whenever.
+useIn :: Map Name Bool -> Core.Expr -> Maybe (Map Name Bool)
+useIn st e =
+  case Core._exprValue e of
+    Core.EVar x
+      | Map.member x st -> if whole x then Just (Map.insert x False st) else Nothing
+      | otherwise -> Just st
+    Core.EPrim (Prim.TransientOp op) (a : rest)
+      | op == Prim.TrLength || op == Prim.TrGet,
+        Just k <- readable a ->
+          if k then useAll st rest else Nothing
+    Core.EAccess (Core.Expr (Core.EVar r) _ _) f
+      | Map.member r st ->
+          if not (holdsTransient (Core.typeOf e))
+            then Just st
+            else
+              let part = partName r f
+               in if st Map.! r && Map.findWithDefault True part st
+                    then Just (Map.insert part False st)
+                    else Nothing
+    Core.ELam _ inner
+      | Transient.mentions (Map.keysSet st) inner -> Nothing
+      | otherwise -> Just st
+    Core.ELetRec binds inner
+      | any (Transient.mentions (Map.keysSet st) . Core._bindValue) binds -> Nothing
+      | otherwise -> useIn st inner
+    Core.EJoin _ _ -> if Transient.mentions (Map.keysSet st) e then Nothing else Just st
+    Core.EJump _ _ -> if Transient.mentions (Map.keysSet st) e then Nothing else Just st
+    Core.ELet binds inner ->
+      let step acc (Core.Bind b v) = do
+            after <- useIn acc v
+            return (bindLive b after)
+       in do
+            st' <- foldl (\acc bind -> acc >>= \a -> step a bind) (Just st) binds
+            useIn st' inner
+    Core.ECase scrut alts fallback ->
+      do
+        st' <- useIn st scrut
+        outs <- sequence ([useIn (foldr bindLive st' (patternBinders pat)) b | Core.Alt pat b <- alts] ++ [useIn st' f | Just f <- [fallback]])
+        -- After the case, a name is live only if every branch left it so.
+        return (Map.unionsWith (&&) (st' : outs))
+    -- An update copies the fields it does not replace: its base gives up only
+    -- the transients in those, so a replaced field may take the base's own
+    -- (rule B's @{ acc | out = push x acc.out }@).
+    Core.EUpdate base@(Core.Expr (Core.EVar r) _ _) fields
+      | Map.member r st ->
+          if not (st Map.! r)
+            then Nothing
+            else do
+              st' <- useAll st (map snd fields)
+              let replaced = map fst fields
+                  copied = [f | (f, t) <- recordFields (Core.typeOf base), f `notElem` replaced, holdsTransient t]
+              if all (\f -> Map.findWithDefault True (partName r f) st') copied
+                then Just (Map.insert r False st')
+                else Nothing
+    _ -> useAll st (Specialize.children_ (\c -> [c]) e)
+  where
+    -- A whole record is live with every one of its parts.
+    whole x = st Map.! x && and [v | (k, v) <- Map.toList st, isPartOf x k]
+    readable a =
+      case Core._exprValue a of
+        Core.EVar x | Map.member x st -> Just (whole x)
+        Core.EAccess (Core.Expr (Core.EVar r) _ _) f
+          | Map.member r st -> Just (st Map.! r && Map.findWithDefault True (partName r f) st)
+        _ -> Nothing
+    bindLive b m =
+      let x = Core._binderName b
+          cleared = Map.filterWithKey (\k _ -> not (isPartOf x k)) m
+       in if holdsTransient (Core._binderType b) then Map.insert x True cleared else Map.delete x cleared
+
+partName :: Name -> Name -> Name
+partName r f = Name.fromChars (Name.toChars r ++ "." ++ Name.toChars f)
+
+isPartOf :: Name -> Name -> Bool
+isPartOf x k = (Name.toChars x ++ ".") `List.isPrefixOf` Name.toChars k
+
+useAll :: Map Name Bool -> [Core.Expr] -> Maybe (Map Name Bool)
+useAll st = foldl (\acc x -> acc >>= \a -> useIn a x) (Just st)
+
+patternBinders :: Core.Pattern -> [Core.Binder]
+patternBinders p =
+  case p of
+    Core.PVar b -> [b]
+    Core.PWild -> []
+    Core.PLit _ -> []
+    Core.PCtor _ _ ps -> concatMap patternBinders ps
+    Core.PRecord fs -> concatMap (patternBinders . snd) fs
+    Core.PArray ps rest -> concatMap patternBinders ps ++ maybe [] pure rest
+    Core.PAs b q -> b : patternBinders q
+
+holdsTransient :: Core.Type -> Bool
+holdsTransient t =
+  case t of
+    Core.TCon q args -> q == Core.QualName ModuleName.arrayTransient "Transient" || any holdsTransient args
+    Core.TRecord fields _ -> any (holdsTransient . snd) fields
+    Core.TFun as b -> any holdsTransient (b : as)
+    Core.TForall _ _ inner -> holdsTransient inner
+    Core.TVar _ -> False
 
 -- | Whether the copy grows its transient anywhere: a loop that only reads and
 -- threads its array is left alone.

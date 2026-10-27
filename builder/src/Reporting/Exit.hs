@@ -1586,6 +1586,7 @@ data Generate
   | GenerateConstrainedRoots [(ModuleName.Raw, N.Name, [N.Name])]
   | GenerateExportsDoNotCross [(ModuleName.Raw, N.Name, [ExportProblem])]
   | GenerateRefinementsUnchecked
+  | GenerateOwnershipUnchecked
 
 -- | Why a library's export cannot be one C function (geng-lang
 -- @m3-embed.md@ D619, D620), as 'Generate.checkRoots' finds it.
@@ -1645,6 +1646,13 @@ toGenerateReport problem =
         Nothing
         "This project has a refinement, and nothing will check it: the refinement checker is part of geng's command line, and this compiler was run without it."
         [ D.reflow "Run the command through geng, which checks the refinements and then goes on. GENG_UNCHECKED_REFINEMENTS=1 builds it unchecked, a development switch whose program has promises nothing kept."
+        ]
+    GenerateOwnershipUnchecked ->
+      Help.report
+        "OWNERSHIP NOT CHECKED"
+        Nothing
+        "This compiler was run without the ownership checker, which is part of geng's command line. A builder is written in place, and a program the checker would refuse can answer wrong, so nothing is built unchecked."
+        [ D.reflow "Run the command through geng, which checks every build and then goes on."
         ]
     GenerateNoBackend target ->
       Help.report

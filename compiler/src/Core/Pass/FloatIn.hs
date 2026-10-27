@@ -27,9 +27,18 @@
 --
 --   * contains no @debug_log@, inside a lambda or not, since a lambda it makes
 --     may be called while it is evaluated;
---   * names no global from which a @debug_log@ is reachable ('logging'); and
+--   * names no global from which a @debug_log@ is reachable ('logging');
 --   * names no local value whose type can hold a function ('holdsFunction'):
---     whatever it hands that value to may call it, and its body is unknown.
+--     whatever it hands that value to may call it, and its body is unknown;
+--     and
+--   * when it moves, names no local value whose type can hold an affine one
+--     ('holdsAffine', geng-lang @m4-own.md@ D976) that a later binding or
+--     the body also names: a builder is written in place, so a read of it
+--     moved past a write of it reads the write, and a write moved past a
+--     read is read. The ownership checker holds the order as written, and
+--     this pass runs after it. A transient the binding makes and uses up
+--     itself, or one nothing else names, moves with it; a binding that goes
+--     unread is dropped whatever it names, since that reorders nothing.
 --
 -- The last is not relaxed for a program that never logs: the passes see every
 -- module but not the roots, so they cannot tell, and a log added in one place
@@ -73,12 +82,13 @@ import System.IO.Unsafe (unsafePerformIO)
 -- function whatever their arguments are.
 data Program = Program
   { _logging :: !(Set Core.QualName),
-    _functional :: !(Set Core.QualName)
+    _functional :: !(Set Core.QualName),
+    _affine :: !(Set Core.QualName)
   }
 
 program :: Map ModuleName.Canonical Core.Module -> Program
 program cores =
-  Program (logging (Map.elems cores)) (functional (Map.elems cores))
+  Program (logging (Map.elems cores)) (functional (Map.elems cores)) (affine (Map.elems cores))
 
 -- | Every global whose definition contains a @debug_log@, and every global
 -- that names one of those, to a fixed point.
@@ -117,6 +127,28 @@ functional modules =
          in if next == known then known else fixed next
    in fixed Set.empty
 
+-- | The data types declared @\@affine@, and those one of whose constructors
+-- has a field that holds one apart from the type's own parameters.
+affine :: [Core.Module] -> Set Core.QualName
+affine modules =
+  let decls = concatMap Core._moduleData modules
+      holds known decl =
+        Core._dataAffine decl
+          || any (any (fieldHoldsAffine known) . Core._ctorFields) (Core._dataCtors decl)
+      fixed known =
+        let next = Set.fromList [Core._dataName d | d <- decls, holds known d]
+         in if next == known then known else fixed next
+   in fixed Set.empty
+
+fieldHoldsAffine :: Set Core.QualName -> Core.Type -> Bool
+fieldHoldsAffine known t =
+  case t of
+    Core.TVar _ -> False
+    Core.TFun _ _ -> False
+    Core.TCon q args -> Set.member q known || any (fieldHoldsAffine known) args
+    Core.TRecord fields _ -> any (fieldHoldsAffine known . snd) fields
+    Core.TForall _ _ body -> fieldHoldsAffine known body
+
 fieldHolds :: Set Core.QualName -> Set Name -> Core.Type -> Bool
 fieldHolds known params t =
   case t of
@@ -137,20 +169,45 @@ holdsFunction p t =
     Core.TRecord fields row -> row /= Nothing || any (holdsFunction p . snd) fields
     Core.TForall _ _ body -> holdsFunction p body
 
+-- | Whether a value of a type can hold an affine one. A type variable or a
+-- function is 'holdsFunction''s already.
+holdsAffine :: Program -> Core.Type -> Bool
+holdsAffine p t =
+  case t of
+    Core.TVar _ -> True
+    Core.TFun _ _ -> True
+    Core.TCon q args -> Set.member q (_affine p) || any (holdsAffine p) args
+    Core.TRecord fields row -> row /= Nothing || any (holdsAffine p . snd) fields
+    Core.TForall _ _ body -> holdsAffine p body
+
 hasLog :: Core.Expr -> Bool
 hasLog e =
   case Core._exprValue e of
     Core.EPrim Prim.DebugLog _ -> True
     _ -> getAny (Specialize.children_ (Any . hasLog) e)
 
--- | Why a binding's right-hand side may not move, if it may not.
-refusal :: Program -> Core.Expr -> Maybe String
-refusal p e
+-- | Why a binding's right-hand side may not move, if it may not: dropped
+-- ('Nothing'), or moved past what reads the locals in the set.
+refusal :: Program -> Maybe (Set Name) -> Core.Expr -> Maybe String
+refusal p moving e
   | Core.ELam _ _ <- Core._exprValue e = Nothing
   | hasLog e = Just "log"
   | not (Set.disjoint (_logging p) (Refs._refGlobals (Refs.refsIn e))) = Just "logging-global"
   | any (holdsFunction p) (freeVarTypes e) = Just "function-value"
+  | Just others <- moving,
+    any (\(x, t) -> holdsAffine p t && Set.member x others) (freeVarsTyped e) =
+      Just "affine-value"
   | otherwise = Nothing
+
+-- | The locals an expression reads that it does not bind, with their types.
+freeVarsTyped :: Core.Expr -> [(Name, Core.Type)]
+freeVarsTyped e =
+  let free = Refs.freeLocals e
+      go x =
+        case Core._exprValue x of
+          Core.EVar n | Set.member n free -> [(n, Core.typeOf x)]
+          _ -> Specialize.children_ go x
+   in go e
 
 -- | The types of the locals an expression reads that it does not bind.
 freeVarTypes :: Core.Expr -> [Core.Type]
@@ -251,7 +308,7 @@ sinkRun p binds body =
             then keep Nothing
             else
               if not (Set.member x bodyFree)
-                then case refusal p rhs of
+                then case refusal p Nothing rhs of
                   Nothing -> (after, afterNames, afterReads, bodied, line "dropped" : lines_)
                   Just why -> keep (Just ("refused-" ++ why))
                 else
@@ -260,7 +317,7 @@ sinkRun p binds body =
                     else case sink b rhsFree body0 of
                       Nothing -> keep (Just "stays")
                       Just body1 ->
-                        case refusal p rhs of
+                        case refusal p (Just (Set.union afterReads bodyFree)) rhs of
                           Just why -> keep (Just ("refused-" ++ why))
                           Nothing -> (after, afterNames, afterReads, (body1, Refs.freeLocals body1), line "moved" : lines_)
 
