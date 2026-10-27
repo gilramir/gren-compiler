@@ -347,6 +347,11 @@ data TransientPrim
   | -- | @tr_generate t first n f@: pushes @f first@ to @f (first + n - 1)@.
     -- Precondition: @0 <= n@.
     TrGenerate
+  | -- | @tr_slice t lo hi@: the items from @lo@ up to @hi@ as an array, @t@
+    -- left as it was: one copy where a loop of @get@ and @push@ was a call an
+    -- item (geng-lang @m4-visiterm.md@ §VA16, D978), appended after D904's and
+    -- D905's four. Precondition: @0 <= lo <= hi <= length@.
+    TrSlice
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | The reified @Task@ tree the runtime steps. @map@, @sequence@ and friends
@@ -677,6 +682,7 @@ transientPrimName p =
     TrSetArray -> "set_array"
     TrCopyWithin -> "copy_within"
     TrGenerate -> "generate"
+    TrSlice -> "slice"
 
 taskPrimName :: TaskPrim -> Text
 taskPrimName p =
@@ -830,6 +836,8 @@ primArity op =
         TrCopyWithin -> 4
         -- transient, first argument, count, function
         TrGenerate -> 4
+        -- transient, from, to
+        TrSlice -> 3
     TaskOp p ->
       case p of
         TaskSucceed -> 1

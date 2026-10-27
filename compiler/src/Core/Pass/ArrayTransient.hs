@@ -72,11 +72,11 @@ import Core.Pass.Specialize qualified as Specialize
 import Core.Pass.Transient qualified as Transient
 import Core.Prim qualified as Prim
 import Core.Refs qualified as Refs
+import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Monoid (All (..), Any (..))
 import Data.Name (Name)
-import Data.List qualified as List
 import Data.Name qualified as Name
 import Data.Set qualified as Set
 import Gren.ModuleName qualified as ModuleName
@@ -94,24 +94,24 @@ module_ popsOnly home modul =
   let results = [(b, v, loop popsOnly (Core.QualName home (Core._binderName b)) v) | Core.Bind b v <- Core._moduleDefs modul]
    in logged home modul results $
         if null [() | (_, _, Just _) <- results]
-        then modul
-        else
-          let defs =
-                concat
-                  [ case found of
-                      Nothing -> [Core.Bind b v]
-                      Just (entry, copy) -> [Core.Bind b entry, copy]
-                  | (b, v, found) <- results
-                  ]
-              ordered = Inline.reorder home defs
-           in modul
-                { Core._moduleDefs = concat ordered,
-                  Core._moduleDefsRec =
-                    [ map (Core.QualName home . Core._binderName . Core._bindBinder) grp
-                    | grp <- ordered,
-                      length grp > 1
+          then modul
+          else
+            let defs =
+                  concat
+                    [ case found of
+                        Nothing -> [Core.Bind b v]
+                        Just (entry, copy) -> [Core.Bind b entry, copy]
+                    | (b, v, found) <- results
                     ]
-                }
+                ordered = Inline.reorder home defs
+             in modul
+                  { Core._moduleDefs = concat ordered,
+                    Core._moduleDefsRec =
+                      [ map (Core.QualName home . Core._binderName . Core._bindBinder) grp
+                      | grp <- ordered,
+                        length grp > 1
+                      ]
+                  }
 
 -- THE CENSUS
 
@@ -414,12 +414,12 @@ attempt popsOnly q ps ts r sp body pos w s =
 -- THE SAFETY CHECK
 
 -- | Whether the copy uses each transient once (geng-lang @m4-own.md@ D976):
--- every local whose type holds one is read (@tr_length@, @tr_get@, or a
--- field of it that holds none) only while it is live, and used any other way
--- at most once on each path, in the order Core evaluates. A transient is
--- written in place, so the rule's shapes that a version used twice made a
--- copy of are refused here: two growths of one version, or its length read
--- after it grew. Nothing the transient is in may be captured by a lambda, and
+-- every local whose type holds one is read (@tr_length@, @tr_get@,
+-- @tr_slice@, or a field of it that holds none) only while it is live, and
+-- used any other way at most once on each path, in the order Core evaluates.
+-- A transient is written in place, so the rule's shapes that a version used
+-- twice made a copy of are refused here: two growths of one version, or its
+-- length read after it grew. Nothing the transient is in may be captured by a lambda, and
 -- a join or a recursive group that names one refuses the loop.
 linear :: Name -> Core.Expr -> Bool
 linear version body = maybe False (const True) (useIn (Map.singleton version True) body)
@@ -437,7 +437,7 @@ useIn st e =
       | Map.member x st -> if whole x then Just (Map.insert x False st) else Nothing
       | otherwise -> Just st
     Core.EPrim (Prim.TransientOp op) (a : rest)
-      | op == Prim.TrLength || op == Prim.TrGet,
+      | op == Prim.TrLength || op == Prim.TrGet || op == Prim.TrSlice,
         Just k <- readable a ->
           if k then useAll st rest else Nothing
     Core.EAccess (Core.Expr (Core.EVar r) _ _) f

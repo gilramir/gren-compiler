@@ -631,6 +631,7 @@ transient p args =
     (TrSetArray, [_, _, _]) -> helper "_ArrayPrim_trSetArray" args
     (TrCopyWithin, [_, _, _, _]) -> helper "_ArrayPrim_trCopyWithin" args
     (TrGenerate, [_, _, _, _]) -> helper "_ArrayPrim_trGenerate" args
+    (TrSlice, [_, _, _]) -> helper "_ArrayPrim_trSlice" args
     _ -> arityError (TransientOp p) args
   where
     helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
@@ -1695,6 +1696,10 @@ function _ArrayPrim_trGenerate(t, first, count, f) {
 }
 
 function _ArrayPrim_trLength(t) { return t.live; }
+
+// A copy of items `from` up to `to`, which a frozen handle's array holds as an
+// owner's does.
+function _ArrayPrim_trSlice(t, from, to) { return t.link.slice(from, to); }
 
 // The owner hands its array out, which nothing writes after, and is frozen
 // on it; a frozen handle answers a copy.

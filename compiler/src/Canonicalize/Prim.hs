@@ -278,6 +278,7 @@ transientType p =
     TrSetArray -> fn [tTransient, tInt, tArray] tTransient
     TrCopyWithin -> fn [tTransient, tInt, tInt, tInt] tTransient
     TrGenerate -> fn [tTransient, tInt, tInt, fn [tInt] a] tTransient
+    TrSlice -> fn [tTransient, tInt, tInt] tArray
   where
     a = Can.TVar "a"
     tArray = Can.TType ModuleName.array "Array" [a]

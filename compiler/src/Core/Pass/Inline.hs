@@ -44,7 +44,11 @@
 --     top-level binding that is a literal or a nullary constructor is that.
 --   * a partial application of a global bound by a @let@ and applied at
 --     once, with every argument a value, is the one saturated call — what
---     inlining @apR@ leaves of @x |> f a@;
+--     inlining @apR@ leaves of @x |> f a@; and one whose arguments are free
+--     of effects, applied once further in, under no lambda or join, which is
+--     what inlining a higher-order function leaves of a call that passed one
+--     (@Array.Builder.update p (write a b) row@, geng-lang @m4-visiterm.md@
+--     §VA16, D982);
 --   * a field of a record written out in place is that field, when the other
 --     fields are values — a witness table once specialization has chosen it;
 --   * a lambda written out in place and applied at once is its body, the
@@ -442,6 +446,23 @@ node ctx e@(Core.Expr value tipe sp) =
           do
             markFired
             node ctx (Core.Expr (Core.EApp h (earlier ++ later)) tipe sp)
+    -- The same partial application applied further in: inside the @let@s
+    -- and @case@s of the body, but under no lambda, join or recursive group,
+    -- so that it runs at most once. It is what inlining a higher-order
+    -- function such as @Array.Builder.update@ leaves of @update p (write a b)
+    -- row@: the closure bound before the bounds test, and applied in its
+    -- branch (geng-lang @m4-visiterm.md@ §VA16, D982). The arguments it holds
+    -- are free of effects, so moving them to the call changes nothing but
+    -- when they are computed, and nothing on the way binds a name they use.
+    Core.ELet [Core.Bind b bound] body
+      | Just (h, earlier) <- partial bound,
+        Core.TFun params _ <- Core.typeOf h,
+        length earlier < length params,
+        all pure_ earlier,
+        Just body' <- saturateOnce (Core._binderName b) h earlier (length params) body ->
+          do
+            markFired
+            return body'
     -- A field of a record written out in place, as a witness table is once
     -- specialization has chosen it: @(record .outbound = f).outbound@ is @f@.
     -- The other fields are values, so dropping them drops nothing but work.
@@ -558,6 +579,73 @@ appliedTo fn arg =
     _ -> Nothing
   where
     isName v = case v of Core.EGlobal _ -> True; Core.EVar _ -> True; _ -> False
+
+-- | @body@ with the one application of @v@ that saturates @h@ given @earlier@
+-- made that call ('node''s second partial-application fold). 'Nothing' when
+-- @v@ is used any other way, more than once, under a lambda, a join or a
+-- recursive group, or below a binder of a name @earlier@ uses.
+saturateOnce :: Name -> Core.Expr -> [Core.Expr] -> Int -> Core.Expr -> Maybe Core.Expr
+saturateOnce v h earlier arity body =
+  case go body of
+    Just (1, body') -> Just body'
+    _ -> Nothing
+  where
+    names = Set.unions (map Refs.freeLocals earlier)
+    clear bs = clearNames (map Core._binderName bs)
+    clearNames ns = not (any (\x -> Set.member x names || x == v) ns)
+    many :: [Core.Expr] -> Maybe (Int, [Core.Expr])
+    many es = do
+      rs <- mapM go es
+      Just (sum (map fst rs), map snd rs)
+    go :: Core.Expr -> Maybe (Int, Core.Expr)
+    go e@(Core.Expr value t sp)
+      | not (Set.member v (Refs.freeLocals e)) = Just (0, e)
+      | otherwise =
+          case value of
+            Core.EApp (Core.Expr (Core.EVar x) _ _) later
+              | x == v,
+                length earlier + length later == arity,
+                not (Set.member v (Set.unions (map Refs.freeLocals later))) ->
+                  Just (1, Core.Expr (Core.EApp h (earlier ++ later)) t sp)
+            Core.EApp f args -> do
+              (n, f') <- go f
+              (m, args') <- many args
+              Just (n + m, Core.Expr (Core.EApp f' args') t sp)
+            Core.ELet binds rest
+              | clear (map Core._bindBinder binds) -> do
+                  (n, vs) <- many (map Core._bindValue binds)
+                  (m, rest') <- go rest
+                  Just (n + m, Core.Expr (Core.ELet (zipWith (\(Core.Bind bb _) v' -> Core.Bind bb v') binds vs) rest') t sp)
+            Core.ECase scrut alts fallback
+              | clearNames (concatMap (Set.toList . Refs.patternBinders . Core._altPattern) alts) -> do
+                  (n, scrut') <- go scrut
+                  (m, bodies) <- many (map Core._altBody alts)
+                  (k, fallback') <- case fallback of
+                    Nothing -> Just (0, Nothing)
+                    Just f -> do
+                      (k, f') <- go f
+                      Just (k, Just f')
+                  Just (n + m + k, Core.Expr (Core.ECase scrut' (zipWith (\(Core.Alt p _) b' -> Core.Alt p b') alts bodies) fallback') t sp)
+            Core.ECtor q i args -> do
+              (n, args') <- many args
+              Just (n, Core.Expr (Core.ECtor q i args') t sp)
+            Core.ERecord fields -> do
+              (n, vs) <- many (map snd fields)
+              Just (n, Core.Expr (Core.ERecord (zip (map fst fields) vs)) t sp)
+            Core.EUpdate record fields -> do
+              (n, record') <- go record
+              (m, vs) <- many (map snd fields)
+              Just (n + m, Core.Expr (Core.EUpdate record' (zip (map fst fields) vs)) t sp)
+            Core.EAccess record f -> do
+              (n, record') <- go record
+              Just (n, Core.Expr (Core.EAccess record' f) t sp)
+            Core.EArray items -> do
+              (n, items') <- many items
+              Just (n, Core.Expr (Core.EArray items') t sp)
+            Core.EPrim op args -> do
+              (n, args') <- many args
+              Just (n, Core.Expr (Core.EPrim op args') t sp)
+            _ -> Nothing
 
 -- | The arguments a function expression already holds.
 earlierOf :: Core.Expr -> [Core.Expr]
