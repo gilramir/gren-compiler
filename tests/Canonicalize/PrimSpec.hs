@@ -126,12 +126,13 @@ spec = do
                    ]
 
     it "D904's and D905's transient writes take a run, a count and a function" $
-      map typeOf ["tr_fill", "tr_set_array", "tr_copy_within", "tr_generate", "tr_slice"]
+      map typeOf ["tr_fill", "tr_set_array", "tr_copy_within", "tr_generate", "tr_slice", "tr_rotate"]
         `shouldBe` [ Just (fn [tTransientA, tInt, tInt, a] tTransientA),
                      Just (fn [tTransientA, tInt, tArray] tTransientA),
                      Just (fn [tTransientA, tInt, tInt, tInt] tTransientA),
                      Just (fn [tTransientA, tInt, tInt, fn [tInt] a] tTransientA),
-                     Just (fn [tTransientA, tInt, tInt] tArray)
+                     Just (fn [tTransientA, tInt, tInt] tArray),
+                     Just (fn [tTransientA, tInt, tInt, tInt] tTransientA)
                    ]
 
     it "the three source primitives are D71's mailbox (D252, D253, D254)" $

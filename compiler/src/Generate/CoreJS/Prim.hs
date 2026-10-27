@@ -632,6 +632,7 @@ transient p args =
     (TrCopyWithin, [_, _, _, _]) -> helper "_ArrayPrim_trCopyWithin" args
     (TrGenerate, [_, _, _, _]) -> helper "_ArrayPrim_trGenerate" args
     (TrSlice, [_, _, _]) -> helper "_ArrayPrim_trSlice" args
+    (TrRotate, [_, _, _, _]) -> helper "_ArrayPrim_trRotate" args
     _ -> arityError (TransientOp p) args
   where
     helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
@@ -1713,6 +1714,19 @@ function _ArrayPrim_trLength(t) { return t.live; }
 // A copy of items `from` up to `to`, which a frozen handle's array holds as an
 // owner's does.
 function _ArrayPrim_trSlice(t, from, to) { return t.link.slice(from, to); }
+
+// `rotate`'s turn of `count` items from `from` by `by` toward the start
+// (D991): the `by` that pass the start saved, the rest moved down by a loop,
+// as `trCopyWithin`'s is, and the saved put back at the end.
+function _ArrayPrim_trRotate(t, from, count, by) {
+  if (by <= 0 || by >= count) return t;
+  return _ArrayPrim_trRun(t, from, count, function (array, at) {
+    var saved = array.slice(at, at + by);
+    var k;
+    for (k = 0; k < count - by; k++) array[at + k] = array[at + by + k];
+    for (k = 0; k < by; k++) array[at + count - by + k] = saved[k];
+  });
+}
 
 // The owner hands its array out, which nothing writes after, and is frozen
 // on it; a frozen handle answers a copy.
