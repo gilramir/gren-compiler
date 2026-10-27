@@ -1327,6 +1327,11 @@ function _Program_duplicate(moduleName) {
 -- @core@'s kernel, and nothing linked @Utils.js@ because of it: a program
 -- reached the file through the import chain that began at @Scheduler.js@, and
 -- step 8b's first build is what found that out.
+--
+-- @_Record_assign@ is an update "Core.Pass.InPlace" marked (geng-lang
+-- @m4-visiterm.md@ §VA17, D984): the fields written into the record it is
+-- given, which nothing reads again. The fields' values are an object built
+-- before the first is written, so one may read the record as it was.
 recordHelpers :: B.Builder
 recordHelpers =
   [r|
@@ -1342,6 +1347,14 @@ function _Record_update(oldRecord, updatedFields) {
   }
 
   return newRecord;
+}
+
+function _Record_assign(record, updatedFields) {
+  for (var key in updatedFields) {
+    record[key] = updatedFields[key];
+  }
+
+  return record;
 }
 |]
 

@@ -55,6 +55,8 @@ module Core.Pass.FloatIn
   ( Program,
     program,
     run,
+    affine,
+    fieldHoldsAffine,
   )
 where
 
@@ -394,7 +396,7 @@ once v =
     Core.EApp fn args -> Just (fn : args, \cs -> case cs of f : as -> Core.EApp f as; [] -> v)
     Core.ECtor q t args -> Just (args, Core.ECtor q t)
     Core.ERecord fields -> Just (map snd fields, Core.ERecord . zip (map fst fields))
-    Core.EUpdate base fields -> Just (base : map snd fields, \cs -> case cs of r : fs -> Core.EUpdate r (zip (map fst fields) fs); [] -> v)
+    Core.EUpdate base fields w -> Just (base : map snd fields, \cs -> case cs of r : fs -> Core.EUpdate r (zip (map fst fields) fs) w; [] -> v)
     Core.EAccess base f -> Just ([base], \cs -> case cs of r : _ -> Core.EAccess r f; [] -> v)
     Core.EArray items -> Just (items, Core.EArray)
     Core.EPrim op args -> Just (args, Core.EPrim op)

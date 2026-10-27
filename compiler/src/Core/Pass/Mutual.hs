@@ -120,8 +120,8 @@ walk home expr =
                 )
         Core.ECtor q tag args -> node . Core.ECtor q tag <$> traverse recur args
         Core.ERecord fields -> node . Core.ERecord <$> traverse (\(f, e) -> (,) f <$> recur e) fields
-        Core.EUpdate base fields ->
-          node <$> (Core.EUpdate <$> recur base <*> traverse (\(f, e) -> (,) f <$> recur e) fields)
+        Core.EUpdate base fields w ->
+          node <$> (Core.EUpdate <$> recur base <*> traverse (\(f, e) -> (,) f <$> recur e) fields <*> pure w)
         Core.EAccess base f -> node . (`Core.EAccess` f) <$> recur base
         Core.EArray items -> node . Core.EArray <$> traverse recur items
         Core.EPrim op args -> node . Core.EPrim op <$> traverse recur args
@@ -377,7 +377,7 @@ children expr =
     Core.ECase scrutinee alts fallback -> scrutinee : map Core._altBody alts ++ Maybe.maybeToList fallback
     Core.ECtor _ _ args -> args
     Core.ERecord fields -> map snd fields
-    Core.EUpdate base fields -> base : map snd fields
+    Core.EUpdate base fields _ -> base : map snd fields
     Core.EAccess base _ -> [base]
     Core.EArray items -> items
     Core.EPrim _ args -> args

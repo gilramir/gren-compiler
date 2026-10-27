@@ -58,7 +58,7 @@ hasTodo (Core.Expr value _ _) =
       hasTodo scrut || any (hasTodo . Core._altBody) alts || any hasTodo fallback
     Core.ECtor _ _ args -> any hasTodo args
     Core.ERecord fields -> any (hasTodo . snd) fields
-    Core.EUpdate base fields -> hasTodo base || any (hasTodo . snd) fields
+    Core.EUpdate base fields _ -> hasTodo base || any (hasTodo . snd) fields
     Core.EAccess base _ -> hasTodo base
     Core.EArray items -> any hasTodo items
     Core.EPrim _ args -> any hasTodo args

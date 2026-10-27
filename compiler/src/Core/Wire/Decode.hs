@@ -1255,11 +1255,12 @@ recordP = message "ERecord" 1 (ERecord <$> rep "fields" 1 fieldExprP)
 
 updateP :: P Expr_
 updateP =
-  message "EUpdate" 2 $
+  message "EUpdate" 3 $
     do
       base <- msg "base" 1 exprP
       fields <- rep "fields" 2 fieldExprP
-      pure (EUpdate base fields)
+      inPlace <- bool_ "in_place" 3
+      pure (EUpdate base fields (if inPlace then InPlace else Copy))
 
 fieldExprP :: P (Field, Expr)
 fieldExprP =

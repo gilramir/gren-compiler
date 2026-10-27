@@ -711,7 +711,7 @@ expr env (Can.Expr nid region value) =
                 tipe
                 sp
                 [(fieldRegion, name, expr inner value') | (A.At fieldRegion name, Can.FieldUpdate _ value') <- Map.toAscList fields]
-                (Core.EUpdate (expr env record))
+                (\fs -> Core.EUpdate (expr env record) fs Core.Copy)
         Can.Record fields ->
           let inner = env {_recordDepth = _recordDepth env + 1}
            in writtenOrder

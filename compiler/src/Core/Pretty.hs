@@ -328,8 +328,8 @@ expr opts depth e =
             <> B.intDec tag
             <> mconcat ["\n" <> expr opts (depth + 1) a | a <- args]
         ERecord fields -> "record" <> fieldList opts depth fields
-        EUpdate base fields ->
-          "update\n" <> expr opts (depth + 1) base <> fieldList opts depth fields
+        EUpdate base fields w ->
+          (if w == InPlace then "update in place\n" else "update\n") <> expr opts (depth + 1) base <> fieldList opts depth fields
         EAccess base field ->
           "access ." <> name field <> "\n" <> expr opts (depth + 1) base
         EArray elems ->

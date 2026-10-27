@@ -632,10 +632,10 @@ saturateOnce v h earlier arity body =
             Core.ERecord fields -> do
               (n, vs) <- many (map snd fields)
               Just (n, Core.Expr (Core.ERecord (zip (map fst fields) vs)) t sp)
-            Core.EUpdate record fields -> do
+            Core.EUpdate record fields w -> do
               (n, record') <- go record
               (m, vs) <- many (map snd fields)
-              Just (n + m, Core.Expr (Core.EUpdate record' (zip (map fst fields) vs)) t sp)
+              Just (n + m, Core.Expr (Core.EUpdate record' (zip (map fst fields) vs) w) t sp)
             Core.EAccess record f -> do
               (n, record') <- go record
               Just (n, Core.Expr (Core.EAccess record' f) t sp)
@@ -862,7 +862,7 @@ pure_ e =
     Core.ECtor _ _ args -> all pure_ args
     Core.ERecord fields -> all (pure_ . snd) fields
     Core.EAccess record _ -> pure_ record
-    Core.EUpdate record fields -> pure_ record && all (pure_ . snd) fields
+    Core.EUpdate record fields _ -> pure_ record && all (pure_ . snd) fields
     Core.EArray items -> all pure_ items
     Core.EPrim op args -> comparison op && all pure_ args
     _ -> False

@@ -242,10 +242,10 @@ generate env (Core.Expr value tipe sp) =
         -- A helper the backend emits in every program (D288): it was kernel
         -- `Utils`'s, which no link edge reached, so a program got it only
         -- through whatever else happened to import that file.
-        Core.EUpdate base fields ->
+        Core.EUpdate base fields w ->
           JsExpr $
             JS.Call
-              (JS.Ref (JsName.fromLocalHumanReadable "_Record_update"))
+              (JS.Ref (JsName.fromLocalHumanReadable (if w == Core.InPlace then "_Record_assign" else "_Record_update")))
               [jsExpr env base, record env sp fields]
         Core.EAccess base name ->
           JsExpr (JS.TrackedAccess (jsExpr env base) (_home env) pos (generateField (_mode env) name))
@@ -1186,7 +1186,7 @@ jumpsTo name = go
         Core.ECase s as f -> go s || any altGo as || maybe False go f
         Core.ECtor _ _ as -> any go as
         Core.ERecord fs -> any (go . snd) fs
-        Core.EUpdate b fs -> go b || any (go . snd) fs
+        Core.EUpdate b fs _ -> go b || any (go . snd) fs
         Core.EAccess b _ -> go b
         Core.EArray as -> any go as
         Core.EPrim _ as -> any go as

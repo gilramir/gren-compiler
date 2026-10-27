@@ -134,6 +134,7 @@ Library common
         Core.Pass.Inline
         Core.Pass.Float
         Core.Pass.FloatIn
+        Core.Pass.InPlace
         Core.Pass.FoldSpec
         Core.Pass.Mono
         Core.Pass.Mutual

@@ -128,8 +128,8 @@ expr tbl (Core.Expr value ty sp) =
         Core.EJump j args -> node . Core.EJump j <$> traverse (expr tbl) args
         Core.ECtor q tag args -> node . Core.ECtor q tag <$> traverse (expr tbl) args
         Core.ERecord fields -> node . Core.ERecord <$> traverse (fieldM tbl) fields
-        Core.EUpdate base fields ->
-          node <$> (Core.EUpdate <$> expr tbl base <*> traverse (fieldM tbl) fields)
+        Core.EUpdate base fields w ->
+          node <$> (Core.EUpdate <$> expr tbl base <*> traverse (fieldM tbl) fields <*> pure w)
         Core.EAccess base f -> node . (`Core.EAccess` f) <$> expr tbl base
         Core.EArray items -> node . Core.EArray <$> traverse (expr tbl) items
         Core.EPrim op args -> node . Core.EPrim op <$> traverse (expr tbl) args

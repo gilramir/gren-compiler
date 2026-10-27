@@ -462,7 +462,7 @@ checkerReads cores =
 afterFront :: Maybe Backend -> Details.Details -> ExtSources -> Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> Request -> Task (Maybe B.Builder)
 afterFront backend details sources whole front request =
   do
-    passedCores <- Task.io (passed (Whole._programTarget whole) front)
+    passedCores <- Task.io (passed whole front)
     case Stage.writeTo of
       Just (Stage.Passed, dir) -> Task.io (Stage.write dir whole passedCores) >> return Nothing
       _ -> emit backend details sources whole (Cores front passedCores) request
@@ -657,10 +657,11 @@ throughWire =
 -- trip, so the Core a backend reads — join points, jumps, decision trees,
 -- specialized copies — had never been encoded by any gate, and C11's Geng port
 -- of the passes had nothing byte-level to be held to.
-passed :: Target.Target -> Map.Map ModuleName.Canonical Core.Module -> IO (Map.Map ModuleName.Canonical Core.Module)
-passed target cores =
+passed :: Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> IO (Map.Map ModuleName.Canonical Core.Module)
+passed whole cores =
   do
-    let after = Pass.run target cores
+    let roots = [Core.QualName home name | Whole.Root home name <- Whole._programRoots whole]
+        after = Pass.run (Whole._programTarget whole) roots cores
     case Dump.passedDir of
       Nothing -> return ()
       Just dir ->

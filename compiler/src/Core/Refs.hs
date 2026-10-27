@@ -69,7 +69,7 @@ refsIn (Core.Expr value _ _) =
       refsIn scrut <> foldMap altRefs alts <> foldMap refsIn fallback
     Core.ECtor q _ args -> ctor q <> foldMap refsIn args
     Core.ERecord fields -> foldMap (\(f, e) -> field f <> refsIn e) fields
-    Core.EUpdate base fields -> refsIn base <> foldMap (\(f, e) -> field f <> refsIn e) fields
+    Core.EUpdate base fields _ -> refsIn base <> foldMap (\(f, e) -> field f <> refsIn e) fields
     Core.EAccess base f -> refsIn base <> field f
     Core.EArray items -> foldMap refsIn items
     Core.EPrim _ args -> foldMap refsIn args
@@ -98,7 +98,7 @@ primsIn (Core.Expr value _ _) =
       primsIn scrut <> foldMap (primsIn . Core._altBody) alts <> foldMap primsIn fallback
     Core.ECtor _ _ args -> foldMap primsIn args
     Core.ERecord fields -> foldMap (primsIn . snd) fields
-    Core.EUpdate base fields -> primsIn base <> foldMap (primsIn . snd) fields
+    Core.EUpdate base fields _ -> primsIn base <> foldMap (primsIn . snd) fields
     Core.EAccess base _ -> primsIn base
     Core.EArray items -> foldMap primsIn items
     Core.EPrim op args -> Set.insert (Prim.primCode op) (foldMap primsIn args)
@@ -143,7 +143,7 @@ strictIn (Core.Expr value _ _) =
       strictIn scrut <> foldMap (\(Core.Alt _ b) -> strictIn b) alts <> foldMap strictIn fallback
     Core.ECtor _ _ args -> foldMap strictIn args
     Core.ERecord fields -> foldMap (strictIn . snd) fields
-    Core.EUpdate base fields -> strictIn base <> foldMap (strictIn . snd) fields
+    Core.EUpdate base fields _ -> strictIn base <> foldMap (strictIn . snd) fields
     Core.EAccess base _ -> strictIn base
     Core.EArray items -> foldMap strictIn items
     Core.EPrim _ args -> foldMap strictIn args
@@ -215,7 +215,7 @@ freeLocals (Core.Expr value _ _) =
         )
     Core.ECtor _ _ args -> Set.unions (map freeLocals args)
     Core.ERecord fields -> Set.unions (map (freeLocals . snd) fields)
-    Core.EUpdate base fields -> Set.unions (freeLocals base : map (freeLocals . snd) fields)
+    Core.EUpdate base fields _ -> Set.unions (freeLocals base : map (freeLocals . snd) fields)
     Core.EAccess base _ -> freeLocals base
     Core.EArray items -> Set.unions (map freeLocals items)
     Core.EPrim _ args -> Set.unions (map freeLocals args)

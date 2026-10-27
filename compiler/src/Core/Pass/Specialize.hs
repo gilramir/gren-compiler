@@ -1212,7 +1212,7 @@ childrenA f (Core.Expr value tipe sp) = rebuild <$> go value
           Core.ECase <$> f scrut <*> traverse alt alts <*> traverse f fallback
         Core.ECtor name tag args -> Core.ECtor name tag <$> traverse f args
         Core.ERecord fields -> Core.ERecord <$> traverse field fields
-        Core.EUpdate base fields -> Core.EUpdate <$> f base <*> traverse field fields
+        Core.EUpdate base fields w -> Core.EUpdate <$> f base <*> traverse field fields <*> pure w
         Core.EAccess base name -> (`Core.EAccess` name) <$> f base
         Core.EArray elems -> Core.EArray <$> traverse f elems
         Core.EPrim op args -> Core.EPrim op <$> traverse f args

@@ -473,7 +473,7 @@ useIn st e =
     -- An update copies the fields it does not replace: its base gives up only
     -- the transients in those, so a replaced field may take the base's own
     -- (rule B's @{ acc | out = push x acc.out }@).
-    Core.EUpdate base@(Core.Expr (Core.EVar r) _ _) fields
+    Core.EUpdate base@(Core.Expr (Core.EVar r) _ _) fields _
       | Map.member r st ->
           if not (st Map.! r)
             then Nothing
@@ -684,14 +684,14 @@ conv ck v e
                   do
                     fields' <- sequence [(,) g <$> (if g == f then grow ck v x else plain ck v x) | (g, x) <- fields]
                     return (retyped (Core.ERecord fields'))
-                Core.EUpdate base fields ->
+                Core.EUpdate base fields w ->
                   do
                     -- The fields are evaluated after the base, and a pop in
                     -- it would have written the slot the field's growth reads.
                     if pops v base then Nothing else Just ()
                     base' <- conv ck v base
                     fields' <- sequence [(,) g <$> (if g == f then grow ck v x else plain ck v x) | (g, x) <- fields]
-                    return (retyped (Core.EUpdate base' fields'))
+                    return (retyped (Core.EUpdate base' fields' w))
                 _ -> Nothing
   where
     retyped x = Core.Expr x (transientType (_shape ck)) (Core.spanOf e)
@@ -982,7 +982,7 @@ safeAfter ck v e =
       | Field f _ _ <- _shape ck,
         Map.member r v ->
           g /= f
-    Core.EUpdate (Core.Expr (Core.EVar r) _ _) fields
+    Core.EUpdate (Core.Expr (Core.EVar r) _ _) fields _
       | Field f _ _ <- _shape ck,
         Map.member r v ->
           f `elem` map fst fields && all (safeAfter ck v . snd) fields

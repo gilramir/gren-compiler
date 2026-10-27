@@ -22,6 +22,7 @@
 -- > GENG_CORE_PASSES=transient     -- a Dict a loop threads updated in place ("Core.Pass.Transient")
 -- > GENG_CORE_PASSES=arraytr       -- an Array a loop only appends to, grown through the transient ("Core.Pass.ArrayTransient")
 -- > GENG_CORE_PASSES=arraypop      -- the same, for a loop that pops and pushes back alone (D699)
+-- > GENG_CORE_PASSES=inplace       -- an affine record nothing reads again updated in place ("Core.Pass.InPlace")
 --
 -- A switch rather than a mode, for the reason C4 gives: the pass is optional,
 -- its output is still Core, and a program has to answer the same either way.
@@ -113,6 +114,14 @@
 -- only a loop that pops the last element and pushes back, which a slice
 -- leaves quadratic (D708).
 --
+-- __Updates in place are last__ (D984, geng-lang @m4-visiterm.md@ §VA17): an
+-- update of an affine record whose old record nothing reads again is marked
+-- to be written into it. It needs the whole program, to know every call of a
+-- function whose parameter it writes, and the build's roots, whose callers
+-- it cannot see; and it comes after every pass that moves an expression, so
+-- that no read is moved past a mark. Natively and on JavaScript, which write
+-- records; the BEAM's are tuples, and it would only copy.
+--
 -- __Specialization runs before either__, and it is the one pass that is not a
 -- function of a single module: it needs every module's Core to know what
 -- instantiations a program asks for (§G27). It runs first because the copies it
@@ -133,6 +142,7 @@ import Core.Pass.Case qualified as Case
 import Core.Pass.Float qualified as Float
 import Core.Pass.FloatIn qualified as FloatIn
 import Core.Pass.FoldSpec qualified as FoldSpec
+import Core.Pass.InPlace qualified as InPlace
 import Core.Pass.Inline qualified as Inline
 import Core.Pass.Mono qualified as Mono
 import Core.Pass.Mutual qualified as Mutual
@@ -158,12 +168,12 @@ names target =
 defaults :: Target.Target -> [String]
 defaults target =
   case target of
-    Target.Js -> ["specialize", "foldspec", "transient", "arraypop", "inlinematch", "float", "floatin", "mutual", "case", "tailcall"]
-    Target.Native -> ["specialize", "foldspec", "transient", "arraypop", "mono", "inline", "float", "floatin", "mutual", "case", "tailcall"]
+    Target.Js -> ["specialize", "foldspec", "transient", "arraypop", "inlinematch", "float", "floatin", "mutual", "case", "tailcall", "inplace"]
+    Target.Native -> ["specialize", "foldspec", "transient", "arraypop", "mono", "inline", "float", "floatin", "mutual", "case", "tailcall", "inplace"]
     _ -> ["specialize", "foldspec", "inline", "float", "floatin", "mutual", "case", "tailcall"]
 
-run :: Target.Target -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
-run target cores =
+run :: Target.Target -> [Core.QualName] -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
+run target roots cores =
   let pass name f = if name `elem` names target then f else id
       specialized = pass "specialize" Specialize.run cores
       folded = pass "foldspec" FoldSpec.run specialized
@@ -175,4 +185,5 @@ run target cores =
       floatedIn = pass "floatin" (\cs -> Map.map (FloatIn.run (FloatIn.program cs)) cs) floated
       grouped = pass "mutual" (Map.map Mutual.run) floatedIn
       tbl = Case.table (Map.elems grouped)
-   in Map.map (pass "case" (Case.run tbl) . pass "tailcall" TailCall.run) grouped
+      looped = Map.map (pass "case" (Case.run tbl) . pass "tailcall" TailCall.run) grouped
+   in pass "inplace" (InPlace.run roots) looped

@@ -860,7 +860,7 @@ nodeEnc node =
     ECtor name tag args ->
       msg 15 (qual 1 name <> u32 2 (fromIntegral tag) <> rep 3 exprEnc args)
     ERecord fields -> msg 16 (rep 1 fieldExprEnc fields)
-    EUpdate base fields -> msg 17 (msg 1 (exprEnc base) <> rep 2 fieldExprEnc fields)
+    EUpdate base fields w -> msg 17 (msg 1 (exprEnc base) <> rep 2 fieldExprEnc fields <> bool_ 3 (w == InPlace))
     EAccess base field -> msg 18 (msg 1 (exprEnc base) <> text 2 field)
     EArray items -> msg 19 (rep 1 exprEnc items)
     EPrim op args ->

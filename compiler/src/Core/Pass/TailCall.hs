@@ -177,7 +177,7 @@ walk expr =
                 )
         Core.ECtor q tag args -> node . Core.ECtor q tag <$> traverse walk args
         Core.ERecord fields -> node . Core.ERecord <$> traverse field fields
-        Core.EUpdate base fields -> node <$> (Core.EUpdate <$> walk base <*> traverse field fields)
+        Core.EUpdate base fields w -> node <$> (Core.EUpdate <$> walk base <*> traverse field fields <*> pure w)
         Core.EAccess base f -> node . (`Core.EAccess` f) <$> walk base
         Core.EArray items -> node . Core.EArray <$> traverse walk items
         Core.EPrim op args -> node . Core.EPrim op <$> traverse walk args

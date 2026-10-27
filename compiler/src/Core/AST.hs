@@ -63,6 +63,7 @@ module Core.AST
     -- * Expressions
     Expr (..),
     Expr_ (..),
+    Write (..),
     Binder (..),
     Bind (..),
     Alt (..),
@@ -580,7 +581,11 @@ data Expr_
     ECtor !QualName !Int ![Expr]
   | -- | Fields alphabetical.
     ERecord ![(Field, Expr)]
-  | EUpdate !Expr ![(Field, Expr)]
+  | -- | The record, the fields replaced, and whether the record is copied or
+    -- written in place. Every update is 'Copy' until "Core.Pass.InPlace",
+    -- the last pass, marks one whose record nothing reads after it
+    -- (geng-lang @m4-visiterm.md@ §VA17).
+    EUpdate !Expr ![(Field, Expr)] !Write
   | EAccess !Expr !Field
   | -- | An array literal. Primitive because array literals are surface syntax
     -- (C7).
@@ -615,6 +620,16 @@ data Expr_
     EWitApp !Expr ![Expr]
   | ECrash !CrashKind
   deriving (Eq, Show)
+
+-- | What a record update does to the record it is given (geng-lang
+-- @m4-visiterm.md@ §VA17, D984): 'Copy' makes a new one, which is what an
+-- update means; 'InPlace' writes the fields into the one it is given, which
+-- "Core.Pass.InPlace" asks for only where nothing reads that record again.
+-- A backend that cannot write a record copies it (the BEAM's tuples).
+data Write
+  = Copy
+  | InPlace
+  deriving (Eq, Ord, Show)
 
 data Binder = Binder
   { _binderName :: !Name,
@@ -722,7 +737,7 @@ isSpecialized (Expr e _ _) =
         && all isSpecialized fallback
     ECtor _ _ args -> all isSpecialized args
     ERecord fields -> all (isSpecialized . snd) fields
-    EUpdate base fields -> isSpecialized base && all (isSpecialized . snd) fields
+    EUpdate base fields _ -> isSpecialized base && all (isSpecialized . snd) fields
     EAccess base _ -> isSpecialized base
     EArray elems -> all isSpecialized elems
     EPrim _ args -> all isSpecialized args
