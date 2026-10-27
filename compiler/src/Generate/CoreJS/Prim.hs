@@ -633,6 +633,7 @@ transient p args =
     (TrGenerate, [_, _, _, _]) -> helper "_ArrayPrim_trGenerate" args
     (TrSlice, [_, _, _]) -> helper "_ArrayPrim_trSlice" args
     (TrRotate, [_, _, _, _]) -> helper "_ArrayPrim_trRotate" args
+    (TrAppendSlice, [_, _, _, _]) -> helper "_ArrayPrim_trAppendSlice" args
     _ -> arityError (TransientOp p) args
   where
     helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
@@ -1725,6 +1726,18 @@ function _ArrayPrim_trRotate(t, from, count, by) {
     var k;
     for (k = 0; k < count - by; k++) array[at + k] = array[at + by + k];
     for (k = 0; k < by; k++) array[at + count - by + k] = saved[k];
+  });
+}
+
+// `appendSlice`'s push of `source`'s items from `from` up to `to` (D996):
+// read from `source`'s array once `t`'s is its own, so that the two being one
+// builder reads the array the write goes into.
+function _ArrayPrim_trAppendSlice(t, source, from, to) {
+  var count = to - from;
+  if (count <= 0) return t;
+  return _ArrayPrim_trRun(t, t.live, count, function (array, at) {
+    var items = source.link;
+    for (var k = 0; k < count; k++) array[at + k] = items[from + k];
   });
 }
 

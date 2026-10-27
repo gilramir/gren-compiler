@@ -358,6 +358,12 @@ data TransientPrim
     -- D991): a region of a terminal's rows scrolled with no placeholder.
     -- Precondition: @0 <= from@, @from + n <= length@, @0 < by < n@.
     TrRotate
+  | -- | @tr_append_slice t s lo hi@: @s@'s items from @lo@ up to @hi@ pushed
+    -- onto @t@, @s@ left as it was: one copy where a slice and an append made
+    -- an array between them (geng-lang @m4-visiterm.md@ §VA24, D996): a
+    -- terminal's row trimmed onto its page. Precondition:
+    -- @0 <= lo <= hi <= length s@.
+    TrAppendSlice
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | The reified @Task@ tree the runtime steps. @map@, @sequence@ and friends
@@ -514,7 +520,8 @@ allPrims =
     -- Appended by D863 (m4-refine.md §RF32).
     ++ [BytesOp BtLength]
     -- Appended by D904 and D905 (m4-visiterm.md §VA11), and after them
-    -- D983's tr_slice (§VA16) and D991's tr_rotate (§VA20).
+    -- D983's tr_slice (§VA16), D991's tr_rotate (§VA20) and D996's
+    -- tr_append_slice (§VA24).
     ++ map TransientOp [TrFill .. maxBound]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
@@ -691,6 +698,7 @@ transientPrimName p =
     TrGenerate -> "generate"
     TrSlice -> "slice"
     TrRotate -> "rotate"
+    TrAppendSlice -> "append_slice"
 
 taskPrimName :: TaskPrim -> Text
 taskPrimName p =
@@ -848,6 +856,8 @@ primArity op =
         TrSlice -> 3
         -- transient, from, count, places
         TrRotate -> 4
+        -- transient, source, from, to
+        TrAppendSlice -> 4
     TaskOp p ->
       case p of
         TaskSucceed -> 1

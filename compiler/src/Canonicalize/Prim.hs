@@ -280,6 +280,7 @@ transientType p =
     TrGenerate -> fn [tTransient, tInt, tInt, fn [tInt] a] tTransient
     TrSlice -> fn [tTransient, tInt, tInt] tArray
     TrRotate -> fn [tTransient, tInt, tInt, tInt] tTransient
+    TrAppendSlice -> fn [tTransient, tTransient, tInt, tInt] tTransient
   where
     a = Can.TVar "a"
     tArray = Can.TType ModuleName.array "Array" [a]
