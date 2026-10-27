@@ -303,9 +303,10 @@ parseUserArgs context compilerPath =
 
                 -- `geng package diff`, `bump` and `validate`'s run of the
                 -- binary, the refinements compared by the checker (D855);
-                -- `validate`'s own goals checked too, with its sources (D858).
-                versionsBackend sources backendCommand =
-                    Terminal.Refine.compareVersions
+                -- `validate`'s own goals checked too, with its sources (D858), and its
+                -- ownership violations refused (geng-lang m4-own.md §OW36).
+                versionsBackend refuseOwnership sources backendCommand =
+                    Terminal.Refine.compareVersions { refuseOwnership = refuseOwnership }
                         { fs = context.fsPermission
                         , envVars = context.envVars
                         , sources = sources
@@ -935,7 +936,7 @@ parseUserArgs context compilerPath =
                             )
                         |> Task.andThen
                             (\backendFlags ->
-                                versionsBackend
+                                versionsBackend True
                                     (Terminal.Refine.sourcesOf
                                         { projectPath = backendFlags.projectPath
                                         , rootSources = backendFlags.currentVersion.rootSources
@@ -964,7 +965,7 @@ parseUserArgs context compilerPath =
                                     projectOutline
                                     |> Task.mapError Terminal.PackageBump.prettifyError
                             )
-                        |> Task.andThen (\backendFlags -> versionsBackend noSources (Compiler.Backend.PackageBump backendFlags))
+                        |> Task.andThen (\backendFlags -> versionsBackend False noSources (Compiler.Backend.PackageBump backendFlags))
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
 
                 CliParser.PackageDiff args ->
@@ -1045,7 +1046,7 @@ parseUserArgs context compilerPath =
                                         |> Task.mapError Terminal.PackageDiff.prettifyGlobalError
                     in
                     diffTask
-                        |> Task.andThen (\backendFlags -> versionsBackend noSources (Compiler.Backend.PackageDiff backendFlags))
+                        |> Task.andThen (\backendFlags -> versionsBackend False noSources (Compiler.Backend.PackageDiff backendFlags))
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
 
                 CliParser.Paths opts ->

@@ -145,8 +145,8 @@ modules has a signature or calls a refined function (§RF30, D858). Its goals ar
 checked first, and one not proved refuses the version, as it would refuse a
 program; otherwise the second run is told so with `GENG_REFINE_CHECKED`.
 -}
-compareVersions : Config -> Task Report Int
-compareVersions config =
+compareVersions : { refuseOwnership : Bool } -> Config -> Task Report Int
+compareVersions { refuseOwnership } config =
     FileSystem.makeTempDirectory config.fs "geng-semver-"
         |> Task.mapError (\e -> failure "I cannot make a directory for the refinement checker" (FileSystem.errorToString e))
         |> Task.andThen
@@ -192,7 +192,13 @@ compareVersions config =
                                                                             Dict.empty
                                                                     )
                                                     in
-                                                    checkGoals config staged.own
+                                                    (if refuseOwnership then
+                                                        refuseNewVersion config dir
+
+                                                     else
+                                                        Task.succeed {}
+                                                    )
+                                                        |> Task.andThen (\_ -> checkGoals config staged.own)
                                                         |> Task.andThen
                                                             (\_ ->
                                                                 when staged.values is
@@ -207,6 +213,31 @@ compareVersions config =
                         )
                     |> Task.andThen (\exitCode -> remove config dir |> Task.map (\_ -> exitCode))
                     |> Task.onError (\report -> remove config dir |> Task.andThen (\_ -> Task.fail report))
+            )
+
+
+{-| `validate`'s refusal of a version the ownership checker refuses
+(geng-lang `m4-own.md` §OW27.7, §OW36): the new version staged under `new`
+for its facts is checked as a build is, and its violations are the errors a
+build of it would be refused with. Nothing, when the binary staged none.
+-}
+refuseNewVersion : Config -> Path -> Task Report {}
+refuseNewVersion config dir =
+    let
+        staged =
+            Path.append (Path.fromPosixString "new") dir
+    in
+    FileSystem.checkAccess config.fs [] (Path.append (Path.fromPosixString "ownership/manifest") staged)
+        |> Task.map (\_ -> True)
+        |> Task.onError (\_ -> Task.succeed False)
+        |> Task.andThen
+            (\present ->
+                if present then
+                    Terminal.Own.check config staged
+                        |> Task.andThen (\violations -> refuseWith config violations [])
+
+                else
+                    Task.succeed {}
             )
 
 
