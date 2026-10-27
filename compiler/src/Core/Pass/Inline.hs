@@ -48,7 +48,9 @@
 --     of effects, applied once further in, under no lambda or join, which is
 --     what inlining a higher-order function leaves of a call that passed one
 --     (@Array.Builder.update p (write a b) row@, geng-lang @m4-visiterm.md@
---     §VA16, D982);
+--     §VA16, D982), and one holding a call, which is bound by a @let@ where
+--     the partial application was so that the application holds its name
+--     (§VA22, D994);
 --   * a field of a record written out in place is that field, when the other
 --     fields are values — a witness table once specialization has chosen it;
 --   * a lambda written out in place and applied at once is its body, the
@@ -463,6 +465,35 @@ node ctx e@(Core.Expr value tipe sp) =
           do
             markFired
             return body'
+    -- The same when an argument it holds may have an effect, a call
+    -- (@Builder.fill 0 (extentAt y s) blank@): each such argument is bound
+    -- by a @let@ where the partial application was, in order, so that it is
+    -- computed where and when it was, and the application holds only the
+    -- names, which the rule above then moves (geng-lang @m4-visiterm.md@
+    -- §VA22, D994). The names are fresh, so nothing on the way binds one.
+    Core.ELet [Core.Bind b bound] body
+      | Just (h, earlier) <- partial bound,
+        Core.TFun params _ <- Core.typeOf h,
+        length earlier < length params,
+        not (all pure_ earlier) ->
+          do
+            n0 <- state (\s -> (_fresh s, s))
+            let named = snd (List.mapAccumL nameOne n0 earlier)
+                nameOne i a
+                  | pure_ a = (i, (a, Nothing))
+                  | otherwise = (i + 1, (a, Just (Name.fromChars ("$n" ++ show i))))
+                args = [maybe a (\x -> Core.Expr (Core.EVar x) (Core.typeOf a) (Core.spanOf a)) mx | (a, mx) <- named]
+                bound' = [(x, a) | (a, Just x) <- named]
+            case saturateOnce (Core._binderName b) h args (length params) body of
+              Nothing -> return e
+              Just body' -> do
+                state (\s -> ((), s {_fresh = n0 + length bound'}))
+                markFired
+                return $
+                  foldr
+                    (\(x, a) acc -> Core.Expr (Core.ELet [Core.Bind (Core.Binder x (Core.typeOf a) (Core.spanOf a)) a] acc) tipe sp)
+                    body'
+                    bound'
     -- A field of a record written out in place, as a witness table is once
     -- specialization has chosen it: @(record .outbound = f).outbound@ is @f@.
     -- The other fields are values, so dropping them drops nothing but work.
