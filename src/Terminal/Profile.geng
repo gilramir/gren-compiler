@@ -68,6 +68,7 @@ type alias Config =
     , exe : Path
     , build : Path
     , program : Array String
+    , modules : Dict String String
     , valgrind : String
     , addr2line : String
     , options : Options
@@ -98,16 +99,17 @@ profile config =
                 chainsOf config (run.addresses)
                     |> Task.andThen
                         (\chains ->
-                            let
-                                report =
-                                    charge got.kinds config.program chains run
-                            in
-                            sourcesOf config report
+                            readNotes config
+                                |> Task.map (\notes -> { (charge got.kinds config.program chains run) | notes = notes })
                                 |> Task.andThen
-                                    (\sources ->
-                                        writeOptional config config.options.json (\_ -> Json.encode 1 (jsonReport config.options report))
-                                            |> Task.andThen (\_ -> writeOptional config config.options.html (\_ -> htmlReport config.options sources report))
-                                            |> Task.map (\_ -> { text = textReport config.options sources report, exitCode = got.exitCode })
+                                    (\report ->
+                                        sourcesOf config report
+                                            |> Task.andThen
+                                                (\sources ->
+                                                    writeOptional config config.options.json (\_ -> Json.encode 1 (jsonReport config.options report))
+                                                        |> Task.andThen (\_ -> writeOptional config config.options.html (\_ -> htmlReport config.options sources report))
+                                                        |> Task.map (\_ -> { text = textReport config.options sources report, exitCode = got.exitCode })
+                                                )
                                     )
                         )
             )
@@ -528,7 +530,8 @@ readChains text =
 
 
 type alias Charged =
-    { total : Float
+    { notes : Dict String (Array { callee : String, why : String })
+    , total : Float
     , kinds : Dict String Float
     , functions : Dict String (Dict String Float)
     , lines : Dict String (Dict String Float)
@@ -732,7 +735,8 @@ charge kinds program chains run =
                 Dict.empty
                 run.calls
     in
-    { total = run.total
+    { notes = Dict.empty
+    , total = run.total
     , kinds =
         if outside > 0 then
             Dict.set "memory" outside own.kinds
@@ -842,6 +846,67 @@ typeOfConstructor name =
 
             _ ->
                 name
+
+
+-- THE COMPILER'S ACCOUNT
+
+
+{-| The Inline pass's account of the calls it left calls, which a
+`--debug-info` build keeps as `inline.tsv` (geng-lang `m4-profile.md` D1005),
+by the line of the program each is on: a line's key, the file and the row, from
+the note's module, which `modules` maps from the file. A build with no
+account, or a module that is not the program's, has none. -}
+readNotes : Config -> Task Report.Report (Dict String (Array { callee : String, why : String }))
+readNotes config =
+    let
+        fileOfModule =
+            Dict.foldl (\file m acc -> Dict.set m file acc) Dict.empty config.modules
+    in
+    FileSystem.readFile config.fs (Path.append (Path.fromPosixString "inline.tsv") config.build)
+        |> Task.map (\bytes -> Bytes.toString bytes |> Maybe.withDefault "")
+        |> Task.onError (\_ -> Task.succeed "")
+        |> Task.map
+            (\text ->
+                String.lines text
+                    |> Array.foldl
+                        (\line acc ->
+                            when String.split "\t" line is
+                                [ m, row, _, callee, why ] ->
+                                    when Dict.get m fileOfModule is
+                                        Just file ->
+                                            Dict.updateWithDefault (file ++ ":" ++ row)
+                                                []
+                                                (\notes ->
+                                                    if Array.any (\n -> n.callee == callee) notes then
+                                                        notes
+
+                                                    else
+                                                        Array.pushLast { callee = callee, why = why } notes
+                                                )
+                                                acc
+
+                                        Nothing ->
+                                            acc
+
+                                _ ->
+                                    acc
+                        )
+                        Dict.empty
+            )
+
+
+{-| A call's callee as the program wrote it: `Array.Builder.set$kI4` is
+`Array.Builder.set`. -}
+calleeName : String -> String
+calleeName callee =
+    String.split "$" callee |> Array.first |> Maybe.withDefault callee
+
+
+noteLines : Charged -> String -> Array String
+noteLines report key =
+    Dict.get key report.notes
+        |> Maybe.withDefault []
+        |> Array.map (\n -> calleeName n.callee ++ " is a call: " ++ n.why)
 
 
 -- SOURCES
@@ -990,7 +1055,19 @@ textReport options sources report =
 
         lineRows table =
             ranked options.top table
-                |> Array.map (\r -> "  " ++ String.padLeft 10 ' ' (scaled options r.cost) ++ "  " ++ shortPlace r.key ++ "  " ++ String.takeFirst 60 (sourceLine sources r.key) ++ "\n" ++ String.repeat 14 " " ++ mix r.kinds)
+                |> Array.map
+                    (\r ->
+                        "  "
+                            ++ String.padLeft 10 ' ' (scaled options r.cost)
+                            ++ "  "
+                            ++ shortPlace r.key
+                            ++ "  "
+                            ++ String.takeFirst 60 (sourceLine sources r.key)
+                            ++ "\n"
+                            ++ String.repeat 14 " "
+                            ++ mix r.kinds
+                            ++ (noteLines report r.key |> Array.map (\n -> "\n" ++ String.repeat 14 " " ++ n) |> String.join "")
+                    )
 
         allocations =
             Dict.foldl (\k v acc -> Array.pushLast { key = k, cost = v } acc) [] report.allocations
@@ -1054,6 +1131,21 @@ jsonReport options report =
         , { key = "lines", value = table report.lines }
         , { key = "calls", value = table report.calls }
         , { key = "allocations", value = costs report.allocations }
+        , { key = "notes"
+          , value =
+                Json.object
+                    (Dict.foldl
+                        (\k v acc ->
+                            Array.pushLast
+                                { key = k
+                                , value = Json.array (\n -> Json.object [ { key = "callee", value = Json.string n.callee }, { key = "why", value = Json.string n.why } ]) v
+                                }
+                                acc
+                        )
+                        []
+                        report.notes
+                    )
+          }
         ]
 
 
@@ -1180,6 +1272,8 @@ htmlReport options sources report =
                                     ++ escape (sourceLine sources r.key)
                                     ++ "</td><td>"
                                     ++ escape (kindOrder |> Array.mapAndKeepJust (\k -> Dict.get k r.kinds |> Maybe.map (\c -> k ++ " " ++ scaled options c)) |> String.join ", ")
+                                    ++ "</td><td class=why>"
+                                    ++ (noteLines report r.key |> Array.map escape |> String.join "<br>")
                                     ++ "</td></tr>"
                             )
                         |> String.join ""
@@ -1207,9 +1301,11 @@ htmlReport options sources report =
                                 "0"
 
                         tip =
-                            kindOrder
+                            (kindOrder
                                 |> Array.mapAndKeepJust (\k -> Dict.get k kinds |> Maybe.map (\c -> k ++ " " ++ scaled options c))
                                 |> String.join ", "
+                            )
+                                ++ (noteLines report key |> Array.map (\note -> "\n" ++ note) |> String.join "")
                     in
                     "<tr id=\""
                         ++ anchor key
@@ -1241,7 +1337,7 @@ htmlReport options sources report =
         ++ "body{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif;margin:0 auto;max-width:1100px;padding:24px 16px}"
         ++ "svg{width:100%;height:auto}.key{white-space:nowrap;margin-right:12px}.key i{display:inline-block;width:10px;height:10px;margin-right:4px;border-radius:2px}"
         ++ ".src{border-collapse:collapse;font:12px/1.35 ui-monospace,monospace;width:100%;display:block;overflow-x:auto}.src td{padding:0 8px;white-space:pre}"
-        ++ ".hot{border-collapse:collapse;font-size:13px}.hot td{padding:2px 8px;border-bottom:1px solid var(--rule)}.hot .s{font-family:ui-monospace,monospace;font-size:12px}tr:target{outline:2px solid #4a7bd0}.n{color:#888;text-align:right}.c{text-align:right;font-variant-numeric:tabular-nums;border-right:1px solid var(--rule)}"
+        ++ ".hot{border-collapse:collapse;font-size:13px}.hot td{padding:2px 8px;border-bottom:1px solid var(--rule)}.hot .s{font-family:ui-monospace,monospace;font-size:12px}.why{font-size:12px;color:#8a6fd1}tr:target{outline:2px solid #4a7bd0}.n{color:#888;text-align:right}.c{text-align:right;font-variant-numeric:tabular-nums;border-right:1px solid var(--rule)}"
         ++ "</style></head><body><h1>Geng profile</h1><p>"
         ++ escape (scaled options report.total ++ " " ++ unitName options)
         ++ ". A line's cost is in its margin, its kinds in its tooltip.</p>"

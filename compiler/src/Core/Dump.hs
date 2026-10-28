@@ -38,6 +38,7 @@ module Core.Dump
     specializeStrict,
     monoStrict,
     specializeReport,
+    inlineReport,
     externBodies,
   )
 where
@@ -181,6 +182,16 @@ specializeReport :: Maybe FilePath
 specializeReport =
   unsafePerformIO (Env.lookupEnv "GENG_SPECIALIZE_REPORT")
 {-# NOINLINE specializeReport #-}
+
+-- | @GENG_INLINE_REPORT@: a file where @Generate@ writes the Inline pass's
+-- account of the calls it left calls, one a line (geng-lang @m4-profile.md@
+-- T3, D1005): the module and row and column of the call, the function called,
+-- and why, separated by tabs. @geng profile@ sets it and joins the lines to a
+-- profile's; the build goes on as usual.
+inlineReport :: Maybe FilePath
+inlineReport =
+  unsafePerformIO (Env.lookupEnv "GENG_INLINE_REPORT")
+{-# NOINLINE inlineReport #-}
 
 -- | @GENG_EXTERN_BODIES=1@: every extern with a Geng body is compiled as its
 -- body, even where the backend has an implementation for it (D225,

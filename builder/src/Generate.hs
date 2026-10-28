@@ -15,6 +15,7 @@ import Build qualified
 import Core.AST qualified as Core
 import Core.Dump qualified as Dump
 import Core.Pass qualified as Pass
+import Core.Pass.Inline qualified as Inline
 import Core.Pretty qualified as Pretty
 import Core.Program qualified as Program
 import Core.Refs qualified as Refs
@@ -661,7 +662,10 @@ passed :: Whole.Program -> Map.Map ModuleName.Canonical Core.Module -> IO (Map.M
 passed whole cores =
   do
     let roots = [Core.QualName home name | Whole.Root home name <- Whole._programRoots whole]
-        after = Pass.run (Whole._programTarget whole) roots cores
+        (after, notes) = Pass.runAccounted (Whole._programTarget whole) roots cores
+    case Dump.inlineReport of
+      Nothing -> return ()
+      Just file -> writeFile file (concatMap inlineNote notes)
     case Dump.passedDir of
       Nothing -> return ()
       Just dir ->
@@ -669,6 +673,12 @@ passed whole cores =
           (\(home, core) -> Dump.writeModule dir home (Pretty.moduleToBuilder (Dump.options home) core))
           (Map.toAscList after)
     roundTrip Dump.passedDir after
+
+-- | One line of @GENG_INLINE_REPORT@ (D1005): the call's module, its row and
+-- column, the function called, and why the pass left it a call.
+inlineNote :: Inline.Note -> String
+inlineNote (Inline.Note home row col (Core.QualName callHome name) why) =
+  List.intercalate "\t" [ModuleName.toChars (ModuleName._module home), show row, show col, ModuleName.toChars (ModuleName._module callHome) ++ "." ++ N.toChars name, why] ++ "\n"
 
 -- | Encode every module, write the bytes to @dir@ if there is one, and decode
 -- them back if @GENG_WIRE=1@ asks.

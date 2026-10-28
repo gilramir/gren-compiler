@@ -103,6 +103,10 @@ module Core.Pass.Inline
     runWith,
     Mode (..),
 
+    -- * The pass's account of itself (geng-lang @m4-profile.md@ T3)
+    Note (..),
+    account,
+
     -- * For "Core.Pass.FoldSpec" (prototype)
     Space,
     fileSpace,
@@ -131,6 +135,7 @@ import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Data.Word (Word32)
 import Gren.ModuleName qualified as ModuleName
 
 -- KNOBS
@@ -261,6 +266,99 @@ recursiveNames defs =
           ],
       q <- group
     ]
+
+-- THE ACCOUNT
+
+-- | A call the pass left a call, where it is and why (geng-lang
+-- @m4-profile.md@ T3, D1005): what @geng profile@ joins to a line's cost, so
+-- that a costly line says "this @get@ is a call: its body is 27 nodes, the
+-- limit is 24", which the surveys read off the C by hand.
+data Note = Note
+  { _noteHome :: !ModuleName.Canonical,
+    _noteRow :: !Word32,
+    _noteCol :: !Word32,
+    _noteCallee :: !Core.QualName,
+    _noteWhy :: !String
+  }
+
+-- | Every call to a top-level function in the pass's output, which is the
+-- input with every call the pass could open opened, and why each was not: the
+-- pass's own rules, asked again of the bodies as the pass left them, which
+-- are the optimized bodies it judged. A call to a function the pass would
+-- open and did not is one its mode or the call's shape kept: JavaScript's
+-- narrow set, a call with more or fewer arguments than the function takes,
+-- or the definition's fuel spent.
+account :: Mode -> Map ModuleName.Canonical Core.Module -> [Note]
+account mode cores =
+  let defs =
+        Map.fromList
+          [ (Core.QualName home (Core._binderName binder), value)
+          | (home, modul) <- Map.toList cores,
+            Core.Bind binder value <- Core._moduleDefs modul
+          ]
+      externs =
+        Set.fromList
+          [ Core.QualName home (Core._binderName (Core._externBinder ext))
+          | (home, modul) <- Map.toList cores,
+            ext <- Core._moduleExterns modul
+          ]
+      recursive = recursiveNames defs
+      marked = Set.fromList [q | modul <- Map.elems cores, q <- Core._moduleInline modul]
+      why q args
+        | Set.member q externs = Just "it is an extern"
+        | Set.member q recursive = Just "it is recursive, in a group that can reach itself"
+        | otherwise =
+            case Map.lookup q defs of
+              Nothing -> Nothing
+              Just (Core.Expr (Core.ELam params body) _ _) ->
+                case offence externs body of
+                  Just what -> Just ("its body has " ++ what)
+                  Nothing
+                    | size body > sizeLimit && not (Set.member (source q) marked) ->
+                        Just ("its body is " ++ show (size body) ++ " nodes, and the limit is " ++ show sizeLimit)
+                    | mode == Matched -> Just "JavaScript's narrow set opens only a call a case is decided by"
+                    | length args /= length params ->
+                        Just ("it takes " ++ show (length params) ++ " arguments, and it is given " ++ show (length args))
+                    | otherwise -> Just "the definition's fuel ran out, or the call is where the pass does not look"
+              Just _ -> Just "it is not a function written as one"
+      notesIn home modul e =
+        let here =
+              case Core._exprValue e of
+                Core.EApp (Core.Expr (Core.EGlobal q) _ _) args
+                  | Just reason <- why q args ->
+                      let sp = Core.spanOf e
+                          file = Map.findWithDefault home (Core._spanFile sp) (Core._moduleFiles modul)
+                       in [Note file (Core._spanStartRow sp) (Core._spanStartCol sp) q reason]
+                _ -> []
+         in here ++ concat (Specialize.children_ (\c -> [notesIn home modul c]) e)
+   in concat
+        [ notesIn home modul value
+        | (home, modul) <- Map.toList cores,
+          Core.Bind _ value <- Core._moduleDefs modul
+        ]
+
+-- | What in a body keeps it from being opened, as 'inlinable' judges it: the
+-- first node it refuses, said in words.
+offence :: Set Core.QualName -> Core.Expr -> Maybe String
+offence externs e =
+  case own (Core._exprValue e) of
+    Just what -> Just what
+    Nothing -> Maybe.listToMaybe (concat (Specialize.children_ (\c -> [Maybe.maybeToList (offence externs c)]) e))
+  where
+    own v =
+      case v of
+        Core.ELam _ _ -> Just "a lambda"
+        Core.ELetRec _ _ -> Just "a recursive let"
+        Core.EJoin _ _ -> Just "a join point"
+        Core.EJump _ _ -> Just "a jump"
+        Core.ETyLam _ _ -> Just "a type abstraction"
+        Core.ETyApp _ _ -> Just "a type application"
+        Core.EWitLam _ _ -> Just "a witness abstraction"
+        Core.EWitApp _ _ -> Just "a witness application"
+        Core.EPrim (Prim.TaskOp _) _ -> Just "a task primitive"
+        Core.EPrim Prim.DebugLog _ -> Just "a Debug.log"
+        Core.EGlobal q | Set.member q externs -> Just "a reference to an extern"
+        _ -> Nothing
 
 -- ONE DEFINITION
 

@@ -736,6 +736,7 @@ parseUserArgs context compilerPath =
                                                                     , exe = compiling.outputPath
                                                                     , build = context.pathFromString (context.pathToString compiling.outputPath ++ ".native-build")
                                                                     , program = Dict.foldl (\_ file acc -> Array.pushLast (context.pathToString file.path) acc) [] compiling.resolution.rootSources
+                                                                    , modules = Dict.foldl (\name file acc -> Dict.set (context.pathToString file.path) name acc) Dict.empty compiling.resolution.rootSources
                                                                     , valgrind = Dict.get "GENG_VALGRIND" context.envVars |> Maybe.withDefault "valgrind"
                                                                     , addr2line = Dict.get "GENG_ADDR2LINE" context.envVars |> Maybe.withDefault "addr2line"
                                                                     , options =
@@ -1316,7 +1317,19 @@ nativeMakeBuild context compilerPath flags resolved ordinary =
                 Err report ->
                     Task.fail report
 
-                Ok environment ->
+                Ok staged ->
+                    let
+                        -- With --debug-info the Inline pass's account of the
+                        -- calls it left calls is kept beside the C, as
+                        -- inline.tsv, which geng profile reads (geng-lang
+                        -- `m4-profile.md` D1005).
+                        environment =
+                            if flags.debugInfo then
+                                Dict.set "GENG_INLINE_REPORT" (context.pathToString (Path.append (Path.fromPosixString "inline.tsv") thePlan.work)) staged
+
+                            else
+                                staged
+                    in
                     Terminal.Native.prepare context.fsPermission thePlan
                         |> Task.andThen
                             (\_ ->

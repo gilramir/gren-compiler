@@ -131,6 +131,7 @@
 -- copy's own name and not to the generic one.
 module Core.Pass
   ( run,
+    runAccounted,
     names,
   )
 where
@@ -173,7 +174,13 @@ defaults target =
     _ -> ["specialize", "foldspec", "inline", "float", "floatin", "mutual", "case", "tailcall"]
 
 run :: Target.Target -> [Core.QualName] -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
-run target roots cores =
+run target roots cores = fst (runAccounted target roots cores)
+
+-- | 'run', and the Inline pass's account of the calls it left calls
+-- ('Inline.account', geng-lang @m4-profile.md@ T3, D1005), computed only when
+-- it is read.
+runAccounted :: Target.Target -> [Core.QualName] -> Map ModuleName.Canonical Core.Module -> (Map ModuleName.Canonical Core.Module, [Inline.Note])
+runAccounted target roots cores =
   let pass name f = if name `elem` names target then f else id
       specialized = pass "specialize" Specialize.run cores
       folded = pass "foldspec" FoldSpec.run specialized
@@ -186,4 +193,8 @@ run target roots cores =
       grouped = pass "mutual" (Map.map Mutual.run) floatedIn
       tbl = Case.table (Map.elems grouped)
       looped = Map.map (pass "case" (Case.run tbl) . pass "tailcall" TailCall.run) grouped
-   in pass "inplace" (InPlace.run roots) looped
+      notes
+        | "inline" `elem` names target = Inline.account Inline.Full inlined
+        | "inlinematch" `elem` names target = Inline.account Inline.Matched inlined
+        | otherwise = []
+   in (pass "inplace" (InPlace.run roots) looped, notes)
