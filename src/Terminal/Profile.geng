@@ -900,28 +900,117 @@ readNotes config =
                     acc
 
         inPlace text acc =
-            String.lines text
-                |> Array.foldl
-                    (\line a ->
-                        when String.split "\t" line is
-                            [ m, _, place, why ] ->
-                                when String.split ":" place is
-                                    [ row, _ ] ->
-                                        if why == "in place" then
-                                            a
+            let
+                rows =
+                    String.lines text
+                        |> Array.mapAndKeepJust
+                            (\line ->
+                                when String.split "\t" line is
+                                    [ m, fn, place, why ] ->
+                                        when String.split ":" place is
+                                            [ row, _ ] ->
+                                                Just { m = m, fn = fn, row = row, why = why }
 
-                                        else
-                                            add m row ("in place, no: " ++ why) a
+                                            _ ->
+                                                Nothing
 
                                     _ ->
-                                        a
+                                        Nothing
+                            )
 
-                            _ ->
-                                a
-                    )
-                    acc
+                copies =
+                    copying rows
+            in
+            Array.foldl
+                (\r a ->
+                    if worthSaying r.why copies r.fn then
+                        add r.m r.row ("in place, no: " ++ r.why) a
+
+                    else
+                        a
+                )
+                acc
+                rows
     in
     Task.map2 (\i p -> Dict.empty |> inline i |> inPlace p) (read "inline.tsv") (read "inplace.tsv")
+
+
+{-| The functions with an update that copies, and those that hand an argument
+shared to one of them: what a reason the in-place pass gave matters to. The
+pass says of every affine record handed on shared, to `phys`, which only
+reads it, as to a function that updates it (m4-visiterm.md §VA27). -}
+copying : Array { m : String, fn : String, row : String, why : String } -> Dict String Bool
+copying rows =
+    let
+        own =
+            Array.foldl
+                (\r acc ->
+                    if r.why /= "in place" && not (String.startsWith "hands " r.why) && not (String.startsWith "jumps " r.why) then
+                        Dict.set r.fn True acc
+
+                    else
+                        acc
+                )
+                Dict.empty
+                rows
+
+        grow set =
+            let
+                more =
+                    Array.foldl
+                        (\r acc ->
+                            when handedTo r.why is
+                                Just callee ->
+                                    if Dict.member callee acc then
+                                        Dict.set r.fn True acc
+
+                                    else
+                                        acc
+
+                                Nothing ->
+                                    acc
+                        )
+                        set
+                        rows
+            in
+            if Dict.count more == Dict.count set then
+                set
+
+            else
+                grow more
+    in
+    grow own
+
+
+{-| Whether the in-place pass's reason on a line of `fn` is one to show: a
+copy, an argument handed shared to a function that copies, or a join's
+argument in a function that copies. -}
+worthSaying : String -> Dict String Bool -> String -> Bool
+worthSaying reason copies fn =
+    if reason == "in place" then
+        False
+
+    else
+        when handedTo reason is
+            Just callee ->
+                Dict.member callee copies
+
+            Nothing ->
+                if String.startsWith "jumps " reason then
+                    Dict.member fn copies
+
+                else
+                    True
+
+
+{-| `f` of "hands f argument 0 shared: ...". -}
+handedTo : String -> Maybe String
+handedTo reason =
+    if String.startsWith "hands " reason then
+        String.split " " reason |> Array.get 1
+
+    else
+        Nothing
 
 
 {-| A call's callee as the program wrote it: `Array.Builder.set$kI4` is
