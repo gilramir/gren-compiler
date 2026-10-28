@@ -949,16 +949,70 @@ compile config thePlan compiled =
 
         boehm file =
             config.toString (Path.append (Path.fromPosixString file) (boehmDirectory thePlan))
+
+        args =
+            executableFlags config thePlan
+                ++ [ "-o", config.toString thePlan.exe ]
+                ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c", boehm "gc.o" ]
+                ++ Array.map config.toString compiled.sources
+                ++ compiled.objects
+                ++ compiled.libraries
+                ++ [ "-lpthread", "-lm" ]
     in
-    cc config
-        (executableFlags config thePlan
-            ++ [ "-o", config.toString thePlan.exe ]
-            ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c", boehm "gc.o" ]
-            ++ Array.map config.toString compiled.sources
-            ++ compiled.objects
-            ++ compiled.libraries
-            ++ [ "-lpthread", "-lm" ]
-        )
+    keepCommand config thePlan args
+        |> Task.andThen (\_ -> cc config args)
+
+
+{-| With `--debug-info`, the C compiler's command kept beside the C it
+compiles, as `compile.sh` (geng-lang `m4-profile.md` D1002): `sh compile.sh
+[OUTPUT [FLAG...]]` compiles the directory's C again, into OUTPUT or where the
+build put it, with any FLAGs after the build's own, from wherever the
+directory is, so that a copy of it edited by hand or by a script is compiled
+as the build compiled it. A path in the build directory is written as one in
+the directory the script is in. -}
+keepCommand : Config -> Plan -> Array String -> Task Report {}
+keepCommand config thePlan args =
+    if config.debugInfo then
+        let
+            work =
+                config.toString thePlan.work
+
+            quote s =
+                "'" ++ String.replace "'" "'\\''" s ++ "'"
+
+            inWork s =
+                String.split work s
+                    |> Array.map quote
+                    |> String.join "\"$D\""
+
+            step arg acc =
+                if acc.output then
+                    { output = False, words = Array.pushLast "\"$OUT\"" acc.words }
+
+                else
+                    { output = arg == "-o", words = Array.pushLast (inWork arg) acc.words }
+
+            words =
+                (Array.foldl step { output = False, words = [] } args).words
+
+            script =
+                String.join "\n"
+                    [ "#!/bin/sh"
+                    , "# The C compiler's command for this build, as geng make ran it: `sh compile.sh"
+                    , "# [OUTPUT [FLAG...]]` compiles this directory's C again, into OUTPUT or where"
+                    , "# the build put it, with any FLAGs after the build's own (geng-lang"
+                    , "# m4-profile.md D1002)."
+                    , "D=$(cd \"$(dirname \"$0\")\" && pwd)"
+                    , "OUT=${1:-" ++ quote (config.toString thePlan.exe) ++ "}"
+                    , "[ $# -gt 0 ] && shift"
+                    , "NIX_HARDENING_ENABLE= exec " ++ quote config.tools.cc ++ " " ++ String.join " " words ++ " \"$@\""
+                    , ""
+                    ]
+        in
+        write config.fs thePlan.work [ { name = "compile.sh", text = script } ]
+
+    else
+        Task.succeed {}
 
 
 {-| D490's flags, the optimization, `-g` when asked for, and the `#line` names
