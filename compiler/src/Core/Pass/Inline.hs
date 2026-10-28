@@ -32,6 +32,10 @@
 --   * a case of a case whose every leaf is known is pushed into the leaves,
 --     where the first rule then fires (case-of-case) — only when a branch that
 --     would be copied more than once is small;
+--   * a @let@ whose body is a case of the name it binds, which nothing else
+--     names, is the case of the bound value, evaluated where it was: what
+--     inlining @Maybe.withDefault d (get i b)@ leaves, which case-of-case
+--     then reaches (geng-lang @m4-visiterm.md@ §VA26, D999);
 --   * a case of a @let@ is the @let@ of the case, when the branches name
 --     nothing the @let@ binds, so that the two rules above reach the @case@
 --     an inlined body such as @Array.get@'s ends in, behind the @let@s it
@@ -338,18 +342,47 @@ simplify ctx e =
 -- rest are what a known @case@ leaves when its branch ignores the field it
 -- bound, such as the record @Test.Runner.getFailureReason@ answers under a
 -- @Just _@ once it is inlined (m2-beam-toptier.md §TT30.5).
+--
+-- A record or constructor nothing names whose fields are not all free of
+-- effects keeps only those fields, in order, each bound to a name made from
+-- the binding's: the structure has no effect, and what is computed for it
+-- still is, when it was. It is what a case decided by D999's fold leaves of a
+-- failure record holding an @inspect@ (geng-lang @m4-visiterm.md@ §VA26).
 unused :: [Core.Bind] -> Core.Expr -> Maybe [Core.Bind]
 unused binds body =
   let go rest =
         case rest of
-          [] -> ([], Refs.freeLocals body)
+          [] -> ([], Refs.freeLocals body, False)
           b@(Core.Bind binder value) : more ->
-            let (keptAfter, free) = go more
-             in if pure_ value && not (Set.member (Core._binderName binder) free)
-                  then (keptAfter, free)
-                  else (b : keptAfter, Set.union (Refs.freeLocals value) (Set.delete (Core._binderName binder) free))
-      (kept, _) = go binds
-   in if length kept < length binds then Just kept else Nothing
+            -- The names the rest reads are asked for only once a binding
+            -- could go: computing them for every binding of a chain of N
+            -- is O(N²), which harness/scaling.py's source/let shows.
+            let (keptAfter, free, changed) = go more
+                named = Set.member (Core._binderName binder) free
+                keep = (b : keptAfter, Set.union (Refs.freeLocals value) (Set.delete (Core._binderName binder) free), changed)
+             in if pure_ value
+                  then if named then keep else (keptAfter, free, True)
+                  else case effects binder value of
+                    Just parts | not named -> (parts ++ keptAfter, Set.union (Refs.freeLocals value) free, True)
+                    _ -> keep
+      (kept, _, anyChanged) = go binds
+   in if anyChanged then Just kept else Nothing
+
+-- | What of a record or constructor must still be computed: its fields that
+-- may have an effect, in order, those that are records or constructors in
+-- turn taken apart, each bound to a name made from the binder's.
+effects :: Core.Binder -> Core.Expr -> Maybe [Core.Bind]
+effects binder value =
+  case Core._exprValue value of
+    Core.ECtor _ _ args -> Just (concat (zipWith part [0 :: Int ..] args))
+    Core.ERecord fields -> Just (concat (zipWith part [0 :: Int ..] (map snd fields)))
+    _ -> Nothing
+  where
+    part i a
+      | pure_ a = []
+      | otherwise =
+          let b = Core.Binder (Name.fromChars (Name.toChars (Core._binderName binder) ++ "$" ++ show i)) (Core.typeOf a) (Core.spanOf a)
+           in Maybe.fromMaybe [Core.Bind b a] (effects b a)
 
 -- | A @let@'s bindings in order, each one known to what follows it when its
 -- value is a constructor or a literal.
@@ -448,6 +481,22 @@ node ctx e@(Core.Expr value tipe sp) =
           do
             markFired
             node ctx (Core.Expr (Core.EApp h (earlier ++ later)) tipe sp)
+    -- A value bound once and matched at once, which is what inlining
+    -- @Maybe.withDefault d (get i b)@ leaves: the case is of the value
+    -- itself, evaluated where it was, so that case-of-case reaches the
+    -- constructors it is built of (geng-lang @m4-visiterm.md@ §VA26, D999).
+    -- Only when the value's type is the name's: a binder may say more than
+    -- the value it is bound to does (beta's 'refine'), and a backend reads
+    -- a scrutinee's shape from its type, so a case of the value would match
+    -- a pointer against an @Int@'s constructors.
+    Core.ELet [Core.Bind b bound] (Core.Expr (Core.ECase (Core.Expr (Core.EVar v) vtype _) alts fallback) ctype csp)
+      | v == Core._binderName b,
+        Core.typeOf bound == Core._binderType b,
+        vtype == Core._binderType b,
+        not (Set.member v (Set.unions (maybe Set.empty Refs.freeLocals fallback : [Set.difference (Refs.freeLocals body) (Refs.patternBinders p) | Core.Alt p body <- alts]))) ->
+          do
+            markFired
+            node ctx (Core.Expr (Core.ECase bound alts fallback) ctype csp)
     -- The same partial application applied further in: inside the @let@s
     -- and @case@s of the body, but under no lambda, join or recursive group,
     -- so that it runs at most once. It is what inlining a higher-order
@@ -981,7 +1030,18 @@ caseOf ctx e scrut alts fallback =
       do
         markFired
         return (Core.Expr crash (Core.typeOf e) (Core.spanOf e))
+    -- One branch whose pattern always matches and binds nothing, of a
+    -- scrutinee that may have an effect, which D999's fold can leave of a
+    -- record matched field by field with wildcards: the scrutinee bound by
+    -- a @let@ nothing names, which 'unused' then takes down to what of it
+    -- must still be computed (geng-lang @m4-visiterm.md@ §VA26).
     Nothing
+      | [Core.Alt p body] <- alts,
+        ignores (Refs.freeLocals body) p ->
+          do
+            markFired
+            n <- fresh
+            simplify ctx (Core.Expr (Core.ELet [Core.Bind (Core.Binder n (Core.typeOf scrut) (Core.spanOf scrut)) scrut] body) (Core.typeOf e) (Core.spanOf e))
       | Just floated <- letOfCase e scrut alts fallback ->
           do
             markFired
@@ -1042,6 +1102,16 @@ caseOf ctx e scrut alts fallback =
                 Just (Chosen binds body) -> Just (Chosen binds body)
                 _ -> Nothing
         _ -> select scrut alts fallback
+
+-- | A pattern that matches every value of its type and binds nothing the
+-- branch reads: a wildcard, a name not among @used@, or a record of them.
+ignores :: Set Name -> Core.Pattern -> Bool
+ignores used p =
+  case p of
+    Core.PWild -> True
+    Core.PVar b -> not (Set.member (Core._binderName b) used)
+    Core.PRecord fields -> all (ignores used . snd) fields
+    _ -> False
 
 data Selected
   = Chosen [(Core.Binder, Core.Expr)] Core.Expr
