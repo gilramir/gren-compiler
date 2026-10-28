@@ -38,6 +38,7 @@ import Terminal.PackageUninstall
 import Terminal.PackageValidate
 import Terminal.Parser as CliParser
 import Terminal.Paths
+import Terminal.Profile
 import Terminal.Protobuf
 import Terminal.Refine
 import Terminal.Run
@@ -665,6 +666,93 @@ parseUserArgs context compilerPath =
                                             else
                                                 Task.succeed exitCode
                                         )
+                            )
+                        |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
+
+                CliParser.Profile opts ->
+                    -- `geng profile` (geng-lang `m4-profile.md` T2, D1004):
+                    -- `geng run`'s build for a native project, at -O2 and with
+                    -- the build directory kept, and then the program under
+                    -- callgrind and the report.
+                    Terminal.Run.make
+                        { fsPermission = context.fsPermission
+                        , cpPermission = context.cpPermission
+                        , cacheRoot = context.cacheRoot
+                        , corePath = context.corePath
+                        , useColor = context.useColor
+                        , pathToString = context.pathToString
+                        , moduleName = opts.moduleName
+                        , package = opts.package
+                        }
+                        |> Task.mapError Terminal.Run.prettifyError
+                        |> Task.andThen
+                            (\compiling ->
+                                if Basics.not compiling.native then
+                                    Task.fail
+                                        (Report.create "NOT A NATIVE PROJECT"
+                                            Nothing
+                                            (PP.words "geng profile builds the program for the native target, and this project's target is another. Profile a project whose geng.toml says target = \"native\".")
+                                        )
+
+                                else
+                                    let
+                                        ordinary =
+                                            checkedBackend context
+                                                compilerPath
+                                                Dict.empty
+                                                (Terminal.Refine.sourcesOf compiling.resolution)
+                                                { headless = True
+                                                , encodedCommand = compiling.encodedCommand
+                                                }
+                                    in
+                                    Terminal.Beam.forgetProgram context.fsPermission compiling.outputPath
+                                        |> Task.andThen
+                                            (\_ ->
+                                                nativeMake context
+                                                    compilerPath
+                                                    { encodedCommand = compiling.encodedCommand
+                                                    , headless = True
+                                                    , output = Just compiling.output
+                                                    , optimization = "-O2"
+                                                    , debugInfo = True
+                                                    }
+                                                    compiling.resolution
+                                                    ordinary
+                                            )
+                                        |> Task.andThen
+                                            (\exitCode ->
+                                                if exitCode /= 0 then
+                                                    Task.succeed exitCode
+
+                                                else
+                                                    Terminal.Native.requireProgram context.fsPermission compiling.outputPath
+                                                        |> Task.andThen
+                                                            (\_ ->
+                                                                Terminal.Profile.profile
+                                                                    { fs = context.fsPermission
+                                                                    , cp = context.cpPermission
+                                                                    , toString = context.pathToString
+                                                                    , fromString = context.pathFromString
+                                                                    , exe = compiling.outputPath
+                                                                    , build = context.pathFromString (context.pathToString compiling.outputPath ++ ".native-build")
+                                                                    , program = Dict.foldl (\_ file acc -> Array.pushLast (context.pathToString file.path) acc) [] compiling.resolution.rootSources
+                                                                    , valgrind = Dict.get "GENG_VALGRIND" context.envVars |> Maybe.withDefault "valgrind"
+                                                                    , addr2line = Dict.get "GENG_ADDR2LINE" context.envVars |> Maybe.withDefault "addr2line"
+                                                                    , options =
+                                                                        { arguments = opts.arguments
+                                                                        , ops = opts.ops
+                                                                        , json = opts.json
+                                                                        , html = opts.html
+                                                                        , top = Maybe.withDefault 20 opts.top
+                                                                        }
+                                                                    }
+                                                            )
+                                                        |> Task.andThen
+                                                            (\profiled ->
+                                                                Stream.Log.string context.stdout profiled.text
+                                                                    |> Task.map (\_ -> profiled.exitCode)
+                                                            )
+                                            )
                             )
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
 

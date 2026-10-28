@@ -34,6 +34,7 @@ type Command
     | PackageDiff DiffArgs
     | Paths Paths.Options
     | Run RunOptions
+    | Profile ProfileOptions
     | Test TestOptions
     | Format FormatFlags
     | Protobuf ProtobufFlags
@@ -94,6 +95,20 @@ type alias RunOptions =
     , erlc : Maybe String
     , escript : Maybe String
     , debugInfo : Bool
+    }
+
+
+{-| `geng profile` (geng-lang `m4-profile.md` T2, D1004): the module to build
+for native and run under callgrind, what it is run with, and the report's
+options. -}
+type alias ProfileOptions =
+    { moduleName : ModuleName
+    , package : Maybe PackageName
+    , arguments : Array String
+    , ops : Maybe Int
+    , json : Maybe String
+    , html : Maybe String
+    , top : Maybe Int
     }
 
 
@@ -436,6 +451,54 @@ parser =
                             , debugInfo = flags.debugInfo
                             }
                     )
+                }
+            |> Cli.Parser.withCommand
+                { word = "profile"
+                , arguments =
+                    Cli.Parser.oneArgThenRest moduleNameParser
+                , flags =
+                    Cli.Parser.initFlags
+                        (\package ops json html top ->
+                            { package = package
+                            , ops = ops
+                            , json = json
+                            , html = html
+                            , top = top
+                            }
+                        )
+                        |> Cli.Parser.flag "package" Cli.Parser.packageNameParser "Profile a module in a particular package."
+                        |> Cli.Parser.flag "ops" countParser "How many operations the run makes, so that the report gives instructions an operation rather than millions in all."
+                        |> Cli.Parser.flag "json" fileParser "Write the profile as JSON too, to this file."
+                        |> Cli.Parser.flag "html" fileParser "Write the profile as a page too, to this file: the source with each line's cost in its margin."
+                        |> Cli.Parser.flag "top" countParser "How many functions and lines each table lists. 20 without this."
+                , commonDescription =
+                    Nothing
+                , summary =
+                    "The `profile` command builds a Geng module for the native target and reports where its instructions go:"
+                , example =
+                    PP.verticalBlock
+                        [ PP.words "For example:"
+                        , PP.empty
+                        , PP.words "geng profile Main -- input.txt"
+                            |> PP.indent
+                            |> PP.color PP.Green
+                        , PP.empty
+                        , PP.words
+                            """
+                            This builds src/Main.geng as geng make does for native, at -O2 and with --debug-info, and runs it under valgrind's callgrind with what follows the --. Each instruction is then charged to what it is for (the program's own code, a library's, an ownership check, the barrier, an allocation, the collector, memcpy and the like) and to the line of the program it came from. It needs valgrind and addr2line, from binutils, or the ones GENG_VALGRIND and GENG_ADDR2LINE name.
+                            """
+                        ]
+                , builder =
+                    \args flags ->
+                        Profile
+                            { moduleName = args.first
+                            , package = flags.package
+                            , arguments = args.rest
+                            , ops = flags.ops
+                            , json = flags.json
+                            , html = flags.html
+                            , top = flags.top
+                            }
                 }
             |> Cli.Parser.withCommand
                 { word = "test"
@@ -787,6 +850,28 @@ releaseDirParser =
     , examples =
         [ "release"
         , "_build/release"
+        ]
+    }
+
+
+countParser : Cli.Parser.ValueParser Int
+countParser =
+    { singular = "count"
+    , plural = "counts"
+    , fn = \s -> String.toInt s |> Maybe.andThen (\n -> if n > 0 then Just n else Nothing)
+    , examples =
+        [ "200000"
+        ]
+    }
+
+
+fileParser : Cli.Parser.ValueParser String
+fileParser =
+    { singular = "file"
+    , plural = "files"
+    , fn = \s -> if String.isEmpty s then Nothing else Just s
+    , examples =
+        [ "profile.html"
         ]
     }
 

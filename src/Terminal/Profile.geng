@@ -1,0 +1,1251 @@
+module Terminal.Profile exposing
+    ( Charged
+    , Config
+    , Frame
+    , Kinds
+    , Options
+    , Run
+    , charge
+    , htmlReport
+    , jsonReport
+    , profile
+    , readCallgrind
+    , readChains
+    , readKinds
+    , readSpans
+    , textReport
+    )
+
+{-| `geng profile` (geng-lang `m4-profile.md` T2, D1004): a native program
+built with `--debug-info` at `-O2`, run under callgrind, and each instruction
+it ran charged to what it is for and to the Geng line it came from.
+
+What an instruction is for is its **kind**, read off the chain of inlined
+functions `addr2line -i` gives for it, innermost first: the first frame that is
+one of the runtime's functions `geng.h`'s table names (an ownership check, the
+barrier, an allocation, the collector), else the first frame on a line of the
+program's own Geng (`program`) or of a package's, `core` among them
+(`library`: core's bounds checks and what they inline). An instruction in the
+C library is `memory` (`memcpy` and the like); one in the runtime's C with no
+frame above is `runtime`. The table is the build's own copy of `geng.h`, so
+the kinds are the runtime's that the program was built with.
+
+Where it came from is the innermost frame on a line of the program, so that
+`core`'s code inlined into a line of the program is that line's. A runtime
+function called out of line has no such frame: callgrind records the call, and
+what each call costs with all it calls is charged to the line that made it, in
+a table of its own, so that the totals by kind stay each instruction's own.
+
+-}
+
+import Bytes
+import Char
+import ChildProcess
+import Cli.PrettyPrinter as PP
+import Cli.Report as Report
+import Dict exposing (Dict)
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Json.Encode as Json
+import Math exposing (abs, round)
+import Task exposing (Task)
+
+
+type alias Options =
+    { arguments : Array String
+    , ops : Maybe Int
+    , json : Maybe String
+    , html : Maybe String
+    , top : Int
+    }
+
+
+type alias Config =
+    { fs : FileSystem.Permission
+    , cp : ChildProcess.Permission
+    , toString : Path -> String
+    , fromString : String -> Path
+    , exe : Path
+    , build : Path
+    , program : Array String
+    , valgrind : String
+    , addr2line : String
+    , options : Options
+    }
+
+
+{-| The profile's text, and the program's exit status under callgrind. -}
+profile : Config -> Task Report.Report { text : String, exitCode : Int }
+profile config =
+    let
+        out =
+            Path.append (Path.fromPosixString "callgrind.out") config.build
+    in
+    runCallgrind config out
+        |> Task.andThen
+            (\exitCode ->
+                Task.map3 (\text header prims -> { text = text, kinds = readKinds header |> readSpans [ { name = "geng.h", text = header }, { name = "geng_prim.h", text = prims } ], exitCode = exitCode })
+                    (readText config (config.toString out))
+                    (readText config (config.toString (Path.append (Path.fromPosixString "geng.h") config.build)))
+                    (readText config (config.toString (Path.append (Path.fromPosixString "geng_prim.h") config.build)))
+            )
+        |> Task.andThen
+            (\got ->
+                let
+                    run =
+                        readCallgrind (config.toString config.exe) got.text
+                in
+                chainsOf config (run.addresses)
+                    |> Task.andThen
+                        (\chains ->
+                            let
+                                report =
+                                    charge got.kinds config.program chains run
+                            in
+                            sourcesOf config report
+                                |> Task.andThen
+                                    (\sources ->
+                                        writeOptional config config.options.json (\_ -> Json.encode 1 (jsonReport config.options report))
+                                            |> Task.andThen (\_ -> writeOptional config config.options.html (\_ -> htmlReport config.options sources report))
+                                            |> Task.map (\_ -> { text = textReport config.options sources report, exitCode = got.exitCode })
+                                    )
+                        )
+            )
+
+
+runCallgrind : Config -> Path -> Task Report.Report Int
+runCallgrind config out =
+    { (ChildProcess.defaultSpawnOptions ChildProcess.Integrated) | shell = ChildProcess.NoShell }
+        |> ChildProcess.spawn
+            config.cp
+            config.valgrind
+            ([ "--tool=callgrind"
+             , "--dump-instr=yes"
+             , "--compress-strings=no"
+             , "--compress-pos=no"
+             , "-q"
+             , "--callgrind-out-file=" ++ config.toString out
+             , config.toString config.exe
+             ]
+                ++ config.options.arguments
+            )
+        |> Task.mapError
+            (\err ->
+                missing "I CANNOT RUN VALGRIND"
+                    config.valgrind
+                    err.errorCode
+                    "geng profile runs the program under valgrind's callgrind, which is not part of this compiler. Install valgrind, or tell me which one to run with the GENG_VALGRIND environment variable."
+            )
+        |> Task.andThen ChildProcess.waitForExit
+
+
+missing : String -> String -> String -> String -> Report.Report
+missing title program code advice =
+    Report.create title
+        Nothing
+        (PP.verticalBlock
+            [ PP.words ("I could not start " ++ program ++ ": " ++ code ++ ".")
+            , PP.empty
+            , PP.words advice
+            ]
+        )
+
+
+readText : Config -> String -> Task Report.Report String
+readText config path =
+    FileSystem.readFile config.fs (config.fromString path)
+        |> Task.map (\bytes -> Bytes.toString bytes |> Maybe.withDefault "")
+        |> Task.mapError
+            (\_ ->
+                Report.create "I CANNOT READ THE PROFILE" Nothing (PP.words ("I could not read " ++ path ++ "."))
+            )
+
+
+writeOptional : Config -> Maybe String -> ({} -> String) -> Task Report.Report {}
+writeOptional config path make =
+    when path is
+        Nothing ->
+            Task.succeed {}
+
+        Just p ->
+            FileSystem.writeFile config.fs (Bytes.fromString (make {})) (config.fromString p)
+                |> Task.map (\_ -> {})
+                |> Task.mapError (\_ -> Report.create "I CANNOT WRITE THE PROFILE" Nothing (PP.words ("I could not write " ++ p ++ ".")))
+
+
+-- KINDS
+
+
+{-| `geng.h`'s table: each name a kind, and each prefix (a name ending in
+`*`) one. -}
+type alias Kinds =
+    { names : Dict String String
+    , prefixes : Array { prefix : String, kind : String }
+    , spans : Array { file : String, first : Int, last : Int, kind : String }
+    }
+
+
+readKinds : String -> Kinds
+readKinds header =
+    String.lines header
+        |> Array.foldl
+            (\line acc ->
+                when String.firstIndexOf "geng-kind " line is
+                    Just at ->
+                        let
+                            rest =
+                                String.dropFirst (at + 10) line
+
+                            kind =
+                                String.split ":" rest |> Array.first |> Maybe.withDefault "" |> String.trim
+
+                            names =
+                                String.split ":" rest |> Array.dropFirst 1 |> String.join ":" |> String.words
+                        in
+                        Array.foldl
+                            (\n a ->
+                                if String.endsWith "*" n then
+                                    { a | prefixes = Array.pushLast { prefix = String.dropLast 1 n, kind = kind } a.prefixes }
+
+                                else
+                                    { a | names = Dict.set n kind a.names }
+                            )
+                            acc
+                            names
+
+                    Nothing ->
+                        acc
+            )
+            { names = Dict.empty, prefixes = [], spans = [] }
+
+
+{-| The lines each of the table's functions and macros is defined on in the
+runtime's headers, for a frame the line table names by its line alone: a
+function from its first line to the `}` that ends it, a macro to the line
+that does not continue it. -}
+readSpans : Array { name : String, text : String } -> Kinds -> Kinds
+readSpans files kinds =
+    let
+        defined line =
+            if String.startsWith "static" line || String.startsWith "GENG_TR_INLINE" line || String.startsWith "#define" line then
+                String.split "(" line
+                    |> Array.first
+                    |> Maybe.andThen (\head -> String.words (String.replace "*" " " head) |> Array.last)
+                    |> Maybe.andThen (\name -> Dict.get name kinds.names)
+
+            else
+                Nothing
+
+        inFile file =
+            String.lines file.text
+                |> Array.indexedFoldl
+                    (\i line st ->
+                        let
+                            n =
+                                i + 1
+                        in
+                        when st.open is
+                            Just o ->
+                                let
+                                    ends =
+                                        if o.macro then
+                                            not (String.endsWith "\\" (String.trimRight line))
+
+                                        else
+                                            String.startsWith "}" line
+                                in
+                                if ends then
+                                    { open = Nothing, spans = Array.pushLast { file = file.name, first = o.first, last = n, kind = o.kind } st.spans }
+
+                                else
+                                    st
+
+                            Nothing ->
+                                when defined line is
+                                    Just kind ->
+                                        if String.endsWith "}" (String.trimRight line) then
+                                            { st | spans = Array.pushLast { file = file.name, first = n, last = n, kind = kind } st.spans }
+
+                                        else
+                                            { st | open = Just { first = n, kind = kind, macro = String.startsWith "#define" line } }
+
+                                    Nothing ->
+                                        st
+                    )
+                    { open = Nothing, spans = [] }
+                |> .spans
+    in
+    { kinds | spans = Array.mapAndFlatten inFile files }
+
+
+kindOfSpan : Kinds -> Frame -> Maybe String
+kindOfSpan kinds frame =
+    let
+        file =
+            baseName frame.file
+    in
+    Array.findFirst (\s -> s.file == file && s.first <= frame.line && frame.line <= s.last) kinds.spans
+        |> Maybe.map (\found -> found.value.kind)
+
+
+kindOfName : Kinds -> String -> Maybe String
+kindOfName kinds name =
+    when Dict.get name kinds.names is
+        Just k ->
+            Just k
+
+        Nothing ->
+            Array.findFirst (\p -> String.startsWith p.prefix name) kinds.prefixes
+                |> Maybe.map (\found -> found.value.kind)
+
+
+-- CALLGRIND
+
+
+{-| What a callgrind file with `--dump-instr=yes --compress-strings=no
+--compress-pos=no` says of a run: each instruction's own cost in the program's
+object, the cost outside it by object, and each call the program's object
+made, at the instruction that made it, to a function, with what the call cost
+with all it called. Costs are `Float`s, which count exactly to 2^53. -}
+type alias Run =
+    { self : Dict String Float
+    , outside : Dict String Float
+    , calls : Array { at : String, callee : String, inclusive : Float }
+    , addresses : Array String
+    , total : Float
+    }
+
+
+readCallgrind : String -> String -> Run
+readCallgrind exe text =
+    let
+        step line st =
+            if String.isEmpty line || String.startsWith "#" line then
+                st
+
+            else if String.startsWith "ob=" line then
+                { st | inProgram = String.dropFirst 3 line == exe, object = String.dropFirst 3 line }
+
+            else if String.startsWith "cfn=" line then
+                { st | callee = String.dropFirst 4 line }
+
+            else if String.startsWith "calls=" line then
+                { st | call = True }
+
+            else
+                when String.words line is
+                    [ addr, _, cost ] ->
+                        cost_ st addr cost
+
+                    [ addr, cost ] ->
+                        cost_ st addr cost
+
+                    _ ->
+                        st
+
+        cost_ st addr costText =
+            if not (String.startsWith "0x" addr) then
+                { st | call = False }
+
+            else
+                let
+                    cost =
+                        String.toInt costText |> Maybe.map toFloat |> Maybe.withDefault 0
+
+                    a =
+                        normal addr
+                in
+                if st.call then
+                    { st
+                        | call = False
+                        , calls =
+                            if st.inProgram then
+                                Array.pushLast { at = a, callee = st.callee, inclusive = cost } st.calls
+
+                            else
+                                st.calls
+                    }
+
+                else if st.inProgram then
+                    { st | self = Dict.updateWithDefault a 0 (\c -> c + cost) st.self, total = st.total + cost }
+
+                else
+                    { st | outside = Dict.updateWithDefault (baseName st.object) 0 (\c -> c + cost) st.outside, total = st.total + cost }
+
+        done =
+            String.lines text
+                |> Array.foldl
+                    step
+                    { inProgram = False
+                    , object = ""
+                    , callee = ""
+                    , call = False
+                    , self = Dict.empty
+                    , outside = Dict.empty
+                    , calls = []
+                    , total = 0
+                    }
+
+        addresses =
+            Dict.keys done.self ++ Array.map .at done.calls |> Array.foldl (\a s -> Dict.set a {} s) Dict.empty |> Dict.keys
+    in
+    { self = done.self, outside = done.outside, calls = done.calls, addresses = addresses, total = done.total }
+
+
+{-| An address as both callgrind and `addr2line -a` can be matched by: hex
+with no leading zeros, lower case. -}
+normal : String -> String
+normal addr =
+    let
+        digits =
+            String.toLower
+                (if String.startsWith "0x" addr then
+                    String.dropFirst 2 addr
+
+                 else
+                    addr
+                )
+
+        trimmed =
+            String.foldl
+                (\c acc ->
+                    if String.isEmpty acc && c == '0' then
+                        acc
+
+                    else
+                        String.pushLast c acc
+                )
+                ""
+                digits
+    in
+    "0x"
+        ++ (if String.isEmpty trimmed then
+                "0"
+
+            else
+                trimmed
+           )
+
+
+baseName : String -> String
+baseName path =
+    String.split "/" path |> Array.last |> Maybe.withDefault path
+
+
+-- ADDR2LINE
+
+
+type alias Frame =
+    { function : String
+    , file : String
+    , line : Int
+    }
+
+
+chainsOf : Config -> Array String -> Task Report.Report (Dict String (Array Frame))
+chainsOf config addresses =
+    chunks 4000 addresses
+        |> Array.map (chainsOfChunk config)
+        |> Task.sequence
+        |> Task.map (Array.foldl (\d acc -> Dict.union d acc) Dict.empty)
+
+
+chunks : Int -> Array a -> Array (Array a)
+chunks n items =
+    if Array.isEmpty items then
+        []
+
+    else
+        Array.pushFirst (Array.takeFirst n items) (chunks n (Array.dropFirst n items))
+
+
+chainsOfChunk : Config -> Array String -> Task Report.Report (Dict String (Array Frame))
+chainsOfChunk config addresses =
+    ChildProcess.run config.cp
+        config.addr2line
+        ([ "-f", "-i", "-a", "-e", config.toString config.exe ] ++ addresses)
+        { (ChildProcess.defaultRunOptions)
+            | shell = ChildProcess.NoShell
+            , maximumBytesWrittenToStreams = 256 * 1024 * 1024
+        }
+        |> Task.map (\done -> readChains (Bytes.toString done.stdout |> Maybe.withDefault ""))
+        |> Task.mapError
+            (\err ->
+                when err is
+                    ChildProcess.InitError e ->
+                        missing "I CANNOT RUN ADDR2LINE"
+                            config.addr2line
+                            e.errorCode
+                            "geng profile reads the program's line table with addr2line, from binutils. Install it, or tell me which one to run with the GENG_ADDR2LINE environment variable."
+
+                    ChildProcess.ProgramError e ->
+                        Report.create "ADDR2LINE FAILED" Nothing (PP.words (config.addr2line ++ " exited with status " ++ String.fromInt e.exitCode ++ "."))
+            )
+
+
+{-| `addr2line -f -i -a`'s output: each address, then a function and a
+`file:line` for each frame of its inline chain, innermost first. -}
+readChains : String -> Dict String (Array Frame)
+readChains text =
+    let
+        step line st =
+            if String.startsWith "0x" line then
+                { st | address = normal line, pending = Nothing, chains = Dict.set (normal line) [] st.chains }
+
+            else
+                when st.pending is
+                    Nothing ->
+                        { st | pending = Just line }
+
+                    Just function ->
+                        let
+                            place =
+                                String.split " " line |> Array.first |> Maybe.withDefault line
+
+                            parts =
+                                String.split ":" place
+
+                            file =
+                                Array.dropLast 1 parts |> String.join ":"
+
+                            number =
+                                Array.last parts |> Maybe.andThen String.toInt |> Maybe.withDefault 0
+
+                            frame =
+                                { function = function, file = file, line = number }
+                        in
+                        { st
+                            | pending = Nothing
+                            , chains = Dict.update st.address (Maybe.map (Array.pushLast frame)) st.chains
+                        }
+    in
+    (String.lines text
+        |> Array.foldl step { address = "", pending = Nothing, chains = Dict.empty }
+    ).chains
+
+
+-- CHARGING
+
+
+type alias Charged =
+    { total : Float
+    , kinds : Dict String Float
+    , functions : Dict String (Dict String Float)
+    , lines : Dict String (Dict String Float)
+    , calls : Dict String (Dict String Float)
+    , allocations : Dict String Float
+    }
+
+
+kindOrder : Array String
+kindOrder =
+    [ "program", "library", "ownership", "barrier", "alloc", "collect", "prim", "runtime", "memory", "other" ]
+
+
+{-| Each instruction's cost to its kind, its function and its line, and each
+out-of-line call into the runtime to the line that made it. `program` is the
+project's source directories, as the line table names them. -}
+charge : Kinds -> Array String -> Dict String (Array Frame) -> Run -> Charged
+charge kinds program chains run =
+    let
+        inProgram frame =
+            Array.any (\dir -> String.startsWith dir frame.file) program
+
+        isGeng frame =
+            String.endsWith ".geng" frame.file
+
+        kindOf frames =
+            Array.foldl
+                (\frame found ->
+                    when found is
+                        Just _ ->
+                            found
+
+                        Nothing ->
+                            when kindOfName kinds frame.function is
+                                Just k ->
+                                    Just k
+
+                                Nothing ->
+                                    when kindOfSpan kinds frame is
+                                        Just k ->
+                                            Just k
+
+                                        Nothing ->
+                                            if isGeng frame then
+                                                Just
+                                                    (if inProgram frame then
+                                                        "program"
+
+                                                     else
+                                                        "library"
+                                                    )
+
+                                            else
+                                                Nothing
+                )
+                Nothing
+                frames
+                |> Maybe.withDefault (unclaimed frames)
+
+        -- No frame of the table's and none on a Geng line: a primitive's own
+        -- body, the glue of a Geng function the compiler made (a step's
+        -- entry, a join), or the runtime's C.
+        unclaimed frames =
+            when { inner = Array.first frames, outer = Array.last frames } is
+                { inner = Just i, outer = Just o } ->
+                    if baseName i.file == "geng_prim.h" then
+                        "prim"
+
+                    else
+                        when gengFunction o.function is
+                            Just inApp ->
+                                if inApp then
+                                    "program"
+
+                                else
+                                    "library"
+
+                            Nothing ->
+                                "runtime"
+
+                _ ->
+                    "other"
+
+        -- The line of the program an instruction is on: the innermost frame
+        -- in one of its files on a line, line 0 being code no line has.
+        site frames =
+            Array.findFirst (\frame -> inProgram frame && frame.line > 0) frames |> Maybe.map .value
+
+        functionKey frames =
+            when site frames is
+                Just frame ->
+                    demangle frame.function
+
+                Nothing ->
+                    when Array.findFirst isGeng frames is
+                        Just found ->
+                            "(library) " ++ demangle found.value.function
+
+                        Nothing ->
+                            let
+                                outer =
+                                    Array.last frames |> Maybe.map .function |> Maybe.withDefault "?"
+                            in
+                            when gengFunction outer is
+                                Just True ->
+                                    demangle outer
+
+                                Just False ->
+                                    "(library) " ++ demangle outer
+
+                                Nothing ->
+                                    "(runtime) " ++ outer
+
+        -- A call out of line into the runtime: a function of the table's, a
+        -- constructor, or another of the runtime's, and not a Geng function.
+        calleeKind callee =
+            when kindOfName kinds callee is
+                Just k ->
+                    Just k
+
+                Nothing ->
+                    if String.startsWith "geng_new_" callee then
+                        Just "alloc"
+
+                    else if String.startsWith "geng_" callee && gengFunction callee == Nothing then
+                        Just "runtime"
+
+                    else
+                        Nothing
+
+        lineKey frame =
+            frame.file ++ ":" ++ String.fromInt frame.line
+
+        add key kind cost table =
+            Dict.updateWithDefault key Dict.empty (Dict.updateWithDefault kind 0 (\c -> c + cost)) table
+
+        allocated frames =
+            when Array.findFirst (\frame -> String.startsWith "geng_new_" frame.function) frames is
+                Just found ->
+                    Just (typeOfConstructor found.value.function)
+
+                Nothing ->
+                    if Array.any (\frame -> String.startsWith "geng_array_alloc" frame.function) frames then
+                        Just "an array's buffer"
+
+                    else if kindOf frames == "alloc" then
+                        Just "other"
+
+                    else
+                        Nothing
+
+        own =
+            Dict.foldl
+                (\address cost acc ->
+                    let
+                        frames =
+                            Dict.get address chains |> Maybe.withDefault []
+
+                        kind =
+                            kindOf frames
+                    in
+                    { acc
+                        | kinds = Dict.updateWithDefault kind 0 (\c -> c + cost) acc.kinds
+                        , functions = add (functionKey frames) kind cost acc.functions
+                        , lines =
+                            when site frames is
+                                Just frame ->
+                                    add (lineKey frame) kind cost acc.lines
+
+                                Nothing ->
+                                    acc.lines
+                        , allocations =
+                            when allocated frames is
+                                Just t ->
+                                    Dict.updateWithDefault t 0 (\c -> c + cost) acc.allocations
+
+                                Nothing ->
+                                    acc.allocations
+                    }
+                )
+                { kinds = Dict.empty, functions = Dict.empty, lines = Dict.empty, allocations = Dict.empty }
+                run.self
+
+        outside =
+            Dict.foldl (\_ cost total -> total + cost) 0 run.outside
+
+        calls =
+            Array.foldl
+                (\call acc ->
+                    let
+                        frames =
+                            Dict.get call.at chains |> Maybe.withDefault []
+                    in
+                    when { s = site frames, k = calleeKind call.callee } is
+                        { s = Just frame, k = Just kind } ->
+                            add (lineKey frame) kind call.inclusive acc
+
+                        _ ->
+                            acc
+                )
+                Dict.empty
+                run.calls
+    in
+    { total = run.total
+    , kinds =
+        if outside > 0 then
+            Dict.set "memory" outside own.kinds
+
+        else
+            own.kinds
+    , functions = own.functions
+    , lines = own.lines
+    , calls = calls
+    , allocations = own.allocations
+    }
+
+
+{-| Whether a C name is a Geng function's, and if so whether it is one of the
+program's own (`g_app__`) or a package's. -}
+gengFunction : String -> Maybe Bool
+gengFunction name =
+    let
+        bare =
+            if String.startsWith "geng_step_" name then
+                String.dropFirst 10 name
+
+            else
+                name
+    in
+    if String.startsWith "g_app__" bare then
+        Just True
+
+    else if String.startsWith "g_" bare then
+        Just False
+
+    else
+        Nothing
+
+
+{-| A Geng function's C name as the program reads it: `g_app__Hot__physCells`
+is `Hot.physCells`, `g_core__Array_oBuilder__get_dkI4` `Array.Builder.get`. -}
+demangle : String -> String
+demangle name =
+    let
+        bare =
+            if String.startsWith "geng_step_" name then
+                String.dropFirst 10 name
+
+            else
+                name
+
+        parts =
+            String.split "__" bare
+    in
+    if String.startsWith "g_" bare && Array.length parts >= 3 then
+        let
+            moduleName =
+                Array.get 1 parts |> Maybe.withDefault "" |> String.replace "_o" "."
+
+            value =
+                Array.dropFirst 2 parts |> String.join "__" |> cutSpecialization
+        in
+        moduleName ++ "." ++ value
+
+    else
+        name
+
+
+cutSpecialization : String -> String
+cutSpecialization value =
+    [ "_dk", "_dq" ]
+        |> Array.foldl
+            (\marker v ->
+                when String.firstIndexOf marker v is
+                    Just at ->
+                        String.takeFirst at v
+
+                    Nothing ->
+                        v
+            )
+            value
+
+
+{-| `geng_new_geng_d_core__Maybe__Maybe__I4__c0` is a `Maybe.Maybe` at `I4`,
+its first constructor; `geng_new_geng_r_absolute_I4__bytes_P` a record of
+`absolute` and `bytes`, and one whose fields are many has a hash for a name. -}
+typeOfConstructor : String -> String
+typeOfConstructor name =
+    if String.startsWith "geng_new_geng_r_" name then
+        let
+            fields =
+                String.dropFirst 16 name
+        in
+        if String.startsWith "H" fields then
+            "a record (" ++ fields ++ ")"
+
+        else
+            String.split "__" fields
+                |> Array.map (\f -> String.split "_" f |> Array.dropLast 1 |> String.join "_")
+                |> String.join ", "
+                |> (\list -> "{ " ++ list ++ " }")
+
+    else
+        let
+            parts =
+                String.split "__" (String.replace "geng_new_geng_d_" "" name)
+        in
+        when parts is
+            [ _, moduleName, typeName, shape, ctor ] ->
+                String.replace "_o" "." moduleName ++ "." ++ typeName ++ " (" ++ shape ++ ", " ++ ctor ++ ")"
+
+            _ ->
+                name
+
+
+-- SOURCES
+
+
+sourcesOf : Config -> Charged -> Task Report.Report (Dict String (Array String))
+sourcesOf config report =
+    Dict.keys report.lines
+        ++ Dict.keys report.calls
+        |> Array.mapAndKeepJust fileOf
+        |> Array.foldl (\f s -> Dict.set f {} s) Dict.empty
+        |> Dict.keys
+        |> Array.map
+            (\file ->
+                FileSystem.readFile config.fs (config.fromString file)
+                    |> Task.map (\bytes -> { file = file, lines = Bytes.toString bytes |> Maybe.map String.lines |> Maybe.withDefault [] })
+                    |> Task.onError (\_ -> Task.succeed { file = file, lines = [] })
+            )
+        |> Task.sequence
+        |> Task.map (Array.foldl (\f d -> Dict.set f.file f.lines d) Dict.empty)
+
+
+fileOf : String -> Maybe String
+fileOf key =
+    let
+        parts =
+            String.split ":" key
+    in
+    if Array.length parts >= 2 then
+        Just (Array.dropLast 1 parts |> String.join ":")
+
+    else
+        Nothing
+
+
+sourceLine : Dict String (Array String) -> String -> String
+sourceLine sources key =
+    let
+        parts =
+            String.split ":" key
+
+        number =
+            Array.last parts |> Maybe.andThen String.toInt |> Maybe.withDefault 0
+    in
+    fileOf key
+        |> Maybe.andThen (\f -> Dict.get f sources)
+        |> Maybe.andThen (Array.get (number - 1))
+        |> Maybe.map String.trim
+        |> Maybe.withDefault ""
+
+
+-- TEXT
+
+
+sumOf : Dict String Float -> Float
+sumOf d =
+    Dict.foldl (\_ v t -> t + v) 0 d
+
+
+ranked : Int -> Dict String (Dict String Float) -> Array { key : String, cost : Float, kinds : Dict String Float }
+ranked top table =
+    Dict.foldl (\k v acc -> Array.pushLast { key = k, cost = sumOf v, kinds = v } acc) [] table
+        |> Array.sortBy (\r -> negate r.cost)
+        |> Array.takeFirst top
+
+
+{-| Per operation when `--ops` says how many there were, else in millions. -}
+scaled : Options -> Float -> String
+scaled options cost =
+    when options.ops is
+        Just n ->
+            fixed 1 (cost / toFloat n)
+
+        Nothing ->
+            fixed 1 (cost / 1.0e6)
+
+
+unitName : Options -> String
+unitName options =
+    when options.ops is
+        Just n ->
+            "instructions an operation, of " ++ String.fromInt n
+
+        Nothing ->
+            "millions of instructions"
+
+
+fixed : Int -> Float -> String
+fixed digits value =
+    let
+        scale =
+            toFloat (10 ^ digits)
+
+        n =
+            round (value * scale)
+
+        whole =
+            n // (10 ^ digits)
+
+        frac =
+            modBy (10 ^ digits) (abs n)
+    in
+    (if n < 0 && whole == 0 then
+        "-"
+
+     else
+        ""
+    )
+        ++ String.fromInt whole
+        ++ (if digits > 0 then
+                "." ++ String.padLeft digits '0' (String.fromInt frac)
+
+            else
+                ""
+           )
+
+
+percent : Float -> Float -> String
+percent part whole =
+    if whole > 0 then
+        fixed 1 (100 * part / whole) ++ "%"
+
+    else
+        ""
+
+
+textReport : Options -> Dict String (Array String) -> Charged -> String
+textReport options sources report =
+    let
+        kindsTable =
+            kindOrder
+                |> Array.mapAndKeepJust
+                    (\k ->
+                        Dict.get k report.kinds
+                            |> Maybe.map (\c -> "  " ++ String.padRight 10 ' ' k ++ String.padLeft 12 ' ' (scaled options c) ++ String.padLeft 8 ' ' (percent c report.total))
+                    )
+
+        mix kinds =
+            kindOrder
+                |> Array.mapAndKeepJust (\k -> Dict.get k kinds |> Maybe.map (\c -> k ++ " " ++ scaled options c))
+                |> String.join ", "
+
+        functions =
+            ranked options.top report.functions
+                |> Array.map (\r -> "  " ++ String.padLeft 10 ' ' (scaled options r.cost) ++ "  " ++ r.key ++ "\n" ++ String.repeat 14 " " ++ mix r.kinds)
+
+        lineRows table =
+            ranked options.top table
+                |> Array.map (\r -> "  " ++ String.padLeft 10 ' ' (scaled options r.cost) ++ "  " ++ shortPlace r.key ++ "  " ++ String.takeFirst 60 (sourceLine sources r.key) ++ "\n" ++ String.repeat 14 " " ++ mix r.kinds)
+
+        allocations =
+            Dict.foldl (\k v acc -> Array.pushLast { key = k, cost = v } acc) [] report.allocations
+                |> Array.sortBy (\r -> negate r.cost)
+                |> Array.takeFirst options.top
+                |> Array.map (\r -> "  " ++ String.padLeft 10 ' ' (scaled options r.cost) ++ "  " ++ r.key)
+    in
+    String.join "\n"
+        ([ "PROFILE: " ++ scaled options report.total ++ " " ++ unitName options
+         , ""
+         , "By kind:"
+         ]
+            ++ kindsTable
+            ++ [ "", "By function, the program's (the innermost of its frames):" ]
+            ++ functions
+            ++ [ "", "By line of the program (" ++ covered report ++ " of the instructions are on one; the line table names no line of the rest):" ]
+            ++ lineRows report.lines
+            ++ (if Dict.isEmpty report.calls then
+                    []
+
+                else
+                    [ "", "Calls into the runtime out of line, by the line that made them, with all they call:" ] ++ lineRows report.calls
+               )
+            ++ (if Dict.isEmpty report.allocations then
+                    []
+
+                else
+                    [ "", "Allocation inlined, by what was built:" ] ++ allocations
+               )
+            ++ [ "" ]
+        )
+
+
+covered : Charged -> String
+covered report =
+    percent (Dict.foldl (\_ v t -> t + sumOf v) 0 report.lines) report.total
+
+
+shortPlace : String -> String
+shortPlace key =
+    String.split "/" key |> Array.last |> Maybe.withDefault key
+
+
+-- JSON
+
+
+jsonReport : Options -> Charged -> Json.Value
+jsonReport options report =
+    let
+        costs d =
+            Json.object (Dict.foldl (\k v acc -> Array.pushLast { key = k, value = Json.float v } acc) [] d)
+
+        table t =
+            Json.object (Dict.foldl (\k v acc -> Array.pushLast { key = k, value = costs v } acc) [] t)
+    in
+    Json.object
+        [ { key = "total", value = Json.float report.total }
+        , { key = "ops", value = options.ops |> Maybe.map Json.int |> Maybe.withDefault Json.null }
+        , { key = "kinds", value = costs report.kinds }
+        , { key = "functions", value = table report.functions }
+        , { key = "lines", value = table report.lines }
+        , { key = "calls", value = table report.calls }
+        , { key = "allocations", value = costs report.allocations }
+        ]
+
+
+-- HTML
+
+
+colour : String -> String
+colour kind =
+    when kind is
+        "program" ->
+            "#4a7bd0"
+
+        "library" ->
+            "#8a6fd1"
+
+        "ownership" ->
+            "#d0544a"
+
+        "barrier" ->
+            "#c98a16"
+
+        "alloc" ->
+            "#3aa37a"
+
+        "collect" ->
+            "#2e8fa8"
+
+        "runtime" ->
+            "#9a8f80"
+
+        "memory" ->
+            "#b0705a"
+
+        _ ->
+            "#999999"
+
+
+{-| A line's id in the page: its key with every character an id cannot
+easily hold made a `-`. -}
+anchor : String -> String
+anchor key =
+    "L" ++ String.map
+            (\c ->
+                if Char.isAlphaNum c then
+                    c
+
+                else
+                    '-'
+            )
+            key
+
+
+escape : String -> String
+escape s =
+    s
+        |> String.replace "&" "&amp;"
+        |> String.replace "<" "&lt;"
+        |> String.replace ">" "&gt;"
+        |> String.replace "\"" "&quot;"
+
+
+{-| One page, with no script and nothing outside it: the kinds as a stacked
+bar, and each file of the program that ran with its lines' costs in the
+margin, shaded by cost, each line's kinds in its tooltip. -}
+htmlReport : Options -> Dict String (Array String) -> Charged -> String
+htmlReport options sources report =
+    let
+        bar =
+            let
+                parts =
+                    kindOrder |> Array.mapAndKeepJust (\k -> Dict.get k report.kinds |> Maybe.map (\c -> { kind = k, cost = c }))
+
+                step part acc =
+                    let
+                        w =
+                            if report.total > 0 then
+                                700 * part.cost / report.total
+
+                            else
+                                0
+                    in
+                    { x = acc.x + w
+                    , out =
+                        acc.out
+                            ++ "<g><title>"
+                            ++ escape (part.kind ++ ": " ++ scaled options part.cost ++ " (" ++ percent part.cost report.total ++ ")")
+                            ++ "</title><rect x=\""
+                            ++ fixed 1 acc.x
+                            ++ "\" y=\"0\" width=\""
+                            ++ fixed 1 w
+                            ++ "\" height=\"28\" fill=\""
+                            ++ colour part.kind
+                            ++ "\"/></g>"
+                    }
+
+                legend =
+                    parts
+                        |> Array.map (\p -> "<span class=key><i style=\"background:" ++ colour p.kind ++ "\"></i>" ++ escape p.kind ++ " " ++ percent p.cost report.total ++ "</span>")
+                        |> String.join " "
+            in
+            "<svg viewBox=\"0 0 700 28\" role=\"img\" aria-label=\"the instructions by kind\">"
+                ++ (Array.foldl step { x = 0, out = "" } parts).out
+                ++ "</svg><p>"
+                ++ legend
+                ++ "</p>"
+
+        top =
+            Dict.foldl (\_ v m -> max m (sumOf v)) 0 report.lines
+
+        hottest =
+            "<h2>The costliest lines</h2><p>"
+                ++ covered report
+                ++ " of the instructions are on a line of the program; the line table names no line of the rest, which the kinds above still count.</p><table class=hot>"
+                ++ (ranked options.top report.lines
+                        |> Array.map
+                            (\r ->
+                                "<tr><td class=c>"
+                                    ++ scaled options r.cost
+                                    ++ "</td><td><a href=\"#"
+                                    ++ anchor r.key
+                                    ++ "\">"
+                                    ++ escape (shortPlace r.key)
+                                    ++ "</a></td><td class=s>"
+                                    ++ escape (sourceLine sources r.key)
+                                    ++ "</td><td>"
+                                    ++ escape (kindOrder |> Array.mapAndKeepJust (\k -> Dict.get k r.kinds |> Maybe.map (\c -> k ++ " " ++ scaled options c)) |> String.join ", ")
+                                    ++ "</td></tr>"
+                            )
+                        |> String.join ""
+                   )
+                ++ "</table>"
+
+        fileBlock file lines =
+            let
+                row n text =
+                    let
+                        key =
+                            file ++ ":" ++ String.fromInt n
+
+                        kinds =
+                            Dict.get key report.lines |> Maybe.withDefault Dict.empty
+
+                        cost =
+                            sumOf kinds
+
+                        shade =
+                            if top > 0 && cost > 0 then
+                                fixed 3 (0.08 + 0.6 * cost / top)
+
+                            else
+                                "0"
+
+                        tip =
+                            kindOrder
+                                |> Array.mapAndKeepJust (\k -> Dict.get k kinds |> Maybe.map (\c -> k ++ " " ++ scaled options c))
+                                |> String.join ", "
+                    in
+                    "<tr id=\""
+                        ++ anchor key
+                        ++ "\" title=\""
+                        ++ escape tip
+                        ++ "\"><td class=n>"
+                        ++ String.fromInt n
+                        ++ "</td><td class=c>"
+                        ++ (if cost > 0 then
+                                scaled options cost
+
+                            else
+                                ""
+                           )
+                        ++ "</td><td class=s style=\"background:rgba(208,84,74,"
+                        ++ shade
+                        ++ ")\">"
+                        ++ escape text
+                        ++ "</td></tr>"
+            in
+            "<h2>"
+                ++ escape file
+                ++ "</h2><table class=src>"
+                ++ (Array.indexedMap (\i t -> row (i + 1) t) lines |> String.join "")
+                ++ "</table>"
+    in
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Geng profile</title><style>"
+        ++ ":root{--bg:#fff;--fg:#1d2430;--rule:#d9dde4}@media (prefers-color-scheme:dark){:root{--bg:#15181e;--fg:#e3e7ee;--rule:#333a46}}"
+        ++ "body{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif;margin:0 auto;max-width:1100px;padding:24px 16px}"
+        ++ "svg{width:100%;height:auto}.key{white-space:nowrap;margin-right:12px}.key i{display:inline-block;width:10px;height:10px;margin-right:4px;border-radius:2px}"
+        ++ ".src{border-collapse:collapse;font:12px/1.35 ui-monospace,monospace;width:100%;display:block;overflow-x:auto}.src td{padding:0 8px;white-space:pre}"
+        ++ ".hot{border-collapse:collapse;font-size:13px}.hot td{padding:2px 8px;border-bottom:1px solid var(--rule)}.hot .s{font-family:ui-monospace,monospace;font-size:12px}tr:target{outline:2px solid #4a7bd0}.n{color:#888;text-align:right}.c{text-align:right;font-variant-numeric:tabular-nums;border-right:1px solid var(--rule)}"
+        ++ "</style></head><body><h1>Geng profile</h1><p>"
+        ++ escape (scaled options report.total ++ " " ++ unitName options)
+        ++ ". A line's cost is in its margin, its kinds in its tooltip.</p>"
+        ++ bar
+        ++ hottest
+        ++ (Dict.foldl (\file lines acc -> acc ++ fileBlock file lines) "" (Dict.keepIf (\f _ -> Dict.any (\k _ -> String.startsWith (f ++ ":") k) report.lines) sources))
+        ++ "</body></html>\n"
