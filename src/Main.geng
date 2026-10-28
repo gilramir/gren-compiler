@@ -1320,12 +1320,18 @@ nativeMakeBuild context compilerPath flags resolved ordinary =
                 Ok staged ->
                     let
                         -- With --debug-info the Inline pass's account of the
-                        -- calls it left calls is kept beside the C, as
-                        -- inline.tsv, which geng profile reads (geng-lang
-                        -- `m4-profile.md` D1005).
+                        -- calls it left calls, and the in-place pass's of the
+                        -- updates it copies, are kept beside the C, as
+                        -- inline.tsv and inplace.tsv, which geng profile reads
+                        -- (geng-lang `m4-profile.md` D1005, D1006).
+                        kept name =
+                            context.pathToString (Path.append (Path.fromPosixString name) thePlan.work)
+
                         environment =
                             if flags.debugInfo then
-                                Dict.set "GENG_INLINE_REPORT" (context.pathToString (Path.append (Path.fromPosixString "inline.tsv") thePlan.work)) staged
+                                staged
+                                    |> Dict.set "GENG_INLINE_REPORT" (kept "inline.tsv")
+                                    |> Dict.set "GENG_INPLACE_REPORT" (kept "inplace.tsv")
 
                             else
                                 staged

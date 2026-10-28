@@ -530,7 +530,7 @@ readChains text =
 
 
 type alias Charged =
-    { notes : Dict String (Array { callee : String, why : String })
+    { notes : Dict String (Array String)
     , total : Float
     , kinds : Dict String Float
     , functions : Dict String (Dict String Float)
@@ -851,48 +851,77 @@ typeOfConstructor name =
 -- THE COMPILER'S ACCOUNT
 
 
-{-| The Inline pass's account of the calls it left calls, which a
-`--debug-info` build keeps as `inline.tsv` (geng-lang `m4-profile.md` D1005),
-by the line of the program each is on: a line's key, the file and the row, from
-the note's module, which `modules` maps from the file. A build with no
-account, or a module that is not the program's, has none. -}
-readNotes : Config -> Task Report.Report (Dict String (Array { callee : String, why : String }))
+{-| The compiler's account of a `--debug-info` build, by the line of the
+program each note is on (a line's key, the file and the row, from the note's
+module, which `modules` maps from the file): the Inline pass's calls it left
+calls, kept as `inline.tsv` (geng-lang `m4-profile.md` D1005), and the
+in-place pass's updates it copies and its reasons, kept as `inplace.tsv`
+(D987, D1006). A build without them, or a module that is not the program's,
+has none. -}
+readNotes : Config -> Task Report.Report (Dict String (Array String))
 readNotes config =
     let
         fileOfModule =
             Dict.foldl (\file m acc -> Dict.set m file acc) Dict.empty config.modules
-    in
-    FileSystem.readFile config.fs (Path.append (Path.fromPosixString "inline.tsv") config.build)
-        |> Task.map (\bytes -> Bytes.toString bytes |> Maybe.withDefault "")
-        |> Task.onError (\_ -> Task.succeed "")
-        |> Task.map
-            (\text ->
-                String.lines text
-                    |> Array.foldl
-                        (\line acc ->
-                            when String.split "\t" line is
-                                [ m, row, _, callee, why ] ->
-                                    when Dict.get m fileOfModule is
-                                        Just file ->
-                                            Dict.updateWithDefault (file ++ ":" ++ row)
-                                                []
-                                                (\notes ->
-                                                    if Array.any (\n -> n.callee == callee) notes then
-                                                        notes
 
-                                                    else
-                                                        Array.pushLast { callee = callee, why = why } notes
-                                                )
-                                                acc
+        read name =
+            FileSystem.readFile config.fs (Path.append (Path.fromPosixString name) config.build)
+                |> Task.map (\bytes -> Bytes.toString bytes |> Maybe.withDefault "")
+                |> Task.onError (\_ -> Task.succeed "")
 
-                                        Nothing ->
-                                            acc
+        add m row note acc =
+            when Dict.get m fileOfModule is
+                Just file ->
+                    Dict.updateWithDefault (file ++ ":" ++ row)
+                        []
+                        (\notes ->
+                            if Array.member note notes then
+                                notes
 
-                                _ ->
-                                    acc
+                            else
+                                Array.pushLast note notes
                         )
-                        Dict.empty
-            )
+                        acc
+
+                Nothing ->
+                    acc
+
+        inline text acc =
+            String.lines text
+                |> Array.foldl
+                    (\line a ->
+                        when String.split "\t" line is
+                            [ m, row, _, callee, why ] ->
+                                add m row (calleeName callee ++ " is a call: " ++ why) a
+
+                            _ ->
+                                a
+                    )
+                    acc
+
+        inPlace text acc =
+            String.lines text
+                |> Array.foldl
+                    (\line a ->
+                        when String.split "\t" line is
+                            [ m, _, place, why ] ->
+                                when String.split ":" place is
+                                    [ row, _ ] ->
+                                        if why == "in place" then
+                                            a
+
+                                        else
+                                            add m row ("in place, no: " ++ why) a
+
+                                    _ ->
+                                        a
+
+                            _ ->
+                                a
+                    )
+                    acc
+    in
+    Task.map2 (\i p -> Dict.empty |> inline i |> inPlace p) (read "inline.tsv") (read "inplace.tsv")
 
 
 {-| A call's callee as the program wrote it: `Array.Builder.set$kI4` is
@@ -904,9 +933,7 @@ calleeName callee =
 
 noteLines : Charged -> String -> Array String
 noteLines report key =
-    Dict.get key report.notes
-        |> Maybe.withDefault []
-        |> Array.map (\n -> calleeName n.callee ++ " is a call: " ++ n.why)
+    Dict.get key report.notes |> Maybe.withDefault []
 
 
 -- SOURCES
@@ -1138,7 +1165,7 @@ jsonReport options report =
                         (\k v acc ->
                             Array.pushLast
                                 { key = k
-                                , value = Json.array (\n -> Json.object [ { key = "callee", value = Json.string n.callee }, { key = "why", value = Json.string n.why } ]) v
+                                , value = Json.array Json.string v
                                 }
                                 acc
                         )
