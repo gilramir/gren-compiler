@@ -535,6 +535,7 @@ type alias Charged =
     , kinds : Dict String Float
     , functions : Dict String (Dict String Float)
     , lines : Dict String (Dict String Float)
+    , runs : Dict String (Dict Int Int)
     , calls : Dict String (Dict String Float)
     , allocations : Dict String Float
     }
@@ -703,6 +704,14 @@ charge kinds program chains run =
 
                                 Nothing ->
                                     acc.lines
+                        , runs =
+                            -- An instruction's count is the times it ran.
+                            when site frames is
+                                Just frame ->
+                                    Dict.updateWithDefault (lineKey frame) Dict.empty (Dict.updateWithDefault (round cost) 0 (\n -> n + 1)) acc.runs
+
+                                Nothing ->
+                                    acc.runs
                         , allocations =
                             when allocated frames is
                                 Just t ->
@@ -712,7 +721,7 @@ charge kinds program chains run =
                                     acc.allocations
                     }
                 )
-                { kinds = Dict.empty, functions = Dict.empty, lines = Dict.empty, allocations = Dict.empty }
+                { kinds = Dict.empty, functions = Dict.empty, lines = Dict.empty, runs = Dict.empty, allocations = Dict.empty }
                 run.self
 
         outside =
@@ -745,6 +754,7 @@ charge kinds program chains run =
             own.kinds
     , functions = own.functions
     , lines = own.lines
+    , runs = own.runs
     , calls = calls
     , allocations = own.allocations
     }
@@ -1182,6 +1192,7 @@ textReport options sources report =
                             ++ "\n"
                             ++ String.repeat 14 " "
                             ++ mix r.kinds
+                            ++ (runsOf options report r.key |> Maybe.map (\t -> "\n" ++ String.repeat 14 " " ++ runsLabel options ++ t) |> Maybe.withDefault "")
                             ++ (noteLines report r.key |> Array.map (\n -> "\n" ++ String.repeat 14 " " ++ n) |> String.join "")
                     )
 
@@ -1217,6 +1228,100 @@ textReport options sources report =
         )
 
 
+{-| How many times a line's instructions ran, by how many of them ran each
+number of times, the most often first: a line whose code is one piece runs
+it as one, and a line charged with code that runs apart from it, a test of
+each byte beside a jump table for some, shows the pieces (m4-profile.md
+§PF11). Per operation with `--ops`. -}
+runsOf : Options -> Charged -> String -> Maybe String
+runsOf options report key =
+    Dict.get key report.runs
+        |> Maybe.map
+            (\counts ->
+                let
+                    -- By the figure shown, so that counts a run or two apart,
+                    -- a loop's last turn or the input's last line, are one.
+                    byText =
+                        Dict.foldl
+                            (\times n acc ->
+                                Dict.updateWithDefault (timesText options times) { times = times, n = 0 } (\g -> { times = max g.times times, n = g.n + n }) acc
+                            )
+                            Dict.empty
+                            counts
+
+                    rarely =
+                        Dict.get "rarely" byText |> Maybe.map .n |> Maybe.withDefault 0
+
+                    groups =
+                        Dict.remove "rarely" byText
+                            |> Dict.foldl (\text g acc -> Array.pushLast { text = text, times = g.times, n = g.n } acc) []
+                            |> Array.sortBy (\g -> negate g.times)
+
+                    shown =
+                        Array.takeFirst 4 groups
+                            |> Array.map (\g -> String.fromInt g.n ++ " × " ++ g.text)
+                            |> String.join ", "
+
+                    rest =
+                        Array.length groups - 4
+                in
+                shown
+                    ++ (if rest > 0 then
+                            ", and " ++ String.fromInt rest ++ " more"
+
+                        else
+                            ""
+                       )
+                    ++ (if rarely > 0 then
+                            (if Array.isEmpty groups then
+                                ""
+
+                             else
+                                ", "
+                            )
+                                ++ String.fromInt rarely
+                                ++ " rarely"
+
+                        else
+                            ""
+                       )
+            )
+
+
+runsLabel : Options -> String
+runsLabel options =
+    when options.ops is
+        Just _ ->
+            "runs, instructions × times an operation: "
+
+        Nothing ->
+            "runs, instructions × times: "
+
+
+timesText : Options -> Int -> String
+timesText options times =
+    when options.ops is
+        Just ops ->
+            let
+                t =
+                    toFloat times / toFloat ops
+            in
+            if t >= 0.95 then
+                fixed 1 t
+
+            else if t >= 0.01 then
+                fixed 2 t
+
+            else if t >= 0.0001 then
+                fixed 4 t
+
+            else
+                "rarely"
+
+        Nothing ->
+            String.fromInt times
+
+
 covered : Charged -> String
 covered report =
     percent (Dict.foldl (\_ v t -> t + sumOf v) 0 report.lines) report.total
@@ -1245,6 +1350,21 @@ jsonReport options report =
         , { key = "kinds", value = costs report.kinds }
         , { key = "functions", value = table report.functions }
         , { key = "lines", value = table report.lines }
+        , { key = "runs"
+          , value =
+                Json.object
+                    (Dict.foldl
+                        (\k v acc ->
+                            Array.pushLast
+                                { key = k
+                                , value = Json.object (Dict.foldl (\times n a -> Array.pushLast { key = String.fromInt times, value = Json.int n } a) [] v)
+                                }
+                                acc
+                        )
+                        []
+                        report.runs
+                    )
+          }
         , { key = "calls", value = table report.calls }
         , { key = "allocations", value = costs report.allocations }
         , { key = "notes"
@@ -1374,7 +1494,14 @@ htmlReport options sources report =
         hottest =
             "<h2>The costliest lines</h2><p>"
                 ++ covered report
-                ++ " of the instructions are on a line of the program; the line table names no line of the rest, which the kinds above still count.</p><table class=hot>"
+                ++ " of the instructions are on a line of the program; the line table names no line of the rest, which the kinds above still count. A line's runs are how many of its instructions ran how many times"
+                ++ (if options.ops == Nothing then
+                        ""
+
+                    else
+                        " an operation"
+                   )
+                ++ ": a line whose instructions run different numbers of times holds pieces of code that run apart.</p><table class=hot><tr><th>cost</th><th>line</th><th>source</th><th>kinds</th><th>runs, instructions × times</th><th>the compiler's account</th></tr>"
                 ++ (ranked options.top report.lines
                         |> Array.map
                             (\r ->
@@ -1388,6 +1515,8 @@ htmlReport options sources report =
                                     ++ escape (sourceLine sources r.key)
                                     ++ "</td><td>"
                                     ++ escape (kindOrder |> Array.mapAndKeepJust (\k -> Dict.get k r.kinds |> Maybe.map (\c -> k ++ " " ++ scaled options c)) |> String.join ", ")
+                                    ++ "</td><td class=runs>"
+                                    ++ escape (runsOf options report r.key |> Maybe.withDefault "")
                                     ++ "</td><td class=why>"
                                     ++ (noteLines report r.key |> Array.map escape |> String.join "<br>")
                                     ++ "</td></tr>"
@@ -1421,6 +1550,7 @@ htmlReport options sources report =
                                 |> Array.mapAndKeepJust (\k -> Dict.get k kinds |> Maybe.map (\c -> k ++ " " ++ scaled options c))
                                 |> String.join ", "
                             )
+                                ++ (runsOf options report key |> Maybe.map (\t -> "\n" ++ runsLabel options ++ t) |> Maybe.withDefault "")
                                 ++ (noteLines report key |> Array.map (\note -> "\n" ++ note) |> String.join "")
                     in
                     "<tr id=\""
@@ -1453,7 +1583,7 @@ htmlReport options sources report =
         ++ "body{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif;margin:0 auto;max-width:1100px;padding:24px 16px}"
         ++ "svg{width:100%;height:auto}.key{white-space:nowrap;margin-right:12px}.key i{display:inline-block;width:10px;height:10px;margin-right:4px;border-radius:2px}"
         ++ ".src{border-collapse:collapse;font:12px/1.35 ui-monospace,monospace;width:100%;display:block;overflow-x:auto}.src td{padding:0 8px;white-space:pre}"
-        ++ ".hot{border-collapse:collapse;font-size:13px}.hot td{padding:2px 8px;border-bottom:1px solid var(--rule)}.hot .s{font-family:ui-monospace,monospace;font-size:12px}.why{font-size:12px;color:#8a6fd1}tr:target{outline:2px solid #4a7bd0}.n{color:#888;text-align:right}.c{text-align:right;font-variant-numeric:tabular-nums;border-right:1px solid var(--rule)}"
+        ++ ".hot{border-collapse:collapse;font-size:13px}.hot td{padding:2px 8px;border-bottom:1px solid var(--rule)}.hot .s{font-family:ui-monospace,monospace;font-size:12px}.why{font-size:12px;color:#8a6fd1}.runs{font-size:12px;white-space:nowrap}.hot th{text-align:left;font-size:12px;font-weight:600;padding:2px 8px;border-bottom:1px solid var(--rule)}tr:target{outline:2px solid #4a7bd0}.n{color:#888;text-align:right}.c{text-align:right;font-variant-numeric:tabular-nums;border-right:1px solid var(--rule)}"
         ++ "</style></head><body><h1>Geng profile</h1><p>"
         ++ escape (scaled options report.total ++ " " ++ unitName options)
         ++ ". A line's cost is in its margin, its kinds in its tooltip.</p>"

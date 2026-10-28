@@ -684,7 +684,7 @@ expr env (Can.Expr nid region value) =
         Can.Call func args ->
           node (call env func args)
         Can.If branches final ->
-          node (ifChain env tipe sp branches final)
+          node (ifChain env tipe branches final)
         Can.Let _ _ ->
           letRun env tipe sp value
         Can.LetRec _ _ ->
@@ -1249,8 +1249,8 @@ binderList env sp argTypes args =
 -- @else if@ chains are one Canonical node with several branches, and they nest
 -- here. The nested nodes take the whole @if@'s type and span, which are the
 -- only ones they could have: the source has no separate expression for them.
-ifChain :: Env -> Core.Type -> Core.Span -> [(Can.Expr, Can.Expr)] -> Can.Expr -> Core.Expr_
-ifChain env tipe sp branches final =
+ifChain :: Env -> Core.Type -> [(Can.Expr, Can.Expr)] -> Can.Expr -> Core.Expr_
+ifChain env tipe branches final =
   case branches of
     [] ->
       -- The parser will not build one; `Can.If` is the shape of `if`/`else`.
@@ -1262,7 +1262,12 @@ ifChain env tipe sp branches final =
           Core.Alt (boolPattern False) $
             case rest of
               [] -> expr env final
-              _ -> Core.Expr (ifChain env tipe sp rest final) tipe sp
+              -- An `else if` is a `case` of its own condition, at the
+              -- condition's place: at the chain's, the C for every test of
+              -- the chain claimed the first `if`'s row (m4-profile.md §PF11).
+              (Can.Expr _ region _, _) : _ ->
+                let at = span env region
+                 in Core.Expr (ifChain env tipe rest final) tipe at
         ]
         Nothing
 
