@@ -524,7 +524,8 @@ function _Str_utf8Valid(b) {
 -- over its own slice of a buffer, as it was in the kernel (D202), and a bytes
 -- transient is a @DataView@ too, which 'BtToBytes' hands over as it is. What
 -- names an argument twice is a helper in 'bytesHelpers', so 'inlines' holds
--- for all of them. The retired four have no type, so no @core@ reaches them.
+-- for all of them, as does D1018's @bytes_from_array@. The retired three have
+-- no type, so no @core@ reaches them.
 bytes :: BytesPrim -> [JS.Expr] -> JS.Expr
 bytes p args =
   case (p, args) of
@@ -537,6 +538,7 @@ bytes p args =
     (BtToBytes, [t]) -> t
     (BtSetBytes, _) -> helper "_BytesPrim_setBytes" args
     (BtLength, [t]) -> JS.Access t (JsName.fromLocalHumanReadable "byteLength")
+    (BFromArray, [_]) -> helper "_BytesPrim_fromArray" args
     _ -> arityError (BytesOp p) args
   where
     ref name = JS.Ref (JsName.fromLocalHumanReadable name)
@@ -586,6 +588,17 @@ function _BytesPrim_setU8(t, i, v) { t.setUint8(i, v); return t; }
 function _BytesPrim_setBytes(t, i, b) {
   new Uint8Array(t.buffer, t.byteOffset + i, b.byteLength).set(new Uint8Array(b.buffer, b.byteOffset, b.byteLength));
   return t;
+}
+
+// An `Array UInt8`'s bytes (D1018). The array is a JS array or a `_Slice`
+// over a growable one, read here without `arrayHelpers`, which a program that
+// reaches this need not have.
+function _BytesPrim_fromArray(a) {
+  var items = a, off = 0, n;
+  if (!Array.isArray(a)) { items = a.buf; off = a.off; n = a.len; } else { n = a.length; }
+  var out = new Uint8Array(n);
+  for (var i = 0; i < n; i++) out[i] = items[off + i];
+  return new DataView(out.buffer);
 }
 |]
 

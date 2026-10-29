@@ -280,7 +280,9 @@ data BytesPrim
     BCmp
   | -- | Retired by D233.
     BToArray
-  | -- | Retired by D233.
+  | -- | Retired by D233, and given a type again by D1018: an @Array UInt8@'s
+    -- bytes as a @Bytes@, one copy, so that a program writes bytes a piece at
+    -- a time onto an @Array.Builder UInt8@ (geng-lang @m4-visiterm.md@ §VA47).
     BFromArray
   | -- | A bytes transient for @Bytes.Encode@ and @Bytes.flatten@, zeroed, of
     -- the given length. Its linear use is not checked (D233).

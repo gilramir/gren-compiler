@@ -94,8 +94,11 @@ spec = do
       typeOf "bytes_slice" `shouldBe` Just (fn [tBytes, tInt, tInt] tBytes)
 
     it "a retired bytes primitive has no type, so core cannot name it (D233)" $
-      map answer ["bytes_append", "bytes_cmp", "bytes_to_array", "bytes_from_array"]
-        `shouldBe` [NoTypeYet, NoTypeYet, NoTypeYet, NoTypeYet]
+      map answer ["bytes_append", "bytes_cmp", "bytes_to_array"]
+        `shouldBe` [NoTypeYet, NoTypeYet, NoTypeYet]
+
+    it "`bytes_from_array` makes an Array UInt8 Bytes, retired by D233 and typed again by D1018" $
+      typeOf "bytes_from_array" `shouldBe` Just (fn [Can.TType ModuleName.array "Array" [tUInt8]] tBytes)
 
     it "`str_cmp` answers an Int, and Geng makes the Order (D207)" $
       typeOf "str_cmp" `shouldBe` Just (fn [tString, tString] tInt)
@@ -272,6 +275,9 @@ tString = Can.TType ModuleName.string "String" []
 
 tBytes :: Can.Type
 tBytes = Can.TType ModuleName.bytes "Bytes" []
+
+tUInt8 :: Can.Type
+tUInt8 = Can.TType ModuleName.basics "UInt8" []
 
 tTransient :: Can.Type
 tTransient = Can.TType ModuleName.bytesTransient "Transient" []

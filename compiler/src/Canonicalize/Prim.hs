@@ -215,8 +215,9 @@ strType p =
 
 -- BYTES
 
--- | D233's eight. The transient is @Bytes.Transient.Transient@, declared in a
--- module @core@ does not expose; the four retired primitives have no type.
+-- | D233's eight, and @bytes_from_array@, which D1018 gave a type again. The
+-- transient is @Bytes.Transient.Transient@, declared in a module @core@ does
+-- not expose; the three retired primitives have no type.
 bytesType :: BytesPrim -> Maybe Can.Type
 bytesType p =
   case p of
@@ -227,7 +228,7 @@ bytesType p =
     BEq -> Just (fn [tBytes, tBytes] tBool)
     BCmp -> Nothing
     BToArray -> Nothing
-    BFromArray -> Nothing
+    BFromArray -> Just (fn [Can.TType ModuleName.array "Array" [tUInt8]] tBytes)
     BtNew -> Just (fn [tInt] tTransient)
     BtSetU8 -> Just (fn [tTransient, tInt, tInt] tTransient)
     BtToBytes -> Just (fn [tTransient] tBytes)
