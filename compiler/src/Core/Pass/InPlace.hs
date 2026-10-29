@@ -450,11 +450,16 @@ hoist prog value =
               (body', n2, seen2) = go body n1
               names = binderNames (map Core._bindBinder binds)
            in (e {Core._exprValue = Core.ELetRec binds' body'}, n2, outside names (seen ++ seen2))
+        -- A binding's value may read the bindings before it in the same
+        -- @let@, so the let's names are dropped from what its values read
+        -- too, not only from what its body reads: a read of @$n0.turn@
+        -- in @let $n0 = t.screen; $n1 = $n0.turn in …@ cannot be made
+        -- outside the lambda the let is in.
         Core.ELet binds body ->
           let (values, n1, seen) = goAll (map Core._bindValue binds) n
               (body', n2, seen2) = go body n1
               names = binderNames (map Core._bindBinder binds)
-           in (e {Core._exprValue = Core.ELet (zipWith (\(Core.Bind b _) v -> Core.Bind b v) binds values) body'}, n2, seen ++ outside names seen2)
+           in (e {Core._exprValue = Core.ELet (zipWith (\(Core.Bind b _) v -> Core.Bind b v) binds values) body'}, n2, outside names (seen ++ seen2))
         Core.ECase scrut alts fallback ->
           let (scrut', n1, seen) = go scrut n
               (bodies, n2, altSeen) = goEach [(binderNames (patternBinders pat), b) | Core.Alt pat b <- alts] n1
