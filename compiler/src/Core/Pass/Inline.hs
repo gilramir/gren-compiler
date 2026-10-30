@@ -44,8 +44,11 @@
 --     scrutinee with no effect, is that constructor;
 --   * a case that answers each constructor of its scrutinee with that same
 --     constructor is its scrutinee.
---   * a comparison or @Int@ arithmetic of two literals is its answer, and a
---     top-level binding that is a literal or a nullary constructor is that.
+--   * a comparison, @Int@ arithmetic or a bitwise primitive of literals is
+--     its answer, a shift only by a count in its primitive's @[0, width)@,
+--     and a top-level binding that is a literal or a nullary constructor is
+--     that, so a constant written as a mask of others is a literal too
+--     (geng-lang @m4-visiterm.md@ §VA54, D1023).
 --   * a partial application of a global bound by a @let@ and applied at
 --     once, with every argument a value, is the one saturated call — what
 --     inlining @apR@ leaves of @x |> f a@; and one whose arguments are free
@@ -135,7 +138,9 @@ import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Word (Word32)
+import Data.Bits (Bits, complement, shiftL, shiftR, xor, (.&.), (.|.))
+import Data.Int (Int32, Int64)
+import Data.Word (Word32, Word64)
 import Gren.ModuleName qualified as ModuleName
 
 -- KNOBS
@@ -860,6 +865,16 @@ evaluated e =
 fold :: Prim.PrimOp -> [Core.Expr_] -> Maybe Core.Expr_
 fold op args =
   case (op, args) of
+    -- A shift's count is an @Int@ at every width (A5), so it comes before
+    -- the @i32@ case, whose two arguments are @Int@s too.
+    (Prim.IntOp t p, [Core.ELit a, Core.ELit (Core.LInt n)])
+      | p == Prim.IShl || p == Prim.IShr || p == Prim.IUshr ->
+          case (t, a) of
+            (Prim.I32, Core.LInt x) -> shifted Core.LInt 32 (fromIntegral :: Int32 -> Word32) fromIntegral p x n
+            (Prim.I64, Core.LInt64 x) -> shifted Core.LInt64 64 (fromIntegral :: Int64 -> Word64) fromIntegral p x n
+            (Prim.U32, Core.LUInt32 x) -> shifted Core.LUInt32 32 id id p x n
+            (Prim.U64, Core.LUInt64 x) -> shifted Core.LUInt64 64 id id p x n
+            _ -> Nothing
     (Prim.IntOp Prim.I32 p, [Core.ELit (Core.LInt a), Core.ELit (Core.LInt b)]) ->
       case p of
         Prim.IAdd -> Just (Core.ELit (Core.LInt (a + b)))
@@ -867,30 +882,53 @@ fold op args =
         Prim.IMul -> Just (Core.ELit (Core.LInt (a * b)))
         Prim.IEq -> Just (bool (a == b))
         Prim.ILt -> Just (bool (a < b))
-        _ -> Nothing
+        _ -> logical Core.LInt p a b
     (Prim.IntOp Prim.I64 p, [Core.ELit (Core.LInt64 a), Core.ELit (Core.LInt64 b)]) -> arith Core.LInt64 p a b
     (Prim.IntOp Prim.U32 p, [Core.ELit (Core.LUInt32 a), Core.ELit (Core.LUInt32 b)]) -> arith Core.LUInt32 p a b
     (Prim.IntOp Prim.U64 p, [Core.ELit (Core.LUInt64 a), Core.ELit (Core.LUInt64 b)]) -> arith Core.LUInt64 p a b
     (Prim.StrOp Prim.SEq, [Core.ELit (Core.LString a), Core.ELit (Core.LString b)]) -> Just (bool (a == b))
     (Prim.IntOp Prim.I32 Prim.INeg, [Core.ELit (Core.LInt a)]) -> Just (Core.ELit (Core.LInt (negate a)))
     (Prim.IntOp Prim.I64 Prim.INeg, [Core.ELit (Core.LInt64 a)]) -> Just (Core.ELit (Core.LInt64 (negate a)))
+    (Prim.IntOp Prim.I32 Prim.INot, [Core.ELit (Core.LInt a)]) -> Just (Core.ELit (Core.LInt (complement a)))
+    (Prim.IntOp Prim.I64 Prim.INot, [Core.ELit (Core.LInt64 a)]) -> Just (Core.ELit (Core.LInt64 (complement a)))
+    (Prim.IntOp Prim.U32 Prim.INot, [Core.ELit (Core.LUInt32 a)]) -> Just (Core.ELit (Core.LUInt32 (complement a)))
+    (Prim.IntOp Prim.U64 Prim.INot, [Core.ELit (Core.LUInt64 a)]) -> Just (Core.ELit (Core.LUInt64 (complement a)))
     _ -> Nothing
   where
     -- 'Int64', 'Word32' and 'Word64' wrap as the widths they stand for do.
-    arith :: (Integral a) => (a -> Core.Literal) -> Prim.IntPrim -> a -> a -> Maybe Core.Expr_
+    arith :: (Integral a, Bits a) => (a -> Core.Literal) -> Prim.IntPrim -> a -> a -> Maybe Core.Expr_
     arith lit p a b =
       case p of
         Prim.IAdd -> Just (Core.ELit (lit (a + b)))
         Prim.ISub -> Just (Core.ELit (lit (a - b)))
         Prim.IMul -> Just (Core.ELit (lit (a * b)))
-        _ -> compared p a b
-
-    compared :: (Ord a) => Prim.IntPrim -> a -> a -> Maybe Core.Expr_
-    compared p a b =
-      case p of
         Prim.IEq -> Just (bool (a == b))
         Prim.ILt -> Just (bool (a < b))
+        _ -> logical lit p a b
+
+    -- Two's complement at the literal's own width, as every backend does it.
+    logical :: (Bits a) => (a -> Core.Literal) -> Prim.IntPrim -> a -> a -> Maybe Core.Expr_
+    logical lit p a b =
+      case p of
+        Prim.IAnd -> Just (Core.ELit (lit (a .&. b)))
+        Prim.IOr -> Just (Core.ELit (lit (a .|. b)))
+        Prim.IXor -> Just (Core.ELit (lit (xor a b)))
         _ -> Nothing
+
+    -- The raw primitive's precondition is a count in @[0, width)@ (A4, which
+    -- @Bitwise@ clamps to in Geng before it calls one); outside it nothing is
+    -- computed. @shr@ is arithmetic on a signed value; @ushr@ shifts the
+    -- value's unsigned reading, its bits as they are.
+    shifted :: (Bits a, Bits u) => (a -> Core.Literal) -> Int32 -> (a -> u) -> (u -> a) -> Prim.IntPrim -> a -> Int32 -> Maybe Core.Expr_
+    shifted lit width toU fromU p a n
+      | n < 0 || n >= width = Nothing
+      | otherwise =
+          let k = fromIntegral n
+           in case p of
+                Prim.IShl -> Just (Core.ELit (lit (shiftL a k)))
+                Prim.IShr -> Just (Core.ELit (lit (shiftR a k)))
+                Prim.IUshr -> Just (Core.ELit (lit (fromU (shiftR (toU a) k))))
+                _ -> Nothing
 
     bool b =
       if b
