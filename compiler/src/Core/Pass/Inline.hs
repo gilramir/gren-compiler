@@ -938,7 +938,7 @@ bindAll pairs body tipe sp =
                 typed = (refineTails tipe body') {Core._exprSpan = at}
             return (foldr (\b acc -> Core.Expr (Core.ELet [b] acc) tipe sp) typed (reverse lets))
         (binder, arg) : more
-          | atomic arg ->
+          | atomic arg || fieldOfLocal arg ->
               go more (Map.insert (Core._binderName binder) arg env) lets
           | lambda arg && uses (Core._binderName binder) body == 1 ->
               -- A lambda is a value, so making it where it is used rather than
@@ -1026,6 +1026,18 @@ atomic e =
     Core.EVar _ -> True
     Core.ELit _ -> True
     Core.ECtor _ _ [] -> True
+    _ -> False
+
+-- | A field of a local, or of one of its fields: substituted at each use as
+-- the local is, rather than bound to a local of its own, which would be a
+-- second name for what the field holds (geng-lang @m4-visiterm.md@ §VA52).
+fieldOfLocal :: Core.Expr -> Bool
+fieldOfLocal e =
+  case Core._exprValue e of
+    Core.EAccess base _ ->
+      case Core._exprValue base of
+        Core.EVar _ -> True
+        _ -> fieldOfLocal base
     _ -> False
 
 -- | Free of effects: dropping it changes nothing but the time taken.
