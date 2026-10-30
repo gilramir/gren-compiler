@@ -42,9 +42,10 @@
 --     Names are compared through what they alias ('Aliases', D1021): a
 --     local bound to a field of one, or to what a call on one answers, or a
 --     pattern's binder, may share the scrutinee's buffer, so a read of
---     @$n0 = s.cells@ crosses a write of @s.cells@. The inliner makes such a
---     local of a builder argument it reads twice, as 'Array.Builder.get'
---     does, and the read once moved past the write (visiterm's
+--     @$n0 = s.cells@ crosses a write of @s.cells@. The inliner binds every
+--     argument that is not atomic to such a local ('Inline.bindAll'), a
+--     field among them, and a read through one, inlined from
+--     'Array.Builder.get', once moved past the write (visiterm's
 --     @printUnicode@, geng-lang @m4-visiterm.md@ §VA52).
 --
 -- The last is not relaxed for a program that never logs: the passes see every
