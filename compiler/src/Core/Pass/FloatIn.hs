@@ -39,6 +39,13 @@
 --     this pass runs after it. A transient the binding makes and uses up
 --     itself, or one nothing else names, moves with it; a binding that goes
 --     unread is dropped whatever it names, since that reorders nothing.
+--     Names are compared through what they alias ('Aliases', D1021): a
+--     local bound to a field of one, or to what a call on one answers, or a
+--     pattern's binder, may share the scrutinee's buffer, so a read of
+--     @$n0 = s.cells@ crosses a write of @s.cells@. The inliner makes such a
+--     local of a builder argument it reads twice, as 'Array.Builder.get'
+--     does, and the read once moved past the write (visiterm's
+--     @printUnicode@, geng-lang @m4-visiterm.md@ §VA52).
 --
 -- The last is not relaxed for a program that never logs: the passes see every
 -- module but not the roots, so they cannot tell, and a log added in one place
@@ -190,16 +197,41 @@ hasLog e =
 
 -- | Why a binding's right-hand side may not move, if it may not: dropped
 -- ('Nothing'), or moved past what reads the locals in the set.
-refusal :: Program -> Maybe (Set Name) -> Core.Expr -> Maybe String
-refusal p moving e
+refusal :: Program -> Aliases -> Maybe (Set Name) -> Core.Expr -> Maybe String
+refusal p al moving e
   | Core.ELam _ _ <- Core._exprValue e = Nothing
   | hasLog e = Just "log"
   | not (Set.disjoint (_logging p) (Refs._refGlobals (Refs.refsIn e))) = Just "logging-global"
   | any (holdsFunction p) (freeVarTypes e) = Just "function-value"
   | Just others <- moving,
-    any (\(x, t) -> holdsAffine p t && Set.member x others) (freeVarsTyped e) =
+    not (Set.disjoint (affineRoots p al e) (Set.unions (map (rootsOf al) (Set.toList others)))) =
       Just "affine-value"
   | otherwise = Nothing
+
+-- | For each local in scope that can hold an affine value and may share one
+-- with others, the locals it may share it with, itself among them: a @let@'s
+-- binding with every such local its right-hand side reads, and a pattern's
+-- binder with those its scrutinee reads, each as they alias in turn. A local
+-- not in the map is its own (a parameter's, or one made fresh). It is a
+-- superset: a binding that only reads a builder's length is counted as
+-- sharing it, and so is kept in place a little more often than it must be.
+type Aliases = Map Name (Set Name)
+
+rootsOf :: Aliases -> Name -> Set Name
+rootsOf al x = Map.findWithDefault (Set.singleton x) x al
+
+-- | The roots of the locals that can hold an affine value which an
+-- expression reads.
+affineRoots :: Program -> Aliases -> Core.Expr -> Set Name
+affineRoots p al e =
+  Set.unions [rootsOf al x | (x, t) <- freeVarsTyped e, holdsAffine p t]
+
+-- | A local bound to @rhs@, when its type can hold an affine value: it may
+-- share what the locals @rhs@ reads hold. A name bound twice keeps both.
+alias :: Program -> Name -> Core.Type -> Core.Expr -> Aliases -> Aliases
+alias p x t rhs al
+  | holdsAffine p t = Map.insertWith Set.union x (Set.insert x (affineRoots p al rhs)) al
+  | otherwise = al
 
 -- | The locals an expression reads that it does not bind, with their types.
 freeVarsTyped :: Core.Expr -> [(Name, Core.Type)]
@@ -233,35 +265,55 @@ type Line = [String]
 
 topLevel :: Program -> Name -> Core.Bind -> (Core.Bind, [Line])
 topLevel p home (Core.Bind b v) =
-  let (v', lines_) = walk p v
+  let (v', lines_) = walk p Map.empty v
       tag l = Name.toChars home : Name.toChars (Core._binderName b) : l
    in (Core.Bind b v', map tag lines_)
 
 -- | Top down: a binding moved into an alternative is looked at again there,
 -- and so goes as deep as it can.
-walk :: Program -> Core.Expr -> (Core.Expr, [Line])
-walk p e =
+walk :: Program -> Aliases -> Core.Expr -> (Core.Expr, [Line])
+walk p al0 e =
   case Core._exprValue e of
     Core.ELet _ _ ->
       let (frames, body) = chain e
           -- Each binding is known by its place in the chain, not its name: a
           -- pass before this one may bind a name twice in one chain.
           numbered = zip [0 :: Int ..] [(i, b) | (i, (_, binds)) <- zip [0 :: Int ..] frames, b <- binds]
-          (kept, body', lines1) = sinkRun p [(k, b) | (k, (_, b)) <- numbered] body
-          walked = [let (v', l) = walk p v in (k, (Core.Bind x v', l)) | (k, Core.Bind x v) <- kept]
+          al =
+            List.foldl'
+              (\acc (_, (_, Core.Bind x v)) -> alias p (Core._binderName x) (Core._binderType x) v acc)
+              al0
+              numbered
+          (kept, body', lines1) = sinkRun p al [(k, b) | (k, (_, b)) <- numbered] body
+          walked = [let (v', l) = walk p al v in (k, (Core.Bind x v', l)) | (k, Core.Bind x v) <- kept]
           keptAt = Map.fromList [(k, b) | (k, (b, _)) <- walked]
           frameOf = Map.fromList [(k, i) | (k, (i, _)) <- numbered]
           inFrame = Map.fromListWith (flip (++)) [(frameOf Map.! k, [b]) | (k, b) <- Map.toList keptAt]
-          (body'', lines2) = walk p body'
+          (body'', lines2) = walk p al body'
           rebuild (i, (frame, _)) inner =
             case Map.lookup i inFrame of
               Nothing -> inner
               Just found -> frame {Core._exprValue = Core.ELet found inner}
           e' = foldr rebuild body'' (zip [0 :: Int ..] frames)
        in (e', lines1 ++ concatMap (snd . snd) walked ++ lines2)
+    Core.ECase scrut alts fallback ->
+      let roots = affineRoots p al0 scrut
+          inAlt (Core.Alt pattern body) =
+            let al =
+                  if Set.null roots
+                    then al0
+                    else foldr (\x -> Map.insertWith Set.union x (Set.insert x roots)) al0 (Set.toList (Refs.patternBinders pattern))
+                (body', l) = walk p al body
+             in (Core.Alt pattern body', l)
+          (scrut', l1) = walk p al0 scrut
+          alts' = map inAlt alts
+          fallback' = fmap (walk p al0) fallback
+       in ( e {Core._exprValue = Core.ECase scrut' (map fst alts') (fmap fst fallback')},
+            l1 ++ concatMap snd alts' ++ maybe [] snd fallback'
+          )
     _ ->
-      ( runIdentity (Specialize.childrenA (Identity . fst . walk p) e),
-        Specialize.children_ (snd . walk p) e
+      ( runIdentity (Specialize.childrenA (Identity . fst . walk p al0) e),
+        Specialize.children_ (snd . walk p al0) e
       )
 
 -- | A chain of non-recursive @let@s, one directly in the next's body, and the
@@ -287,8 +339,8 @@ chain e =
 -- only when a binding moves into it. A chain of N one-binding @let@s is one
 -- run ('chain'), so it is looked at in time linear in N whether each reads the
 -- last (@source/let@'s probe, §FI12) or only the body does.
-sinkRun :: Program -> [(Int, Core.Bind)] -> Core.Expr -> ([(Int, Core.Bind)], Core.Expr, [Line])
-sinkRun p binds body =
+sinkRun :: Program -> Aliases -> [(Int, Core.Bind)] -> Core.Expr -> ([(Int, Core.Bind)], Core.Expr, [Line])
+sinkRun p al binds body =
   let (kept, _, _, (body', _), lines_) = foldr step ([], Set.empty, Set.empty, (body, Refs.freeLocals body), []) binds
    in (kept, body', lines_)
   where
@@ -310,7 +362,7 @@ sinkRun p binds body =
             then keep Nothing
             else
               if not (Set.member x bodyFree)
-                then case refusal p Nothing rhs of
+                then case refusal p al Nothing rhs of
                   Nothing -> (after, afterNames, afterReads, bodied, line "dropped" : lines_)
                   Just why -> keep (Just ("refused-" ++ why))
                 else
@@ -319,7 +371,9 @@ sinkRun p binds body =
                     else case sink b rhsFree body0 of
                       Nothing -> keep (Just "stays")
                       Just body1 ->
-                        case refusal p (Just (Set.union afterReads bodyFree)) rhs of
+                        -- the binding's own name is read where it moves to,
+                        -- and aliases what it reads: not a crossing
+                        case refusal p al (Just (Set.delete x (Set.union afterReads bodyFree))) rhs of
                           Just why -> keep (Just ("refused-" ++ why))
                           Nothing -> (after, afterNames, afterReads, (body1, Refs.freeLocals body1), line "moved" : lines_)
 
