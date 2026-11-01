@@ -139,6 +139,9 @@ spec = do
                      Just (fn [tTransientA, tTransientA, tInt, tInt] tTransientA)
                    ]
 
+    it "D1026's tr_drop answers the value it is given" $
+      typeOf "tr_drop" `shouldBe` Just (fn [tTransientA, Can.TVar "b"] (Can.TVar "b"))
+
     it "the three source primitives are D71's mailbox (D252, D253, D254)" $
       map typeOf ["source_new", "source_next", "source_close"]
         `shouldBe` [ Just (tTask tSourceA),

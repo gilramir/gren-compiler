@@ -282,8 +282,11 @@ transientType p =
     TrSlice -> fn [tTransient, tInt, tInt] tArray
     TrRotate -> fn [tTransient, tInt, tInt, tInt] tTransient
     TrAppendSlice -> fn [tTransient, tTransient, tInt, tInt] tTransient
+    -- D1026: made only by the drop pass; no @\@prim@ declares it.
+    TrDrop -> fn [tTransient, b] b
   where
     a = Can.TVar "a"
+    b = Can.TVar "b"
     tArray = Can.TType ModuleName.array "Array" [a]
     tTransient = Can.TType ModuleName.arrayTransient "Transient" [a]
 

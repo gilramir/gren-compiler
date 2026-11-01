@@ -366,6 +366,16 @@ data TransientPrim
     -- terminal's row trimmed onto its page. Precondition:
     -- @0 <= lo <= hi <= length s@.
     TrAppendSlice
+  | -- | @tr_drop t v@: @v@, and @t@'s buffer given back to the allocator once
+    -- @v@ is computed (geng-lang @m4-free.md@ D1026). Only the @drop@ pass
+    -- makes one, natively, where it has proved that nothing reads @t@ after
+    -- @v@ and nothing else holds it; no source can name it. A backend may
+    -- answer @v@ and do nothing else, and JavaScript and the BEAM do. The C
+    -- runtime frees the buffer only when the handle owns it, it is old, it
+    -- holds no pointers and it is the start of its block; otherwise it too
+    -- does nothing. Its result is @v@'s, so that it is the value of the
+    -- binding whose computation reads @t@ last.
+    TrDrop
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | The reified @Task@ tree the runtime steps. @map@, @sequence@ and friends
@@ -522,8 +532,8 @@ allPrims =
     -- Appended by D863 (m4-refine.md §RF32).
     ++ [BytesOp BtLength]
     -- Appended by D904 and D905 (m4-visiterm.md §VA11), and after them
-    -- D983's tr_slice (§VA16), D991's tr_rotate (§VA20) and D996's
-    -- tr_append_slice (§VA24).
+    -- D983's tr_slice (§VA16), D991's tr_rotate (§VA20), D996's
+    -- tr_append_slice (§VA24) and D1026's tr_drop (m4-free.md).
     ++ map TransientOp [TrFill .. maxBound]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
@@ -701,6 +711,7 @@ transientPrimName p =
     TrSlice -> "slice"
     TrRotate -> "rotate"
     TrAppendSlice -> "append_slice"
+    TrDrop -> "drop"
 
 taskPrimName :: TaskPrim -> Text
 taskPrimName p =
@@ -860,6 +871,8 @@ primArity op =
         TrRotate -> 4
         -- transient, source, from, to
         TrAppendSlice -> 4
+        -- transient, the value answered
+        TrDrop -> 2
     TaskOp p ->
       case p of
         TaskSucceed -> 1

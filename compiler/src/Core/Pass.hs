@@ -23,6 +23,7 @@
 -- > GENG_CORE_PASSES=arraytr       -- an Array a loop only appends to, grown through the transient ("Core.Pass.ArrayTransient")
 -- > GENG_CORE_PASSES=arraypop      -- the same, for a loop that pops and pushes back alone (D699)
 -- > GENG_CORE_PASSES=inplace       -- an affine record nothing reads again updated in place ("Core.Pass.InPlace")
+-- > GENG_CORE_PASSES=drop          -- a builder an affine record holds freed where it is read last, native (D1026)
 --
 -- A switch rather than a mode, for the reason C4 gives: the pass is optional,
 -- its output is still Core, and a program has to answer the same either way.
@@ -170,7 +171,7 @@ defaults :: Target.Target -> [String]
 defaults target =
   case target of
     Target.Js -> ["specialize", "foldspec", "transient", "arraypop", "inlinematch", "float", "floatin", "mutual", "case", "tailcall", "inplace"]
-    Target.Native -> ["specialize", "foldspec", "transient", "arraypop", "mono", "inline", "float", "floatin", "mutual", "case", "tailcall", "inplace"]
+    Target.Native -> ["specialize", "foldspec", "transient", "arraypop", "mono", "inline", "float", "floatin", "mutual", "case", "tailcall", "inplace", "drop"]
     _ -> ["specialize", "foldspec", "inline", "float", "floatin", "mutual", "case", "tailcall"]
 
 run :: Target.Target -> [Core.QualName] -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
@@ -197,4 +198,7 @@ runAccounted target roots cores =
         | "inline" `elem` names target = Inline.account Inline.Full inlined
         | "inlinematch" `elem` names target = Inline.account Inline.Matched inlined
         | otherwise = []
-   in (pass "inplace" (InPlace.run roots) looped, notes)
+      -- D1026 (geng-lang m4-free.md): after the marks, a builder an affine
+      -- record holds dropped where it is read for the last time.
+      marked = pass "inplace" (InPlace.run roots) looped
+   in (pass "drop" (InPlace.runDrops roots) marked, notes)

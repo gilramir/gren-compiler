@@ -647,6 +647,8 @@ transient p args =
     (TrSlice, [_, _, _]) -> helper "_ArrayPrim_trSlice" args
     (TrRotate, [_, _, _, _]) -> helper "_ArrayPrim_trRotate" args
     (TrAppendSlice, [_, _, _, _]) -> helper "_ArrayPrim_trAppendSlice" args
+    -- D1026: the drop pass is native's alone; V8 collects the buffer.
+    (TrDrop, [_, v]) -> v
     _ -> arityError (TransientOp p) args
   where
     helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
