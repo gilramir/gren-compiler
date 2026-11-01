@@ -56,7 +56,10 @@ instance Semigroup Verdict where
 -- @m4-own.md@ §OW33, D974): each fact restricts its callers, so one the new
 -- version has and the old does not is MAJOR, and one it lost is MINOR. A fact
 -- is matched by its parameter's index, not its name, and a type parameter's
--- by the renaming the type comparison found.
+-- by the renaming the type comparison found. A parameter's @hands@ is a
+-- weaker @takes@ (D1034): against the other version's @takes@ of the same
+-- parameter it is left out, so that @takes@ to @hands@ is a @takes@ lost
+-- (MINOR) and @hands@ to @takes@ one gained (MAJOR).
 ownershipVerdict :: Docs.Value -> Docs.Value -> Verdict
 ownershipVerdict (Docs.Value _ oldType _ oldFacts) (Docs.Value _ newType _ newFacts) =
   let renamed = Map.fromList (maybe [] id (diffType oldType newType))
@@ -64,15 +67,27 @@ ownershipVerdict (Docs.Value _ oldType _ oldFacts) (Docs.Value _ newType _ newFa
         case fact of
           Docs.KeepsTwice v -> Docs.KeepsTwice (Map.findWithDefault v v renamed)
           _ -> fact
-      oldKeys = map (Docs.factKey . rename) oldFacts
-      newKeys = map Docs.factKey newFacts
-      gained = [f | f <- newFacts, Docs.factKey f `notElem` oldKeys]
-      lost = [f | f <- oldFacts, Docs.factKey (rename f) `notElem` newKeys]
+      takesIn facts = [i | Docs.Takes i _ <- facts]
+      weaker others fact =
+        case fact of
+          Docs.Hands i _ _ _ _ -> i `elem` takesIn others
+          _ -> False
+      oldFacts' = filter (not . weaker newFacts) oldFacts
+      newFacts' = filter (not . weaker oldFacts) newFacts
+      oldKeys = map (Docs.factKey . rename) oldFacts'
+      newKeys = map Docs.factKey newFacts'
+      gained = [f | f <- newFacts', Docs.factKey f `notElem` oldKeys]
+      lost = [f | f <- oldFacts', Docs.factKey (rename f) `notElem` newKeys]
       magnitude
         | not (null gained) = M.MAJOR
         | not (null lost) = M.MINOR
         | otherwise = M.PATCH
-   in Verdict magnitude (map (now . Docs.factWords) gained ++ map (noLonger . Docs.factWords) lost)
+      handsIn facts i = [f | f@(Docs.Hands h _ _ _ _) <- facts, h == i]
+      lostWords fact =
+        case fact of
+          Docs.Takes i _ | (h : _) <- handsIn newFacts i -> "It now " ++ Docs.factWords h ++ ", which asks less of a caller."
+          _ -> noLonger (Docs.factWords fact)
+   in Verdict magnitude (map (now . Docs.factWords) gained ++ map lostWords lost)
   where
     now said =
       case List.stripPrefix "may " said of

@@ -106,13 +106,17 @@ data Fact
   | -- | A parameter whose type is affine or holds a type variable is taken
     -- (D920, §OW6).
     Takes Int Name.Name
+  | -- | A parameter taken only to be handed to the callback that is parameter
+    -- @k@, as its @j@th argument of @n@ (D1034): 'Takes' made weaker, since a
+    -- caller may hand it a borrow when the callback only looks.
+    Hands Int Int Int Int Name.Name
   | -- | A function parameter may be called or kept more than once (D952).
     UsesMany Int Name.Name
   deriving (Eq)
 
 -- | A fact as the checker's @I@ line writes it: @escapes:0:fn@,
 -- @borrows:1:array:path@, @keeps-twice:a@, @lends:0.1:fn@, @takes:1:acc@,
--- @uses-many:0:fn@.
+-- @hands:1.0.0.1:maybe@, @uses-many:0:fn@.
 factFromToken :: String -> Maybe Fact
 factFromToken token =
   case splitOn ':' token of
@@ -124,6 +128,10 @@ factFromToken token =
         [k, j] -> Lends <$> number k <*> number j <*> pure (Name.fromChars n)
         _ -> Nothing
     ["takes", i, n] -> Takes <$> number i <*> pure (Name.fromChars n)
+    ["hands", ikjn, n] ->
+      case splitOn '.' ikjn of
+        [i, k, j, c] -> Hands <$> number i <*> number k <*> number j <*> number c <*> pure (Name.fromChars n)
+        _ -> Nothing
     ["uses-many", i, n] -> UsesMany <$> number i <*> pure (Name.fromChars n)
     _ -> Nothing
   where
@@ -147,6 +155,7 @@ factKey fact =
     KeepsTwice v -> ("keeps-twice", 0, 0, Name.toChars v)
     Lends k j _ -> ("lends", k, j, "")
     Takes i _ -> ("takes", i, 0, "")
+    Hands i k j c _ -> ("hands", i, k, show j ++ "." ++ show c)
     UsesMany i _ -> ("uses-many", i, 0, "")
 
 -- | A fact in words, as the documentation and @geng package diff@ print it
@@ -160,6 +169,7 @@ factWords fact =
     KeepsTwice v -> "may keep a value of type " ++ Name.toChars v ++ " twice"
     Lends k j n -> "lends " ++ param k n ++ " its " ++ ordinal (j + 1) ++ " argument to look at"
     Takes i n -> "takes " ++ param i n
+    Hands i k j _ n -> "takes " ++ param i n ++ " only to hand it to its " ++ ordinal (k + 1) ++ " argument" ++ (if j == 0 then "" else " as its " ++ ordinal (j + 1))
     UsesMany i n -> "may call " ++ param i n ++ " more than once"
   where
     param i n =
@@ -353,6 +363,7 @@ encodeFact fact =
       KeepsTwice v -> [kind "keeps-twice", "var" ==> E.name v]
       Lends k j n -> [kind "lends", "arg" ==> E.int k, "name" ==> E.name n, "lent" ==> E.int j]
       Takes i n -> [kind "takes", "arg" ==> E.int i, "name" ==> E.name n]
+      Hands i k j c n -> [kind "hands", "arg" ==> E.int i, "name" ==> E.name n, "callback" ==> E.int k, "lent" ==> E.int j, "count" ==> E.int c]
       UsesMany i n -> [kind "uses-many", "arg" ==> E.int i, "name" ==> E.name n]
   where
     kind k = "fact" ==> E.chars k
@@ -367,6 +378,7 @@ factDecoder =
       "keeps-twice" -> KeepsTwice <$> D.field "var" nameDecoder
       "lends" -> (\k n j -> Lends k j n) <$> D.field "arg" D.int <*> D.field "name" nameDecoder <*> D.field "lent" D.int
       "takes" -> Takes <$> D.field "arg" D.int <*> D.field "name" nameDecoder
+      "hands" -> (\i n k j c -> Hands i k j c n) <$> D.field "arg" D.int <*> D.field "name" nameDecoder <*> D.field "callback" D.int <*> D.field "lent" D.int <*> D.field "count" D.int
       "uses-many" -> UsesMany <$> D.field "arg" D.int <*> D.field "name" nameDecoder
       _ -> D.failure BadType
 
