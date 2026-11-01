@@ -68,21 +68,27 @@
 -- record read for the last time, with nothing else holding its buffer? There
 -- it wraps the value of the binding that reads it last in 'Prim.TrDrop',
 -- which answers that value and gives the buffer back to the allocator. Its
--- walk differs from the marks' in four things, each toward fewer drops:
+-- walk differs from the marks' in three things, each toward fewer drops:
 --
 --   * it tracks every value whose type can hold an array transient
 --     ('canHoldTransient'), where the marks track those that can hold an
 --     affine record, since a builder answered as a borrow (D930) is a bare
 --     transient;
---   * a call's result shares only the arguments whose parameter the
---     function's result may hold ('answers', a fixed point over the
---     program, read off each body with every loop and closure taken whole),
---     where the marks take every argument;
 --   * a loop's result shares everything the loop mentions, and a root bound
 --     outside a loop's body or a lambda is never dropped inside it, since the
 --     next time round reads it again;
 --   * every place that may share the buffer must be its root's alone, never
 --     handed on while still read, and read by nothing after the binding.
+--
+-- Both walks share a call's result only with the arguments whose parameter
+-- the function's result may hold ('answers', a fixed point over the program
+-- read off each body, a loop's parameters holding what its jumps hand them,
+-- D1037), and ask only those to be handed over by nothing else; both take a
+-- primitive's result as its own when what it may hold is ('primHolds'), and
+-- a read of an element as a part of its container, linked and not handed on
+-- (geng-lang @m4-owned-pages.md@ D1036). The marks met these with a builder
+-- of affine records, visiterm's scrollback, where taking every primitive's
+-- result as shared made every record that holds one shared.
 --
 -- It changes no mark. A drop it cannot prove is not made, and the collector
 -- frees the buffer, as it did before.
@@ -161,9 +167,9 @@ data Facts = Facts
     -- function's result: handed to an extern, a function value or another
     -- such parameter, or captured. Grows from all false.
     _stash :: Map Core.QualName [Bool],
-    -- | For the drops alone: whether the result may hold a part of each
-    -- parameter that can hold a transient ('answers'). The walk's fixed
-    -- point does not move it.
+    -- | Whether the result may hold a part of each parameter the walk
+    -- follows ('answers': transients for the drops, affine records for the
+    -- marks, D1036). The walk's fixed point does not move it.
     _answers :: Map Core.QualName [Bool]
   }
   deriving (Eq)
@@ -178,7 +184,7 @@ run roots cores =
           { _excl = Map.mapWithKey (\q n -> replicate n (not (Set.member q (_open prog)))) (_fns prog),
             _fresh = Map.map (const True) (_fns prog),
             _stash = Map.map (`replicate` False) (_fns prog),
-            _answers = Map.empty
+            _answers = answersBy (holdsRec prog) prog defs
           }
       defs = [(q, hoist prog v) | (q, v) <- defs0]
       (facts, final) = fixFacts prog defs start
@@ -186,9 +192,16 @@ run roots cores =
         maybe (Core.Bind b v) (Core.Bind b . _defExpr) (Map.lookup (Core.QualName home (Core._binderName b)) final)
       out = Map.map (\m -> m {Core._moduleDefs = map (rewrite (Core._moduleName m)) (Core._moduleDefs m)}) cores
       factLines =
-        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "facts: exclusive " ++ show ex ++ ", fresh " ++ show (Map.findWithDefault False q (_fresh facts)) ++ ", kept " ++ show (Map.findWithDefault [] q (_stash facts)) ++ (if Set.member q (_open prog) then ", open" else "")]
+        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "facts: exclusive " ++ show ex ++ ", fresh " ++ show (Map.findWithDefault False q (_fresh facts)) ++ ", kept " ++ show (Map.findWithDefault [] q (_stash facts)) ++ (if Set.member q (_open prog) then ", open" else "") ++ notFresh q]
         | (q, ex) <- Map.toList (_excl facts)
         ]
+      defsMap = Map.fromList defs
+      -- Why a function's result is not fresh: its walk with every parameter
+      -- taken as exclusive, which is the walk that decides it.
+      notFresh q
+        | Map.findWithDefault True q (_fresh facts) = ""
+        | Just v <- Map.lookup q defsMap = " (not fresh: " ++ _defWhy (definition prog facts True q v) ++ ")"
+        | otherwise = ""
    in if any (hasAffineUpdate prog . snd) defs0
         then report (factLines ++ concatMap (_outLines . _defOut) (Map.elems final)) out
         else cores
@@ -1005,6 +1018,8 @@ data R = R
 data Def = Def
   { _defExpr :: Core.Expr,
     _defResult :: Bool,
+    -- | For the report: why the result is not fresh, when it is not.
+    _defWhy :: String,
     _defOut :: Out,
     _defStash :: [Bool]
   }
@@ -1046,7 +1061,7 @@ definition prog facts allExclusive q value =
           joinExcl' = Map.unionWith (zipWith (&&)) joinExcl (_outJoins out)
           settled = taint' == taint && joinExcl' == joinExcl
        in if rounds >= 100
-            then Def value False (nothingOut out) (replicate n True)
+            then Def value False "no fixed point" (nothingOut out) (replicate n True)
             else
               if settled
                 then
@@ -1055,7 +1070,11 @@ definition prog facts allExclusive q value =
                       -- The result may be a parameter's value, or hold one:
                       -- fresh is what it holds besides.
                       result = _ex r && all (\p -> _root p < n) (Set.toList (_co r))
-                   in Def rebuilt result out [Set.member i stashed | i <- [0 .. n - 1]]
+                      whyNot
+                        | result = ""
+                        | not (_ex r) = _why r ++ concat [" [" ++ l ++ "]" | l <- _outLines out, "jumps to" `List.isInfixOf` l]
+                        | otherwise = "it may hold " ++ List.intercalate ", " [IntMap.findWithDefault "?" (_root p) (_rootWhat env) | p <- Set.toList (_co r), _root p >= n]
+                   in Def rebuilt result whyNot out [Set.member i stashed | i <- [0 .. n - 1]]
                 else go taint' joinExcl' (rounds + 1)
     nothingOut out = out {_outCalls = Map.map (map (const False)) (_outCalls out), _outLines = []}
 
@@ -1228,19 +1247,21 @@ walkNode env live keep e =
           -- result may be what a builder holds.
           let ks = siblings env live live args
               rs = map fst ks
-              -- For the drops, a read of an element answers a part of the
-              -- container, as a field access does, and its links say so: it
-              -- hands nothing on (D1032).
-              keeps = tracks env (Core._exprType e) && not (_mode (_prog env) == Drops && readsPart op)
+              -- A read of an element answers a part of the container, as a
+              -- field access does, and its links say so: it hands nothing on
+              -- (D1032, and for the marks D1036).
+              keeps = tracks env (Core._exprType e) && not (readsPart op)
               heldArgs = [k | (k, True) <- zip ks (primHolds op (length args))]
            in (combine rs)
                 { _expr = e {Core._exprValue = Core.EPrim op (map _expr rs)},
                   _flow = [],
                   _co = Set.unions (map (_co . fst) heldArgs),
-                  -- For the drops, a primitive's result holds what it made
-                  -- and parts of what it was handed, which '_co' names, as a
-                  -- record does: no global, and nothing it read elsewhere.
-                  _ex = _mode (_prog env) == Drops && and (map snd heldArgs),
+                  -- A primitive's result holds what it made and parts of what
+                  -- it was handed, which '_co' names, as a record does: no
+                  -- global, and nothing it read elsewhere. For the marks a
+                  -- read of an element is not its own, since its container
+                  -- holds it too (D1036).
+                  _ex = (_mode (_prog env) == Drops || not (readsPart op)) && and (map snd heldArgs),
                   _out = foldMap _out rs <> (if keeps then escapes env (map fst heldArgs) else mempty),
                   _why = "a primitive's result"
                 }
@@ -1652,11 +1673,10 @@ call env live keep e fn args =
               shared = Set.fromList (concat [holdsClosed env r | (r, True) <- zip rs stash, not (_x r)])
               stashed = Set.fromList [_root (_place m) | (r, True) <- zip rs stash, m <- Set.toList (_ms r), _deep m]
               fresh = Map.findWithDefault False q (_fresh facts)
-              -- The drops share the result only with the arguments whose
-              -- parameter it may hold.
-              answered = case _mode (_prog env) of
-                Marks -> rs
-                Drops -> [r | (r, True) <- zip rs (Map.findWithDefault (replicate arity True) q (_answers facts))]
+              -- The result shares only the arguments whose parameter it may
+              -- hold (D1036 for the marks).
+              answersQ = Map.findWithDefault (replicate arity True) q (_answers facts)
+              answered = [r | (r, True) <- zip rs answersQ]
               lines_ =
                 [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome (_def env))), Name.toChars (Core._qnName (_def env)), spanText (Core.spanOf a), "hands " ++ Name.toChars (Core._qnName q) ++ " argument " ++ show i ++ " shared: " ++ _why r]
                 | (i, a, r) <- zip3 [0 :: Int ..] args rs,
@@ -1668,7 +1688,9 @@ call env live keep e fn args =
                   _ms = Set.unions (map _ms rs),
                   _flow = [],
                   _co = Set.unions (map _co answered),
-                  _ex = fresh && and (map snd ks),
+                  -- Only the arguments the result may hold need be handed
+                  -- over by nothing else (D1036).
+                  _ex = fresh && and [alone | ((_, alone), True) <- zip ks answersQ],
                   _x = False,
                   _out = foldMap _out rs <> mempty {_outCalls = Map.singleton q (map _x rs), _outTaint = shared, _outStash = stashed, _outLines = say (lines_ ++ keptLines env ("a call of " ++ Name.toChars (Core._qnName q)) stashed)},
                   _jumps = Set.unions (map _jumps rs),
@@ -1794,7 +1816,7 @@ jump env e j args =
                       [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome (_def env))), Name.toChars (Core._qnName (_def env)), spanText (Core.spanOf a), "jumps to " ++ Name.toChars j ++ " with argument " ++ show i ++ " shared: " ++ _why r]
                       | (i, a, r) <- zip3 [0 :: Int ..] args rs,
                         not (_x r),
-                        affineRec (_prog env) (Core._exprType a)
+                        tracks env (Core._exprType a)
                       ],
                   _outDerived = Map.fromList [(start + i, Set.fromList [_root (_place m) | m <- Set.toList (_ms r)]) | (i, r) <- zip [0 ..] rs]
                 },
@@ -2004,12 +2026,18 @@ movedParams modules =
 
 -- | Whether each function's result may hold a part of each parameter that
 -- can hold a transient: read off each body, to a fixed point over the
--- program, from false. A loop's parameters and a closure's captures are
--- taken as holding everything the loop or the closure names; a call of a
--- function by name holds the arguments its own answers say, and any other
--- call all of them. A value whose type holds no transient holds nothing.
+-- program, from false. A loop's parameter holds what the jumps to it hand it,
+-- to a fixed point over the loop's group (D1037), and a closure's captures
+-- everything the closure names; a call of a function by name holds the
+-- arguments its own answers say, and any other call all of them. A value
+-- whose type holds no transient holds nothing.
 answers :: Prog -> [(Core.QualName, Core.Expr)] -> Map Core.QualName [Bool]
-answers prog defs = go (Map.map (`replicate` False) (_fns prog)) (0 :: Int)
+answers prog defs = answersBy (canHoldTransient prog) prog defs
+
+-- | 'answers' for the values a predicate on their type says the walk
+-- follows: the drops' transients, or the marks' affine records (D1036).
+answersBy :: (Core.Type -> Bool) -> Prog -> [(Core.QualName, Core.Expr)] -> Map Core.QualName [Bool]
+answersBy follows prog defs = go (Map.map (`replicate` False) (_fns prog)) (0 :: Int)
   where
     fnDefs = [(q, v) | (q, v) <- defs, Map.member q (_fns prog)]
     go known rounds
@@ -2025,50 +2053,87 @@ answers prog defs = go (Map.map (`replicate` False) (_fns prog)) (0 :: Int)
               kept = flowOf known env body
            in [IntSet.member i kept | i <- [0 .. length bs - 1]]
         Nothing -> []
-    prune t set = if canHoldTransient prog t then set else IntSet.empty
+    prune t set = if follows t then set else IntSet.empty
     captured env names = IntSet.unions [Map.findWithDefault IntSet.empty x env | x <- Set.toList names]
-    flowOf known env e =
-      prune (Core._exprType e) $
-        case Core._exprValue e of
-          Core.EVar x -> Map.findWithDefault IntSet.empty x env
-          Core.EGlobal _ -> IntSet.empty
-          Core.ELit _ -> IntSet.empty
-          Core.ECrash _ -> IntSet.empty
-          Core.ELam _ _ -> captured env (Refs.freeLocals e)
-          Core.EWitLam _ _ -> captured env (Refs.freeLocals e)
-          Core.EApp fn args ->
-            case Core._exprValue (peelTyApp fn) of
-              Core.EGlobal q
-                | Just arity <- Map.lookup q (_fns prog),
-                  arity == length args ->
-                    IntSet.unions [flowOf known env a | (a, True) <- zip args (Map.findWithDefault (replicate arity True) q known)]
-              _ -> IntSet.unions (map (flowOf known env) (fn : args))
-          Core.EWitApp fn args -> IntSet.unions (map (flowOf known env) (fn : args))
-          Core.ELet binds body ->
-            let env' = foldl (\en (Core.Bind b v) -> Map.insert (Core._binderName b) (prune (Core._binderType b) (flowOf known en v)) en) env binds
-             in flowOf known env' body
-          Core.ELetRec binds body ->
-            let names = Set.unions [Refs.freeLocals v | Core.Bind _ v <- binds]
-                closure = captured env names
-                env' = foldl (\en (Core.Bind b _) -> Map.insert (Core._binderName b) closure en) env binds
-             in flowOf known env' body
-          Core.ECase scrut alts fallback ->
-            let sv = flowOf known env scrut
-                arm pat body = flowOf known (foldl (\en b -> Map.insert (Core._binderName b) (prune (Core._binderType b) sv) en) env (patternBinders pat)) body
-             in IntSet.unions ([arm pat body | Core.Alt pat body <- alts] ++ [flowOf known env f | Just f <- [fallback]])
-          Core.ECtor _ _ args -> IntSet.unions (map (flowOf known env) args)
-          Core.ERecord fields -> IntSet.unions (map (flowOf known env . snd) fields)
-          Core.EArray items -> IntSet.unions (map (flowOf known env) items)
-          Core.EUpdate base fields _ -> IntSet.unions (flowOf known env base : map (flowOf known env . snd) fields)
-          Core.EAccess base _ -> flowOf known env base
-          Core.EPrim op args -> IntSet.unions [flowOf known env a | (a, True) <- zip args (primHolds op (length args))]
-          Core.EJoin binds body ->
-            let loopHolds = captured env (Refs.freeLocals e)
-                joinBody (Core.Bind _ v) =
-                  case Core._exprValue v of
-                    Core.ELam params jbody -> flowOf known (foldl (\en p -> Map.insert (Core._binderName p) (prune (Core._binderType p) loopHolds) en) env params) jbody
-                    _ -> flowOf known env v
-             in IntSet.unions (flowOf known env body : map joinBody binds)
-          Core.EJump _ _ -> IntSet.empty
-          Core.ETyLam _ body -> flowOf known env body
-          Core.ETyApp body _ -> flowOf known env body
+    flowOf known env e = fst (flowJ known env e)
+    unionJ = Map.unionWith (zipWith IntSet.union)
+    unionsJ = foldr unionJ Map.empty
+    -- What a value may hold, and what each jump in it to a join bound
+    -- outside it hands that join's parameters (D1037).
+    flowJ known env e =
+      let (holds, jumps) = flowRaw known env e
+       in (prune (Core._exprType e) holds, jumps)
+    many known env es =
+      let rs = map (flowJ known env) es
+       in (IntSet.unions (map fst rs), unionsJ (map snd rs))
+    flowRaw known env e =
+      case Core._exprValue e of
+        Core.EVar x -> (Map.findWithDefault IntSet.empty x env, Map.empty)
+        Core.EGlobal _ -> (IntSet.empty, Map.empty)
+        Core.ELit _ -> (IntSet.empty, Map.empty)
+        Core.ECrash _ -> (IntSet.empty, Map.empty)
+        Core.ELam _ _ -> (captured env (Refs.freeLocals e), Map.empty)
+        Core.EWitLam _ _ -> (captured env (Refs.freeLocals e), Map.empty)
+        Core.EApp fn args ->
+          case Core._exprValue (peelTyApp fn) of
+            Core.EGlobal q
+              | Just arity <- Map.lookup q (_fns prog),
+                arity == length args ->
+                  let rs = map (flowJ known env) args
+                   in ( IntSet.unions [f | ((f, _), True) <- zip rs (Map.findWithDefault (replicate arity True) q known)],
+                        unionsJ (map snd rs)
+                      )
+            _ -> many known env (fn : args)
+        Core.EWitApp fn args -> many known env (fn : args)
+        Core.ELet binds body ->
+          let step (en, js) (Core.Bind b v) =
+                let (fv, jv) = flowJ known en v
+                 in (Map.insert (Core._binderName b) (prune (Core._binderType b) fv) en, unionJ js jv)
+              (env', bindJumps) = foldl step (env, Map.empty) binds
+              (f, j) = flowJ known env' body
+           in (f, unionJ bindJumps j)
+        Core.ELetRec binds body ->
+          let names = Set.unions [Refs.freeLocals v | Core.Bind _ v <- binds]
+              closure = captured env names
+              env' = foldl (\en (Core.Bind b _) -> Map.insert (Core._binderName b) closure en) env binds
+           in flowJ known env' body
+        Core.ECase scrut alts fallback ->
+          let (sv, sj) = flowJ known env scrut
+              arm pat body = flowJ known (foldl (\en b -> Map.insert (Core._binderName b) (prune (Core._binderType b) sv) en) env (patternBinders pat)) body
+              rs = [arm pat body | Core.Alt pat body <- alts] ++ [flowJ known env f | Just f <- [fallback]]
+           in (IntSet.unions (map fst rs), unionsJ (sj : map snd rs))
+        Core.ECtor _ _ args -> many known env args
+        Core.ERecord fields -> many known env (map snd fields)
+        Core.EArray items -> many known env items
+        Core.EUpdate base fields _ -> many known env (base : map snd fields)
+        Core.EAccess base _ -> flowJ known env base
+        Core.EPrim op args ->
+          let rs = map (flowJ known env) args
+           in (IntSet.unions [f | ((f, _), True) <- zip rs (primHolds op (length args))], unionsJ (map snd rs))
+        Core.EJoin binds body ->
+          -- Each join's parameters hold what the jumps to it hand them, to a
+          -- fixed point over the group; the join's value is what its body
+          -- and the joins' bodies may answer. Jumps out of the group go on
+          -- to the joins around it.
+          let names = Set.fromList [Core._binderName b | Core.Bind b _ <- binds]
+              lams = [(Core._binderName b, ps, jb) | Core.Bind b v <- binds, Core.ELam ps jb <- [Core._exprValue v]]
+              plain = [v | Core.Bind _ v <- binds, not (isLam v)]
+              isLam v = case Core._exprValue v of
+                Core.ELam _ _ -> True
+                _ -> False
+              at pf j i = maybe IntSet.empty (\l -> Maybe.fromMaybe IntSet.empty (Maybe.listToMaybe (drop i l))) (Map.lookup j pf)
+              envFor pf j ps = foldl (\en (i, p) -> Map.insert (Core._binderName p) (prune (Core._binderType p) (at pf j i)) en) env (zip [0 ..] ps)
+              roundOf pf =
+                let rs = flowJ known env body : [flowJ known (envFor pf j ps) jb | (j, ps, jb) <- lams] ++ map (flowJ known env) plain
+                    js = unionsJ (map snd rs)
+                    pf' = unionJ pf (Map.filterWithKey (\k _ -> Set.member k names) js)
+                 in (pf', IntSet.unions (map fst rs), Map.filterWithKey (\k _ -> not (Set.member k names)) js)
+              toFixed (n :: Int) pf =
+                let (pf', f, out) = roundOf pf
+                 in if pf' == pf || n >= 100 then (f, out) else toFixed (n + 1) pf'
+           in toFixed 0 Map.empty
+        Core.EJump j args ->
+          let rs = map (flowJ known env) args
+           in (IntSet.empty, unionJ (Map.singleton j (map fst rs)) (unionsJ (map snd rs)))
+        Core.ETyLam _ body -> flowJ known env body
+        Core.ETyApp body _ -> flowJ known env body
