@@ -327,7 +327,7 @@ declHolds affineSet known t =
   case t of
     Core.TVar _ -> False
     Core.TFun _ _ -> True
-    Core.TCon q args -> Set.member q known || any (declHolds affineSet known) args
+    Core.TCon q args -> Set.member q known || isPointerShape q || any (declHolds affineSet known) args
     Core.TRecord fields _ -> affineRecordOf affineSet t || any (declHolds affineSet known . snd) fields
     Core.TForall _ _ body -> declHolds affineSet known body
 
@@ -343,7 +343,11 @@ holdsRecAffine :: Prog -> Core.Type -> (Bool, Bool)
 holdsRecAffine p t =
   Maybe.fromMaybe (holdsRecAffineNode p t) (IntMap.lookup (Core.typeId t) (_typeInfo p))
 
--- | 'holdsRecAffine' of a type from its children's.
+-- | 'holdsRecAffine' of a type from its children's. @Mono@'s pointer shape
+-- can hold an affine record, as a type variable can, but is not one: read as
+-- a plain @Basics@ type, a value whose type @Mono@ erased held nothing the
+-- walk followed, and the marks rested on the checker there, where D984 says
+-- the pass proves for itself (geng-lang @m4-owned-pages.md@ §OP14).
 holdsRecAffineNode :: Prog -> Core.Type -> (Bool, Bool)
 holdsRecAffineNode p t =
   case t of
@@ -351,7 +355,7 @@ holdsRecAffineNode p t =
     Core.TFun _ _ -> (True, False)
     Core.TCon q args ->
       let rs = map (holdsRecAffine p) args
-       in (Set.member q (_holders p) || any fst rs, Set.member q (_affine p) || any snd rs)
+       in (Set.member q (_holders p) || isPointerShape q || any fst rs, Set.member q (_affine p) || any snd rs)
     Core.TRecord fields row ->
       let rs = map (holdsRecAffine p . snd) fields
           affine = any snd rs
