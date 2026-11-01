@@ -520,7 +520,7 @@ toReport source err =
           ( D.reflow $
               "This refinement calls `" ++ Name.toChars prefix ++ "." ++ Name.toChars name ++ "`, which is not one of core's measures:",
             D.reflow $
-              "A refinement may apply only `Array.length`, `Bytes.length`, `String.count`, `Dict.count` and `Set.count`, each to a name, so that the checker knows what each means."
+              "A refinement may apply only `Array.length`, `Bytes.length`, `Bytes.Owned.length`, `String.count`, `Dict.count` and `Set.count`, each to a name, so that the checker knows what each means."
           )
     RefinementNotCore region name ->
       Report.Report "NOT CORE'S IN A REFINEMENT" region [] $

@@ -363,6 +363,20 @@ isTransient :: Core.QualName -> Bool
 isTransient q =
   Core._qnHome q == ModuleName.arrayTransient && Core._qnName q == Name.fromChars "Transient"
 
+-- | @Bytes.Owned@'s type (geng-lang @m4-owned-pages.md@ D1031), which the
+-- drops count as they count a transient: what dropping one frees is its
+-- bytes.
+isOwned :: Core.QualName -> Bool
+isOwned q =
+  Core._qnHome q == ModuleName.bytesOwned && Core._qnName q == Name.fromChars "Owned"
+
+-- | @Basics.$P@: the type @Mono@ gives a value of the pointer shape whose own
+-- type it erased, a record's field or a primitive's result among them. It may
+-- be anything a pointer is, a builder or owned bytes or what holds them.
+isPointerShape :: Core.QualName -> Bool
+isPointerShape q =
+  Core._qnHome q == ModuleName.basics && Core._qnName q == Name.fromChars "$P"
+
 -- | A data type's field that can hold an array transient, its parameters
 -- taken as holding none (a use of the type says what they are). A function
 -- can, by what it captures, and so can a type the program does not declare,
@@ -372,12 +386,14 @@ declHoldsTransient known t =
   case t of
     Core.TVar _ -> False
     Core.TFun _ _ -> True
-    Core.TCon q args -> isTransient q || Set.member q known || any (declHoldsTransient known) args
+    Core.TCon q args -> isTransient q || isOwned q || isPointerShape q || Set.member q known || any (declHoldsTransient known) args
     Core.TRecord fields row -> row /= Nothing || any (declHoldsTransient known . snd) fields
     Core.TForall _ _ body -> declHoldsTransient known body
 
--- | Whether a value of the type can hold an array transient's buffer: a
--- transient, a type variable, a function (by what it captures), an open
+-- | Whether a value of the type can hold an array transient's buffer or an
+-- owned value's bytes: a transient, a @Bytes.Owned@, @Mono@'s pointer shape
+-- (D1032: a borrow of an element answered by @arr_get@ is one, and lost its
+-- link to the array as a plain @Basics@ type), a type variable, a function (by what it captures), an open
 -- record, a declared type that holds one, and a type the program does not
 -- declare unless it is one of @core@'s plain ones, whose arguments decide.
 -- A value of any other type holds no buffer, so nothing a drop frees can be
@@ -394,7 +410,7 @@ canHoldTransientNode p t =
     Core.TRecord fields row -> row /= Nothing || any (canHoldTransient p . snd) fields
     Core.TForall _ _ body -> canHoldTransient p body
     Core.TCon q args
-      | isTransient q -> True
+      | isTransient q || isOwned q || isPointerShape q -> True
       | Set.member q (_trHolders p) -> True
       | Map.member q (_decls p) -> any (canHoldTransient p) args
       | Core._qnHome q `elem` plainHomes -> any (canHoldTransient p) args
@@ -402,14 +418,88 @@ canHoldTransientNode p t =
   where
     plainHomes = [ModuleName.basics, ModuleName.char, ModuleName.string, ModuleName.bytes, ModuleName.array]
 
--- | The field paths, through closed records alone, from a value of the type
--- to each array transient in it: what dropping the value frees.
-transientPaths :: Core.Type -> [[Name]]
-transientPaths t =
+-- | What dropping a value frees, at a path of fields from it.
+data Target
+  = -- | A builder's buffer, by 'Prim.TrDrop' (D1026).
+    TBuilder
+  | -- | An owned value's bytes, by 'Prim.BoDrop' (D1031).
+    TOwned
+  | -- | What dropping each element of an array or a builder frees, the
+    -- element's type and its own targets (D1032).
+    TEach Container Core.Type [([Name], Target)]
+
+data Container = CArray | CBuilder
+
+-- | The targets of a value of the type, through closed records, and through
+-- an @Array@ or a builder to the elements, when each element is a
+-- @Bytes.Owned@ or a closed record with targets of its own. An element's
+-- targets come before the container's own buffer, which a loop over the
+-- elements reads. A builder is a target only inside a record, as D1026
+-- made it; an owned value and a container of elements are one bare too.
+dropTargets :: Core.Type -> [([Name], Target)]
+dropTargets t = filter wanted (targetsIn t)
+  where
+    wanted (path, target) =
+      case target of
+        TBuilder -> not (null path)
+        _ -> True
+
+targetsIn :: Core.Type -> [([Name], Target)]
+targetsIn t =
   case t of
-    Core.TCon q _ | isTransient q -> [[]]
-    Core.TRecord fields Nothing -> [f : path | (f, ft) <- fields, path <- transientPaths ft]
+    Core.TCon q _ | isOwned q -> [([], TOwned)]
+    Core.TCon q args | isTransient q -> each CBuilder args ++ [([], TBuilder)]
+    Core.TCon q args | q == Core.QualName ModuleName.array (Name.fromChars "Array") -> each CArray args
+    Core.TRecord fields Nothing -> [(f : path, x) | (f, ft) <- fields, (path, x) <- targetsIn ft]
     _ -> []
+  where
+    each container args =
+      case args of
+        [element] | elementOk element ->
+          case dropTargets element of
+            [] -> []
+            inner -> [([], TEach container element inner)]
+        _ -> []
+    elementOk element =
+      case element of
+        Core.TCon q _ -> isOwned q
+        Core.TRecord _ Nothing -> True
+        _ -> False
+
+-- | A target as the report writes it: its path, and what is freed there.
+targetText :: ([Name], Target) -> String
+targetText (path, target) =
+  concatMap (\f -> "." ++ Name.toChars f) path
+    ++ case target of
+      TBuilder -> ""
+      TOwned -> " (owned)"
+      TEach container _ inner ->
+        (case container of CArray -> "[each"; CBuilder -> "{each")
+          ++ concatMap (\x -> " " ++ targetText x) inner
+          ++ (case container of CArray -> "]"; CBuilder -> "}")
+
+-- | A primitive that answers an element of the container it is handed, which
+-- the result is then a part of, as a field it reads is a part of a record.
+readsPart :: Prim.PrimOp -> Bool
+readsPart op =
+  case op of
+    Prim.ArrOp Prim.AGet -> True
+    Prim.TransientOp Prim.TrGet -> True
+    _ -> False
+
+-- | Which arguments a primitive's result may hold a part of. Each holds all
+-- of them but @Bytes.Owned@'s, which copy out of the owned value they read,
+-- or answer a number (D1031): the walk would otherwise take a page whose
+-- bytes were copied onto a new builder as held by that builder.
+primHolds :: Prim.PrimOp -> Int -> [Bool]
+primHolds op n =
+  case op of
+    Prim.BytesOp Prim.BoFromBuilder -> [False]
+    Prim.BytesOp Prim.BoLength -> [False]
+    Prim.BytesOp Prim.BoGetU8 -> [False, False]
+    Prim.BytesOp Prim.BoAppendTo -> [True, False, False, False]
+    Prim.BytesOp Prim.BoToBytes -> [False]
+    _ -> replicate n True
 
 -- | Whether a value of the first type can hold a value of the second, at
 -- any depth. A type variable, a function and an open record can hold
@@ -1134,15 +1224,20 @@ walkNode env live keep e =
           -- result may be what a builder holds.
           let ks = siblings env live live args
               rs = map fst ks
-              keeps = tracks env (Core._exprType e)
+              -- For the drops, a read of an element answers a part of the
+              -- container, as a field access does, and its links say so: it
+              -- hands nothing on (D1032).
+              keeps = tracks env (Core._exprType e) && not (_mode (_prog env) == Drops && readsPart op)
+              heldArgs = [k | (k, True) <- zip ks (primHolds op (length args))]
            in (combine rs)
                 { _expr = e {Core._exprValue = Core.EPrim op (map _expr rs)},
                   _flow = [],
+                  _co = Set.unions (map (_co . fst) heldArgs),
                   -- For the drops, a primitive's result holds what it made
                   -- and parts of what it was handed, which '_co' names, as a
                   -- record does: no global, and nothing it read elsewhere.
-                  _ex = _mode (_prog env) == Drops && and (map snd ks),
-                  _out = foldMap _out rs <> (if keeps then escapes env rs else mempty),
+                  _ex = _mode (_prog env) == Drops && and (map snd heldArgs),
+                  _out = foldMap _out rs <> (if keeps then escapes env (map fst heldArgs) else mempty),
                   _why = "a primitive's result"
                 }
         Core.EJoin binds body -> joins env live keep e binds body
@@ -1712,7 +1807,7 @@ jump env e j args =
 -- the let, what holds its value) and held by nothing else. With them, the
 -- report's lines: each drop, and each root of such a type the value reads
 -- for the last time and why it is not dropped.
-drops :: Env -> Ms -> R -> ([(Int, Core.Binder, [Name])], [String])
+drops :: Env -> Ms -> R -> ([(Int, Core.Binder, ([Name], Target))], [String])
 drops env after rv =
   let already = _outDropped (_out rv)
       read_ = List.nub [_root (_place m) | m <- Set.toList (_ms rv)]
@@ -1722,20 +1817,26 @@ drops env after rv =
           c >= _scope env,
           not (IntSet.member c already),
           Just b <- [IntMap.lookup c (_binders env)],
-          let paths = filter (not . null) (transientPaths (Core._binderType b)),
+          let paths = dropTargets (Core._binderType b),
           not (null paths),
           not (hitsIn deepHits (Place c []) after)
         ]
-      judged = [(c, b, paths, whyNot c b paths) | (c, b, paths) <- candidates]
+      judged = [(c, b, paths, whyNot c b (List.nub (map fst paths))) | (c, b, paths) <- candidates]
       made = [(c, b, path) | (c, b, paths, Nothing) <- judged, path <- paths]
       line why b =
         List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome (_def env))), Name.toChars (Core._qnName (_def env)), spanText (Core._binderSpan b), why]
       lines_ =
         if dropReporting
-          then [line (maybe ("drop " ++ Name.toChars (Core._binderName b) ++ concatMap (\ps -> " ." ++ List.intercalate "." (map Name.toChars ps)) paths) (\w -> "no drop of " ++ Name.toChars (Core._binderName b) ++ ": " ++ w) why) b | (_, b, paths, why) <- judged]
+          then [line (maybe ("drop " ++ Name.toChars (Core._binderName b) ++ concatMap (\x -> " " ++ dropText x) paths) (\w -> "no drop of " ++ Name.toChars (Core._binderName b) ++ ": " ++ w) why) b | (_, b, paths, why) <- judged]
           else []
    in (made, lines_)
   where
+    -- D1026's report wrote a builder's path as @.f.g@; an owned value and a
+    -- container say what they are after it.
+    dropText x@(path, target) =
+      case (path, target) of
+        ([], TOwned) -> "(owned)"
+        _ -> targetText x
     related a q = _root a == _root q && (_path a `List.isPrefixOf` _path q || _path q `List.isPrefixOf` _path a)
     valueHolds = Set.toList (Set.union (closeCo env (_co rv)) (Set.fromList (_flow rv)))
     whyNot c b paths
@@ -1759,17 +1860,82 @@ drops env after rv =
         Just ref -> _refPlace ref /= p || _refSnap ref /= 0
         Nothing -> True
 
--- | The value of a binding, then the drop of a builder that it read last:
--- 'Prim.TrDrop' answers the value.
-wrapDrop :: Core.Expr -> (Int, Core.Binder, [Name]) -> Core.Expr
-wrapDrop v (_, b, path) =
+-- | The value of a binding, then the drop of what it read last:
+-- 'Prim.TrDrop' and 'Prim.BoDrop' answer the value.
+wrapDrop :: Core.Expr -> (Int, Core.Binder, ([Name], Target)) -> Core.Expr
+wrapDrop v (c, b, (path, target)) =
   let sp = Core.spanOf v
       var = Core.Expr (Core.EVar (Core._binderName b)) (Core._binderType b) sp
-      access e f =
-        case Core._exprType e of
-          Core.TRecord fields _ | Just ft <- lookup f fields -> Core.Expr (Core.EAccess e f) ft sp
-          _ -> error "Core.Pass.InPlace.wrapDrop: a path through something not a record"
-   in Core.Expr (Core.EPrim (Prim.TransientOp Prim.TrDrop) [foldl access var path, v]) (Core._exprType v) sp
+      tag = show c ++ concatMap (\f -> "_" ++ Name.toChars f) path
+   in dropOf tag (accessPath sp var path) target v
+
+accessPath :: Core.Span -> Core.Expr -> [Name] -> Core.Expr
+accessPath sp = foldl access
+  where
+    access e f =
+      case Core._exprType e of
+        Core.TRecord fields _ | Just ft <- lookup f fields -> Core.Expr (Core.EAccess e f) ft sp
+        _ -> error "Core.Pass.InPlace.wrapDrop: a path through something not a record"
+
+-- | @v@, then what dropping @x@ frees. A container's elements are dropped by
+-- a loop after @v@ is bound (D1032), counting down from its length, each
+-- element read with the primitive that reads one and its own targets
+-- dropped in turn:
+--
+-- > let r = v in
+-- > join loop i = case i of 0 -> r; _ -> let j = i - 1; e = get x j; u = drops e 0 in jump loop j
+-- > in jump loop (length x)
+--
+-- The names start with @$drop@, which no source can write, and carry the
+-- root's number and the path, so a drop inside another's loop names its own.
+dropOf :: String -> Core.Expr -> Target -> Core.Expr -> Core.Expr
+dropOf tag x target v =
+  let sp = Core.spanOf v
+      vt = Core._exprType v
+      prim op args t = Core.Expr (Core.EPrim op args) t sp
+      var n t = Core.Expr (Core.EVar n) t sp
+      name s = Name.fromChars ("$drop" ++ tag ++ s)
+   in case target of
+        TBuilder -> prim (Prim.TransientOp Prim.TrDrop) [x, v] vt
+        TOwned -> prim (Prim.BytesOp Prim.BoDrop) [x, v] vt
+        TEach container element inner ->
+          let (lengthOp, getOp) =
+                case container of
+                  CArray -> (Prim.ArrOp Prim.ALength, Prim.ArrOp Prim.AGet)
+                  CBuilder -> (Prim.TransientOp Prim.TrLength, Prim.TransientOp Prim.TrGet)
+              r = name "r"
+              i = name "i"
+              j = name "j"
+              e = name "e"
+              u = name "u"
+              loop = name "loop"
+              loopType = Core.TFun [tInt] vt
+              zero = Core.Expr (Core.ELit (Core.LInt 0)) tInt sp
+              one = Core.Expr (Core.ELit (Core.LInt 1)) tInt sp
+              eVar = var e element
+              each =
+                foldl
+                  (\acc (k, (path, t)) -> dropOf (tag ++ "_" ++ show (k :: Int)) (accessPath sp eVar path) t acc)
+                  zero
+                  (zip [0 ..] inner)
+              step =
+                Core.Expr
+                  ( Core.ELet
+                      [ Core.Bind (Core.Binder j tInt sp) (prim (Prim.IntOp Prim.I32 Prim.ISub) [var i tInt, one] tInt),
+                        Core.Bind (Core.Binder e element sp) (prim getOp [x, var j tInt] element),
+                        Core.Bind (Core.Binder u tInt sp) each
+                      ]
+                      (Core.Expr (Core.EJump loop [var j tInt]) vt sp)
+                  )
+                  vt
+                  sp
+              body = Core.Expr (Core.ECase (var i tInt) [Core.Alt (Core.PLit (Core.LInt 0)) (var r vt), Core.Alt Core.PWild step] Nothing) vt sp
+              lam = Core.Expr (Core.ELam [Core.Binder i tInt sp] body) loopType sp
+              joined = Core.Expr (Core.EJoin [Core.Bind (Core.Binder loop loopType sp) lam] (Core.Expr (Core.EJump loop [prim lengthOp [x] tInt]) vt sp)) vt sp
+           in Core.Expr (Core.ELet [Core.Bind (Core.Binder r vt sp) v] joined) vt sp
+
+tInt :: Core.Type
+tInt = Core.TCon (Core.QualName ModuleName.basics (Name.fromChars "Int")) []
 
 dropReportPath :: Maybe FilePath
 dropReportPath = unsafePerformIO (Env.lookupEnv "GENG_DROP_REPORT")
@@ -1799,7 +1965,7 @@ runDrops roots cores =
       out = Map.map (\m -> m {Core._moduleDefs = map (rewrite (Core._moduleName m)) (Core._moduleDefs m)}) cores
       lines_ = [l | d <- Map.elems final, l <- _outLines (_defOut d), "drop " `List.isInfixOf` l || "hands " `List.isInfixOf` l] ++ factLines
       factLines =
-        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "drop facts: exclusive " ++ show ex ++ ", fresh " ++ show (Map.findWithDefault False q (_fresh facts)) ++ ", answers " ++ show (Map.findWithDefault [] q (_answers facts)) ++ (if Set.member q (_open prog) then ", open" else "")]
+        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "drop facts: exclusive " ++ show ex ++ ", fresh " ++ show (Map.findWithDefault False q (_fresh facts)) ++ ", answers " ++ show (Map.findWithDefault [] q (_answers facts)) ++ ", stash " ++ show (Map.findWithDefault [] q (_stash facts)) ++ (if Set.member q (_open prog) then ", open" else "")]
         | dropReporting,
           (q, ex) <- Map.toList (_excl facts)
         ]
@@ -1808,7 +1974,7 @@ runDrops roots cores =
         _ -> out
    in if any (holdsBuilder . snd) defs then written else cores
   where
-    holdsBuilder e = any (\t -> not (null (filter (not . null) (transientPaths t)))) (exprTypes e)
+    holdsBuilder e = any (not . null . dropTargets) (exprTypes e)
 
 -- | Each top-level function's parameters its written signature marks
 -- @moved@, by name: a signature is matched to the definition whose binder has
@@ -1891,7 +2057,7 @@ answers prog defs = go (Map.map (`replicate` False) (_fns prog)) (0 :: Int)
           Core.EArray items -> IntSet.unions (map (flowOf known env) items)
           Core.EUpdate base fields _ -> IntSet.unions (flowOf known env base : map (flowOf known env . snd) fields)
           Core.EAccess base _ -> flowOf known env base
-          Core.EPrim _ args -> IntSet.unions (map (flowOf known env) args)
+          Core.EPrim op args -> IntSet.unions [flowOf known env a | (a, True) <- zip args (primHolds op (length args))]
           Core.EJoin binds body ->
             let loopHolds = captured env (Refs.freeLocals e)
                 joinBody (Core.Bind _ v) =

@@ -149,6 +149,7 @@ provided =
       Core.QualName ModuleName.arrayTransient "Transient",
       Core.QualName ModuleName.bytes "Bytes",
       Core.QualName ModuleName.bytesTransient "Transient",
+      Core.QualName ModuleName.bytesOwned "Owned",
       Core.QualName ModuleName.taskInternal "Task",
       Core.QualName ModuleName.source "Source",
       Core.QualName ModuleName.process "Id"

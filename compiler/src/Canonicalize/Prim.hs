@@ -215,9 +215,10 @@ strType p =
 
 -- BYTES
 
--- | D233's eight, and @bytes_from_array@, which D1018 gave a type again. The
--- transient is @Bytes.Transient.Transient@, declared in a module @core@ does
--- not expose; the three retired primitives have no type.
+-- | D233's eight, @bytes_from_array@, which D1018 gave a type again, and
+-- D1031's seven over @Bytes.Owned.Owned@. The transient is
+-- @Bytes.Transient.Transient@, declared in a module @core@ does not expose;
+-- the three retired primitives have no type.
 bytesType :: BytesPrim -> Maybe Can.Type
 bytesType p =
   case p of
@@ -234,8 +235,18 @@ bytesType p =
     BtToBytes -> Just (fn [tTransient] tBytes)
     BtSetBytes -> Just (fn [tTransient, tInt, tBytes] tTransient)
     BtLength -> Just (fn [tTransient] tInt)
+    BoFromBuilder -> Just (fn [tBuilder] tOwned)
+    BoLength -> Just (fn [tOwned] tInt)
+    BoGetU8 -> Just (fn [tOwned, tInt] tUInt8)
+    BoAppendTo -> Just (fn [tBuilder, tOwned, tInt, tInt] tBuilder)
+    BoTakeFirst -> Just (fn [tOwned, tInt] tOwned)
+    BoToBytes -> Just (fn [tOwned] tBytes)
+    -- D1032: made only by the drop pass; no @\@prim@ declares it.
+    BoDrop -> Just (fn [tOwned, Can.TVar "b"] (Can.TVar "b"))
   where
     tTransient = Can.TType ModuleName.bytesTransient "Transient" []
+    tOwned = Can.TType ModuleName.bytesOwned "Owned" []
+    tBuilder = Can.TType ModuleName.arrayTransient "Transient" [tUInt8]
 
 -- ARRAYS
 

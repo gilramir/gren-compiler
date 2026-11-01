@@ -539,6 +539,16 @@ bytes p args =
     (BtSetBytes, _) -> helper "_BytesPrim_setBytes" args
     (BtLength, [t]) -> JS.Access t (JsName.fromLocalHumanReadable "byteLength")
     (BFromArray, [_]) -> helper "_BytesPrim_fromArray" args
+    -- D1031: an owned value is a `DataView` as `Bytes` is, which nothing
+    -- writes once it is made, so `toBytes` hands it over as it is and its
+    -- drop does nothing: V8 collects it.
+    (BoFromBuilder, [_]) -> helper "_BytesPrim_ownedFromBuilder" args
+    (BoLength, [o]) -> JS.Access o (JsName.fromLocalHumanReadable "byteLength")
+    (BoGetU8, [o, i]) -> JS.Call (JS.Access o (JsName.fromLocalHumanReadable "getUint8")) [i]
+    (BoAppendTo, [_, _, _, _]) -> helper "_BytesPrim_ownedAppendTo" args
+    (BoTakeFirst, [o, n]) -> helper "_BytesPrim_slice" [o, JS.Int 0, n]
+    (BoToBytes, [o]) -> o
+    (BoDrop, [_, v]) -> v
     _ -> arityError (BytesOp p) args
   where
     ref name = JS.Ref (JsName.fromLocalHumanReadable name)
@@ -599,6 +609,25 @@ function _BytesPrim_fromArray(a) {
   var out = new Uint8Array(n);
   for (var i = 0; i < n; i++) out[i] = items[off + i];
   return new DataView(out.buffer);
+}
+
+// D1031's `Bytes.Owned.fromBuilder`: a builder of `UInt8`'s bytes, at their
+// exact length. Its array is the transient's own (`arrayHelpers`, which every
+// program has), live up to `t.live`.
+function _BytesPrim_ownedFromBuilder(t) {
+  var n = t.live, items = t.link, out = new Uint8Array(n);
+  for (var i = 0; i < n; i++) out[i] = items[i];
+  return new DataView(out.buffer);
+}
+
+// `Bytes.Owned.appendTo`: the bytes from `from` up to `to` pushed onto the
+// builder, as `_ArrayPrim_trAppendSlice` pushes a builder's.
+function _BytesPrim_ownedAppendTo(t, o, from, to) {
+  var count = to - from;
+  if (count <= 0) return t;
+  return _ArrayPrim_trRun(t, t.live, count, function (array, at) {
+    for (var k = 0; k < count; k++) array[at + k] = o.getUint8(from + k);
+  });
 }
 |]
 

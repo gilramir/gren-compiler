@@ -19,7 +19,7 @@ spec = do
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
       -- someone noticing.
-      length allPrims `shouldBe` 199
+      length allPrims `shouldBe` 206
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -103,6 +103,14 @@ spec = do
         primCode (TransientOp TrToArray)
       )
         `shouldBe` ([(191, "tr_fill", 4), (192, "tr_set_array", 3), (193, "tr_copy_within", 4), (194, "tr_generate", 4), (195, "tr_slice", 3), (196, "tr_rotate", 4), (197, "tr_append_slice", 4), (198, "tr_drop", 2)], 190, 145)
+
+    it "appends D1031's bo_ primitives after every code that existed" $
+      -- `Bytes.Owned`'s seven (geng-lang m4-owned-pages.md §OP13), after
+      -- D1026's `tr_drop`, which did not move.
+      ( map (\p -> (primCode (BytesOp p), primName (BytesOp p), primArity (BytesOp p))) [BoFromBuilder .. maxBound],
+        primCode (TransientOp TrDrop)
+      )
+        `shouldBe` ([(199, "bo_from_builder", 1), (200, "bo_length", 1), (201, "bo_get_u8", 2), (202, "bo_append_to", 4), (203, "bo_take_first", 2), (204, "bo_to_bytes", 1), (205, "bo_drop", 2)], 198)
 
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved

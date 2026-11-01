@@ -710,6 +710,8 @@ measures =
     (ModuleName.string, Name.fromChars "count"),
     (ModuleName.dict, Name.fromChars "count"),
     (ModuleName.Canonical Pkg.core (Name.fromChars "Set"), Name.fromChars "count"),
+    -- D1031's owned bytes (geng-lang @m4-owned-pages.md@ §OP13).
+    (ModuleName.bytesOwned, Name.fromChars "length"),
     -- Not exposed by @core@, so only @core@'s primitives name it (D846).
     (ModuleName.Canonical Pkg.core (Name.fromChars "Array.Transient"), Name.fromChars "length"),
     -- The same for the bytes transient (D863, @m4-refine.md@ §RF32).

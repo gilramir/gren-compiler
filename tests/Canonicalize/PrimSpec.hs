@@ -142,6 +142,17 @@ spec = do
     it "D1026's tr_drop answers the value it is given" $
       typeOf "tr_drop" `shouldBe` Just (fn [tTransientA, Can.TVar "b"] (Can.TVar "b"))
 
+    it "D1031's bo_ primitives are over Bytes.Owned, and bo_drop answers the value it is given" $
+      map typeOf ["bo_from_builder", "bo_length", "bo_get_u8", "bo_append_to", "bo_take_first", "bo_to_bytes", "bo_drop"]
+        `shouldBe` [ Just (fn [tBuilderU8] tOwned),
+                     Just (fn [tOwned] tInt),
+                     Just (fn [tOwned, tInt] tUInt8),
+                     Just (fn [tBuilderU8, tOwned, tInt, tInt] tBuilderU8),
+                     Just (fn [tOwned, tInt] tOwned),
+                     Just (fn [tOwned] tBytes),
+                     Just (fn [tOwned, Can.TVar "b"] (Can.TVar "b"))
+                   ]
+
     it "the three source primitives are D71's mailbox (D252, D253, D254)" $
       map typeOf ["source_new", "source_next", "source_close"]
         `shouldBe` [ Just (tTask tSourceA),
@@ -284,3 +295,9 @@ tUInt8 = Can.TType ModuleName.basics "UInt8" []
 
 tTransient :: Can.Type
 tTransient = Can.TType ModuleName.bytesTransient "Transient" []
+
+tOwned :: Can.Type
+tOwned = Can.TType ModuleName.bytesOwned "Owned" []
+
+tBuilderU8 :: Can.Type
+tBuilderU8 = Can.TType ModuleName.arrayTransient "Transient" [tUInt8]

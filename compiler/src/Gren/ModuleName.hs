@@ -18,6 +18,7 @@ module Gren.ModuleName
     bitwise,
     bytes,
     bytesTransient,
+    bytesOwned,
     arrayTransient,
     source,
     process,
@@ -221,6 +222,11 @@ bytes = Canonical Pkg.core "Bytes"
 -- (@m1b-bytes-prim.md@ D233, after D221's @Json.Value@).
 bytesTransient :: Canonical
 bytesTransient = Canonical Pkg.core "Bytes.Transient"
+
+-- | Where @Bytes.Owned@'s type is declared, with its @bo_@ bindings (geng-lang
+-- @m4-owned-pages.md@ D1031): exposed, affine, and laid out as @Bytes@ is.
+bytesOwned :: Canonical
+bytesOwned = Canonical Pkg.core "Bytes.Owned"
 
 -- | Where the array transient's type is declared, with the @tr_@ bindings that
 -- do not mention @Array@: a module @core@ does not expose, which @Array@ and

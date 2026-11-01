@@ -299,6 +299,34 @@ data BytesPrim
     -- measure @Bytes.Transient.length@, so that the refinement checker proves
     -- every write into a transient within it (geng-lang @m4-refine.md@ §RF32).
     BtLength
+  | -- | D1031's seven (geng-lang @m4-owned-pages.md@ §OP13), __appended__
+    -- after every other primitive: @Bytes.Owned@, an affine bytes value that
+    -- is only read, laid out as @Bytes@ is, which the drop pass gives back
+    -- natively where it is dropped. No @Bytes@ view of one is ever made, so
+    -- nothing can keep its bytes past the drop.
+    --
+    -- @bo_from_builder t@: the bytes of an @Array.Builder UInt8@, one copy at
+    -- their exact length. The builder is taken, and natively its buffer is
+    -- given back as @tr_drop@ gives one back.
+    BoFromBuilder
+  | -- | The length.
+    BoLength
+  | -- | Precondition: in-range index.
+    BoGetU8
+  | -- | @bo_append_to t o from to@: @o@'s bytes from @from@ up to @to@ pushed
+    -- onto the builder @t@, @o@ only read. Precondition:
+    -- @0 <= from <= to <= length o@.
+    BoAppendTo
+  | -- | @bo_take_first o n@: the first @n@ bytes of @o@, which it takes:
+    -- natively in place. Precondition: @0 <= n <= length o@.
+    BoTakeFirst
+  | -- | A @Bytes@ of the same bytes. Natively a copy, since the owned value's
+    -- block may be given back while the @Bytes@ lives.
+    BoToBytes
+  | -- | @bo_drop o v@: @v@, and @o@'s bytes given back once @v@ is computed,
+    -- as 'TrDrop' does a builder's buffer. Only the @drop@ pass makes one,
+    -- natively; JavaScript and the BEAM answer @v@.
+    BoDrop
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | C7's contract: @Array@ is flat and dense, @get@ and @length@ are O(1) and
@@ -535,6 +563,8 @@ allPrims =
     -- D983's tr_slice (§VA16), D991's tr_rotate (§VA20), D996's
     -- tr_append_slice (§VA24) and D1026's tr_drop (m4-free.md).
     ++ map TransientOp [TrFill .. maxBound]
+    -- Appended by D1031 (m4-owned-pages.md §OP13).
+    ++ map BytesOp [BoFromBuilder .. maxBound]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -682,6 +712,13 @@ bytesPrimName p =
     BtToBytes -> "bt_to_bytes"
     BtSetBytes -> "bt_set_bytes"
     BtLength -> "bt_length"
+    BoFromBuilder -> "bo_from_builder"
+    BoLength -> "bo_length"
+    BoGetU8 -> "bo_get_u8"
+    BoAppendTo -> "bo_append_to"
+    BoTakeFirst -> "bo_take_first"
+    BoToBytes -> "bo_to_bytes"
+    BoDrop -> "bo_drop"
 
 arrPrimName :: ArrPrim -> Text
 arrPrimName p =
@@ -839,6 +876,15 @@ primArity op =
         -- transient, offset, bytes
         BtSetBytes -> 3
         BtLength -> 1
+        BoFromBuilder -> 1
+        BoLength -> 1
+        BoGetU8 -> 2
+        -- builder, owned, from, to
+        BoAppendTo -> 4
+        BoTakeFirst -> 2
+        BoToBytes -> 1
+        -- owned, the value answered
+        BoDrop -> 2
     ArrOp p ->
       case p of
         ALength -> 1
