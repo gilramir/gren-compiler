@@ -20,6 +20,7 @@ module Gren.ModuleName
     bytesTransient,
     bytesOwned,
     arrayTransient,
+    arrayBuilder,
     source,
     process,
     taskInternal,
@@ -233,6 +234,11 @@ bytesOwned = Canonical Pkg.core "Bytes.Owned"
 -- @Array.Builder@ both import (@m1b-arr-prim.md@ D240).
 arrayTransient :: Canonical
 arrayTransient = Canonical Pkg.core "Array.Transient"
+
+-- | @Array.Builder@, whose @set@ the native drop pass follows with a drop of
+-- the element it writes over (geng-lang @m4-owned-pages.md@ D1041).
+arrayBuilder :: Canonical
+arrayBuilder = Canonical Pkg.core "Array.Builder"
 
 -- | D71's mailbox (@ffi.md@ F4), the pull-based replacement for @Sub@. Unlike
 -- the two transients this one is __exposed__ (D253): @portable-core.md@ P2

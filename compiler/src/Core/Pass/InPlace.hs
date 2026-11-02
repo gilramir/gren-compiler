@@ -90,6 +90,12 @@
 -- of affine records, visiterm's scrollback, where taking every primitive's
 -- result as shared made every record that holds one shared.
 --
+-- One drop rests on the checker's word instead of this walk ('setDrops',
+-- geng-lang @m4-owned-pages.md@ D1041): a call of @Array.Builder.set@ whose
+-- builder's elements hold owned bytes is followed by a drop of the element
+-- it writes over, since @set@'s builder is @moved@ and what @get@ answers is
+-- only lent.
+--
 -- It changes no mark. A drop it cannot prove is not made, and the collector
 -- frees the buffer, as it did before.
 module Core.Pass.InPlace
@@ -1963,6 +1969,133 @@ dropOf tag x target v =
 tInt :: Core.Type
 tInt = Core.TCon (Core.QualName ModuleName.basics (Name.fromChars "Int")) []
 
+-- WHAT A SET WRITES OVER (D1041)
+
+-- | Each call of @Array.Builder.set@ whose builder's elements hold owned
+-- bytes, followed by a drop of the element it writes over (geng-lang
+-- @m4-owned-pages.md@ D1041), with the report's line for each. The slot is
+-- the one @set@ writes, as its @actualIndex@ finds it: an index from the end
+-- when it is negative, and none, so no drop, when it is outside the builder.
+--
+-- > set i v b   ⟹   let i' = i; v' = v; b' = b; n = length b'; a = (i' < 0 ? n + i' : i')
+-- >                 in if a < 0 || not (a < n) then set i' v' b'
+-- >                    else let e = get b' a; r = set i' v' b' in r, then what dropping e frees
+--
+-- It rests on the checker's word, not on this pass's walk: @set@'s builder
+-- is @moved@, so nothing else holds it; what @Array.Builder.get@ answers is
+-- lent, and a borrow is not stored, so nothing else holds the element in the
+-- slot either, and @set@'s value is not it. @update@ and @swap@, whose
+-- element lives on, write with the primitive, not with @set@, and
+-- @Array.set@'s array may be shared, so neither is followed. No code in
+-- @Array.Builder@ is rewritten.
+setDrops :: Core.QualName -> Core.Expr -> (Core.Expr, [String])
+setDrops def e0 =
+  -- a definition that names no @set@ is left as it is, unwalked
+  if Core._qnHome def == ModuleName.arrayBuilder || not (any isBuilderSet (Set.toList (globalsOf e0)))
+    then (e0, [])
+    else let ((_, ls), e) = go (0, []) e0 in (e, reverse ls)
+  where
+    -- the count of sets rewritten so far, and the report's lines, newest first
+    go :: (Int, [String]) -> Core.Expr -> ((Int, [String]), Core.Expr)
+    go st e =
+      let ((n1, ls1), kids) = List.mapAccumL go st (children e)
+          e1 = withChildren e kids
+       in case Core._exprValue e1 of
+            Core.EApp fn [i, v, b]
+              | Core.EGlobal q <- Core._exprValue (peelTyApp fn),
+                isBuilderSet q,
+                (elt, inner) : _ <- [(elt, inner) | ([], TEach CBuilder elt inner) <- targetsIn (Core._exprType b)] ->
+                  ((n1 + 1, line e1 inner : ls1), overSet n1 e1 fn i v b elt inner)
+            _ -> ((n1, ls1), e1)
+    line e inner =
+      List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome def)), Name.toChars (Core._qnName def), spanText (Core.spanOf e), "drop over set {each" ++ concatMap (\x -> " " ++ targetText x) inner ++ "}"]
+
+isBuilderSet :: Core.QualName -> Bool
+isBuilderSet q =
+  Core._qnHome q == ModuleName.arrayBuilder
+    && (name == "set" || "set$k" `List.isPrefixOf` name)
+  where
+    name = Name.toChars (Core._qnName q)
+
+overSet :: Int -> Core.Expr -> Core.Expr -> Core.Expr -> Core.Expr -> Core.Expr -> Core.Type -> [([Name], Target)] -> Core.Expr
+overSet k e fn i v b elt inner =
+  let sp = Core.spanOf e
+      rt = Core._exprType e
+      it = Core._exprType i
+      vt = Core._exprType v
+      bt = Core._exprType b
+      tag = "set" ++ show k
+      name s = Name.fromChars ("$drop" ++ tag ++ s)
+      var n t = Core.Expr (Core.EVar n) t sp
+      prim op args t = Core.Expr (Core.EPrim op args) t sp
+      bind n t x = Core.Bind (Core.Binder n t sp) x
+      tBool = Core.TCon (Core.QualName ModuleName.basics (Name.fromChars "Bool")) []
+      lt x y = prim (Prim.IntOp Prim.I32 Prim.ILt) [x, y] tBool
+      zero = Core.Expr (Core.ELit (Core.LInt 0)) tInt sp
+      ifThen c yes no t = Core.Expr (Core.ECase c [Core.Alt (Core.PCtor (Core.QualName ModuleName.basics (Name.fromChars "True")) 0 []) yes, Core.Alt (Core.PCtor (Core.QualName ModuleName.basics (Name.fromChars "False")) 1 []) no] Nothing) t sp
+      iN = name "i"
+      vN = name "v"
+      bN = name "b"
+      nN = name "n"
+      aN = name "a"
+      eN = name "e"
+      rN = name "r"
+      callSet = Core.Expr (Core.EApp fn [var iN it, var vN vt, var bN bt]) rt sp
+      eVar = var eN elt
+      dropped =
+        foldl
+          (\acc (j, (path, t)) -> dropOf (tag ++ "_" ++ show (j :: Int)) (accessPath sp eVar path) t acc)
+          (var rN rt)
+          (zip [0 ..] inner)
+      withDrop = Core.Expr (Core.ELet [bind eN elt (prim (Prim.TransientOp Prim.TrGet) [var bN bt, var aN tInt] elt), bind rN rt callSet] dropped) rt sp
+      actual = ifThen (lt (var iN it) zero) (prim (Prim.IntOp Prim.I32 Prim.IAdd) [var nN tInt, var iN it] tInt) (var iN it) tInt
+      body = ifThen (lt (var aN tInt) zero) callSet (ifThen (lt (var aN tInt) (var nN tInt)) withDrop callSet rt) rt
+   in Core.Expr
+        ( Core.ELet
+            [ bind iN it i,
+              bind vN vt v,
+              bind bN bt b,
+              bind nN tInt (prim (Prim.TransientOp Prim.TrLength) [var bN bt] tInt),
+              bind aN tInt actual
+            ]
+            body
+        )
+        rt
+        sp
+
+-- | An expression with its children replaced, in 'children''s order.
+withChildren :: Core.Expr -> [Core.Expr] -> Core.Expr
+withChildren e kids =
+  e {Core._exprValue = node}
+  where
+    node =
+      case (Core._exprValue e, kids) of
+        (Core.ELam bs _, [body]) -> Core.ELam bs body
+        (Core.EApp _ _, fn : args) -> Core.EApp fn args
+        (Core.ELet binds _, _) -> let (vs, body) = splitLast kids in Core.ELet (zipWith (\(Core.Bind b _) x -> Core.Bind b x) binds vs) body
+        (Core.ELetRec binds _, _) -> let (vs, body) = splitLast kids in Core.ELetRec (zipWith (\(Core.Bind b _) x -> Core.Bind b x) binds vs) body
+        (Core.ECase _ alts fallback, scrut : rest) ->
+          let (bodies, fb) = splitAt (length alts) rest
+           in Core.ECase scrut (zipWith (\(Core.Alt pat _) x -> Core.Alt pat x) alts bodies) (case (fallback, fb) of (Just _, x : _) -> Just x; _ -> fallback)
+        (Core.ECtor q tagN _, args) -> Core.ECtor q tagN args
+        (Core.ERecord fields, xs) -> Core.ERecord (zip (map fst fields) xs)
+        (Core.EUpdate _ fields w, base : xs) -> Core.EUpdate base (zip (map fst fields) xs) w
+        (Core.EAccess _ f, [base]) -> Core.EAccess base f
+        (Core.EArray _, xs) -> Core.EArray xs
+        (Core.EPrim op _, xs) -> Core.EPrim op xs
+        (Core.EJoin binds _, _) -> let (vs, body) = splitLast kids in Core.EJoin (zipWith (\(Core.Bind b _) x -> Core.Bind b x) binds vs) body
+        (Core.EJump j _, xs) -> Core.EJump j xs
+        (Core.ETyLam vs _, [body]) -> Core.ETyLam vs body
+        (Core.ETyApp _ tys, [fn]) -> Core.ETyApp fn tys
+        (Core.EWitLam bs _, [body]) -> Core.EWitLam bs body
+        (Core.EWitApp _ _, fn : args) -> Core.EWitApp fn args
+        (Core.ECrash (Core.Todo place _), [message]) -> Core.ECrash (Core.Todo place message)
+        (other, _) -> other
+    splitLast xs =
+      case reverse xs of
+        body : vs -> (reverse vs, body)
+        [] -> error "Core.Pass.InPlace.withChildren: a binding form with no body"
+
 dropReportPath :: Maybe FilePath
 dropReportPath = unsafePerformIO (Env.lookupEnv "GENG_DROP_REPORT")
 {-# NOINLINE dropReportPath #-}
@@ -1986,10 +2119,20 @@ runDrops roots cores =
             _answers = answers prog defs
           }
       (facts, final) = fixFacts prog defs start
+      -- each definition as the walk dropped in it, then each set of a
+      -- builder of owned elements followed by a drop of what it writes over
+      -- (D1041)
+      rewritten =
+        Map.fromList
+          [ (q, setDrops q (maybe v _defExpr (Map.lookup q final)))
+          | m <- Map.elems cores,
+            Core.Bind b v <- Core._moduleDefs m,
+            let q = Core.QualName (Core._moduleName m) (Core._binderName b)
+          ]
       rewrite home (Core.Bind b v) =
-        maybe (Core.Bind b v) (Core.Bind b . _defExpr) (Map.lookup (Core.QualName home (Core._binderName b)) final)
+        maybe (Core.Bind b v) (Core.Bind b . fst) (Map.lookup (Core.QualName home (Core._binderName b)) rewritten)
       out = Map.map (\m -> m {Core._moduleDefs = map (rewrite (Core._moduleName m)) (Core._moduleDefs m)}) cores
-      lines_ = [l | d <- Map.elems final, l <- _outLines (_defOut d), "drop " `List.isInfixOf` l || "hands " `List.isInfixOf` l] ++ factLines
+      lines_ = [l | d <- Map.elems final, l <- _outLines (_defOut d), "drop " `List.isInfixOf` l || "hands " `List.isInfixOf` l] ++ concatMap snd (Map.elems rewritten) ++ factLines
       factLines =
         [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "drop facts: exclusive " ++ show ex ++ ", fresh " ++ show (Map.findWithDefault False q (_fresh facts)) ++ ", answers " ++ show (Map.findWithDefault [] q (_answers facts)) ++ ", stash " ++ show (Map.findWithDefault [] q (_stash facts)) ++ (if Set.member q (_open prog) then ", open" else "")]
         | dropReporting,
