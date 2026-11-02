@@ -1322,7 +1322,7 @@ isFunction t =
 siblings :: Env -> Ms -> Ms -> [Core.Expr] -> [(R, Bool)]
 siblings env live keep kids = zip rs alone
   where
-    rs = lazyZip3 (\k after (before, others) -> walk env (Set.unions [live, after, before]) (Set.union keep others) k) kids afters heldBy
+    rs = lazyZip3 (\(k, start) after (before, others) -> walk (from start env) (Set.unions [live, after, before]) (Set.union keep others) k) (zip kids (startsOf env kids)) afters heldBy
     holds r = heldAll (holdsClosed env r)
     afters = drop 1 (scanr (\r acc -> Set.union (_ms r) acc) Set.empty rs)
     befores = scanl (\acc r -> Set.union acc (holds r)) Set.empty rs
@@ -1379,6 +1379,42 @@ built e ks node =
           _why = "a part is shared: " ++ firstWhy rs
         }
 
+-- ROOT NUMBERS
+
+-- | Walks that number from the same start give two roots one number, and
+-- what is keyed by it, the taint fed back between rounds, '_outDerived'
+-- and '_outDropped', then says of one what was so of the other
+-- (m4-owned-pages.md §OP24). So each walk numbers in a range of its own:
+-- a node's children start where the roots its earlier children may number
+-- end, and a binding's value after the binding's own number. 'rootsIn' is
+-- a bound on what a walk numbers, not the count, so ranges may leave gaps.
+rootsIn :: Core.Expr -> Int
+rootsIn e = own + sum (map rootsIn (children e))
+  where
+    own = case Core._exprValue e of
+      Core.ELam bs _ -> length bs
+      Core.EWitLam bs _ -> length bs
+      Core.ELet binds _ -> length binds
+      Core.ELetRec binds _ -> length binds
+      Core.ECase _ alts _ -> 1 + sum [length (patternBinders p) | Core.Alt p _ <- alts]
+      Core.EJoin binds _ -> sum [joinParams v | Core.Bind _ v <- binds]
+      _ -> 0
+
+-- | What a join's own walk numbers besides its body: its parameters.
+joinParams :: Core.Expr -> Int
+joinParams v =
+  case Core._exprValue v of
+    Core.ELam params _ -> length params
+    _ -> 0
+
+-- | Where each of a run of walks starts, each after what those before it
+-- may number. Lazy: a walk's start reads only the walks before it.
+startsOf :: Env -> [Core.Expr] -> [Int]
+startsOf env es = scanl (+) (_next env) (map rootsIn es)
+
+from :: Int -> Env -> Env
+from start env = env {_next = start}
+
 -- | A new root, its value its own or not, sharing with the roots given.
 bindRoot :: Env -> String -> Core.Binder -> Bool -> Set Place -> (Env, Int)
 bindRoot env what b excl co =
@@ -1428,8 +1464,9 @@ lambda env e binders body =
 letRec :: Env -> Ms -> Ms -> Core.Expr -> [Core.Bind] -> Core.Expr -> R
 letRec env live keep e binds body =
   let inner = foldl (\en (Core.Bind b _) -> fst (bindRoot en "a recursive function" b False Set.empty)) env binds
-      values = [walk inner Set.empty Set.empty v | Core.Bind _ v <- binds]
-      rb = walk inner live keep body
+      starts = startsOf inner (map Core._bindValue binds ++ [body])
+      values = [walk (from start inner) Set.empty Set.empty v | (Core.Bind _ v, start) <- zip binds starts]
+      rb = walk (from (starts !! length binds) inner) live keep body
       all_ = rb : values
    in (combine all_)
         { _expr = e {Core._exprValue = Core.ELetRec [Core.Bind b (_expr r) | (Core.Bind b _, r) <- zip binds values] (_expr rb)},
@@ -1471,9 +1508,9 @@ lets env live keep e binds body =
             _ ->
               let (env0, i) = bindRoot env "a let" b (_ex rv) (alive after (closeCo env (_co rv)))
                   env' = env0 {_binders = IntMap.insert i b (_binders env0)}
-                  inner = walk env' live keep restExpr
+                  inner = walk (from (i + 1 + rootsIn v) env') live keep restExpr
                   after = Set.union (_ms inner) live
-                  rv = walk env after after v
+                  rv = walk (from (i + 1) env) after after v
                   mine m = _root (_place m) == i
                   derived = Set.fromList [_root (_place m) | m <- Set.toList (_ms rv)]
                   flowOut = concat [if _root p == i then _flow rv else [p] | p <- _flow inner]
@@ -1508,16 +1545,19 @@ caseOf env live keep e scrut alts fallback =
             let hidden = Core.Binder (hiddenName (_next env)) (Core._exprType scrut) (Core.spanOf scrut)
                 (env', i) = bindRoot env "what a case matched," hidden (_ex rs) (alive after (closeCo env (_co rs)))
                 after = Set.union armsMs live
-                rs = walk env after after scrut
+                rs = walk (from (_next env + 1) env) after after scrut
              in ( rs,
                   env',
                   Place i [],
                   True,
                   mempty {_outDerived = Map.singleton i (Set.fromList [_root (_place m) | m <- Set.toList (_ms rs)])}
                 )
-      arm pat body = walk (bindPattern armEnv armTracked armPlace pat) live keep body
-      armRs = [arm pat body | Core.Alt pat body <- alts]
-      fallbackR = fmap (walk armEnv live keep) fallback
+      -- Each arm numbers after the scrutinee and the arms before it.
+      armWidth pat body = length (patternBinders pat) + rootsIn body
+      armStarts = scanl (+) (_next env + 1 + rootsIn scrut) [armWidth pat body | Core.Alt pat body <- alts]
+      arm start pat body = walk (bindPattern (from start armEnv) armTracked armPlace pat) live keep body
+      armRs = [arm start pat body | (Core.Alt pat body, start) <- zip alts armStarts]
+      fallbackR = fmap (walk (from (last armStarts) armEnv) live keep) fallback
       armsMs = Set.unions (map _ms armRs ++ maybe [] (pure . _ms) fallbackR)
       every = armRs ++ Maybe.maybeToList fallbackR
       hiddenRoot = case placeOf env scrut of
@@ -1605,7 +1645,7 @@ update env live keep e base fields w0 =
       kept = case Core._exprType base of
         Core.TRecord fs _ | not (null anchors) -> heldAll [Place (_root a) (_path a ++ [SField f]) | a <- anchors, (f, _) <- fs, f `notElem` replaced]
         _ -> heldAll (holdsClosed env baseR)
-      fieldRs = lazyZip3 (\(_, v) after (before, others) -> walk env (Set.unions [live, after, before, kept]) (Set.unions [keep, others, kept]) v) fields afters heldBy
+      fieldRs = lazyZip3 (\((_, v), start) after (before, others) -> walk (from start env) (Set.unions [live, after, before, kept]) (Set.unions [keep, others, kept]) v) (zip fields (drop 1 (startsOf env (base : map snd fields)))) afters heldBy
       holds r = heldAll (holdsClosed env r)
       afters = drop 1 (scanr (\r acc -> Set.union (_ms r) acc) Set.empty fieldRs)
       befores = scanl (\acc r -> Set.union acc (holds r)) Set.empty fieldRs
@@ -1767,18 +1807,24 @@ unknownCall env live e fn args node =
 joins :: Env -> Ms -> Ms -> Core.Expr -> [Core.Bind] -> Core.Expr -> R
 joins env live keep e binds body =
   let start = _next env
-      infos = Map.fromList [(Core._binderName b, JoinInfo start (after (Core._binderName b))) | Core.Bind b _ <- binds]
+      -- Each join numbers its parameters and its body after the joins
+      -- before it, and the body after them all.
+      joinStarts = scanl (+) start [joinParams v + rootsIn (joinBody v) | Core.Bind _ v <- binds]
+      joinBody v = case Core._exprValue v of
+        Core.ELam _ jbody -> jbody
+        _ -> v
+      infos = Map.fromList [(Core._binderName b, JoinInfo first (after (Core._binderName b))) | (Core.Bind b _, first) <- zip binds joinStarts]
       env' = env {_joins = Map.union infos (_joins env)}
-      walkJoin (Core.Bind b v) =
+      walkJoin (Core.Bind b v, first) =
         let name = Core._binderName b
          in case Core._exprValue v of
               Core.ELam params jbody ->
                 let excl = Map.findWithDefault (map (const True) params) name (_joinExcl env)
-                    inner = foldl (\en (p, x) -> fst (bindRoot en "a join's parameter" p x Set.empty)) env' {_scope = start} (zip params (excl ++ repeat False))
+                    inner = foldl (\en (p, x) -> fst (bindRoot en "a join's parameter" p x Set.empty)) (from first env') {_scope = first} (zip params (excl ++ repeat False))
                     r = walk inner live keep jbody
                  in (name, r {_expr = v {Core._exprValue = Core.ELam params (_expr r)}, _co = Set.filter (\q -> _root q < start) (_co r)})
-              _ -> (name, walk env' live keep v)
-      walked = map walkJoin binds
+              _ -> (name, walk (from first env') live keep v)
+      walked = map walkJoin (zip binds joinStarts)
       own = Map.fromList [(name, Set.filter (\m -> _root (_place m) < start) (_ms r)) | (name, r) <- walked]
       targets = Map.fromList [(name, _jumps r) | (name, r) <- walked]
       after name = Set.union live (reach name)
@@ -1787,7 +1833,7 @@ joins env live keep e binds body =
       closure seen =
         let next = Set.union seen (Set.unions [Map.findWithDefault Set.empty t targets | t <- Set.toList seen, Map.member t targets])
          in if next == seen then seen else closure next
-      rb = walk env' live keep body
+      rb = walk (from (last joinStarts) env') live keep body
       every = rb : map snd walked
       -- For the drops, a loop's result may hold anything the loop reads: its
       -- parameters are not linked to what the jumps hand them.
