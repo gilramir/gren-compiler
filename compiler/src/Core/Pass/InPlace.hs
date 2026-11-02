@@ -1452,7 +1452,14 @@ lets env live keep e binds body =
               Core.ELet more body' | not (null rest) -> Core.ELet (Core.Bind b v' : more) body'
               _ -> Core.ELet [Core.Bind b v'] (_expr inner)
        in case placeOf env v of
-            Just (ref, steps) ->
+            -- A binding of a place names it, so a mention of the name is a
+            -- mention of the place. For the drops, only a place that can hold
+            -- what they free: a field that cannot is read where it is bound,
+            -- and a later mention of it is no read of its record. As an alias,
+            -- @n = back.rows@ read after @takePages back@ handed the pages on
+            -- made @back@ read there, and its pages dropped through the
+            -- builder @toArray@ had taken (visiterm @phase2-window.md@ §15.6).
+            Just (ref, steps) | _mode (_prog env) == Marks || tracks env (Core._exprType v) ->
               let p = Place (_root (_refPlace ref)) (_path (_refPlace ref) ++ steps)
                   alias = Ref p (length (_path p)) (_refTracked ref)
                   inner = walk env {_names = Map.insert (Core._binderName b) alias (_names env)} live keep restExpr
@@ -1461,7 +1468,7 @@ lets env live keep e binds body =
                     { _expr = e {Core._exprValue = rebuild v inner},
                       _ms = Set.union (Set.fromList readNow) (_ms inner)
                     }
-            Nothing ->
+            _ ->
               let (env0, i) = bindRoot env "a let" b (_ex rv) (alive after (closeCo env (_co rv)))
                   env' = env0 {_binders = IntMap.insert i b (_binders env0)}
                   inner = walk env' live keep restExpr
