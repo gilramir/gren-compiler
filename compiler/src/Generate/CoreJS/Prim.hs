@@ -405,6 +405,7 @@ string p args =
     (SOffsetToIndex, _) -> helper "_Str_offsetToIndex" args
     (SNext, _) -> helper "_Str_next" args
     (SPrev, _) -> helper "_Str_prev" args
+    (SJoin, _) -> helper "_Str_join" args
     _ -> arityError (StrOp p) args
   where
     method obj name as = JS.Call (JS.Access obj (JsName.fromLocalHumanReadable name)) as
@@ -460,6 +461,13 @@ function _Str_foldr(s, acc, f) {
     acc = A2(f, cp, acc);
   }
   return acc;
+}
+
+// D1052's `str_join`, which `geng-hs-bodies` reaches, since `String.join`'s
+// extern is `Array.join` itself. The array is a JS array or a `_Slice` over a
+// growable one (D709), read here without `arrayHelpers`.
+function _Str_join(sep, a) {
+  return (Array.isArray(a) ? a : a.buf.slice(a.off, a.off + a.len)).join(sep);
 }
 
 // Not `String.fromCodePoint(...cs)`: an argument list has a length limit.

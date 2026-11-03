@@ -250,6 +250,10 @@ data StrPrim
     SPrev
   | -- | The codepoint at an offset. Precondition: an offset before 'SEnd'.
     SCharAt
+  | -- | The strings with the separator between each two, sized before it is
+    -- made, so each piece is copied once (D1052, geng-lang
+    -- @m4-memory-proofs.md@ §MP11). __Appended__ to 'allPrims' after D1031's.
+    SJoin
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | Every width, both byte orders and both float widths are Geng over 'BGetU8',
@@ -537,7 +541,7 @@ allPrims =
     ++ [DebugLog]
     -- Appended by D206 and D210 (m1b-str-prim.md §Z9). Everything above keeps
     -- its code.
-    ++ map StrOp [SEnd .. maxBound]
+    ++ map StrOp [SEnd .. SCharAt]
     ++ [ConvOp F64FromDecimal]
     -- Appended by D233 (m1b-bytes-prim.md §BY12).
     ++ [BytesOp BtSetBytes]
@@ -565,6 +569,8 @@ allPrims =
     ++ map TransientOp [TrFill .. maxBound]
     -- Appended by D1031 (m4-owned-pages.md §OP13).
     ++ map BytesOp [BoFromBuilder .. maxBound]
+    -- Appended by D1052 (m4-memory-proofs.md §MP11).
+    ++ [StrOp SJoin]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -695,6 +701,7 @@ strPrimName p =
     SNext -> "next"
     SPrev -> "prev"
     SCharAt -> "char_at"
+    SJoin -> "join"
 
 bytesPrimName :: BytesPrim -> Text
 bytesPrimName p =
@@ -848,6 +855,7 @@ primArity op =
         SNext -> 2
         SPrev -> 2
         SCharAt -> 2
+        SJoin -> 2
         -- string, needle, offset
         SFind -> 3
         SFindLast -> 3

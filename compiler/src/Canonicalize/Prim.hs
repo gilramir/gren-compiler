@@ -209,6 +209,7 @@ strType p =
     SNext -> Just (fn [tString, tInt] tInt)
     SPrev -> Just (fn [tString, tInt] tInt)
     SCharAt -> Just (fn [tString, tInt] tChar)
+    SJoin -> Just (fn [tString, Can.TType ModuleName.array "Array" [tString]] tString)
   where
     b = Can.TVar "b"
     fold = fn [tString, b, fn [tChar, b] b] b
