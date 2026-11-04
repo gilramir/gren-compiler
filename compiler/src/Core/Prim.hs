@@ -267,6 +267,14 @@ data StrPrim
     -- does, and gives back either operand's buffer the result does not keep
     -- (D1056). __Appended__ after 'AAppendU'.
     SAppendUU
+  | -- | The string copied into a buffer of its own, with room after it, so
+    -- that nothing else holds or views that buffer (D1059, geng-lang
+    -- @m4-memory-proofs.md@ §MP16); an empty string is answered as it is,
+    -- since it has no buffer to give back. Only the @appends@ pass makes
+    -- one, natively, at a loop's entry, so that the loop's accumulator is
+    -- its own from the first round; a backend with no buffers to give back
+    -- may answer the string. __Appended__ after 'AAppendUU'.
+    SFresh
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | Every width, both byte orders and both float widths are Geng over 'BGetU8',
@@ -364,6 +372,9 @@ data ArrPrim
     AAppendU
   | -- | 'SAppendUU' for an array. __Appended__ after 'SAppendUU'.
     AAppendUU
+  | -- | 'SFresh' for an array of plain elements (D1059). __Appended__ after
+    -- 'SFresh'.
+    AFresh
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | C7's transient — a real mutable array plus a @finalized@ flag, mutating in
@@ -591,6 +602,8 @@ allPrims =
     ++ [StrOp SJoin]
     -- Appended by D1056 (m4-memory-proofs.md §MP12).
     ++ [StrOp SAppendU, ArrOp AAppendU, StrOp SAppendUU, ArrOp AAppendUU]
+    -- Appended by D1059 (m4-memory-proofs.md §MP16).
+    ++ [StrOp SFresh, ArrOp AFresh]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -724,6 +737,7 @@ strPrimName p =
     SJoin -> "join"
     SAppendU -> "append_u"
     SAppendUU -> "append_uu"
+    SFresh -> "fresh"
 
 bytesPrimName :: BytesPrim -> Text
 bytesPrimName p =
@@ -759,6 +773,7 @@ arrPrimName p =
     AAppend -> "append"
     AAppendU -> "append_u"
     AAppendUU -> "append_uu"
+    AFresh -> "fresh"
     AInsert -> "insert"
     ARemove -> "remove"
 
@@ -882,6 +897,7 @@ primArity op =
         SJoin -> 2
         SAppendU -> 2
         SAppendUU -> 2
+        SFresh -> 1
         -- string, needle, offset
         SFind -> 3
         SFindLast -> 3
@@ -926,6 +942,7 @@ primArity op =
         AAppend -> 2
         AAppendU -> 2
         AAppendUU -> 2
+        AFresh -> 1
         ARemove -> 2
         ASet -> 3
         ASlice -> 3

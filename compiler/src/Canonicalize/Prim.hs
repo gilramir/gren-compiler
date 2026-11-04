@@ -194,6 +194,8 @@ strType p =
     -- D1056: made only by the appends pass; no @\@prim@ declares it.
     SAppendU -> Just (fn [tString, tString] tString)
     SAppendUU -> Just (fn [tString, tString] tString)
+    -- D1059: made only by the appends pass; no @\@prim@ declares it.
+    SFresh -> Just (fn [tString] tString)
     SSlice -> Just (fn [tString, tInt, tInt] tString)
     SEq -> Just (fn [tString, tString] tBool)
     SCmp -> Just (fn [tString, tString] tInt)
@@ -275,6 +277,8 @@ arrType p =
     -- D1056: made only by the appends pass; no @\@prim@ declares it.
     AAppendU -> fn [tArray, tArray] tArray
     AAppendUU -> fn [tArray, tArray] tArray
+    -- D1059: made only by the appends pass; no @\@prim@ declares it.
+    AFresh -> fn [tArray] tArray
   where
     a = Can.TVar "a"
     tArray = Can.TType ModuleName.array "Array" [a]

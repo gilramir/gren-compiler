@@ -391,6 +391,8 @@ string p args =
     -- D1056: native only; JavaScript's append is already its own.
     (SAppendU, [a, b]) -> JS.Infix JS.OpAdd a b
     (SAppendUU, [a, b]) -> JS.Infix JS.OpAdd a b
+    -- D1059: native only; a JavaScript string has no buffer to give back.
+    (SFresh, [a]) -> a
     (SEq, [a, b]) -> JS.Infix JS.OpEq a b
     (SSlice, [s, i, j]) -> method s "slice" [i, j]
     (SEnd, [s]) -> JS.Access s (JsName.fromLocalHumanReadable "length")
@@ -661,6 +663,8 @@ array p args =
     (AAppend, [_, _]) -> helper "_Arr_append" args
     (AAppendU, [_, _]) -> helper "_Arr_append" args
     (AAppendUU, [_, _]) -> helper "_Arr_append" args
+    -- D1059: native only; nothing here gives a buffer back.
+    (AFresh, [a]) -> a
     (AInsert, [a, i, v]) -> method (flat a) "toSpliced" [i, JS.Int 0, v]
     (ARemove, [a, i]) -> method (flat a) "toSpliced" [i, JS.Int 1]
     _ -> arityError (ArrOp p) args

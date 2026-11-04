@@ -116,6 +116,22 @@
 -- holds only what the call made or what an argument's own part held. A
 -- part is at most 'maxPartDepth' steps deep, or a loop could make its own
 -- parts one step deeper each round and the facts would never settle.
+--
+-- __A loop's accumulator copied at its entry__ (geng-lang
+-- @m4-memory-proofs.md@ D1059). A join's parameter has one fact for every
+-- jump to it, the entry's too, so a loop whose caller hands it a line the
+-- caller still reads has its own rounds taken as shared. Where the loop is
+-- at a function's top and enters with a parameter, and the walk with the
+-- program's facts makes more appends in place with the parameter its own,
+-- each call of the function hands it a copy ('Prim.SFresh', 'Prim.AFresh'),
+-- a buffer of its own, when no call is in a loop, so that a copy is one per
+-- call and not one per round of a caller's loop; and the facts are worked
+-- out again with the copies in the program ('paramCandidates', 'copyable',
+-- 'tryParamCopies', 'copyAtCalls'). Two things that held of a whole
+-- definition hold in the appends' walk only where they can: a taint a jump
+-- raises leaves out the roots the join binds anew, and a taint holds only
+-- after where it was raised and in no other arm of a case it was raised in,
+-- for a root its scope binds anew ('liveTaint').
 module Core.Pass.InPlace
   ( run,
     runDrops,
@@ -639,6 +655,10 @@ primHolds op n =
     Prim.BytesOp Prim.BoGetU8 -> [False, False]
     Prim.BytesOp Prim.BoAppendTo -> [True, False, False, False]
     Prim.BytesOp Prim.BoToBytes -> [False]
+    -- D1059's copies hold none of what they copy: a string's bytes, or an
+    -- array of plain elements, the only types the appends make one for.
+    Prim.StrOp Prim.SFresh -> [False]
+    Prim.ArrOp Prim.AFresh -> [False]
     _ -> replicate n True
 
 -- | Whether a value of the first type can hold a value of the second, at
@@ -1016,23 +1036,85 @@ hitsIn hits (Place root path) ms =
 -- | A shared place under which nothing is written: a write at or under it.
 taintedShallow :: Set Taint -> Place -> Bool
 taintedShallow taint (Place root p) =
-  any (\(Taint (Place r q) spared) -> r == root && q `List.isPrefixOf` p && not (covers spared (drop (length q) p))) (Set.toList taint)
+  any (\(Taint (Place r q) spared _ _ _) -> r == root && q `List.isPrefixOf` p && not (covers spared (drop (length q) p))) (Set.toList taint)
 
 taintedDeep :: Set Taint -> Place -> Bool
 taintedDeep taint (Place root p) =
-  any (\(Taint (Place r q) spared) -> r == root && ((q `List.isPrefixOf` p && not (covers spared (drop (length q) p))) || p `List.isPrefixOf` q)) (Set.toList taint)
+  any (\(Taint (Place r q) spared _ _ _) -> r == root && ((q `List.isPrefixOf` p && not (covers spared (drop (length q) p))) || p `List.isPrefixOf` q)) (Set.toList taint)
 
 -- | A shared place, but the parts under it, by their paths from it, that a
 -- value handed on held as its alone (D1057). For the marks and the drops
 -- nothing is spared.
 data Taint = Taint
   { _taintAt :: !Place,
-    _taintSpared :: !Excl
+    _taintSpared :: !Excl,
+    -- | The arms of the cases the value was handed on in, each case by its
+    -- key (D1059); empty for the marks and the drops.
+    _taintBranch :: !Branch,
+    -- | Where it was handed on: the walk's next root there, and the first
+    -- root of the function, loop body or lambda it was in (D1059).
+    _taintPos :: !Int,
+    _taintScope :: !Int
   }
   deriving (Eq, Ord)
 
+-- | One taint for each place, its spared parts and its scope (D1059): the
+-- arms the taints have in common and the first place one was raised, which
+-- holds wherever any of them held. Without it a place handed on at many
+-- points is as many taints, every one of which each read looks at.
+mergeTaints :: Set Taint -> Set Taint
+mergeTaints ts =
+  Set.fromList
+    [ Taint at sp branch pos scope
+    | ((at, sp, scope), group) <- Map.toList (Map.fromListWith (++) [((_taintAt t, _taintSpared t, _taintScope t), [t]) | t <- Set.toList ts]),
+      let branch = foldr1 common (map _taintBranch group)
+          pos = minimum (map _taintPos group)
+    ]
+  where
+    common = IntMap.mergeWithKey (\_ a b -> if fst a == fst b then Just a else Nothing) (const IntMap.empty) (const IntMap.empty)
+
+-- | A taint that holds everywhere: a closure's, which may run anywhere.
 taintAll :: Place -> Taint
-taintAll p = Taint p none
+taintAll p = Taint p none IntMap.empty 0 (-1)
+
+-- | The arms of the cases the walk is in (D1059): each case by the root
+-- number it reserves, which no other node of the definition's walk has, to
+-- the arm and the first root the case's scope binds anew each time it runs.
+-- A map and not a path from the outermost: a case is in one arm of each
+-- case around it, so two places' paths part at the one case both are in
+-- with different arms, if any, and after it share no case; and a path
+-- grown one case at a time is a cost as deep as the nesting each time,
+-- which a chain of a thousand @else if@s made quadratic.
+type Branch = IntMap.IntMap (Int, Int)
+
+-- | The taints that may hold where the walk is (D1059), for a root that
+-- the scope the walk is in (a function's body, a join's, a lambda's) binds
+-- anew each time it runs; a root bound before the scope, or a parameter of
+-- the function, keeps every taint, and so do the marks and the drops.
+--
+-- * One handed on in an arm of a case holds in no other arm of that case.
+--   To run another arm the case runs again, which it does only once a jump
+--   has entered a join around it again, or the function or the lambda it is
+--   in has been called again, and either binds every root of the scope
+--   again. What the jump or the call is handed of the old roots is its
+--   arguments', whose own parts leave out what something else holds.
+-- * One handed on in the same scope holds only after it, where the walk's
+--   next root is past where it was handed on: the walk numbers a scope's
+--   roots in the order it runs them (a let's value before its body, a
+--   call's arguments in turn, a case's scrutinee before its arms), and
+--   running the scope again binds its roots anew.
+liveTaint :: Env -> Set Taint
+liveTaint env
+  | not (byPlace env) = _taint env
+  | otherwise = Set.filter (not . gone) (_taint env)
+  where
+    lo = max (_scope env) (_paramCount env)
+    gone t =
+      let r = _root (_taintAt t)
+       in apart (_taintBranch t) r
+            || (_taintScope t == _scope env && r >= lo && _next env < _taintPos t)
+    apart there r =
+      or (IntMap.intersectionWith (\(i, armLo) (j, _) -> i /= j && r >= armLo) (_branch env) there)
 
 -- | What a mention of a value already handed on holds: the object at the
 -- place, read when it was handed.
@@ -1137,6 +1219,8 @@ data Ref = Ref
 data JoinInfo = JoinInfo
   { -- | The first root number bound inside the join.
     _joinStart :: Int,
+    -- | One past the last root bound inside it (D1059).
+    _joinEnd :: Int,
     -- | What may be read once the join is entered, of what is bound outside
     -- it: its body's mentions, those of every join it may jump to, and what
     -- follows the 'Core.EJoin' that binds it.
@@ -1165,7 +1249,11 @@ data Env = Env
     -- time round or the next time the lambda runs; and the binders of the
     -- roots a drop may name, a let's and a parameter's.
     _scope :: Int,
-    _binders :: IntMap.IntMap Core.Binder
+    _binders :: IntMap.IntMap Core.Binder,
+    -- | The arms of the cases the walk is in (D1059); the appends' only.
+    _branch :: Branch,
+    -- | How many parameters the function has.
+    _paramCount :: Int
   }
 
 -- | Whether the walk follows a value of the type: one that can hold an
@@ -1298,11 +1386,13 @@ definition prog facts allExclusive q value =
                 _taint = taint,
                 _joinExcl = joinExcl,
                 _scope = 0,
-                _binders = IntMap.fromList (zip [0 ..] params)
+                _binders = IntMap.fromList (zip [0 ..] params),
+                _branch = IntMap.empty,
+                _paramCount = n
               }
           r = walk env Set.empty Set.empty body
           out = _out r
-          taint' = Set.union taint (_outTaint out)
+          taint' = mergeTaints (Set.union taint (_outTaint out))
           joinExcl' = Map.unionWith (zipWith meetExcl) joinExcl (_outJoins out)
           settled = taint' == taint && joinExcl' == joinExcl
        in if rounds >= 100
@@ -1326,7 +1416,15 @@ definition prog facts allExclusive q value =
                         | result = ""
                         | not (_ex r) = _why r ++ concat [" [" ++ l ++ "]" | l <- _outLines out, "jumps to" `List.isInfixOf` l]
                         | otherwise = "it may hold " ++ List.intercalate ", " [IntMap.findWithDefault "?" (_root p) (_rootWhat env) | p <- Set.toList (_co r), _root p >= n]
-                   in Def rebuilt result whyNot out [Set.member i stashed | i <- [0 .. n - 1]] parts
+                      -- each loop's facts, for the appends' report (D1059)
+                      joinFactLines =
+                        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "append join facts: " ++ Name.toChars j ++ " exclusive " ++ showExcl ex]
+                        | appendReporting,
+                          _mode prog == Appends,
+                          not allExclusive,
+                          (j, ex) <- Map.toList joinExcl
+                        ]
+                   in Def rebuilt result whyNot out {_outLines = _outLines out ++ joinFactLines} [Set.member i stashed | i <- [0 .. n - 1]] parts
                 else go taint' joinExcl' (rounds + 1)
     nothingOut out = out {_outCalls = Map.map (map (const none)) (_outCalls out), _outLines = []}
 
@@ -1391,7 +1489,7 @@ escaping env r =
       spared (Place root p) linked
         | any (\(Place r' q) -> r' == root && q `List.isPrefixOf` p) mine = whole
         | otherwise = normalExcl (linked ++ [drop (length p) q | Place r' q <- mine, r' == root, p `List.isPrefixOf` q])
-   in [Taint pl sp | (pl, linked) <- holdsSpared env r, let sp = spared pl linked, sp /= whole]
+   in [Taint pl sp (_branch env) (_next env) (_scope env) | (pl, linked) <- holdsSpared env r, let sp = spared pl linked, sp /= whole]
 
 -- | The places a value at the place may share an object with, besides it.
 shareOf :: Env -> Place -> Set Place
@@ -1517,7 +1615,7 @@ walkNode env live keep e =
           deep = tracks env (Core._exprType e)
           m = mention p (_refSnap ref) deep
           excl = rootExcl env (_root p)
-          own = covers excl (_path p) && not (taintedDeep (_taint env) p)
+          own = covers excl (_path p) && not (taintedDeep (liveTaint env) p)
           -- D1057: the root's own parts under the place, each held by
           -- nothing but the place it is at.
           parts =
@@ -1526,7 +1624,7 @@ walkNode env live keep e =
               byPlace env,
               sub <- exclBelow excl (_path p),
               let q = Place (_root p) (_path p ++ sub),
-              not (taintedDeep (_taint env) q)
+              not (taintedDeep (liveTaint env) q)
             ]
        in if _refTracked ref
             then
@@ -1832,7 +1930,7 @@ bindRootParts env what b excl co parts =
 lambda :: Env -> Core.Expr -> [Core.Binder] -> Core.Expr -> R
 lambda env e binders body =
   let start = _next env
-      inner = foldl (\en b -> fst (bindRoot en "a lambda's parameter" b none Set.empty)) env {_joins = Map.empty, _scope = start} binders
+      inner = foldl (\en b -> fst (bindRoot en "a lambda's parameter" b none Set.empty)) env {_joins = Map.empty, _scope = start, _branch = IntMap.empty} binders
       r = walk inner Set.empty Set.empty body
       outer = Set.filter (\m -> _root (_place m) < start) (_ms r)
       -- A number read when an alias was bound is not read again, whatever
@@ -1955,9 +2053,13 @@ caseOf env live keep e scrut alts fallback =
       -- Each arm numbers after the scrutinee and the arms before it.
       armWidth pat body = length (patternBinders pat) + rootsIn body
       armStarts = scanl (+) (_next env + 1 + rootsIn scrut) [armWidth pat body | Core.Alt pat body <- alts]
-      arm start pat body = walk (bindPattern (from start armEnv) armTracked armPlace pat) live keep body
-      armRs = [arm start pat body | (Core.Alt pat body, start) <- zip alts armStarts]
-      fallbackR = fmap (walk (from (last armStarts) armEnv) live keep) fallback
+      -- D1059: each arm walked knowing it is that arm of this case.
+      inArm k en
+        | byPlace env = en {_branch = IntMap.insert (_next env) (k, max (_scope env) (_paramCount env)) (_branch env)}
+        | otherwise = en
+      arm k start pat body = walk (bindPattern (inArm k (from start armEnv)) armTracked armPlace pat) live keep body
+      armRs = [arm k start pat body | (k, Core.Alt pat body, start) <- zip3 [0 ..] alts armStarts]
+      fallbackR = fmap (walk (inArm (length alts) (from (last armStarts) armEnv)) live keep) fallback
       armsMs = Set.unions (map _ms armRs ++ maybe [] (pure . _ms) fallbackR)
       every = armRs ++ Maybe.maybeToList fallbackR
       hiddenRoot = case placeOf env scrut of
@@ -2086,7 +2188,7 @@ update env live keep e base fields w0 =
         Just (ref, p)
           | not (_refTracked ref) -> Just "the base is not tracked"
           | not (isExcl env (_root p)) -> Just ("the record is not the base's alone: " ++ IntMap.findWithDefault "?" (_root p) (_rootWhat env))
-          | taintedShallow (_taint env) p -> Just "the record is shared: it was handed on while it was still read"
+          | taintedShallow (liveTaint env) p -> Just "the record is shared: it was handed on while it was still read"
           | hitsIn shallowHits p live -> Just "the record is read after the update"
           | coRead -> Just "what may share the record is read after the update"
           | embeds -> Just "a field puts the record into itself"
@@ -2258,7 +2360,7 @@ joins env live keep e binds body =
       joinBody v = case Core._exprValue v of
         Core.ELam _ jbody -> jbody
         _ -> v
-      infos = Map.fromList [(Core._binderName b, JoinInfo first (after (Core._binderName b))) | (Core.Bind b _, first) <- zip binds joinStarts]
+      infos = Map.fromList [(Core._binderName b, JoinInfo first end (after (Core._binderName b))) | (Core.Bind b _, first, end) <- zip3 binds joinStarts (drop 1 joinStarts)]
       env' = env {_joins = Map.union infos (_joins env)}
       walkJoin (Core.Bind b v, first) =
         let name = Core._binderName b
@@ -2307,6 +2409,17 @@ jump env e j args =
       live = maybe Set.empty _joinAfter info
       rs = map fst (siblings env live live args)
       start = maybe 0 _joinStart info
+      -- D1059: what a jump hands on taints no place under a root the join
+      -- binds, its parameters and what its body binds. Nothing runs after a
+      -- jump but the join, which binds them all again: its parameters to
+      -- what its facts, the meet of every jump's own parts, say, so an
+      -- object the jump stores where the parameter does not own it, as
+      -- @joinLines@ stores its line in @lines@, is left out of that
+      -- parameter's own parts by the jump itself. The appends only, as the
+      -- parts are theirs.
+      rebound out
+        | byPlace env, Just ji <- info = out {_outTaint = Set.filter (\t -> let r = _root (_taintAt t) in r < start || r >= _joinEnd ji) (_outTaint out)}
+        | otherwise = out
    in R
         { _expr = e {Core._exprValue = Core.EJump j (map _expr rs)},
           _ms = Set.unions (map _ms rs),
@@ -2316,7 +2429,7 @@ jump env e j args =
           _x = True,
           _out =
             foldMap _out rs
-              <> escapes env rs
+              <> rebound (escapes env rs)
               <> mempty
                 { _outJoins = Map.singleton j (map xExcl rs),
                   _outLines =
@@ -2386,7 +2499,7 @@ drops env after rv =
       let shares = q : Set.toList (shareOf env q)
        in case () of
             _
-              | any (taintedDeep (_taint env)) shares -> Just "it was handed on while still read"
+              | any (taintedDeep (liveTaint env)) shares -> Just "it was handed on while still read"
               | any (\p -> hitsIn deepHits p after) shares -> Just "what may share it is read after"
               | any (\p -> not (isExcl env (_root p))) shares -> Just "what may share it is not its root's alone"
               | any (\p -> any (`related` p) valueHolds) shares -> Just "the binding's value may hold it"
@@ -2673,6 +2786,75 @@ runAppends roots cores =
   -- an @Array@ or a @String@, may still be read after (D933), and it shares
   -- the field's buffer. Whether every caller hands a value nothing else holds
   -- is the walk's own fact here, as it is for the marks.
+  let (prog1, defs1, facts1, final1) = appendFacts roots cores
+      -- D1059: a loop's accumulator its function's callers hand it shared,
+      -- copied where they call it when that makes an append in place; the
+      -- facts are then worked out again over the program with the copies in
+      -- it, which is what the rewrite rests on.
+      sites = callSites defs1
+      copied =
+        [ (q, paths, notes)
+        | (q, v) <- defs1,
+          let cands = paramCandidates v,
+          not (null cands),
+          copyable prog1 sites q,
+          Just d <- [Map.lookup q final1],
+          let (paths, notes) = tryParamCopies prog1 facts1 q v (inPlaceAppends (_defExpr d)) cands,
+          not (null paths)
+        ]
+      copiedMap = Map.fromList [(q, paths) | (q, paths, _) <- copied]
+      cores'
+        | null copied = cores
+        | otherwise =
+            Map.map
+              (\m -> m {Core._moduleDefs = [Core.Bind b (copyAtCalls copiedMap v) | Core.Bind b v <- Core._moduleDefs m]})
+              cores
+      (prog, defs, facts, final)
+        | null copied = (prog1, defs1, facts1, final1)
+        | otherwise = appendFacts roots cores'
+      copyLines =
+        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", note]
+        | appendReporting,
+          (q, _, notes) <- copied,
+          note <- notes
+        ]
+          ++ [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "not copied where it is called: " ++ why]
+             | appendReporting,
+               (q, v) <- defs1,
+               not (null (paramCandidates v)),
+               not (copyable prog1 sites q),
+               let why
+                     | Set.member q (_open prog1) = "its callers are not all known"
+                     | otherwise = "called in a loop or by itself: " ++ List.intercalate ", " [Name.toChars (Core._qnName c) | (c, l) <- Map.findWithDefault [] q sites, l || c == q]
+             ]
+      rewrite home (Core.Bind b v) =
+        maybe (Core.Bind b v) (Core.Bind b . _defExpr) (Map.lookup (Core.QualName home (Core._binderName b)) final)
+      out = Map.map (\m -> m {Core._moduleDefs = map (rewrite (Core._moduleName m)) (Core._moduleDefs m)}) cores'
+      -- each function's facts, as the drops' report has them, and the parts
+      -- of its result that are its own (D1057)
+      factLines =
+        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "append facts: exclusive " ++ showExcl ex ++ ", fresh " ++ show (Map.findWithDefault False q (_fresh facts)) ++ ", own parts " ++ showExcl [Map.findWithDefault none q (_freshParts facts)] ++ (if Set.member q (_open prog) then ", open" else "")]
+        | appendReporting,
+          (q, ex) <- Map.toList (_excl facts)
+        ]
+      -- each append, and why each value the appends follow is not handed on
+      -- as its own: the jumps and calls that hand one shared, and what keeps
+      -- one (D917's report reads as the drops' does)
+      lines_ = [l | d <- Map.elems final, l <- _outLines (_defOut d), any (`List.isInfixOf` l) ["\tappend", "_append_u", "\tjumps to ", "\thands ", "\tkept by "]] ++ factLines ++ copyLines
+      written = case appendReportPath of
+        Just path | path /= "" -> unsafePerformIO (appendFile path (unlines lines_) >> return out)
+        _ -> out
+   in if any (hasAppend . snd) defs then written else cores
+  where
+    hasAppend e =
+      case Core._exprValue e of
+        Core.EPrim op _ | isAppend op -> True
+        _ -> any hasAppend (children e)
+
+-- | The appends' facts over the program, from the start every walk of them
+-- takes, and each definition walked with them.
+appendFacts :: [Core.QualName] -> Map ModuleName.Canonical Core.Module -> (Prog, [(Core.QualName, Core.Expr)], Facts, Map Core.QualName Def)
+appendFacts roots cores =
   let prog = (program roots (Map.elems cores)) {_mode = Appends}
       defs = [(Core.QualName (Core._moduleName m) (Core._binderName b), v) | m <- Map.elems cores, Core.Bind b v <- Core._moduleDefs m]
       start =
@@ -2684,29 +2866,216 @@ runAppends roots cores =
             _freshParts = Map.map (const whole) (_fns prog)
           }
       (facts, final) = fixFacts prog defs start
-      rewrite home (Core.Bind b v) =
-        maybe (Core.Bind b v) (Core.Bind b . _defExpr) (Map.lookup (Core.QualName home (Core._binderName b)) final)
-      out = Map.map (\m -> m {Core._moduleDefs = map (rewrite (Core._moduleName m)) (Core._moduleDefs m)}) cores
-      -- each function's facts, as the drops' report has them, and the parts
-      -- of its result that are its own (D1057)
-      factLines =
-        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "append facts: exclusive " ++ showExcl ex ++ ", fresh " ++ show (Map.findWithDefault False q (_fresh facts)) ++ ", own parts " ++ showExcl [Map.findWithDefault none q (_freshParts facts)] ++ (if Set.member q (_open prog) then ", open" else "")]
-        | appendReporting,
-          (q, ex) <- Map.toList (_excl facts)
+   in (prog, defs, facts, final)
+
+-- COPIES AT A LOOP'S ENTRY (D1059)
+
+-- | A function's parameter and a path under it that a loop at the
+-- function's top hands its join's parameter, from every jump into the loop
+-- from outside it, where the join appends to that path: @joinLines@' @j@ and
+-- @.line@.
+paramCandidates :: Core.Expr -> [(Int, [Name])]
+paramCandidates v =
+  case lambdaOf v of
+    Nothing -> []
+    Just (params, body) ->
+      List.nub
+        [ (i, path)
+        | (j, k, path) <- entryCandidates body,
+          Just entries <- [entriesOf j body],
+          not (null entries),
+          let named = [n | args <- entries, Just a <- [nth k args], Core.EVar n <- [Core._exprValue a]],
+          length named == length entries,
+          (i, p) <- zip [0 ..] params,
+          all (== Core._binderName p) named
         ]
-      -- each append, and why each value the appends follow is not handed on
-      -- as its own: the jumps and calls that hand one shared, and what keeps
-      -- one (D917's report reads as the drops' does)
-      lines_ = [l | d <- Map.elems final, l <- _outLines (_defOut d), any (`List.isInfixOf` l) ["\tappend", "_append_u", "\tjumps to ", "\thands ", "\tkept by "]] ++ factLines
-      written = case appendReportPath of
-        Just path | path /= "" -> unsafePerformIO (appendFile path (unlines lines_) >> return out)
-        _ -> out
-   in if any (hasAppend . snd) defs then written else cores
   where
-    hasAppend e =
+    nth k xs = case drop k xs of
+      x : _ -> Just x
+      [] -> Nothing
+    entriesOf j e =
       case Core._exprValue e of
-        Core.EPrim op _ | isAppend op -> True
-        _ -> any hasAppend (children e)
+        Core.EJoin binds inner
+          | any (\(Core.Bind b _) -> Core._binderName b == j) binds -> Just (jumpsTo j inner)
+        _ -> Maybe.listToMaybe (Maybe.mapMaybe (entriesOf j) (children e))
+    jumpsTo j e =
+      case Core._exprValue e of
+        Core.EJump k args | k == j -> [args]
+        _ -> concatMap (jumpsTo j) (children e)
+
+-- | Each function's calls by name in the program, and whether each is in a
+-- loop: in a join that jumps to itself or to its group, or in a lambda,
+-- which may run any number of times.
+callSites :: [(Core.QualName, Core.Expr)] -> Map Core.QualName [(Core.QualName, Bool)]
+callSites defs =
+  Map.fromListWith (++) [(callee, [(caller, inLoop)]) | (caller, v) <- defs, (callee, inLoop) <- fst (go False (maybe v snd (lambdaOf v)) [])]
+  where
+    -- The calls under the node put before the ones given, and the joins
+    -- jumped to under it: one walk, with the calls threaded through it, as
+    -- a join's jumps looked for again at each join around it, or the calls
+    -- under a join's binding gathered again at each, cost the nesting's
+    -- depth over a decision tree's joins. A binding is walked knowing
+    -- whether it is in a loop, which needs the jumps of every binding of
+    -- its group, its own among them; they do not depend on it, so the
+    -- walk is lazy in it.
+    go loop e acc =
+      case Core._exprValue e of
+        Core.EApp f args
+          | Core.EGlobal q <- Core._exprValue (peelTyApp f) ->
+              let (calls, js) = goList loop args acc
+               in ((q, loop) : calls, js)
+        Core.ELam _ body -> go True body acc
+        Core.EJoin binds body ->
+          let (afterBody, bodyJumps) = go loop body acc
+              step (Core.Bind b v) ~(calls, jumps) =
+                let n = Core._binderName b
+                    ~(calls', js) = go (loop || cycles n) v calls
+                 in (calls', (n, js) : jumps)
+              ~(allCalls, bindJumps) = foldr step (afterBody, []) binds
+              names = Set.fromList (map fst bindJumps)
+              edges = Map.fromList [(n, Set.intersection names js) | (n, js) <- bindJumps]
+              reach seen frontier =
+                let next = Set.difference (Set.unions [Map.findWithDefault Set.empty n edges | n <- Set.toList frontier]) seen
+                 in if Set.null next then seen else reach (Set.union seen next) next
+              cycles n = Set.member n (reach Set.empty (Set.singleton n))
+           in (allCalls, Set.unions (bodyJumps : map snd bindJumps))
+        Core.EJump k args ->
+          let (calls, js) = goList loop args acc
+           in (calls, Set.insert k js)
+        _ -> goList loop (children e) acc
+    goList loop es acc =
+      foldr (\x ~(calls, jumps) -> let ~(calls', js) = go loop x calls in (calls', Set.union js jumps)) (acc, Set.empty) es
+
+-- | Whether a copy at every call of the function costs a copy per call and
+-- no more: every caller known, none in a loop, and none the function itself.
+-- A copy where a loop calls it would be one per round, each of what the
+-- loop has grown so far, as @Json.Value.scan@'s caller hands it the output.
+copyable :: Prog -> Map Core.QualName [(Core.QualName, Bool)] -> Core.QualName -> Bool
+copyable prog sites q =
+  not (Set.member q (_open prog))
+    && Map.member q (_fns prog)
+    && all (\(caller, inLoop) -> not inLoop && caller /= q) (Map.findWithDefault [] q sites)
+
+-- | The candidates tried one at a time with the parameter taken as its own at
+-- the path, each kept when the walk then makes more appends in place; and a
+-- line for the report for each kept.
+tryParamCopies :: Prog -> Facts -> Core.QualName -> Core.Expr -> Int -> [(Int, [Name])] -> ([(Int, [Name])], [String])
+tryParamCopies prog facts0 q v base0 = go facts0 base0 [] []
+  where
+    go _ _ kept notes [] = (reverse kept, reverse notes)
+    go facts base kept notes (c@(i, path) : rest) =
+      let facts' = facts {_excl = Map.adjust (\ex -> [if k == i then normalExcl (e ++ [map SField path]) else e | (k, e) <- zip [0 ..] ex]) q (_excl facts)}
+          n' = inPlaceAppends (_defExpr (definition prog facts' False q v))
+          note = "copied where it is called: argument " ++ show i ++ showPath (map SField path) ++ ", appends in place " ++ show base ++ " -> " ++ show n'
+       in if n' > base then go facts' n' (c : kept) (note : notes) rest else go facts base kept notes rest
+
+-- | Every call of a function in the map, by name and with all its
+-- arguments, with each argument's part at each path copied.
+copyAtCalls :: Map Core.QualName [(Int, [Name])] -> Core.Expr -> Core.Expr
+copyAtCalls copies e =
+  case Core._exprValue e' of
+    Core.EApp f args
+      | Core.EGlobal q <- Core._exprValue (peelTyApp f),
+        Just paths <- Map.lookup q copies ->
+          e' {Core._exprValue = Core.EApp f (foldl copyArg args paths)}
+    _ -> e'
+  where
+    e' = withChildren e (map (copyAtCalls copies) (children e))
+    copyArg args (i, path) =
+      [ if k == i then Maybe.fromMaybe a (freshAt path a) else a
+      | (k, a) <- zip [0 :: Int ..] args
+      ]
+
+-- | A loop's accumulator that the loop's first round is handed shared, as
+-- @joinLines@' line is the caller's: one fact for the join's parameter must
+-- hold of every jump to it, the entry's too, so the loop's own rounds are
+-- taken as shared. A copy at the entry, 'Prim.SFresh' or 'Prim.AFresh', is
+-- a buffer of its own, and the rounds after it hand on what they made. A
+-- candidate is a join, a parameter and a path of fields under it that an
+-- append's left operand reads; the copy is the identity as a value, so a
+-- candidate tried and kept changes no answer, and the facts are worked out
+-- again with it in the program.
+entryCandidates :: Core.Expr -> [(Name, Int, [Name])]
+entryCandidates e = List.nub (fst (go e))
+  where
+    -- The candidates under the node, and the left operands of the appends
+    -- under it: one walk, as a join's appends looked for again at each join
+    -- around it cost the nesting's depth over a decision tree's joins.
+    go x =
+      let rs = map go (children x)
+          lefts = case Core._exprValue x of
+            Core.EPrim op (l : _)
+              | isAppend op,
+                Maybe.isJust (appendForms op (Core._exprType x)),
+                Just np <- fieldsOf l ->
+                  np : concatMap snd rs
+            _ -> concatMap snd rs
+          here = case Core._exprValue x of
+            Core.EJoin binds _ ->
+              -- 'children' has a join's bindings first, in order
+              [ (Core._binderName b, i, path)
+              | (Core.Bind b v, (_, jlefts)) <- zip binds rs,
+                Core.ELam params _ <- [Core._exprValue v],
+                (n, path) <- jlefts,
+                (i, p) <- zip [0 ..] params,
+                Core._binderName p == n,
+                length path <= maxPartDepth
+              ]
+            _ -> []
+       in (here ++ concatMap fst rs, lefts)
+    fieldsOf x =
+      case Core._exprValue x of
+        Core.EVar n -> Just (n, [])
+        Core.EAccess r f -> fmap (\(n, path) -> (n, path ++ [f])) (fieldsOf r)
+        _ -> Nothing
+
+-- | How many appends are in place.
+inPlaceAppends :: Core.Expr -> Int
+inPlaceAppends e =
+  case Core._exprValue e of
+    Core.EPrim op args
+      | op `elem` [Prim.StrOp Prim.SAppendU, Prim.StrOp Prim.SAppendUU, Prim.ArrOp Prim.AAppendU, Prim.ArrOp Prim.AAppendUU] -> 1 + sum (map inPlaceAppends args)
+    _ -> sum (map inPlaceAppends (children e))
+
+-- | The value with its part at the path in a buffer of its own: a record
+-- literal with its field copied, or a record named updated with it, under
+-- the @let@s that name its fields first; any other value is left as it is,
+-- and the facts worked out again say so.
+freshAt :: [Name] -> Core.Expr -> Maybe Core.Expr
+freshAt path e =
+  case path of
+    [] ->
+      case Core._exprType e of
+        t
+          | Maybe.isJust (appendForms (Prim.StrOp Prim.SAppend) t), isString t -> Just (prim (Prim.StrOp Prim.SFresh))
+          | Maybe.isJust (appendForms (Prim.ArrOp Prim.AAppend) t) -> Just (prim (Prim.ArrOp Prim.AFresh))
+        _ -> Nothing
+      where
+        prim op = e {Core._exprValue = Core.EPrim op [e]}
+    _ | Core.ELet binds body <- Core._exprValue e -> do
+      body' <- freshAt path body
+      return e {Core._exprValue = Core.ELet binds body'}
+    f : rest ->
+      case (Core._exprValue e, recordFields (Core._exprType e)) of
+        (Core.ERecord fields, _)
+          | Just v <- lookup f fields -> do
+              v' <- freshAt rest v
+              return e {Core._exprValue = Core.ERecord [(g, if g == f then v' else x) | (g, x) <- fields]}
+        (Core.EVar _, Just fields)
+          | Just ft <- lookup f fields -> do
+              let sp = Core.spanOf e
+              field <- freshAt rest (Core.Expr (Core.EAccess e f) ft sp)
+              return (Core.Expr (Core.EUpdate e [(f, field)] Core.Copy) (Core._exprType e) sp)
+        _ -> Nothing
+  where
+    isString t = case t of
+      Core.TCon q [] -> Name.toChars (Core._qnName q) == "String"
+      Core.TForall _ _ body -> isString body
+      _ -> False
+    recordFields t = case t of
+      Core.TRecord fields _ -> Just fields
+      Core.TForall _ _ body -> recordFields body
+      _ -> Nothing
 
 -- | Each top-level function's parameters its written signature marks
 -- @moved@, by name: a signature is matched to the definition whose binder has
