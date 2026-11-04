@@ -148,6 +148,7 @@ import Core.Pass.InPlace qualified as InPlace
 import Core.Pass.Inline qualified as Inline
 import Core.Pass.Mono qualified as Mono
 import Core.Pass.Mutual qualified as Mutual
+import Core.Pass.Quad qualified as Quad
 import Core.Pass.Specialize qualified as Specialize
 import Core.Pass.TailCall qualified as TailCall
 import Core.Pass.Transient qualified as Transient
@@ -183,7 +184,7 @@ run target roots cores = fst (runAccounted target roots cores)
 runAccounted :: Target.Target -> [Core.QualName] -> Map ModuleName.Canonical Core.Module -> (Map ModuleName.Canonical Core.Module, [Inline.Note])
 runAccounted target roots cores =
   let pass name f = if name `elem` names target then f else id
-      specialized = pass "specialize" Specialize.run cores
+      specialized = pass "specialize" Specialize.run (Quad.report cores)
       folded = pass "foldspec" FoldSpec.run specialized
       transient = pass "transient" Transient.run folded
       arrays = pass "arraypop" (ArrayTransient.run True) (pass "arraytr" (ArrayTransient.run False) transient)

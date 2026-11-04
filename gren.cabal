@@ -138,6 +138,7 @@ Library common
         Core.Pass.FoldSpec
         Core.Pass.Mono
         Core.Pass.Mutual
+        Core.Pass.Quad
         Core.Pass.Specialize
         Core.Pass.TailCall
         Core.Pass.Transient
