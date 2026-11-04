@@ -110,7 +110,10 @@
 -- of them after is handed on as its own. Three things that named a whole
 -- root name it but its own parts: a taint ('Taint'), a link ('CoLink') and a
 -- mention made from a link ('_except'). A call's result has the parts its
--- function's walk gives with the facts the program has ('_freshParts'). A
+-- function's walk gives with the facts the program has ('_freshParts'), each
+-- held by what holds the arguments' own parts, not by what holds the
+-- arguments (D1058): the facts are the meet of every call's, so such a part
+-- holds only what the call made or what an argument's own part held. A
 -- part is at most 'maxPartDepth' steps deep, or a loop could make its own
 -- parts one step deeper each round and the facts would never settle.
 module Core.Pass.InPlace
@@ -2157,10 +2160,15 @@ call env live keep e fn args =
               answered = [r | (r, True) <- zip rs answersQ]
               ex = fresh && and [alone | ((_, alone), True) <- zip ks answersQ]
               -- D1057: the parts of the result that are its own when each
-              -- argument's are what the facts say, as this call's are. Each
-              -- may hold what the arguments the result may hold hold.
+              -- argument's are what the facts say, as this call's are. Such a
+              -- part holds what the call made or what the arguments' parts
+              -- held by nothing else hold, since the facts are the meet of
+              -- every call's (D1058): what holds those may hold it.
+              handed r
+                | _x r = Set.union (_co r) (Set.fromList (_flow r))
+                | otherwise = Set.unions (map _partCo (_xparts r))
               resultParts =
-                [ Part pp (Set.unions (map _co answered))
+                [ Part pp (Set.unions (map handed answered))
                 | not ex,
                   byPlace env,
                   pp <- Map.findWithDefault none q (_freshParts facts)

@@ -33,9 +33,12 @@
 -- loop is.
 --
 -- __Which arguments__: a lambda written at the call, one a @let@ in scope
--- binds, or a global. What the lambda names and does not bind becomes the
--- copy's first parameters, passed at the call before the others, so that a
--- partial application of the copy is still one. @x |> Array.foldl f d@ is
+-- binds, a global, or a partial application of a global (D1058), which is
+-- the lambda that applies it, its arguments that are not values bound by
+-- @let@s before the call: the copy then calls the global by name, so that
+-- "Core.Pass.InPlace" knows its callers. What the lambda names and does not
+-- bind becomes the copy's first parameters, passed at the call before the
+-- others, so that a partial application of the copy is still one. @x |> Array.foldl f d@ is
 -- the call @Array.foldl f d x@, as the JavaScript backend writes it, with @x@
 -- bound first so that it is still evaluated first.
 --
@@ -382,9 +385,54 @@ site env ctx e =
         length args <= length (_params info),
         g /= _def ctx ->
           do
+            (pre, args') <- partials is args
+            body <- site1 env ctx fn g is info args args' e {Core._exprValue = Core.EApp fn args'}
+            return $
+              if null pre
+                then body
+                else e {Core._exprValue = Core.ELet pre body}
+    _ -> return e
+
+-- | A partial application of a global at a fold's function position, written
+-- as the lambda it is (D1058): @Array.foldl (pullDir rows cols ink j)@ is
+-- @Array.foldl (\\d w -> pullDir rows cols ink j d w)@, so that the copy calls
+-- @pullDir@ by name. An argument that is not a value is bound by a @let@
+-- before the call, as the partial application evaluated it once, before the
+-- fold's other arguments.
+partials :: [Int] -> [Core.Expr] -> M ([Core.Bind], [Core.Expr])
+partials is args =
+  do
+    pairs <- forM (zip [0 :: Int ..] args) $ \(i, a) ->
+      case Core._exprValue a of
+        Core.EApp h@(Core.Expr (Core.EGlobal _) (Core.TFun ps r) _) as
+          | i `elem` is,
+            not (null as),
+            length as < length ps,
+            Core.TFun qs _ <- Core.typeOf a,
+            length qs == length ps - length as ->
+              do
+                bound <- forM as $ \x ->
+                  if value x
+                    then return ([], x)
+                    else do
+                      n <- freshN
+                      let b = Core.Binder (Name.fromChars ("$q" ++ show n)) (Core.typeOf x) (Core.spanOf x)
+                      return ([Core.Bind b x], Core.Expr (Core.EVar (Core._binderName b)) (Core.typeOf x) (Core.spanOf x))
+                rest <- forM (drop (length as) ps) $ \t -> do
+                  n <- freshN
+                  return (Core.Binder (Name.fromChars ("$q" ++ show n)) t (Core.spanOf a))
+                let restVars = [Core.Expr (Core.EVar (Core._binderName b)) (Core._binderType b) (Core.spanOf a) | b <- rest]
+                    call = Core.Expr (Core.EApp h (map snd bound ++ restVars)) r (Core.spanOf a)
+                return (concatMap fst bound, a {Core._exprValue = Core.ELam rest call})
+        _ -> return ([], a)
+    return (concatMap fst pairs, map snd pairs)
+
+site1 :: Env -> Ctx -> Core.Expr -> Core.QualName -> [Int] -> Info -> [Core.Expr] -> [Core.Expr] -> Core.Expr -> M Core.Expr
+site1 env ctx fn g is info orig args e =
+          do
             let kinds = [(i, classify ctx (args !! i)) | i <- is, i < length args]
                 known = [(i, a) | (i, Right a) <- kinds]
-                desc = List.intercalate "," [either id (kindOf (args !! i)) k | (i, k) <- kinds]
+                desc = List.intercalate "," [either id (kindOf (orig !! i)) k | (i, k) <- kinds]
             if null kinds
               then return e
               else
@@ -412,7 +460,6 @@ site env ctx e =
                                     Core.TFun ts r' -> Core.TFun (map snd caps ++ [t | (j, t) <- zip [0 :: Int ..] ts, j `notElem` map fst known]) r'
                                     other -> other
                               return e {Core._exprValue = Core.EApp (Core.Expr (Core.EGlobal copyQ) copyT (Core.spanOf fn)) (capArgs ++ rest)}
-    _ -> return e
 
 -- | A wrapper small enough to be written out at the call (D581).
 opens :: Info -> Bool
@@ -423,6 +470,7 @@ kindOf orig a =
   case Core._exprValue orig of
     Core.ELam _ _ -> if Set.null (freeIn a) then "lambda" else "lambda+" ++ show (Set.size (freeIn a))
     Core.EGlobal _ -> "global"
+    Core.EApp _ _ -> if Set.null (freeIn a) then "partial" else "partial+" ++ show (Set.size (freeIn a))
     Core.EVar _ -> if Set.null (freeIn a) then "let-lambda" else "let-lambda+" ++ show (Set.size (freeIn a))
     _ -> "?"
 
