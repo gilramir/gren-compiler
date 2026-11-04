@@ -98,6 +98,21 @@
 --
 -- It changes no mark. A drop it cannot prove is not made, and the collector
 -- frees the buffer, as it did before.
+--
+-- __Exclusiveness by place__ (geng-lang @m4-memory-proofs.md@ D1057). The
+-- appends' walk ('runAppends') asks which parts of a value are its own, where
+-- the marks and the drops ask it of the whole: a record whose one field the
+-- caller still holds would otherwise make every field shared, and an
+-- accumulator in it with them. A root's, a parameter's and a join
+-- parameter's exclusiveness is a set of paths ('Excl'), the whole or none of
+-- it for the other two walks; a value carries the parts it knows are its own
+-- ('Part'), each with the places that may hold it, and a part read by none
+-- of them after is handed on as its own. Three things that named a whole
+-- root name it but its own parts: a taint ('Taint'), a link ('CoLink') and a
+-- mention made from a link ('_except'). A call's result has the parts its
+-- function's walk gives with the facts the program has ('_freshParts'). A
+-- part is at most 'maxPartDepth' steps deep, or a loop could make its own
+-- parts one step deeper each round and the facts would never settle.
 module Core.Pass.InPlace
   ( run,
     runDrops,
@@ -174,7 +189,7 @@ data Mode = Marks | Drops | Appends
 data Facts = Facts
   { -- | Whether each parameter is handed a value nothing else holds, at every
     -- call. Shrinks from all true.
-    _excl :: Map Core.QualName [Bool],
+    _excl :: Map Core.QualName [Excl],
     -- | Whether the result is a value nothing else holds when the arguments
     -- were. Shrinks from true.
     _fresh :: Map Core.QualName Bool,
@@ -185,7 +200,11 @@ data Facts = Facts
     -- | Whether the result may hold a part of each parameter the walk
     -- follows ('answers': transients for the drops, affine records for the
     -- marks, D1036). The walk's fixed point does not move it.
-    _answers :: Map Core.QualName [Bool]
+    _answers :: Map Core.QualName [Bool],
+    -- | The parts of the result that are its own when each argument's are
+    -- what '_excl' says (D1057): the walk with the facts the program has,
+    -- not with every parameter its own. Shrinks from the whole.
+    _freshParts :: Map Core.QualName Excl
   }
   deriving (Eq)
 
@@ -196,10 +215,11 @@ run roots cores =
       defs0 = [(Core.QualName (Core._moduleName m) (Core._binderName b), v) | m <- Map.elems cores, Core.Bind b v <- Core._moduleDefs m]
       start =
         Facts
-          { _excl = Map.mapWithKey (\q n -> replicate n (not (Set.member q (_open prog)))) (_fns prog),
+          { _excl = Map.mapWithKey (\q n -> replicate n (exclIf (not (Set.member q (_open prog))))) (_fns prog),
             _fresh = Map.map (const True) (_fns prog),
             _stash = Map.map (`replicate` False) (_fns prog),
-            _answers = answersBy (holdsRec prog) prog defs
+            _answers = answersBy (holdsRec prog) prog defs,
+            _freshParts = Map.map (const whole) (_fns prog)
           }
       defs = [(q, hoist prog v) | (q, v) <- defs0]
       (facts, final) = fixFacts prog defs start
@@ -207,7 +227,7 @@ run roots cores =
         maybe (Core.Bind b v) (Core.Bind b . _defExpr) (Map.lookup (Core.QualName home (Core._binderName b)) final)
       out = Map.map (\m -> m {Core._moduleDefs = map (rewrite (Core._moduleName m)) (Core._moduleDefs m)}) cores
       factLines =
-        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "facts: exclusive " ++ show ex ++ ", fresh " ++ show (Map.findWithDefault False q (_fresh facts)) ++ ", kept " ++ show (Map.findWithDefault [] q (_stash facts)) ++ (if Set.member q (_open prog) then ", open" else "") ++ notFresh q]
+        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "facts: exclusive " ++ showExcl ex ++ ", fresh " ++ show (Map.findWithDefault False q (_fresh facts)) ++ ", kept " ++ show (Map.findWithDefault [] q (_stash facts)) ++ (if Set.member q (_open prog) then ", open" else "") ++ notFresh q]
         | (q, ex) <- Map.toList (_excl facts)
         ]
       defsMap = Map.fromList defs
@@ -258,7 +278,7 @@ fixFacts prog defs start =
       | otherwise =
           let changed :: (Eq a) => (Facts -> Map Core.QualName a) -> Set Core.QualName
               changed field = Set.fromList [q | (q, a) <- Map.toList (field next), Map.lookup q (field facts) /= Just a]
-              byCallee = readersOf (Set.union (changed _fresh) (changed _stash))
+              byCallee = readersOf (Set.unions [changed _fresh, changed _stash, changed _freshParts])
               -- The walk that asks for the result's freshness takes every
               -- parameter as exclusive, so reads no '_excl'.
               byParams = changed _excl
@@ -268,13 +288,14 @@ fixFacts prog defs start =
                 | otherwise = (d, fr)
            in go next (Map.intersectionWithKey rewalk defMap walked) (rounds + 1)
       where
-        calls = Map.unionsWith (zipWith (&&)) [_outCalls (_defOut d) | (d, _) <- Map.elems walked]
+        calls = Map.unionsWith (zipWith meetExcl) [_outCalls (_defOut d) | (d, _) <- Map.elems walked]
         next =
           Facts
-            { _excl = Map.mapWithKey (\q old -> maybe old (zipWith (&&) old) (Map.lookup q calls)) (_excl facts),
+            { _excl = Map.mapWithKey (\q old -> maybe old (zipWith meetExcl old) (Map.lookup q calls)) (_excl facts),
               _fresh = Map.mapWithKey (\q old -> old && maybe True snd (Map.lookup q walked)) (_fresh facts),
               _stash = Map.mapWithKey (\q old -> zipWith (||) old (maybe (map (const False) old) (_defStash . fst) (Map.lookup q walked))) (_stash facts),
-              _answers = _answers facts
+              _answers = _answers facts,
+              _freshParts = Map.mapWithKey (\q old -> maybe old (meetExcl old . _defParts . fst) (Map.lookup q walked)) (_freshParts facts)
             }
 
 -- | The globals an expression names.
@@ -287,8 +308,9 @@ globalsOf e =
 nothingExclusive :: Facts -> Facts
 nothingExclusive facts =
   facts
-    { _excl = Map.map (map (const False)) (_excl facts),
+    { _excl = Map.map (map (const none)) (_excl facts),
       _fresh = Map.map (const False) (_fresh facts),
+      _freshParts = Map.map (const none) (_freshParts facts),
       _stash = Map.map (map (const True)) (_stash facts)
     }
 
@@ -951,9 +973,10 @@ data Mention = Mention
   { _place :: !Place,
     _snap :: !Int,
     _deep :: !Bool,
-    -- | Fields of the object at the place this mention does not read: an
-    -- update's base, which replaces them.
-    _except :: ![Name]
+    -- | Paths under the object at the place that this mention does not read:
+    -- an update's base, whose fields the update replaces, and a value that
+    -- may share a root's objects but its own parts (D1057).
+    _except :: ![[Step]]
   }
   deriving (Eq, Ord)
 
@@ -963,7 +986,7 @@ mention p snap deep = Mention p snap deep []
 -- | Whether the path is at or under a field the mention does not read.
 excepted :: Mention -> [Step] -> Bool
 excepted (Mention (Place _ q) _ _ except) r =
-  any (\f -> (q ++ [SField f]) `List.isPrefixOf` r) except
+  any (\e -> (q ++ e) `List.isPrefixOf` r) except
 
 type Ms = Set Mention
 
@@ -988,19 +1011,116 @@ hitsIn hits (Place root path) ms =
   any (hits path) (Set.toList (Set.filter (\m -> _root (_place m) == root) ms))
 
 -- | A shared place under which nothing is written: a write at or under it.
-taintedShallow :: Set Place -> Place -> Bool
+taintedShallow :: Set Taint -> Place -> Bool
 taintedShallow taint (Place root p) =
-  any (\(Place r q) -> r == root && q `List.isPrefixOf` p) (Set.toList taint)
+  any (\(Taint (Place r q) spared) -> r == root && q `List.isPrefixOf` p && not (covers spared (drop (length q) p))) (Set.toList taint)
 
-taintedDeep :: Set Place -> Place -> Bool
+taintedDeep :: Set Taint -> Place -> Bool
 taintedDeep taint (Place root p) =
-  any (\(Place r q) -> r == root && (q `List.isPrefixOf` p || p `List.isPrefixOf` q)) (Set.toList taint)
+  any (\(Taint (Place r q) spared) -> r == root && ((q `List.isPrefixOf` p && not (covers spared (drop (length q) p))) || p `List.isPrefixOf` q)) (Set.toList taint)
+
+-- | A shared place, but the parts under it, by their paths from it, that a
+-- value handed on held as its alone (D1057). For the marks and the drops
+-- nothing is spared.
+data Taint = Taint
+  { _taintAt :: !Place,
+    _taintSpared :: !Excl
+  }
+  deriving (Eq, Ord)
+
+taintAll :: Place -> Taint
+taintAll p = Taint p none
 
 -- | What a mention of a value already handed on holds: the object at the
 -- place, read when it was handed.
 held :: Place -> Mention
 held p =
   mention p (length (_path p)) True
+
+-- EXCLUSIVENESS BY PLACE (D1057)
+
+-- | Which parts of a value are its own, by their paths from it: the object
+-- at each path, and everything under it, is held by nothing else. @[[]]@ is
+-- the whole value; @[]@ is none of it. For the marks and the drops it is
+-- always one of the two, as it was when it was a 'Bool'; the appends ask it
+-- of a record's fields, since one shared field made every field shared
+-- (m4-memory-proofs.md §MP13).
+type Excl = [[Step]]
+
+whole :: Excl
+whole = [[]]
+
+none :: Excl
+none = []
+
+exclIf :: Bool -> Excl
+exclIf b = if b then whole else none
+
+-- | Whether the object at the path is under a part that is its own.
+covers :: Excl -> [Step] -> Bool
+covers e p = any (`List.isPrefixOf` p) e
+
+-- | How deep a part may be, in steps from its value. A value of a recursive
+-- type has parts at every depth, and a loop that nests its parameter in what
+-- it hands the next time round would make its own parts one step deeper each
+-- round of the fixed point, never reaching it. Three is visiterm's deepest.
+maxPartDepth :: Int
+maxPartDepth = 3
+
+-- | Each path once, and none under another, and none deeper than
+-- 'maxPartDepth': a part not named is not its own, which is always right.
+normalExcl :: [[Step]] -> Excl
+normalExcl ps =
+  let sorted = List.nub (List.sortOn length (filter ((<= maxPartDepth) . length) ps))
+      keep acc p = if covers acc p then acc else acc ++ [p]
+   in List.sort (List.foldl' keep [] sorted)
+
+-- | What is its own in both.
+meetExcl :: Excl -> Excl -> Excl
+meetExcl a b = normalExcl ([p | p <- a, covers b p] ++ [p | p <- b, covers a p])
+
+-- | The parts of the value at @path@ under a root whose own parts are @e@,
+-- when the value is not its own whole.
+exclBelow :: Excl -> [Step] -> Excl
+exclBelow e path = normalExcl [drop (length path) q | q <- e, path `List.isPrefixOf` q]
+
+showPath :: [Step] -> String
+showPath = concatMap stepText
+  where
+    stepText st = case st of
+      SField f -> "." ++ Name.toChars f
+      SCtor t i -> "#" ++ show t ++ "." ++ show i
+
+-- | Each parameter's own parts, for the report: as the 'Bool' it was when
+-- each is the whole or none.
+showExcl :: [Excl] -> String
+showExcl es
+  | all (\e -> e == whole || e == none) es = show (map (== whole) es)
+  | otherwise = show (map (map showPath) es)
+
+-- | A part of a value its own but for what holds the places in '_partCo':
+-- as '_ex' says of a whole value and '_co'. A part read by nothing after,
+-- through those places, is the value's alone once it is handed on, as '_x'
+-- says of a whole value.
+data Part = Part
+  { _partPath :: ![Step],
+    _partCo :: !(Set Place)
+  }
+  deriving (Eq, Ord)
+
+-- | The parts in every one of the values, each with what holds it in any:
+-- an arm of a case, or of a join.
+meetParts :: [[Part]] -> [Part]
+meetParts arms =
+  case arms of
+    [] -> []
+    _ ->
+      let paths = foldr1 meetExcl [normalExcl (map _partPath ps) | ps <- arms]
+       in [Part p (Set.unions [_partCo q | ps <- arms, q <- ps, _partPath q `List.isPrefixOf` p]) | p <- paths]
+
+-- | The parts under a step, as parts of the value one step up.
+partsUnder :: Step -> [Part] -> [Part]
+partsUnder s ps = [Part (s : p) c | Part p c <- ps, length p < maxPartDepth]
 
 -- THE WALK
 
@@ -1027,7 +1147,7 @@ data Env = Env
     _names :: Map Name Ref,
     -- | Whether a root's value was its own when it was bound: nothing else
     -- held it, but what '_coOf' names.
-    _rootExcl :: IntMap.IntMap Bool,
+    _rootExcl :: IntMap.IntMap Excl,
     -- | Where a root's value may share an object with another place's: a
     -- call's result and its arguments, a record and its fields' locals.
     _coOf :: IntMap.IntMap [CoLink],
@@ -1035,8 +1155,8 @@ data Env = Env
     _rootWhat :: IntMap.IntMap String,
     _next :: Int,
     _joins :: Map Name JoinInfo,
-    _taint :: Set Place,
-    _joinExcl :: Map Name [Bool],
+    _taint :: Set Taint,
+    _joinExcl :: Map Name [Excl],
     -- | For the drops: the first root of the function, loop body or lambda
     -- being walked, since a root bound before it is read again the next
     -- time round or the next time the lambda runs; and the binders of the
@@ -1058,18 +1178,30 @@ tracksIn prog =
     Appends -> canHoldBuffer prog
 
 -- | The object at '_mine', under a root, may be or hold the object at
--- '_other', or the other way round.
+-- '_other', or the other way round: but the objects under '_mine' at the
+-- paths in '_spare', the root's own parts, which links of their own name
+-- (D1057).
 data CoLink = CoLink
   { _mine :: [Step],
-    _other :: Place
+    _other :: Place,
+    _spare :: Excl,
+    -- | The paths under '_other' it does not share: a root's own parts,
+    -- linked from a place only the rest of it may share.
+    _otherSpare :: Excl
   }
+
+-- | Whether the link says what the object at the path, under its root, may
+-- share.
+linkCovers :: CoLink -> [Step] -> Bool
+linkCovers l path =
+  _mine l `List.isPrefixOf` path && not (covers (_spare l) (drop (length (_mine l)) path))
 
 -- Strict, so that a walk's 'Out' holds what it says and not the walk: a
 -- lazy field would keep every environment that made it alive.
 data Out = Out
-  { _outCalls :: !(Map Core.QualName [Bool]),
-    _outTaint :: !(Set Place),
-    _outJoins :: !(Map Name [Bool]),
+  { _outCalls :: !(Map Core.QualName [Excl]),
+    _outTaint :: !(Set Taint),
+    _outJoins :: !(Map Name [Excl]),
     _outStash :: !(Set Int),
     -- | A root and the roots its value was made from.
     _outDerived :: !(Map Int (Set Int)),
@@ -1083,7 +1215,7 @@ data Out = Out
 
 instance Semigroup Out where
   Out a b c d e f g <> Out a' b' c' d' e' f' g' =
-    Out (Map.unionWith (zipWith (&&)) a a') (Set.union b b') (Map.unionWith (zipWith (&&)) c c') (Set.union d d') (Map.unionWith Set.union e e') (f ++ f') (IntSet.union g g')
+    Out (Map.unionWith (zipWith meetExcl) a a') (Set.union b b') (Map.unionWith (zipWith meetExcl) c c') (Set.union d d') (Map.unionWith Set.union e e') (f ++ f') (IntSet.union g g')
 
 instance Monoid Out where
   mempty = Out Map.empty Set.empty Map.empty Set.empty Map.empty [] IntSet.empty
@@ -1111,7 +1243,15 @@ data R = R
     -- | The joins it jumps to.
     _jumps :: Set Name,
     -- | For the report: why '_x' is false.
-    _why :: String
+    _why :: String,
+    -- | The parts of the value that are its own (D1057): the appends' only,
+    -- and empty for the marks and the drops. When '_ex' is true they may be
+    -- empty, or name the value's parts finer, for when something read after
+    -- holds one part of it and not another.
+    _parts :: [Part],
+    -- | When '_x' is false, the parts of the value held by nothing else once
+    -- it is handed on.
+    _xparts :: [Part]
   }
 
 data Def = Def
@@ -1120,7 +1260,10 @@ data Def = Def
     -- | For the report: why the result is not fresh, when it is not.
     _defWhy :: String,
     _defOut :: Out,
-    _defStash :: [Bool]
+    _defStash :: [Bool],
+    -- | The parts of the result that are its own, with the parameters' own
+    -- parts as the facts say (D1057).
+    _defParts :: Excl
   }
 
 -- | A definition walked, with its own joins' and escapes' facts taken to a
@@ -1135,8 +1278,8 @@ definition prog facts allExclusive q value =
     n = length params
     movedNames = Map.findWithDefault [] q (_moved prog)
     paramExcl
-      | allExclusive = replicate n True
-      | otherwise = zipWith (||) (Map.findWithDefault (replicate n False) q (_excl facts)) [Core._binderName b `elem` movedNames | b <- params]
+      | allExclusive = replicate n whole
+      | otherwise = zipWith (\e moved -> if moved then whole else e) (Map.findWithDefault (replicate n none) q (_excl facts)) [Core._binderName b `elem` movedNames | b <- params]
     go taint joinExcl rounds =
       let env =
             Env
@@ -1157,10 +1300,10 @@ definition prog facts allExclusive q value =
           r = walk env Set.empty Set.empty body
           out = _out r
           taint' = Set.union taint (_outTaint out)
-          joinExcl' = Map.unionWith (zipWith (&&)) joinExcl (_outJoins out)
+          joinExcl' = Map.unionWith (zipWith meetExcl) joinExcl (_outJoins out)
           settled = taint' == taint && joinExcl' == joinExcl
        in if rounds >= 100
-            then Def value False "no fixed point" (nothingOut out) (replicate n True)
+            then Def value False "no fixed point" (nothingOut out) (replicate n True) none
             else
               if settled
                 then
@@ -1168,14 +1311,21 @@ definition prog facts allExclusive q value =
                       rebuilt = if null params then _expr r else rewrap value (_expr r)
                       -- The result may be a parameter's value, or hold one:
                       -- fresh is what it holds besides.
-                      result = _ex r && all (\p -> _root p < n) (Set.toList (_co r))
+                      inParams = all (\p -> _root p < n) . Set.toList
+                      result = _ex r && inParams (_co r)
+                      -- D1057: the parts of a result not its own whole that
+                      -- hold nothing but what it was handed.
+                      parts
+                        | result = whole
+                        | _ex r = none
+                        | otherwise = normalExcl [p | Part p c <- _parts r, inParams c]
                       whyNot
                         | result = ""
                         | not (_ex r) = _why r ++ concat [" [" ++ l ++ "]" | l <- _outLines out, "jumps to" `List.isInfixOf` l]
                         | otherwise = "it may hold " ++ List.intercalate ", " [IntMap.findWithDefault "?" (_root p) (_rootWhat env) | p <- Set.toList (_co r), _root p >= n]
-                   in Def rebuilt result whyNot out [Set.member i stashed | i <- [0 .. n - 1]]
+                   in Def rebuilt result whyNot out [Set.member i stashed | i <- [0 .. n - 1]] parts
                 else go taint' joinExcl' (rounds + 1)
-    nothingOut out = out {_outCalls = Map.map (map (const False)) (_outCalls out), _outLines = []}
+    nothingOut out = out {_outCalls = Map.map (map (const none)) (_outCalls out), _outLines = []}
 
 -- | The definition with its lambda's body replaced.
 rewrap :: Core.Expr -> Core.Expr -> Core.Expr
@@ -1193,7 +1343,52 @@ closeStash derived = grow
        in if next == seen then seen else grow next
 
 isExcl :: Env -> Int -> Bool
-isExcl env r = IntMap.findWithDefault False r (_rootExcl env)
+isExcl env r = covers (rootExcl env r) []
+
+rootExcl :: Env -> Int -> Excl
+rootExcl env r = IntMap.findWithDefault none r (_rootExcl env)
+
+-- | Whether the walk asks which parts of a value are its own: the appends'
+-- walk only (D1057).
+byPlace :: Env -> Bool
+byPlace env = _mode (_prog env) == Appends
+
+-- | What a value's own parts are, as a root bound to it holds them.
+exclOf :: Env -> R -> Excl
+exclOf env r
+  | _ex r = whole
+  | byPlace env = normalExcl (map _partPath (_parts r))
+  | otherwise = none
+
+-- | A value's own parts, as finely as the walk knows them: its whole one
+-- when it is its own and no finer part is known.
+fineParts :: R -> [Part]
+fineParts r
+  | _ex r && not (null (_parts r)) = _parts r
+  | otherwise = ownParts r
+
+-- | What of a value is held by nothing else once it is handed on.
+xExcl :: R -> Excl
+xExcl r
+  | _x r = whole
+  | otherwise = normalExcl (map _partPath (_xparts r))
+
+-- | A value's own parts, its whole one when it is its own.
+ownParts :: R -> [Part]
+ownParts r
+  | _ex r = [Part [] (Set.union (_co r) (Set.fromList (_flow r)))]
+  | otherwise = _parts r
+
+-- | What a value handed on while it is not its alone makes shared: the
+-- places it holds, but those only its parts held by nothing else hold
+-- (D1057). Nothing reads those after, so nothing can see them shared.
+escaping :: Env -> R -> [Taint]
+escaping env r =
+  let mine = Set.toList (closeCo env (Set.unions (map _partCo (_xparts r))))
+      spared (Place root p) linked
+        | any (\(Place r' q) -> r' == root && q `List.isPrefixOf` p) mine = whole
+        | otherwise = normalExcl (linked ++ [drop (length p) q | Place r' q <- mine, r' == root, p `List.isPrefixOf` q])
+   in [Taint pl sp | (pl, linked) <- holdsSpared env r, let sp = spared pl linked, sp /= whole]
 
 -- | The places a value at the place may share an object with, besides it.
 shareOf :: Env -> Place -> Set Place
@@ -1201,7 +1396,7 @@ shareOf env (Place r path) =
   Set.fromList
     [ _other l
     | l <- IntMap.findWithDefault [] r (_coOf env),
-      _mine l `List.isPrefixOf` path || path `List.isPrefixOf` _mine l
+      linkCovers l path || path `List.isPrefixOf` _mine l
     ]
 
 -- | The places whose objects may be, or hold, the one at the place. A link
@@ -1211,7 +1406,7 @@ sameAs :: Env -> Place -> [Place]
 sameAs env (Place r path) =
   [ _other l
   | l <- IntMap.findWithDefault [] r (_coOf env),
-    _mine l `List.isPrefixOf` path
+    linkCovers l path
   ]
 
 -- | The objects under the one at the place that may be another place's: the
@@ -1223,6 +1418,27 @@ sharedBelow env (Place r path) =
     path `List.isPrefixOf` _mine l,
     path /= _mine l
   ]
+
+-- | 'shareOf', each place with the paths under it the link spares.
+shareOfSpared :: Env -> Place -> [(Place, Excl)]
+shareOfSpared env (Place r path) =
+  [ (_other l, _otherSpare l)
+  | l <- IntMap.findWithDefault [] r (_coOf env),
+    linkCovers l path || path `List.isPrefixOf` _mine l
+  ]
+
+-- | What a value holds or shares, as 'holdsClosed' says, each place with the
+-- paths under it that it does not (D1057). A place reached twice spares only
+-- what both spare.
+holdsSpared :: Env -> R -> [(Place, Excl)]
+holdsSpared env r =
+  let mine = holdsPlaces r
+   in Map.toList (Map.fromListWith meetExcl ([(p, none) | p <- mine] ++ [s | p <- mine, s <- shareOfSpared env p]))
+
+-- | What holds a value once it is handed on, as 'heldAll' says, but the
+-- parts of the places it does not hold.
+heldSpared :: [(Place, Excl)] -> Ms
+heldSpared ps = Set.fromList [(held p) {_except = sp} | (p, sp) <- ps]
 
 -- | The places, and every place one of them may share an object with.
 closeCo :: Env -> Set Place -> Set Place
@@ -1275,16 +1491,20 @@ settle env keep e r =
       let held_ = heldIn (_flow r) (closeCo env (_co r)) keep
        in r
             { _x = _ex r && not held_,
-              _why = if _ex r then (if held_ then "held by what is read after it: " ++ whoHolds env r keep else "") else _why r
+              _why = if _ex r then (if held_ then "held by what is read after it: " ++ whoHolds env r keep else "") else _why r,
+              _xparts =
+                if byPlace env
+                  then [pt | pt <- _parts r, not (heldIn [] (closeCo env (_partCo pt)) keep)]
+                  else []
             }
-    else r {_x = True, _ex = True, _co = Set.empty, _flow = []}
+    else r {_x = True, _ex = True, _co = Set.empty, _flow = [], _parts = [], _xparts = []}
 
 whoHolds :: Env -> R -> Ms -> String
 whoHolds env r keep =
   List.intercalate ", " (take 3 [IntMap.findWithDefault "?" (_root (_place m)) (_rootWhat env) ++ show (_path (_place m)) | m <- Set.toList keep, any (\p -> _root p == _root (_place m) && deepHits (_path p) m) (holdsPlaces r)])
 
 leaf :: Core.Expr -> R
-leaf e = R e Set.empty [] Set.empty False False mempty Set.empty (constructorOf e)
+leaf e = R e Set.empty [] Set.empty False False mempty Set.empty (constructorOf e) [] []
 
 walkNode :: Env -> Ms -> Ms -> Core.Expr -> R
 walkNode env live keep e =
@@ -1293,7 +1513,18 @@ walkNode env live keep e =
       let p = Place (_root (_refPlace ref)) (_path (_refPlace ref) ++ steps)
           deep = tracks env (Core._exprType e)
           m = mention p (_refSnap ref) deep
-          own = isExcl env (_root p) && not (taintedDeep (_taint env) p)
+          excl = rootExcl env (_root p)
+          own = covers excl (_path p) && not (taintedDeep (_taint env) p)
+          -- D1057: the root's own parts under the place, each held by
+          -- nothing but the place it is at.
+          parts =
+            [ Part sub (Set.singleton q)
+            | not own,
+              byPlace env,
+              sub <- exclBelow excl (_path p),
+              let q = Place (_root p) (_path p ++ sub),
+              not (taintedDeep (_taint env) q)
+            ]
        in if _refTracked ref
             then
               R
@@ -1306,9 +1537,11 @@ walkNode env live keep e =
                   _out = mempty,
                   _jumps = Set.empty,
                   _why =
-                    if isExcl env (_root p)
+                    if covers excl (_path p)
                       then IntMap.findWithDefault "?" (_root p) (_rootWhat env) ++ " was handed on while it was still read"
-                      else "not its own: " ++ IntMap.findWithDefault "?" (_root p) (_rootWhat env)
+                      else "not its own: " ++ IntMap.findWithDefault "?" (_root p) (_rootWhat env) ++ concatMap (\(Part sub _) -> " (but " ++ showPath sub ++ ")") parts,
+                  _parts = parts,
+                  _xparts = []
                 }
             else (leaf e) {_why = "not tracked"}
     Nothing ->
@@ -1329,14 +1562,14 @@ walkNode env live keep e =
         Core.ELet binds body -> lets env live keep e binds body
         Core.ECase scrut alts fallback -> caseOf env live keep e scrut alts fallback
         Core.ECtor q tag args ->
-          let ks = siblings env live keep args
-           in built e ks (Core.ECtor q tag (map (_expr . fst) ks))
+          let ks = siblingsP env live keep args
+           in built e ks (stepsIf env [SCtor tag i | i <- [0 .. length args - 1]]) (Core.ECtor q tag [_expr r | (r, _, _) <- ks])
         Core.ERecord fields ->
-          let ks = siblings env live keep (map snd fields)
-           in built e ks (Core.ERecord (zip (map fst fields) (map (_expr . fst) ks)))
+          let ks = siblingsP env live keep (map snd fields)
+           in built e ks (stepsIf env [SField f | (f, _) <- fields]) (Core.ERecord (zip (map fst fields) [_expr r | (r, _, _) <- ks]))
         Core.EArray items ->
-          let ks = siblings env live keep items
-           in built e ks (Core.EArray (map (_expr . fst) ks))
+          let ks = siblingsP env live keep items
+           in built e ks Nothing (Core.EArray [_expr r | (r, _, _) <- ks])
         Core.EUpdate base fields w -> update env live keep e base fields w
         Core.EAccess _ _ -> accessChain env live e
         Core.EApp fn args -> call env live keep e fn args
@@ -1429,7 +1662,8 @@ accessChain env live e0 =
             { _expr = node {Core._exprValue = Core.EAccess (_expr r) f},
               _flow = [Place root (path ++ [SField f]) | Place root path <- _flow r],
               _ex = False,
-              _why = "a field of something not a local"
+              _why = "a field of something not a local",
+              _parts = []
             }
         _ -> r
 
@@ -1445,10 +1679,16 @@ isFunction t =
 -- ones made are held; once handed on, each is held beside all the others'.
 -- Each comes with whether it shares nothing with the others.
 siblings :: Env -> Ms -> Ms -> [Core.Expr] -> [(R, Bool)]
-siblings env live keep kids = zip rs alone
+siblings env live keep kids = [(r, a) | (r, a, _) <- siblingsP env live keep kids]
+
+-- | 'siblings', each with its own parts that share nothing with the others
+-- (D1057), when it is not its own whole.
+siblingsP :: Env -> Ms -> Ms -> [Core.Expr] -> [(R, Bool, [Part])]
+siblingsP env live keep kids = lazyZip3 (\r a (_, others) -> (r, a, partsAlone r others)) rs alone heldBy
   where
+    partsAlone r others = [pt | byPlace env, pt <- _parts r, not (heldIn [] (_partCo pt) others)]
     rs = lazyZip3 (\(k, start) after (before, others) -> walk (from start env) (Set.unions [live, after, before]) (Set.union keep others) k) (zip kids (startsOf env kids)) afters heldBy
-    holds r = heldAll (holdsClosed env r)
+    holds r = heldSpared (holdsSpared env r)
     afters = drop 1 (scanr (\r acc -> Set.union (_ms r) acc) Set.empty rs)
     befores = scanl (\acc r -> Set.union acc (holds r)) Set.empty rs
     laters = drop 1 (scanr (\r acc -> Set.union (holds r) acc) Set.empty rs)
@@ -1478,7 +1718,9 @@ combine rs =
       _x = all _x rs,
       _out = foldMap _out rs,
       _jumps = Set.unions (map _jumps rs),
-      _why = firstWhy rs
+      _why = firstWhy rs,
+      _parts = [],
+      _xparts = []
     }
 
 firstWhy :: [R] -> String
@@ -1491,18 +1733,29 @@ firstWhy rs =
 -- parts something else holds too: they are shared from now on.
 escapes :: Env -> [R] -> Out
 escapes env rs =
-  mempty {_outTaint = Set.fromList (concat [holdsClosed env r | r <- rs, not (_x r)])}
+  mempty {_outTaint = Set.fromList (concat [escaping env r | r <- rs, not (_x r)])}
 
 -- | A record, constructor or array literal: a new value holding its parts,
--- its own when each part shares nothing with another.
-built :: Core.Expr -> [(R, Bool)] -> Core.Expr_ -> R
-built e ks node =
-  let rs = map fst ks
+-- its own when each part shares nothing with another. With the step to each
+-- part, a record's or a constructor's, the parts that share nothing with
+-- another are its own when the whole is not (D1057).
+built :: Core.Expr -> [(R, Bool, [Part])] -> Maybe [Step] -> Core.Expr_ -> R
+built e ks steps node =
+  let rs = [r | (r, _, _) <- ks]
+      ex = and [a | (_, a, _) <- ks]
+      parts = case steps of
+        Just ss -> concat [if a then [Part [st] (Set.union (_co r) (Set.fromList (_flow r)))] else partsUnder st ps | ((r, a, ps), st) <- zip ks ss]
+        _ -> []
    in (combine rs)
         { _expr = e {Core._exprValue = node},
-          _ex = and (map snd ks),
-          _why = "a part is shared: " ++ firstWhy rs
+          _ex = ex,
+          _why = "a part is shared: " ++ firstWhy rs,
+          _parts = parts
         }
+
+-- | The steps to a value's parts, when the walk asks for its parts.
+stepsIf :: Env -> [Step] -> Maybe [Step]
+stepsIf env ss = if byPlace env then Just ss else Nothing
 
 -- ROOT NUMBERS
 
@@ -1541,17 +1794,29 @@ from :: Int -> Env -> Env
 from start env = env {_next = start}
 
 -- | A new root, its value its own or not, sharing with the roots given.
-bindRoot :: Env -> String -> Core.Binder -> Bool -> Set Place -> (Env, Int)
-bindRoot env what b excl co =
+bindRoot :: Env -> String -> Core.Binder -> Excl -> Set Place -> (Env, Int)
+bindRoot env what b excl co = bindRootParts env what b excl co []
+
+-- | 'bindRoot', with the value's own parts and what each may share (D1057):
+-- the links from the root spare them and they have their own, and a place
+-- only a part may share is linked to that part, not to the whole root.
+bindRootParts :: Env -> String -> Core.Binder -> Excl -> Set Place -> [Part] -> (Env, Int)
+bindRootParts env what b excl co parts =
   let i = _next env
+      spared = normalExcl (map _partPath parts)
+      partOf q = [Place i pp | Part pp c <- parts, Set.member q c]
+      others = Set.toList (Set.union co (Set.unions (map _partCo parts)))
+      back q = case partOf q of
+        [] -> [(Place i [], spared)]
+        ps -> [(pl, none) | pl <- ps]
    in ( env
           { _names = Map.insert (Core._binderName b) (Ref (Place i []) 0 (tracks env (Core._binderType b))) (_names env),
             _rootExcl = IntMap.insert i excl (_rootExcl env),
             _coOf =
               foldr
-                (\q m -> IntMap.insertWith (++) (_root q) [CoLink (_path q) (Place i [])] m)
-                (IntMap.insert i [CoLink [] q | q <- Set.toList co] (_coOf env))
-                (Set.toList co),
+                (\q m -> IntMap.insertWith (++) (_root q) [CoLink (_path q) t none tSpare | (t, tSpare) <- back q] m)
+                (IntMap.insert i ([CoLink [] q spared none | q <- Set.toList co] ++ [CoLink pp q none none | Part pp c <- parts, q <- Set.toList c]) (_coOf env))
+                others,
             _rootWhat = IntMap.insert i (what ++ " " ++ Name.toChars (Core._binderName b)) (_rootWhat env),
             _next = i + 1
           },
@@ -1564,7 +1829,7 @@ bindRoot env what b excl co =
 lambda :: Env -> Core.Expr -> [Core.Binder] -> Core.Expr -> R
 lambda env e binders body =
   let start = _next env
-      inner = foldl (\en b -> fst (bindRoot en "a lambda's parameter" b False Set.empty)) env {_joins = Map.empty, _scope = start} binders
+      inner = foldl (\en b -> fst (bindRoot en "a lambda's parameter" b none Set.empty)) env {_joins = Map.empty, _scope = start} binders
       r = walk inner Set.empty Set.empty body
       outer = Set.filter (\m -> _root (_place m) < start) (_ms r)
       -- A number read when an alias was bound is not read again, whatever
@@ -1581,14 +1846,16 @@ lambda env e binders body =
           _co = Set.empty,
           _ex = True,
           _x = True,
-          _out = (_out r) {_outTaint = Set.union (_outTaint (_out r)) capturedPlaces, _outStash = Set.union (_outStash (_out r)) captured, _outLines = say (_outLines (_out r) ++ keptLines env "a closure" captured)},
+          _out = (_out r) {_outTaint = Set.union (_outTaint (_out r)) (Set.map taintAll capturedPlaces), _outStash = Set.union (_outStash (_out r)) captured, _outLines = say (_outLines (_out r) ++ keptLines env "a closure" captured)},
           _jumps = Set.empty,
-          _why = ""
+          _why = "",
+          _parts = [],
+          _xparts = []
         }
 
 letRec :: Env -> Ms -> Ms -> Core.Expr -> [Core.Bind] -> Core.Expr -> R
 letRec env live keep e binds body =
-  let inner = foldl (\en (Core.Bind b _) -> fst (bindRoot en "a recursive function" b False Set.empty)) env binds
+  let inner = foldl (\en (Core.Bind b _) -> fst (bindRoot en "a recursive function" b none Set.empty)) env binds
       starts = startsOf inner (map Core._bindValue binds ++ [body])
       values = [walk (from start inner) Set.empty Set.empty v | (Core.Bind _ v, start) <- zip binds starts]
       rb = walk (from (starts !! length binds) inner) live keep body
@@ -1598,7 +1865,8 @@ letRec env live keep e binds body =
           _flow = _flow rb,
           _co = _co rb,
           _ex = _ex rb,
-          _why = _why rb
+          _why = _why rb,
+          _parts = _parts rb
         }
 
 lets :: Env -> Ms -> Ms -> Core.Expr -> [Core.Bind] -> Core.Expr -> R
@@ -1631,7 +1899,7 @@ lets env live keep e binds body =
                       _ms = Set.union (Set.fromList readNow) (_ms inner)
                     }
             _ ->
-              let (env0, i) = bindRoot env "a let" b (_ex rv) (alive after (closeCo env (_co rv)))
+              let (env0, i) = bindRootParts env "a let" b (exclOf env rv) (alive after (closeCo env (_co rv))) (linkedParts env after rv)
                   env' = env0 {_binders = IntMap.insert i b (_binders env0)}
                   inner = walk (from (i + 1 + rootsIn v) env') live keep restExpr
                   after = Set.union (_ms inner) live
@@ -1639,10 +1907,11 @@ lets env live keep e binds body =
                   mine m = _root (_place m) == i
                   derived = Set.fromList [_root (_place m) | m <- Set.toList (_ms rv)]
                   flowOut = concat [if _root p == i then _flow rv else [p] | p <- _flow inner]
-                  coOut =
-                    if any (\q -> _root q == i) (Set.toList (_co inner))
-                      then Set.union (Set.filter (\q -> _root q /= i) (_co inner)) (_co rv)
-                      else _co inner
+                  outOf co =
+                    if any (\q -> _root q == i) (Set.toList co)
+                      then Set.union (Set.filter (\q -> _root q /= i) co) (_co rv)
+                      else co
+                  coOut = outOf (_co inner)
                   dropped = case _mode (_prog env) of
                     Marks -> ([], [])
                     Drops -> drops env (Set.unions [_ms inner, live, keep]) rv
@@ -1656,7 +1925,9 @@ lets env live keep e binds body =
                       _x = _x inner,
                       _out = _out rv <> _out inner <> mempty {_outDerived = Map.singleton i derived, _outLines = snd dropped, _outDropped = IntSet.fromList [c | (c, _, _) <- fst dropped]},
                       _jumps = Set.union (_jumps rv) (_jumps inner),
-                      _why = _why inner ++ (if _ex rv then "" else " (" ++ Name.toChars (Core._binderName b) ++ ": " ++ _why rv ++ ")")
+                      _why = _why inner ++ (if _ex rv then "" else " (" ++ Name.toChars (Core._binderName b) ++ ": " ++ _why rv ++ ")"),
+                      _parts = [Part pp (outOf c) | Part pp c <- _parts inner],
+                      _xparts = []
                     }
 
 caseOf :: Env -> Ms -> Ms -> Core.Expr -> Core.Expr -> [Core.Alt] -> Maybe Core.Expr -> R
@@ -1669,7 +1940,7 @@ caseOf env live keep e scrut alts fallback =
              in ((leaf scrut) {_ms = Set.fromList m, _ex = True}, env, p, _refTracked ref, mempty)
           Nothing ->
             let hidden = Core.Binder (hiddenName (_next env)) (Core._exprType scrut) (Core.spanOf scrut)
-                (env', i) = bindRoot env "what a case matched," hidden (_ex rs) (alive after (closeCo env (_co rs)))
+                (env', i) = bindRootParts env "what a case matched," hidden (exclOf env rs) (alive after (closeCo env (_co rs))) (linkedParts env after rs)
                 after = Set.union armsMs live
                 rs = walk (from (_next env + 1) env) after after scrut
              in ( rs,
@@ -1701,8 +1972,17 @@ caseOf env live keep e scrut alts fallback =
           _x = all _x every,
           _out = _out scrutR <> extraOut <> foldMap _out every,
           _jumps = Set.unions (_jumps scrutR : map _jumps every),
-          _why = "a case: " ++ firstWhy every
+          _why = "a case: " ++ firstWhy every,
+          _parts = if byPlace env then [Part pp (scrubCo c) | Part pp c <- meetParts (map fineParts every)] else [],
+          _xparts = []
         }
+
+-- | A bound value's own parts, each with the places it may share that
+-- something reads after the binding, as 'alive' keeps them for the whole.
+linkedParts :: Env -> Ms -> R -> [Part]
+linkedParts env after r
+  | byPlace env = [Part pp (alive after (closeCo env c)) | Part pp c <- _parts r]
+  | otherwise = []
 
 -- | The places whose roots something reads after a binding: a value may
 -- share an object with one nothing reads again, and no read can see it. The
@@ -1733,7 +2013,7 @@ bindPattern env tracked p pat =
     Core.PRecord fields ->
       foldl (\en (f, sub) -> bindPattern en tracked (extend (SField f)) sub) env fields
     Core.PArray pats rest ->
-      foldl (\en b -> fst (bindRoot en "an array pattern's" b False (Set.singleton p))) env (concatMap patternBinders pats ++ Maybe.maybeToList rest)
+      foldl (\en b -> fst (bindRoot en "an array pattern's" b none (Set.singleton p))) env (concatMap patternBinders pats ++ Maybe.maybeToList rest)
   where
     alias b = env {_names = Map.insert (Core._binderName b) (Ref p (length (_path p)) tracked) (_names env)}
     extend s = p {_path = _path p ++ [s]}
@@ -1772,13 +2052,16 @@ update env live keep e base fields w0 =
         Core.TRecord fs _ | not (null anchors) -> heldAll [Place (_root a) (_path a ++ [SField f]) | a <- anchors, (f, _) <- fs, f `notElem` replaced]
         _ -> heldAll (holdsClosed env baseR)
       fieldRs = lazyZip3 (\((_, v), start) after (before, others) -> walk (from start env) (Set.unions [live, after, before, kept]) (Set.unions [keep, others, kept]) v) (zip fields (drop 1 (startsOf env (base : map snd fields)))) afters heldBy
-      holds r = heldAll (holdsClosed env r)
+      holds r = heldSpared (holdsSpared env r)
       afters = drop 1 (scanr (\r acc -> Set.union (_ms r) acc) Set.empty fieldRs)
       befores = scanl (\acc r -> Set.union acc (holds r)) Set.empty fieldRs
       laters = drop 1 (scanr (\r acc -> Set.union (holds r) acc) Set.empty fieldRs)
       heldBy = lazyZip3 (\_ b l -> (b, Set.union b l)) fields befores laters
       fieldAlone = lazyZip3 (\r _ (_, others) -> _ex r && not (heldIn (_flow r) (_co r) (Set.union others kept))) fieldRs fields heldBy
       fieldMs = Set.unions (map _ms fieldRs)
+      -- D1057: each field's own parts that share nothing with the others or
+      -- with what the update keeps.
+      fieldParts = lazyZip3 (\r _ (_, others) -> [pt | byPlace env, pt <- _parts r, not (heldIn [] (_partCo pt) (Set.union others kept))]) fieldRs fields heldBy
       fieldHolds = concatMap (holdsClosed env) fieldRs
       baseHeldBy = heldAll (filter (not . under) fieldHolds)
       baseR = walk env (Set.union live fieldMs) (Set.union keep baseHeldBy) base
@@ -1815,9 +2098,22 @@ update env live keep e base fields w0 =
         Drops -> w0
         Appends -> w0
       baseMs = case basePlace of
-        Just _ -> Set.map (\m -> m {_except = List.sort replaced}) (_ms baseR)
+        Just _ -> Set.map (\m -> m {_except = List.sort [[SField f] | f <- replaced]}) (_ms baseR)
         Nothing -> _ms baseR
       rs = baseR : fieldRs
+      ex = baseAlone && and fieldAlone
+      -- D1057: the fields the update keeps, as parts of the base, and those
+      -- it writes, as parts of their values.
+      keptFields = case Core._exprType base of
+        Core.TRecord fs _ -> [f | (f, _) <- fs, f `notElem` replaced]
+        _ -> []
+      baseParts
+        | baseAlone = [Part [SField f] (Set.union (_co baseR) (Set.fromList (_flow baseR))) | f <- keptFields]
+        | otherwise = [pt | pt@(Part (SField f : _) c) <- _parts baseR, f `notElem` replaced, not (heldIn [] c baseHeldBy)]
+      newParts =
+        [ if alone then [Part [SField f] (Set.union (_co r) (Set.fromList (_flow r)))] else partsUnder (SField f) ps
+        | (f, r, alone, ps) <- List.zip4 replaced fieldRs fieldAlone fieldParts
+        ]
       line =
         [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome (_def env))), Name.toChars (Core._qnName (_def env)), spanText (Core.spanOf e), maybe "in place" id why]
         | affine
@@ -1827,8 +2123,10 @@ update env live keep e base fields w0 =
           _ms = Set.unions (baseMs : map _ms fieldRs),
           _flow = concatMap _flow rs,
           _co = Set.unions (map _co rs),
-          _ex = baseAlone && and fieldAlone,
+          _ex = ex,
           _x = all _x rs,
+          _parts = if byPlace env then baseParts ++ concat newParts else [],
+          _xparts = [],
           _out = foldMap _out rs <> mempty {_outLines = say line},
           _jumps = Set.unions (map _jumps rs),
           _why = "an update: " ++ firstWhy rs
@@ -1850,13 +2148,23 @@ call env live keep e fn args =
               ks = siblings env live live args
               rs = map fst ks
               stash = Map.findWithDefault (replicate arity True) q (_stash facts)
-              shared = Set.fromList (concat [holdsClosed env r | (r, True) <- zip rs stash, not (_x r)])
+              shared = Set.fromList (concat [escaping env r | (r, True) <- zip rs stash, not (_x r)])
               stashed = Set.fromList [_root (_place m) | (r, True) <- zip rs stash, m <- Set.toList (_ms r), _deep m]
               fresh = Map.findWithDefault False q (_fresh facts)
               -- The result shares only the arguments whose parameter it may
               -- hold (D1036 for the marks).
               answersQ = Map.findWithDefault (replicate arity True) q (_answers facts)
               answered = [r | (r, True) <- zip rs answersQ]
+              ex = fresh && and [alone | ((_, alone), True) <- zip ks answersQ]
+              -- D1057: the parts of the result that are its own when each
+              -- argument's are what the facts say, as this call's are. Each
+              -- may hold what the arguments the result may hold hold.
+              resultParts =
+                [ Part pp (Set.unions (map _co answered))
+                | not ex,
+                  byPlace env,
+                  pp <- Map.findWithDefault none q (_freshParts facts)
+                ]
               lines_ =
                 [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome (_def env))), Name.toChars (Core._qnName (_def env)), spanText (Core.spanOf a), "hands " ++ Name.toChars (Core._qnName q) ++ " argument " ++ show i ++ " shared: " ++ _why r]
                 | (i, a, r) <- zip3 [0 :: Int ..] args rs,
@@ -1870,9 +2178,11 @@ call env live keep e fn args =
                   _co = Set.unions (map _co answered),
                   -- Only the arguments the result may hold need be handed
                   -- over by nothing else (D1036).
-                  _ex = fresh && and [alone | ((_, alone), True) <- zip ks answersQ],
+                  _ex = ex,
                   _x = False,
-                  _out = foldMap _out rs <> mempty {_outCalls = Map.singleton q (map _x rs), _outTaint = shared, _outStash = stashed, _outLines = say (lines_ ++ keptLines env ("a call of " ++ Name.toChars (Core._qnName q)) stashed)},
+                  _parts = resultParts,
+                  _xparts = [],
+                  _out = foldMap _out rs <> mempty {_outCalls = Map.singleton q (map xExcl rs), _outTaint = shared, _outStash = stashed, _outLines = say (lines_ ++ keptLines env ("a call of " ++ Name.toChars (Core._qnName q)) stashed)},
                   _jumps = Set.unions (map _jumps rs),
                   _why =
                     if fresh
@@ -1883,8 +2193,8 @@ call env live keep e fn args =
     Core.EGlobal q
       | Just arity <- Map.lookup q (_fns (_prog env)),
         arity > length args ->
-          let ks = siblings env live keep args
-           in (built e ks (Core.EApp fn (map (_expr . fst) ks))) {_why = "a partial application: " ++ firstWhy (map fst ks)}
+          let ks = siblingsP env live keep args
+           in (built e ks Nothing (Core.EApp fn [_expr r | (r, _, _) <- ks])) {_why = "a partial application: " ++ firstWhy [r | (r, _, _) <- ks]}
     _ -> unknownCall env live e fn args Core.EApp
 
 -- | For the report: the roots something may keep, and what keeps them.
@@ -1946,11 +2256,12 @@ joins env live keep e binds body =
         let name = Core._binderName b
          in case Core._exprValue v of
               Core.ELam params jbody ->
-                let excl = Map.findWithDefault (map (const True) params) name (_joinExcl env)
-                    inner = foldl (\en (p, x) -> fst (bindRoot en "a join's parameter" p x Set.empty)) (from first env') {_scope = first} (zip params (excl ++ repeat False))
+                let excl = Map.findWithDefault (map (const whole) params) name (_joinExcl env)
+                    inner = foldl (\en (p, x) -> fst (bindRoot en "a join's parameter" p x Set.empty)) (from first env') {_scope = first} (zip params (excl ++ repeat none))
                     r = walk inner live keep jbody
-                 in (name, r {_expr = v {Core._exprValue = Core.ELam params (_expr r)}, _co = Set.filter (\q -> _root q < start) (_co r)})
+                 in (name, r {_expr = v {Core._exprValue = Core.ELam params (_expr r)}, _co = outer (_co r), _parts = [Part pp (outer c) | Part pp c <- _parts r]})
               _ -> (name, walk (from first env') live keep v)
+      outer = Set.filter (\q -> _root q < start)
       walked = map walkJoin (zip binds joinStarts)
       own = Map.fromList [(name, Set.filter (\m -> _root (_place m) < start) (_ms r)) | (name, r) <- walked]
       targets = Map.fromList [(name, _jumps r) | (name, r) <- walked]
@@ -1976,7 +2287,10 @@ joins env live keep e binds body =
           _x = all _x every,
           _out = foldMap _out every,
           _jumps = Set.difference (Set.unions (map _jumps every)) (Map.keysSet infos),
-          _why = "a join: " ++ firstWhy every
+          _why = "a join: " ++ firstWhy every,
+          -- A loop's result may hold what its body reads, as for '_co'.
+          _parts = if byPlace env then [Part pp (Set.union loopCo c) | Part pp c <- meetParts (map fineParts every)] else [],
+          _xparts = []
         }
 
 jump :: Env -> Core.Expr -> Name -> [Core.Expr] -> R
@@ -1996,7 +2310,7 @@ jump env e j args =
             foldMap _out rs
               <> escapes env rs
               <> mempty
-                { _outJoins = Map.singleton j (map _x rs),
+                { _outJoins = Map.singleton j (map xExcl rs),
                   _outLines =
                     say
                       [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome (_def env))), Name.toChars (Core._qnName (_def env)), spanText (Core.spanOf a), "jumps to " ++ Name.toChars j ++ " with argument " ++ show i ++ " shared: " ++ _why r]
@@ -2007,7 +2321,9 @@ jump env e j args =
                   _outDerived = Map.fromList [(start + i, Set.fromList [_root (_place m) | m <- Set.toList (_ms r)]) | (i, r) <- zip [0 ..] rs]
                 },
           _jumps = Set.singleton j,
-          _why = ""
+          _why = "",
+          _parts = [],
+          _xparts = []
         }
 
 -- DROPS (D1026)
@@ -2293,10 +2609,11 @@ runDrops roots cores =
       defs = [(Core.QualName (Core._moduleName m) (Core._binderName b), v) | m <- Map.elems cores, Core.Bind b v <- Core._moduleDefs m]
       start =
         Facts
-          { _excl = Map.mapWithKey (\q n -> replicate n (not (Set.member q (_open prog)))) (_fns prog),
+          { _excl = Map.mapWithKey (\q n -> replicate n (exclIf (not (Set.member q (_open prog))))) (_fns prog),
             _fresh = Map.map (const True) (_fns prog),
             _stash = Map.map (`replicate` False) (_fns prog),
-            _answers = answers prog defs
+            _answers = answers prog defs,
+            _freshParts = Map.map (const whole) (_fns prog)
           }
       (facts, final) = fixFacts prog defs start
       -- each definition as the walk dropped in it, then each set of a
@@ -2314,7 +2631,7 @@ runDrops roots cores =
       out = Map.map (\m -> m {Core._moduleDefs = map (rewrite (Core._moduleName m)) (Core._moduleDefs m)}) cores
       lines_ = [l | d <- Map.elems final, l <- _outLines (_defOut d), "drop " `List.isInfixOf` l || "hands " `List.isInfixOf` l] ++ concatMap snd (Map.elems rewritten) ++ factLines
       factLines =
-        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "drop facts: exclusive " ++ show ex ++ ", fresh " ++ show (Map.findWithDefault False q (_fresh facts)) ++ ", answers " ++ show (Map.findWithDefault [] q (_answers facts)) ++ ", stash " ++ show (Map.findWithDefault [] q (_stash facts)) ++ (if Set.member q (_open prog) then ", open" else "")]
+        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "drop facts: exclusive " ++ showExcl ex ++ ", fresh " ++ show (Map.findWithDefault False q (_fresh facts)) ++ ", answers " ++ show (Map.findWithDefault [] q (_answers facts)) ++ ", stash " ++ show (Map.findWithDefault [] q (_stash facts)) ++ (if Set.member q (_open prog) then ", open" else "")]
         | dropReporting,
           (q, ex) <- Map.toList (_excl facts)
         ]
@@ -2352,19 +2669,27 @@ runAppends roots cores =
       defs = [(Core.QualName (Core._moduleName m) (Core._binderName b), v) | m <- Map.elems cores, Core.Bind b v <- Core._moduleDefs m]
       start =
         Facts
-          { _excl = Map.mapWithKey (\q n -> replicate n (not (Set.member q (_open prog)))) (_fns prog),
+          { _excl = Map.mapWithKey (\q n -> replicate n (exclIf (not (Set.member q (_open prog))))) (_fns prog),
             _fresh = Map.map (const True) (_fns prog),
             _stash = Map.map (`replicate` False) (_fns prog),
-            _answers = answersBy (canHoldBuffer prog) prog defs
+            _answers = answersBy (canHoldBuffer prog) prog defs,
+            _freshParts = Map.map (const whole) (_fns prog)
           }
-      (_, final) = fixFacts prog defs start
+      (facts, final) = fixFacts prog defs start
       rewrite home (Core.Bind b v) =
         maybe (Core.Bind b v) (Core.Bind b . _defExpr) (Map.lookup (Core.QualName home (Core._binderName b)) final)
       out = Map.map (\m -> m {Core._moduleDefs = map (rewrite (Core._moduleName m)) (Core._moduleDefs m)}) cores
+      -- each function's facts, as the drops' report has them, and the parts
+      -- of its result that are its own (D1057)
+      factLines =
+        [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome q)), Name.toChars (Core._qnName q), "-", "append facts: exclusive " ++ showExcl ex ++ ", fresh " ++ show (Map.findWithDefault False q (_fresh facts)) ++ ", own parts " ++ showExcl [Map.findWithDefault none q (_freshParts facts)] ++ (if Set.member q (_open prog) then ", open" else "")]
+        | appendReporting,
+          (q, ex) <- Map.toList (_excl facts)
+        ]
       -- each append, and why each value the appends follow is not handed on
       -- as its own: the jumps and calls that hand one shared, and what keeps
       -- one (D917's report reads as the drops' does)
-      lines_ = [l | d <- Map.elems final, l <- _outLines (_defOut d), any (`List.isInfixOf` l) ["\tappend", "_append_u", "\tjumps to ", "\thands ", "\tkept by "]]
+      lines_ = [l | d <- Map.elems final, l <- _outLines (_defOut d), any (`List.isInfixOf` l) ["\tappend", "_append_u", "\tjumps to ", "\thands ", "\tkept by "]] ++ factLines
       written = case appendReportPath of
         Just path | path /= "" -> unsafePerformIO (appendFile path (unlines lines_) >> return out)
         _ -> out
