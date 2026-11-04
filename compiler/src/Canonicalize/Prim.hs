@@ -191,6 +191,9 @@ strType p =
   case p of
     SLength -> Just (fn [tString] tInt)
     SAppend -> Just (fn [tString, tString] tString)
+    -- D1056: made only by the appends pass; no @\@prim@ declares it.
+    SAppendU -> Just (fn [tString, tString] tString)
+    SAppendUU -> Just (fn [tString, tString] tString)
     SSlice -> Just (fn [tString, tInt, tInt] tString)
     SEq -> Just (fn [tString, tString] tBool)
     SCmp -> Just (fn [tString, tString] tInt)
@@ -269,6 +272,9 @@ arrType p =
     AAppend -> fn [tArray, tArray] tArray
     AInsert -> fn [tArray, tInt, a] tArray
     ARemove -> fn [tArray, tInt] tArray
+    -- D1056: made only by the appends pass; no @\@prim@ declares it.
+    AAppendU -> fn [tArray, tArray] tArray
+    AAppendUU -> fn [tArray, tArray] tArray
   where
     a = Can.TVar "a"
     tArray = Can.TType ModuleName.array "Array" [a]

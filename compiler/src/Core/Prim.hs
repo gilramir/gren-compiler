@@ -254,6 +254,19 @@ data StrPrim
     -- made, so each piece is copied once (D1052, geng-lang
     -- @m4-memory-proofs.md@ §MP11). __Appended__ to 'allPrims' after D1031's.
     SJoin
+  | -- | 'SAppend' for an accumulator nothing else holds (D1053, D1056, geng-lang
+    -- @m4-memory-proofs.md@ §MP12): it never adopts the right operand, and
+    -- gives back the left operand's buffer when the result does not keep it.
+    -- Only the @appends@ pass makes one, natively, where it has proved the
+    -- left operand read by nothing after and held by nothing else, and the
+    -- left operand is a parameter's; no source can name it, and a backend
+    -- may answer 'SAppend''s result. __Appended__ to 'allPrims' after
+    -- 'SJoin'.
+    SAppendU
+  | -- | 'SAppend' where both operands are proved so: it adopts as 'SAppend'
+    -- does, and gives back either operand's buffer the result does not keep
+    -- (D1056). __Appended__ after 'AAppendU'.
+    SAppendUU
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | Every width, both byte orders and both float widths are Geng over 'BGetU8',
@@ -346,6 +359,11 @@ data ArrPrim
   | AAppend
   | AInsert
   | ARemove
+  | -- | 'AAppend' for an accumulator nothing else holds, as 'SAppendU' is
+    -- for strings (D1053, D1056). __Appended__ to 'allPrims' after 'SAppendU'.
+    AAppendU
+  | -- | 'SAppendUU' for an array. __Appended__ after 'SAppendUU'.
+    AAppendUU
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | C7's transient — a real mutable array plus a @finalized@ flag, mutating in
@@ -535,7 +553,7 @@ allPrims =
     ++ map ConvOp [minBound .. I32ToChar]
     ++ map StrOp [minBound .. SUtf8Valid]
     ++ map BytesOp [minBound .. BtToBytes]
-    ++ map ArrOp [minBound .. maxBound]
+    ++ map ArrOp [minBound .. ARemove]
     ++ map TransientOp [minBound .. TrToArray]
     ++ map TaskOp [minBound .. SourceClose]
     ++ [DebugLog]
@@ -571,6 +589,8 @@ allPrims =
     ++ map BytesOp [BoFromBuilder .. maxBound]
     -- Appended by D1052 (m4-memory-proofs.md §MP11).
     ++ [StrOp SJoin]
+    -- Appended by D1056 (m4-memory-proofs.md §MP12).
+    ++ [StrOp SAppendU, ArrOp AAppendU, StrOp SAppendUU, ArrOp AAppendUU]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -702,6 +722,8 @@ strPrimName p =
     SPrev -> "prev"
     SCharAt -> "char_at"
     SJoin -> "join"
+    SAppendU -> "append_u"
+    SAppendUU -> "append_uu"
 
 bytesPrimName :: BytesPrim -> Text
 bytesPrimName p =
@@ -735,6 +757,8 @@ arrPrimName p =
     ASet -> "set"
     ASlice -> "slice"
     AAppend -> "append"
+    AAppendU -> "append_u"
+    AAppendUU -> "append_uu"
     AInsert -> "insert"
     ARemove -> "remove"
 
@@ -856,6 +880,8 @@ primArity op =
         SPrev -> 2
         SCharAt -> 2
         SJoin -> 2
+        SAppendU -> 2
+        SAppendUU -> 2
         -- string, needle, offset
         SFind -> 3
         SFindLast -> 3
@@ -898,6 +924,8 @@ primArity op =
         ALength -> 1
         AGet -> 2
         AAppend -> 2
+        AAppendU -> 2
+        AAppendUU -> 2
         ARemove -> 2
         ASet -> 3
         ASlice -> 3

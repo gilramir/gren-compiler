@@ -101,6 +101,7 @@
 module Core.Pass.InPlace
   ( run,
     runDrops,
+    runAppends,
   )
 where
 
@@ -118,6 +119,7 @@ import Data.Name (Name)
 import Data.Name qualified as Name
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Data.Text qualified as Text
 import Gren.ModuleName qualified as ModuleName
 import System.Environment qualified as Env
 import System.IO.Unsafe (unsafePerformIO)
@@ -147,7 +149,13 @@ data Prog = Prog
     -- | 'canHoldTransient' of every type the program's expressions have, by
     -- 'Core.typeId'.
     _trInfo :: IntMap.IntMap Bool,
-    -- | Which question the walk answers: the marks, or the drops.
+    -- | The data types whose values can hold an @Array@'s, a @String@'s or
+    -- a @Bytes@' buffer ('canHoldBuffer'), for D1056's appends.
+    _bufHolders :: Set Core.QualName,
+    -- | 'canHoldBuffer' of every type the program's expressions have, by
+    -- 'Core.typeId'.
+    _bufInfo :: IntMap.IntMap Bool,
+    -- | Which question the walk answers: the marks, the drops or the appends.
     _mode :: Mode,
     -- | For the drops: each function's parameters its written signature
     -- marks @moved@ (D920), by name. The ownership checker holds every build
@@ -157,8 +165,9 @@ data Prog = Prog
     _moved :: Map Core.QualName [Name]
   }
 
--- | 'run' marks updates in place; 'runDrops' drops builders (D1026).
-data Mode = Marks | Drops
+-- | 'run' marks updates in place; 'runDrops' drops builders (D1026);
+-- 'runAppends' makes an accumulator's append its @_u@ form (D1056).
+data Mode = Marks | Drops | Appends
   deriving (Eq)
 
 -- | What the program's walk learns of its functions, to a fixed point.
@@ -298,6 +307,10 @@ program roots modules =
       fixedTr known =
         let next = Set.fromList [Core._dataName d | d <- decls, trIn known d]
          in if next == known then known else fixedTr next
+      bufIn known decl = any (any (declHoldsBuffer known) . Core._ctorFields) (Core._dataCtors decl)
+      fixedBuf known =
+        let next = Set.fromList [Core._dataName d | d <- decls, bufIn known d]
+         in if next == known then known else fixedBuf next
       types = typesIn (concatMap (exprTypes . snd) defs)
       prog =
         Prog
@@ -309,6 +322,8 @@ program roots modules =
             _typeInfo = IntMap.fromList [(Core.typeId t, holdsRecAffineNode prog t) | t <- types],
             _trHolders = fixedTr Set.empty,
             _trInfo = IntMap.fromList [(Core.typeId t, canHoldTransientNode prog t) | t <- types],
+            _bufHolders = fixedBuf Set.empty,
+            _bufInfo = IntMap.fromList [(Core.typeId t, canHoldBufferNode prog t) | t <- types],
             _mode = Marks,
             _moved = Map.empty
           }
@@ -440,6 +455,83 @@ canHoldTransientNode p t =
       | otherwise -> True
   where
     plainHomes = [ModuleName.basics, ModuleName.char, ModuleName.string, ModuleName.bytes, ModuleName.array]
+
+-- | The types whose values are a buffer the appends follow (D1056).
+isBufferType :: Core.QualName -> Bool
+isBufferType q =
+  q == Core.QualName ModuleName.array (Name.fromChars "Array")
+    || q == Core.QualName ModuleName.string (Name.fromChars "String")
+    || q == Core.QualName ModuleName.bytes (Name.fromChars "Bytes")
+
+-- | A data type's field that can hold a buffer, its parameters taken as
+-- holding none, as 'declHoldsTransient' asks of a transient.
+declHoldsBuffer :: Set Core.QualName -> Core.Type -> Bool
+declHoldsBuffer known t =
+  case t of
+    Core.TVar _ -> False
+    Core.TFun _ _ -> True
+    Core.TCon q args -> isBufferType q || isTransient q || isOwned q || isPointerShape q || Set.member q known || any (declHoldsBuffer known) args
+    Core.TRecord fields row -> row /= Nothing || any (declHoldsBuffer known . snd) fields
+    Core.TForall _ _ body -> declHoldsBuffer known body
+
+-- | Whether a value of the type can hold an @Array@'s, a @String@'s or a
+-- @Bytes@' buffer: what the appends follow (D1056). As 'canHoldTransient',
+-- with the three buffer types added and fewer types plain.
+canHoldBuffer :: Prog -> Core.Type -> Bool
+canHoldBuffer p t =
+  Maybe.fromMaybe (canHoldBufferNode p t) (IntMap.lookup (Core.typeId t) (_bufInfo p))
+
+canHoldBufferNode :: Prog -> Core.Type -> Bool
+canHoldBufferNode p t =
+  case t of
+    Core.TVar _ -> True
+    Core.TFun _ _ -> True
+    Core.TRecord fields row -> row /= Nothing || any (canHoldBuffer p . snd) fields
+    Core.TForall _ _ body -> canHoldBuffer p body
+    Core.TCon q args
+      | isBufferType q || isTransient q || isOwned q || isPointerShape q -> True
+      | Set.member q (_bufHolders p) -> True
+      | Map.member q (_decls p) -> any (canHoldBuffer p) args
+      | Core._qnHome q `elem` [ModuleName.basics, ModuleName.char] -> any (canHoldBuffer p) args
+      | otherwise -> True
+
+-- | An append's @_u@ and @_uu@ forms, when the type it appends is one whose
+-- buffer holds no pointers: a @String@, or an @Array@ of one of @Basics@'
+-- numbers, a @Bool@ or a @Char@. The runtime checks the buffer's own flag
+-- before it frees, so a type taken wrongly here costs a free and never makes
+-- a wrong one.
+appendForms :: Prim.PrimOp -> Core.Type -> Maybe (Prim.PrimOp, Prim.PrimOp)
+appendForms op t =
+  case op of
+    Prim.StrOp Prim.SAppend -> Just (Prim.StrOp Prim.SAppendU, Prim.StrOp Prim.SAppendUU)
+    Prim.ArrOp Prim.AAppend | plainElements t -> Just (Prim.ArrOp Prim.AAppendU, Prim.ArrOp Prim.AAppendUU)
+    _ -> Nothing
+  where
+    plainElements ty =
+      case ty of
+        Core.TCon q [Core.TCon e []]
+          | q == Core.QualName ModuleName.array (Name.fromChars "Array") ->
+              (Core._qnHome e == ModuleName.basics && Name.toChars (Core._qnName e) `elem` ["Int", "Float", "Bool", "Int8", "UInt8", "Int16", "UInt16", "UInt32", "Int64", "UInt64"])
+                || (Core._qnHome e == ModuleName.char && Name.toChars (Core._qnName e) == "Char")
+        Core.TForall _ _ body -> plainElements body
+        _ -> False
+
+-- | Whether the expression is a place under a join's parameter: what a loop
+-- carries round, which a tail recursion and a fold become, and the one shape
+-- where the left operand is the accumulator (D1056). A function's parameter
+-- is not enough: @Inspect.ctor@'s @name ++ " " ++ rest@ is a short name
+-- before a long rendering, which an append writes into the rendering's front
+-- room, and a @_u@ there copied the rendering at every level of a nest
+-- (@scaling@'s @inspect-nested@).
+loopPlace :: Env -> Core.Expr -> Bool
+loopPlace env e =
+  case placeOf env e of
+    Just (ref, _) -> "a join's parameter " `List.isPrefixOf` IntMap.findWithDefault "" (_root (_refPlace ref)) (_rootWhat env)
+    Nothing -> False
+
+-- | Whether the primitive is an append the appends ask about.
+isAppend :: Prim.PrimOp -> Bool
+isAppend op = op == Prim.StrOp Prim.SAppend || op == Prim.ArrOp Prim.AAppend
 
 -- | What dropping a value frees, at a path of fields from it.
 data Target
@@ -830,7 +922,7 @@ reporting = maybe False (/= "") reportPath
 
 -- | The report's lines, or none when no report is asked for.
 say :: [String] -> [String]
-say lines_ = if reporting then lines_ else []
+say lines_ = if reporting || appendReporting then lines_ else []
 
 report :: [String] -> a -> a
 report lines_ out =
@@ -963,6 +1055,7 @@ tracksIn prog =
   case _mode prog of
     Marks -> holdsRec prog
     Drops -> canHoldTransient prog
+    Appends -> canHoldBuffer prog
 
 -- | The object at '_mine', under a root, may be or hold the object at
 -- '_other', or the other way round.
@@ -1257,9 +1350,41 @@ walkNode env live keep e =
               -- field access does, and its links say so: it hands nothing on
               -- (D1032, and for the marks D1036).
               keeps = tracks env (Core._exprType e) && not (readsPart op)
-              heldArgs = [k | (k, True) <- zip ks (primHolds op (length args))]
+              -- D1056: an append whose operands nothing else holds or reads
+              -- after is made its @_uu@ form, which adopts as an append does
+              -- and gives back what the result does not keep. When only the
+              -- left one is, and it is a join parameter's, the accumulator a
+              -- loop carries, it is made @_u@, which never adopts
+              -- the right one: its result holds the left one's buffer and a
+              -- copy of the right one's. A left operand that is a literal or
+              -- a call's result is not an accumulator, and a @_u@ there would
+              -- copy the right one where an append writes into its room.
+              asked = _mode (_prog env) == Appends && isAppend op && tracks env (Core._exprType e)
+              forms = appendForms op (Core._exprType e)
+              made = case (rs, args, forms) of
+                (left : right : _, leftExpr : _, Just (u, uu))
+                  | asked && _x left && _x right -> Just uu
+                  | asked && _x left && loopPlace env leftExpr -> Just u
+                _ -> Nothing
+              op' = Maybe.fromMaybe op made
+              heldArgs = case made of
+                Just u | Just (u', _) <- forms, u == u' -> take 1 ks
+                _ -> [k | (k, True) <- zip ks (primHolds op (length args))]
+              appendLines
+                | asked && appendReporting =
+                    [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome (_def env))), Name.toChars (Core._qnName (_def env)), spanText (Core.spanOf e), appendWhy made rs]
+                    ]
+                | otherwise = []
+              appendWhy m lrs =
+                case (m, lrs) of
+                  (Just u, _) -> Text.unpack (Prim.primName u)
+                  (Nothing, left : _)
+                    | Maybe.isNothing forms -> "append: its elements may be pointers"
+                    | _x left -> "append: the right operand is shared and the left is not a loop's"
+                    | otherwise -> "append: " ++ _why left
+                  (Nothing, []) -> "append"
            in (combine rs)
-                { _expr = e {Core._exprValue = Core.EPrim op (map _expr rs)},
+                { _expr = e {Core._exprValue = Core.EPrim op' (map _expr rs)},
                   _flow = [],
                   _co = Set.unions (map (_co . fst) heldArgs),
                   -- A primitive's result holds what it made and parts of what
@@ -1268,7 +1393,7 @@ walkNode env live keep e =
                   -- read of an element is not its own, since its container
                   -- holds it too (D1036).
                   _ex = (_mode (_prog env) == Drops || not (readsPart op)) && and (map snd heldArgs),
-                  _out = foldMap _out rs <> (if keeps then escapes env (map fst heldArgs) else mempty),
+                  _out = foldMap _out rs <> (if keeps then escapes env (map fst heldArgs) else mempty) <> mempty {_outLines = appendLines},
                   _why = "a primitive's result"
                 }
         Core.EJoin binds body -> joins env live keep e binds body
@@ -1521,6 +1646,7 @@ lets env live keep e binds body =
                   dropped = case _mode (_prog env) of
                     Marks -> ([], [])
                     Drops -> drops env (Set.unions [_ms inner, live, keep]) rv
+                    Appends -> ([], [])
                in R
                     { _expr = e {Core._exprValue = rebuild (foldl wrapDrop (_expr rv) (fst dropped)) inner},
                       _ms = Set.union (_ms rv) (Set.filter (not . mine) (_ms inner)),
@@ -1687,6 +1813,7 @@ update env live keep e base fields w0 =
       write = case _mode (_prog env) of
         Marks -> if inPlace then Core.InPlace else Core.Copy
         Drops -> w0
+        Appends -> w0
       baseMs = case basePlace of
         Just _ -> Set.map (\m -> m {_except = List.sort replaced}) (_ms baseR)
         Nothing -> _ms baseR
@@ -1734,7 +1861,7 @@ call env live keep e fn args =
                 [ List.intercalate "\t" [Name.toChars (ModuleName._module (Core._qnHome (_def env))), Name.toChars (Core._qnName (_def env)), spanText (Core.spanOf a), "hands " ++ Name.toChars (Core._qnName q) ++ " argument " ++ show i ++ " shared: " ++ _why r]
                 | (i, a, r) <- zip3 [0 :: Int ..] args rs,
                   not (_x r),
-                  affineRec (_prog env) (Core._exprType a) || (_mode (_prog env) == Drops && tracks env (Core._exprType a))
+                  affineRec (_prog env) (Core._exprType a) || (_mode (_prog env) /= Marks && tracks env (Core._exprType a))
                 ]
            in R
                 { _expr = e {Core._exprValue = Core.EApp fn (map _expr rs)},
@@ -1835,11 +1962,11 @@ joins env live keep e binds body =
          in if next == seen then seen else closure next
       rb = walk (from (last joinStarts) env') live keep body
       every = rb : map snd walked
-      -- For the drops, a loop's result may hold anything the loop reads: its
-      -- parameters are not linked to what the jumps hand them.
+      -- For the drops and the appends, a loop's result may hold anything the
+      -- loop reads: its parameters are not linked to what the jumps hand them.
       loopCo = case _mode (_prog env) of
         Marks -> Set.empty
-        Drops -> closeCo env (Set.fromList [Place (_root (_place m)) [] | r <- every, m <- Set.toList (_ms r), _root (_place m) < start])
+        _ -> closeCo env (Set.fromList [Place (_root (_place m)) [] | r <- every, m <- Set.toList (_ms r), _root (_place m) < start])
    in R
         { _expr = e {Core._exprValue = Core.EJoin [Core.Bind b (_expr r) | (Core.Bind b _, (_, r)) <- zip binds walked] (_expr rb)},
           _ms = Set.unions (map _ms every),
@@ -2197,6 +2324,56 @@ runDrops roots cores =
    in if any (holdsBuilder . snd) defs then written else cores
   where
     holdsBuilder e = any (not . null . dropTargets) (exprTypes e)
+
+-- | @GENG_APPEND_REPORT=<file>@: a line for each append the appends walk
+-- follows, module, definition, where, and the @_u@ form it made or why it
+-- left the append (D1056, D917). Appended, as the drops' report is.
+appendReportPath :: Maybe FilePath
+appendReportPath = unsafePerformIO (Env.lookupEnv "GENG_APPEND_REPORT")
+{-# NOINLINE appendReportPath #-}
+
+appendReporting :: Bool
+appendReporting = maybe False (/= "") appendReportPath
+
+-- | D1056's pass (geng-lang @m4-memory-proofs.md@ §MP12): the walk again,
+-- asking at each append whether its left operand is held by nothing else
+-- and read by nothing after, and making it its @_u@ form where it is, which
+-- never adopts an operand and gives back the left one's buffer when it
+-- outgrows it. Natively only, after the drops. A program with no append is
+-- left as it is, unwalked.
+runAppends :: [Core.QualName] -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
+runAppends roots cores =
+  -- Not the drops' @moved@ parameters (D963): the checker holds an affine
+  -- value to one owner, but a plain field read out of it before it was moved,
+  -- an @Array@ or a @String@, may still be read after (D933), and it shares
+  -- the field's buffer. Whether every caller hands a value nothing else holds
+  -- is the walk's own fact here, as it is for the marks.
+  let prog = (program roots (Map.elems cores)) {_mode = Appends}
+      defs = [(Core.QualName (Core._moduleName m) (Core._binderName b), v) | m <- Map.elems cores, Core.Bind b v <- Core._moduleDefs m]
+      start =
+        Facts
+          { _excl = Map.mapWithKey (\q n -> replicate n (not (Set.member q (_open prog)))) (_fns prog),
+            _fresh = Map.map (const True) (_fns prog),
+            _stash = Map.map (`replicate` False) (_fns prog),
+            _answers = answersBy (canHoldBuffer prog) prog defs
+          }
+      (_, final) = fixFacts prog defs start
+      rewrite home (Core.Bind b v) =
+        maybe (Core.Bind b v) (Core.Bind b . _defExpr) (Map.lookup (Core.QualName home (Core._binderName b)) final)
+      out = Map.map (\m -> m {Core._moduleDefs = map (rewrite (Core._moduleName m)) (Core._moduleDefs m)}) cores
+      -- each append, and why each value the appends follow is not handed on
+      -- as its own: the jumps and calls that hand one shared, and what keeps
+      -- one (D917's report reads as the drops' does)
+      lines_ = [l | d <- Map.elems final, l <- _outLines (_defOut d), any (`List.isInfixOf` l) ["\tappend", "_append_u", "\tjumps to ", "\thands ", "\tkept by "]]
+      written = case appendReportPath of
+        Just path | path /= "" -> unsafePerformIO (appendFile path (unlines lines_) >> return out)
+        _ -> out
+   in if any (hasAppend . snd) defs then written else cores
+  where
+    hasAppend e =
+      case Core._exprValue e of
+        Core.EPrim op _ | isAppend op -> True
+        _ -> any hasAppend (children e)
 
 -- | Each top-level function's parameters its written signature marks
 -- @moved@, by name: a signature is matched to the definition whose binder has

@@ -171,7 +171,7 @@ defaults :: Target.Target -> [String]
 defaults target =
   case target of
     Target.Js -> ["specialize", "foldspec", "transient", "arraypop", "inlinematch", "float", "floatin", "mutual", "case", "tailcall", "inplace"]
-    Target.Native -> ["specialize", "foldspec", "transient", "arraypop", "mono", "inline", "float", "floatin", "mutual", "case", "tailcall", "inplace", "drop"]
+    Target.Native -> ["specialize", "foldspec", "transient", "arraypop", "mono", "inline", "float", "floatin", "mutual", "case", "tailcall", "inplace", "drop", "appends"]
     _ -> ["specialize", "foldspec", "inline", "float", "floatin", "mutual", "case", "tailcall"]
 
 run :: Target.Target -> [Core.QualName] -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
@@ -201,4 +201,7 @@ runAccounted target roots cores =
       -- D1026 (geng-lang m4-free.md): after the marks, a builder an affine
       -- record holds dropped where it is read for the last time.
       marked = pass "inplace" (InPlace.run roots) looped
-   in (pass "drop" (InPlace.runDrops roots) marked, notes)
+      dropped = pass "drop" (InPlace.runDrops roots) marked
+   in -- D1056 (geng-lang m4-memory-proofs.md §MP12): last, an accumulator's
+      -- append made its _u form where nothing else holds the accumulator.
+      (pass "appends" (InPlace.runAppends roots) dropped, notes)

@@ -388,6 +388,9 @@ string :: StrPrim -> [JS.Expr] -> JS.Expr
 string p args =
   case (p, args) of
     (SAppend, [a, b]) -> JS.Infix JS.OpAdd a b
+    -- D1056: native only; JavaScript's append is already its own.
+    (SAppendU, [a, b]) -> JS.Infix JS.OpAdd a b
+    (SAppendUU, [a, b]) -> JS.Infix JS.OpAdd a b
     (SEq, [a, b]) -> JS.Infix JS.OpEq a b
     (SSlice, [s, i, j]) -> method s "slice" [i, j]
     (SEnd, [s]) -> JS.Access s (JsName.fromLocalHumanReadable "length")
@@ -656,6 +659,8 @@ array p args =
     (ASet, [_, _, _]) -> helper "_Arr_set" args
     (ASlice, [_, _, _]) -> helper "_Arr_slice" args
     (AAppend, [_, _]) -> helper "_Arr_append" args
+    (AAppendU, [_, _]) -> helper "_Arr_append" args
+    (AAppendUU, [_, _]) -> helper "_Arr_append" args
     (AInsert, [a, i, v]) -> method (flat a) "toSpliced" [i, JS.Int 0, v]
     (ARemove, [a, i]) -> method (flat a) "toSpliced" [i, JS.Int 1]
     _ -> arityError (ArrOp p) args

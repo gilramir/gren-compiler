@@ -19,7 +19,7 @@ spec = do
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
       -- someone noticing.
-      length allPrims `shouldBe` 207
+      length allPrims `shouldBe` 211
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -117,6 +117,16 @@ spec = do
       -- did not move, and after `char_at`, the string group's last before it.
       (primCode (StrOp SJoin), primName (StrOp SJoin), primArity (StrOp SJoin), primCode (BytesOp BoDrop), primCode (StrOp SCharAt))
         `shouldBe` (206, "str_join", 2, 205, 164)
+
+    it "appends D1056's four appends after str_join" $
+      -- geng-lang m4-memory-proofs.md §MP12: only the native appends pass
+      -- makes them, and `arr_remove` keeps the code it had before `ArrPrim`
+      -- grew past it.
+      ( [(primCode p, primName p, primArity p) | p <- [StrOp SAppendU, ArrOp AAppendU, StrOp SAppendUU, ArrOp AAppendUU]],
+        primCode (StrOp SJoin),
+        primCode (ArrOp ARemove)
+      )
+        `shouldBe` ([(207, "str_append_u", 2), (208, "arr_append_u", 2), (209, "str_append_uu", 2), (210, "arr_append_uu", 2)], 206, 138)
 
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved
