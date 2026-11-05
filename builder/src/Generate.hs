@@ -80,6 +80,8 @@ data Mode = Dev | Prod
 data Shape
   = Bare
   | NodeScript ModuleName.Raw
+  | -- | A script a page loads, which starts its @main@ when it runs (D1072).
+    BrowserScript ModuleName.Raw
   | HtmlPage ModuleName.Raw
 
 -- | The Core a build has made by the time a backend is asked, each stage run
@@ -588,6 +590,7 @@ javaScript =
         case shape of
           Bare -> mapped 0 source
           NodeScript name -> mapped Node.leadingLines (Node.sandwich name source)
+          BrowserScript name -> mapped Html.scriptLeadingLines (Html.script name source)
           HtmlPage name -> Html.sandwich name (mapped Html.leadingLines source)
 
 -- TARGET

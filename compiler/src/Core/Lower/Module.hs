@@ -305,8 +305,8 @@ data MainOf
 
 -- | The classification, from the module's annotations and the platform.
 --
--- The platform decides whether a @main@ can run at all: only @node@ runs a
--- task today. @main : String@, @main : Html msg@ and @Platform.Program@ left
+-- The platform decides whether a @main@ can run at all: @node@ and @browser@
+-- run a task (D1072, geng-lang @browser.md@ §BR7, amending D273). @main : String@, @main : Html msg@ and @Platform.Program@ left
 -- with @Platform@ (§SO19, D273), and are refused here as any other type is.
 mainOf :: P.Platform -> Map.Map Name Can.Annotation -> MainOf
 mainOf platform annotations =
@@ -316,7 +316,7 @@ mainOf platform annotations =
     Just (Can.Forall freeVars tipe) ->
       case Type.deepDealias tipe of
         Can.TType hm nm [err, answer]
-          | platform == P.Node && hm == ModuleName.taskInternal && nm == Name.task ->
+          | runsTasks platform && hm == ModuleName.taskInternal && nm == Name.task ->
               let badErr = not (isNever err || unconstrained freeVars err)
                   badAnswer = not (isUnit answer || unconstrained freeVars answer)
                in if badErr || badAnswer then BadTask tipe badErr badAnswer else IsMain Core.MainTask
@@ -347,11 +347,16 @@ unconstrained freeVars t =
     Can.TVar name -> null (Map.findWithDefault [] name freeVars)
     _ -> False
 
+-- | Whether a platform runs a task @main@.
+runsTasks :: P.Platform -> Bool
+runsTasks platform =
+  not (null (runnableOn platform))
+
 -- | The type names a platform's @main@ may have, as the error prints them.
 runnableOn :: P.Platform -> [String]
 runnableOn platform =
   case platform of
-    P.Browser -> []
+    P.Browser -> ["Task Never {}"]
     P.Node -> ["Task Never {}"]
     P.Common -> []
     P.Host -> []

@@ -138,6 +138,8 @@ runHelp style flags@(Flags optimize withSourceMaps maybeOutput _ modules root ou
                     Task.throw Exit.MakeExeOnlyForNodePlatform
               Just (JS target) ->
                 case getNoMains artifacts of
+                  [] | Platform.Browser <- platform, [name] <- mains ->
+                    build (Generate.BrowserScript name) target (NE.List name [])
                   [] ->
                     build Generate.Bare target (Build.getRootNames artifacts)
                   name : names ->
