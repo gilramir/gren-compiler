@@ -19,7 +19,7 @@ spec = do
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
       -- someone noticing.
-      length allPrims `shouldBe` 213
+      length allPrims `shouldBe` 215
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -133,6 +133,16 @@ spec = do
       -- makes them, at a loop's entry.
       [(primCode p, primName p, primArity p) | p <- [StrOp SFresh, ArrOp AFresh]]
         `shouldBe` [(211, "str_fresh", 1), (212, "arr_fresh", 1)]
+
+    it "appends D1080's emit and deliver after the copies" $
+      -- geng-lang source-emit.md §SE6: Geng code pushing into a source,
+      -- after D1059's `arr_fresh`, and apart from `source_close`, which did
+      -- not move.
+      ( [(primCode p, primName p, primArity p) | p <- [TaskOp SourceEmit, TaskOp SourceDeliver]],
+        primCode (ArrOp AFresh),
+        primCode (TaskOp SourceClose)
+      )
+        `shouldBe` ([(213, "source_emit", 2), (214, "source_deliver", 2)], 212, 156)
 
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved

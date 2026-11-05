@@ -488,6 +488,14 @@ data TaskPrim
   | TaskContext
   | TaskWithContext
   | TaskMap
+  | -- | D1080 (geng-lang @source-emit.md@ §SE5), __appended__ after 'TaskMap':
+    -- Geng code pushing into a 'SourceNew' source. @source_emit@ drops an event
+    -- a closed source will not take; @source_deliver@ answers whether it took
+    -- it, and @Source.deliver@ fails with @Closed@ in Geng when it did not. Two
+    -- primitives, since on the BEAM only the second waits for the source's
+    -- process to answer.
+    SourceEmit
+  | SourceDeliver
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | D579's @Dict@ transient (geng-lang @m3-fold.md@ §FL10, D582): a loop that
@@ -604,6 +612,8 @@ allPrims =
     ++ [StrOp SAppendU, ArrOp AAppendU, StrOp SAppendUU, ArrOp AAppendUU]
     -- Appended by D1059 (m4-memory-proofs.md §MP16).
     ++ [StrOp SFresh, ArrOp AFresh]
+    -- Appended by D1080 (source-emit.md §SE5).
+    ++ map TaskOp [SourceEmit, SourceDeliver]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -817,6 +827,8 @@ taskPrimName p =
     TaskContext -> "task_context"
     TaskWithContext -> "task_with_context"
     TaskMap -> "task_map"
+    SourceEmit -> "source_emit"
+    SourceDeliver -> "source_deliver"
 
 dictPrimName :: DictPrim -> Text
 dictPrimName p =
@@ -1000,6 +1012,9 @@ primArity op =
         TaskWithContext -> 2
         -- the function, and the task whose value it is applied to
         TaskMap -> 2
+        -- the source, and the event
+        SourceEmit -> 2
+        SourceDeliver -> 2
     DictOp p ->
       case p of
         -- `{}`: an owner is taken where the call is, never hoisted to a

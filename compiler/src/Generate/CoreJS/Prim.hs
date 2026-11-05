@@ -1456,11 +1456,13 @@ source p args =
     (SourceNew, []) -> JS.Ref (JsName.fromLocalHumanReadable "_SourcePrim_new")
     (SourceNext, [_]) -> helper "_SourcePrim_next" args
     (SourceClose, [_]) -> helper "_SourcePrim_close" args
+    (SourceEmit, [_, _]) -> helper "_SourcePrim_emitTask" args
+    (SourceDeliver, [_, _]) -> helper "_SourcePrim_deliver" args
     _ -> arityError (TaskOp p) args
   where
     helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
 
--- | Whether a primitive is one of the three @source_@ ones, whose helpers
+-- | Whether a primitive is one of the five @source_@ ones, whose helpers
 -- 'Generate.CoreJS' emits once in a program that reaches any of them.
 isSource :: PrimOp -> Bool
 isSource op =
@@ -1468,6 +1470,8 @@ isSource op =
     TaskOp SourceNew -> True
     TaskOp SourceNext -> True
     TaskOp SourceClose -> True
+    TaskOp SourceEmit -> True
+    TaskOp SourceDeliver -> True
     _ -> False
 
 -- | The @source_@ helpers: D71's single-reader mailbox, which is a queue, at
@@ -1484,8 +1488,10 @@ isSource op =
 -- documentation says not to.
 --
 -- @emit@ and @close@ are what an extern implementation is handed (@ffi.md@ F4);
--- they are not primitives, and they are reached from the wrapper the extern
--- generator writes rather than from Geng.
+-- they are reached from the wrapper the extern generator writes. Geng reaches
+-- the same @emit@ through @source_emit@ and @source_deliver@ (D1080), which run
+-- it when the task runs: waking a parked reader then only queues it, since the
+-- scheduler is stepping ('_TaskPrim_enqueue').
 sourceHelpers :: B.Builder
 sourceHelpers =
   [r|
@@ -1531,6 +1537,21 @@ function _SourcePrim_shut(source) {
     source.waiting = null;
     waiting(_TaskPrim_succeed([]));
   }
+}
+
+// D1080: `Source.emit` drops what a closed source will not take, and
+// `Source.deliver` answers whether it took it.
+function _SourcePrim_emitTask(source, value) {
+  return _TaskPrim_binding(function (callback) {
+    _SourcePrim_emit(source, value);
+    callback(_TaskPrim_succeed({}));
+  });
+}
+
+function _SourcePrim_deliver(source, value) {
+  return _TaskPrim_binding(function (callback) {
+    callback(_TaskPrim_succeed(_SourcePrim_emit(source, value)));
+  });
 }
 
 // Whether the source took the event: false once it is closed.

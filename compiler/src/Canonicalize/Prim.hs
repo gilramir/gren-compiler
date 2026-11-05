@@ -388,6 +388,11 @@ sourceType p =
     SourceNew -> Just (fn [] (tTask (Can.TVar "x") tSource))
     SourceNext -> Just (fn [tSource] (tTask (Can.TVar "x") tArray))
     SourceClose -> Just (fn [tSource] (tTask (Can.TVar "x") tUnit))
+    -- D1080: @deliver@'s @Bool@ is whether the source took the event, and
+    -- @Source.deliver@ makes @False@ its @Closed@ failure in Geng, so the
+    -- table names no type of @core@'s beyond @Source@.
+    SourceEmit -> Just (fn [tSource, a] (tTask (Can.TVar "x") tUnit))
+    SourceDeliver -> Just (fn [tSource, a] (tTask (Can.TVar "x") tBool))
     _ -> Nothing
   where
     a = Can.TVar "a"
