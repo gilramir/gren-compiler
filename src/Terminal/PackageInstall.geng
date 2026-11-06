@@ -858,13 +858,20 @@ finish env { projectPath, outline } isCore state =
 
         -- D24: a package is usable when the project's runtime is the one it
         -- declares or below it. A project for a runtime the compiler does not
-        -- build for is refused before this is asked (D319).
+        -- build for is refused before this is asked (D319). An `os`
+        -- project's resolution takes the packages for each platform under
+        -- it too, since one lock serves every platform; a native build picks
+        -- one and refuses the others' (geng-lang D1074,
+        -- `Terminal.Native.otherPlatform`).
+        usable declared =
+            Runtime.isAtOrBelow rootRuntime declared
+                || (rootRuntime == Runtime.Os && Runtime.parent declared == Just Runtime.Os)
 
         incompatible =
             Array.findFirst
                 (\loaded ->
                     not (SemanticVersionRange.contains Meta.version loaded.outline.gengVersion)
-                        || not (Runtime.isAtOrBelow rootRuntime loaded.outline.runtime)
+                        || not (usable loaded.outline.runtime)
                 )
                 chosen
                 |> Maybe.map

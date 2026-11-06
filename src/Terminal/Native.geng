@@ -5,7 +5,9 @@ module Terminal.Native exposing
     , abandon
     , build
     , isTarget
+    , otherPlatform
     , plan
+    , platformName
     , prepare
     , requireProgram
     , serve
@@ -60,6 +62,22 @@ machine needs no Boehm of its own and its configuration is this compiler's.
 An executable's is threaded, as the release's configure builds it; its black
 list is larger than the release's default, which a deep stack filled (§SW28).
 
+**A build is for one platform** (geng-lang `m4-windows.md` D1074, §WN14):
+Linux or Windows, which `--platform` names and which is otherwise the
+machine's. The runtime is carried for both, each platform's part in a
+directory of its own (`linux/`, `windows/`), and a build compiles the shared
+files and its platform's, with its platform's directory on the include path.
+A package's `src/Ext/linux/*.c` or `src/Ext/windows/*.c` is likewise compiled
+only for its platform, beside its `src/Ext/*.c` (D1078). A Windows build is a
+cross build: `GENG_CC` names the compiler, the program is `app.exe` unless
+`--output` names it, it is linked statically (D1073), `String.toFloat`'s parse
+is mingw's (D1079), and `-fstack-clash-protection` is not passed, since a
+Windows stack is probed by `__chkstk` and clang refuses the flag for it.
+`GENG_LDFLAGS` is added to the link alone, split on spaces, after every
+object, which is where a cross toolchain's `-L` goes. A package whose
+`geng.toml` declares another platform is refused by name: a build for
+Windows takes `os` and `windows` packages, and not `linux` ones.
+
 A native build with no `main` is a library, `runtime = "host"` (geng-lang
 `m3-embed.md` D619, §EM17). The backend roots it at the values its module
 exposes, holds each to what crosses to C, and writes the C each is entered by
@@ -93,11 +111,12 @@ import Cli.PrettyPrinter as PP
 import Cli.Report as Report exposing (Report)
 import Compiler.Backend
 import Compiler.Outline as Outline exposing (Outline)
+import Compiler.Runtime as Runtime
 import Dict exposing (Dict)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
 import Geng.C.Build as Build
-import Geng.C.Runtime as Runtime
+import Geng.C.Runtime as Carried
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Stream
@@ -128,6 +147,7 @@ type alias Plan =
 type alias Toolchain =
     { cc : String
     , flags : Array String
+    , linkFlags : Array String
     , pkgConfig : String
     }
 
@@ -147,6 +167,7 @@ type alias Config =
     , stderr : Stream.Writable Bytes.Bytes
     , toString : Path -> String
     , tools : Toolchain
+    , platform : Runtime.Runtime
     , optimization : String
     , debugInfo : Bool
     , packages : Array Path
@@ -241,26 +262,60 @@ sourceMaps toString project =
             project.packages
 
 
-{-| `GENG_CC`, else `clang`; `GENG_CFLAGS`, split on spaces; and
-`GENG_PKG_CONFIG`, else `pkg-config` (D890). -}
+{-| `GENG_CC`, else `clang`; `GENG_CFLAGS` and `GENG_LDFLAGS`, split on
+spaces; and `GENG_PKG_CONFIG`, else `pkg-config` (D890). -}
 toolchain : Dict String String -> Toolchain
 toolchain envVars =
+    let
+        words name =
+            Dict.get name envVars
+                |> Maybe.withDefault ""
+                |> String.split " "
+                |> Array.keepIf (\flag -> flag /= "")
+    in
     { cc = Maybe.withDefault "clang" (Dict.get "GENG_CC" envVars)
     , pkgConfig = Maybe.withDefault "pkg-config" (Dict.get "GENG_PKG_CONFIG" envVars)
-    , flags =
-        Dict.get "GENG_CFLAGS" envVars
-            |> Maybe.withDefault ""
-            |> String.split " "
-            |> Array.keepIf (\flag -> flag /= "")
+    , flags = words "GENG_CFLAGS"
+    , linkFlags = words "GENG_LDFLAGS"
     }
+
+
+{-| The platform's name, as `--platform` and `geng.toml` write it, and the
+directory its part of the runtime and of a package's C is in. -}
+platformName : Runtime.Runtime -> String
+platformName =
+    Runtime.toString
+
+
+{-| A package of the build declared for a platform under `os` that is not the
+one the build is for (D1074), as a report naming it. Resolution takes every
+platform under an `os` application's, since one `geng.lock` serves them all;
+the build is where one is picked. -}
+otherPlatform : Runtime.Runtime -> Array { name : String, runtime : Runtime.Runtime } -> Maybe Report
+otherPlatform platform packages =
+    packages
+        |> Array.findFirst (\p -> Runtime.parent p.runtime == Just Runtime.Os && p.runtime /= platform)
+        |> Maybe.map
+            (\{ value = p } ->
+                Report.create
+                    "THIS PACKAGE IS FOR ANOTHER PLATFORM"
+                    Nothing
+                    (PP.verticalBlock
+                        [ PP.words (p.name ++ " says it runs on " ++ Runtime.toString p.runtime ++ ", and this build is for " ++ Runtime.toString platform ++ ".")
+                        , PP.empty
+                        , PP.words ("A build for " ++ Runtime.toString platform ++ " takes the packages for os and for " ++ Runtime.toString platform ++ ". Build for " ++ Runtime.toString p.runtime ++ " with --platform=" ++ Runtime.toString p.runtime ++ ", or drop the dependency.")
+                        ]
+                    )
+            )
 
 
 {-| The plan for an `--output`, or why there is none: `/dev/null` asks for no
 program, and the three JavaScript artifacts are refused, a native program being
-none of them.
+none of them. With no `--output` the program is `app`, or `app.exe` for
+Windows; one named is used as it is named.
 -}
-plan : (String -> Path) -> Maybe Compiler.Backend.MakeOutput -> Result Report (Maybe Plan)
-plan fromString output =
+plan : Runtime.Runtime -> (String -> Path) -> Maybe Compiler.Backend.MakeOutput -> Result Report (Maybe Plan)
+plan platform fromString output =
     let
         refuse what instead =
             Err <|
@@ -276,7 +331,19 @@ plan fromString output =
     in
     when output is
         Nothing ->
-            Ok (Just (paths (fromString "app")))
+            Ok
+                (Just
+                    (paths
+                        (fromString
+                            (if platform == Runtime.Windows then
+                                "app.exe"
+
+                             else
+                                "app"
+                            )
+                        )
+                    )
+                )
 
         Just (Compiler.Backend.Exe path) ->
             Ok (Just (paths (fromString path)))
@@ -438,7 +505,7 @@ buildStage config thePlan =
                         boehmSources {}
                             |> Task.andThen
                                 (\boehm ->
-                                    write config.fs thePlan.work Runtime.sources
+                                    write config.fs thePlan.work Carried.sources
                                         |> Task.andThen (\_ -> write config.fs (boehmDirectory thePlan) boehm)
                                 )
                             |> Task.andThen (\_ -> externSources config)
@@ -545,7 +612,7 @@ gives, which the worker found as `libraryName` does here, so it is there
 whenever the name is. -}
 buildLibrary : Config -> Plan -> Maybe String -> Task Report Int
 buildLibrary config thePlan header =
-    when libraryName thePlan.exe is
+    when (if config.platform == Runtime.Windows then Err windowsLibrary else libraryName thePlan.exe) is
         Err report ->
             abandon config.fs thePlan
                 |> Task.andThen (\_ -> Task.fail report)
@@ -554,7 +621,7 @@ buildLibrary config thePlan header =
             boehmSources {}
                 |> Task.andThen
                     (\boehm ->
-                        write config.fs thePlan.work (Runtime.sources ++ Runtime.library)
+                        write config.fs thePlan.work (Carried.sources ++ Carried.library)
                             |> Task.andThen (\_ -> write config.fs (boehmDirectory thePlan) boehm)
                             |> Task.andThen (\_ -> write config.fs (Path.parentPath thePlan.exe |> Maybe.withDefault Path.empty) [ { name = name ++ ".h", text = Maybe.withDefault "" header } ])
                     )
@@ -567,6 +634,16 @@ buildLibrary config thePlan header =
                     )
                 |> Task.andThen (\_ -> finish config thePlan)
                 |> Task.map (\_ -> 0)
+
+
+{-| A library for Windows waits until something needs one (geng-lang D1081):
+its stack switch is fibers' work. -}
+windowsLibrary : Report
+windowsLibrary =
+    Report.create
+        "NO LIBRARY FOR WINDOWS YET"
+        Nothing
+        (PP.words "This application's runtime is host, so it is a library, and a native library is built for Linux only so far. Build it for Linux, or give it a main to build a Windows program.")
 
 
 {-| The output's file name less a leading `lib` and everything from its first
@@ -613,7 +690,7 @@ libraryName exe =
 decoded only by a native build, and not each time the compiler starts. -}
 boehmSources : {} -> Task Report (Array { name : String, text : String })
 boehmSources {} =
-    Stream.fromArray [ Build.base64 Runtime.boehm ]
+    Stream.fromArray [ Build.base64 Carried.boehm ]
         |> Task.andThen (Stream.awaitAndPipeThrough Stream.gzipDecompression)
         |> Task.andThen (Stream.readUntilClosed (\chunk chunks -> Ok (Array.pushLast chunk chunks)) [])
         |> Task.mapError (\_ -> "it would not decompress")
@@ -671,7 +748,8 @@ write fs directory files =
         |> Task.map (\_ -> {})
 
 
-{-| Every `src/Ext/*.c` a package of this build has (`ffi.md` F1), each once. -}
+{-| Every `src/Ext/*.c` a package of this build has (`ffi.md` F1), and its
+`src/Ext/<platform>/*.c` (D1078), each once. -}
 externSources : Config -> Task Report (Array Path)
 externSources config =
     config.packages
@@ -691,13 +769,24 @@ externSources config =
             )
 
 
-{-| A package's `src/Ext/*.c`, sorted, or none when it has no `src/Ext`. -}
+{-| A package's `src/Ext/*.c` and then its `src/Ext/<platform>/*.c`, each
+sorted, or none where there is no such directory. -}
 extFiles : Config -> Path -> Task Report (Array Path)
 extFiles config root =
     let
         directory =
             Path.append (Path.fromPosixString "Ext") (Path.append (Path.fromPosixString "src") root)
     in
+    cFiles config directory
+        |> Task.andThen
+            (\shared ->
+                cFiles config (Path.append (Path.fromPosixString (platformName config.platform)) directory)
+                    |> Task.map (\own -> shared ++ own)
+            )
+
+
+cFiles : Config -> Path -> Task Report (Array Path)
+cFiles config directory =
     FileSystem.listDirectory config.fs directory
         |> Task.map
             (\entries ->
@@ -935,7 +1024,13 @@ executableFlags config thePlan =
     programFlags config thePlan
         ++ [ "-I", boehm "include/gc", "-I", boehm "include" ]
         ++ config.tools.flags
-        ++ [ "-I", config.toString thePlan.work ]
+        ++ [ "-I", config.toString thePlan.work, "-I", config.toString (platformDirectory config thePlan) ]
+
+
+{-| The runtime's part for the build's platform (`geng_sys.h`). -}
+platformDirectory : Config -> Plan -> Path
+platformDirectory config thePlan =
+    Path.append (Path.fromPosixString (platformName config.platform)) thePlan.work
 
 
 {-| The executable: the program and the runtime, and Boehm's object, its
@@ -953,11 +1048,17 @@ compile config thePlan compiled =
         args =
             executableFlags config thePlan
                 ++ [ "-o", config.toString thePlan.exe ]
-                ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c", boehm "gc.o" ]
+                ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c", in_ (platformName config.platform ++ "/geng_sys.c"), boehm "gc.o" ]
                 ++ Array.map config.toString compiled.sources
                 ++ compiled.objects
                 ++ compiled.libraries
-                ++ [ "-lpthread", "-lm" ]
+                ++ config.tools.linkFlags
+                ++ (if config.platform == Runtime.Windows then
+                        [ "-static", "-lm" ]
+
+                    else
+                        [ "-lpthread", "-lm" ]
+                   )
     in
     keepCommand config thePlan args
         |> Task.andThen (\_ -> cc config args)
@@ -1016,7 +1117,9 @@ keepCommand config thePlan args =
 
 
 {-| D490's flags, the optimization, `-g` when asked for, and the `#line` names
-mapped to the files (D513), which a program and a library are compiled with. -}
+mapped to the files (D513), which a program and a library are compiled with.
+For Windows, `-fstack-clash-protection` is `__chkstk`'s, which every compiler
+for it emits, and `String.toFloat` is mingw's `strtod` (D1079). -}
 programFlags : Config -> Plan -> Array String
 programFlags config thePlan =
     let
@@ -1029,7 +1132,13 @@ programFlags config thePlan =
             Array.pushFirst { name = "program.c", path = in_ "program.c" } config.sources
                 |> Array.map (\m -> "-ffile-prefix-map=" ++ m.name ++ "=" ++ m.path)
     in
-    [ "-std=c11", config.optimization, "-ffp-contract=off", "-fno-fast-math", "-fstack-clash-protection" ]
+    [ "-std=c11", config.optimization, "-ffp-contract=off", "-fno-fast-math" ]
+        ++ (if config.platform == Runtime.Windows then
+                [ "-D__USE_MINGW_STRTOX=1" ]
+
+            else
+                [ "-fstack-clash-protection" ]
+           )
         ++ debugFlags config
         ++ maps
 
@@ -1075,7 +1184,7 @@ libraryFlags config thePlan name =
     in
     programFlags config thePlan
         ++ [ "-fPIC", "-shared", "-fvisibility=hidden", "-Wl,-z,nodelete", "-DGENG_LIBRARY=" ++ name ]
-        ++ [ "-I", config.toString thePlan.work, "-I", boehm "include/gc", "-I", boehm "include" ]
+        ++ [ "-I", config.toString thePlan.work, "-I", config.toString (platformDirectory config thePlan), "-I", boehm "include/gc", "-I", boehm "include" ]
         ++ config.tools.flags
 
 
@@ -1099,10 +1208,11 @@ compileLibrary config thePlan name compiled =
     cc config
         (libraryFlags config thePlan name
             ++ [ "-o", config.toString thePlan.exe ]
-            ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c", in_ "geng_embed.c", boehm "gc.o" ]
+            ++ [ in_ "program.c", in_ "geng.c", in_ "geng_rt.c", in_ (platformName config.platform ++ "/geng_sys.c"), in_ "geng_embed.c", boehm "gc.o" ]
             ++ Array.map config.toString compiled.sources
             ++ compiled.objects
             ++ compiled.libraries
+            ++ config.tools.linkFlags
             ++ [ "-lm" ]
         )
 

@@ -10,6 +10,7 @@ import Compiler.ModuleName as ModuleName exposing (ModuleName)
 import Compiler.Outline as Outline exposing (Outline)
 import Compiler.PackageName as PackageName exposing (PackageName)
 import Compiler.Paths
+import Compiler.Runtime as Runtime exposing (Runtime)
 import Dict exposing (Dict)
 import FileSystem
 import FileSystem.Path as Path exposing (Path)
@@ -125,6 +126,7 @@ type alias Context =
     , pathFromString : String -> Path
     , envVars : Dict String String
     , script : String
+    , host : Runtime
     }
 
 
@@ -162,6 +164,18 @@ start env =
             context =
                 { args = Array.dropFirst 2 env.args
                 , script = Array.get 1 env.args |> Maybe.withDefault ""
+                -- The platform a native build is for unless `--platform`
+                -- names one (geng-lang D1074).
+                , host =
+                    when env.platform is
+                        Node.Win32 ->
+                            Runtime.Windows
+
+                        Node.Darwin ->
+                            Runtime.Darwin
+
+                        _ ->
+                            Runtime.Linux
                 , stdout = env.stdout
                 , stderr = env.stderr
                 , stdin = env.stdin
@@ -446,6 +460,7 @@ parseUserArgs context compilerPath =
                                         , output = flags.output
                                         , optimization = "-O2"
                                         , debugInfo = flags.debugInfo
+                                        , platform = Maybe.withDefault context.host flags.platform
                                         }
                                         resolved
                                         (makeBackend resolved command)
@@ -621,6 +636,7 @@ parseUserArgs context compilerPath =
                                                             , output = Just compiling.output
                                                             , optimization = "-O0"
                                                             , debugInfo = opts.debugInfo
+                                                            , platform = context.host
                                                             }
                                                             compiling.resolution
                                                             ordinary
@@ -715,6 +731,7 @@ parseUserArgs context compilerPath =
                                                     , output = Just compiling.output
                                                     , optimization = "-O2"
                                                     , debugInfo = True
+                                                    , platform = context.host
                                                     }
                                                     compiling.resolution
                                                     ordinary
@@ -838,6 +855,7 @@ parseUserArgs context compilerPath =
                                                             , output = Just compiling.output
                                                             , optimization = "-O0"
                                                             , debugInfo = False
+                                                            , platform = context.host
                                                             }
                                                             compiling.resolution
                                                             ordinary
@@ -1282,7 +1300,7 @@ run` at `-O0` (§NA28), and either with `-g` when `--debug-info` asks (D512).
 nativeMake :
     Context
     -> Path
-    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String, debugInfo : Bool }
+    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String, debugInfo : Bool, platform : Runtime }
     -> Terminal.PackageInstall.PackageResolution
     -> Task Report Int
     -> Task Report Int
@@ -1300,12 +1318,12 @@ nativeMake context compilerPath flags resolved ordinary =
 nativeMakeBuild :
     Context
     -> Path
-    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String, debugInfo : Bool }
+    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String, debugInfo : Bool, platform : Runtime }
     -> Terminal.PackageInstall.PackageResolution
     -> Task Report Int
     -> Task Report Int
 nativeMakeBuild context compilerPath flags resolved ordinary =
-    when Terminal.Native.plan context.pathFromString flags.output is
+    when nativePlan context flags resolved is
         Err report ->
             Task.fail report
 
@@ -1360,6 +1378,7 @@ nativeMakeBuild context compilerPath flags resolved ordinary =
                                         , stderr = context.stderr
                                         , toString = context.pathToString
                                         , tools = Terminal.Native.toolchain context.envVars
+                                        , platform = flags.platform
                                         , optimization = flags.optimization
                                         , debugInfo = flags.debugInfo
                                         , packages = beamPackages context resolved
@@ -1373,6 +1392,33 @@ nativeMakeBuild context compilerPath flags resolved ordinary =
                                 Terminal.Native.abandon context.fsPermission thePlan
                                     |> Task.andThen (\_ -> Task.fail report)
                             )
+
+
+{-| The native build's plan, once its platform is one there is a runtime for
+and no package of the build is for another (geng-lang D1074). -}
+nativePlan :
+    Context
+    -> { a | output : Maybe Compiler.Backend.MakeOutput, platform : Runtime }
+    -> Terminal.PackageInstall.PackageResolution
+    -> Result Report (Maybe Terminal.Native.Plan)
+nativePlan context flags resolved =
+    if flags.platform /= Runtime.Linux && flags.platform /= Runtime.Windows then
+        Err <|
+            Report.create
+                "NO NATIVE RUNTIME FOR THIS PLATFORM"
+                Nothing
+                (PP.words ("A native program is built for linux or windows so far, and this build is for " ++ Runtime.toString flags.platform ++ ". Name one of them with --platform."))
+
+    else
+        when
+            Terminal.Native.otherPlatform flags.platform
+                (Dict.foldl (\name dependency acc -> Array.pushLast { name = name, runtime = dependency.outline.runtime } acc) [] resolved.dependencies)
+        is
+            Just report ->
+                Err report
+
+            Nothing ->
+                Terminal.Native.plan flags.platform context.pathFromString flags.output
 
 
 {-| Every package root this build is made of, for the `src/Ext/*.erl` each may

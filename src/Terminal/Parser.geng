@@ -14,6 +14,7 @@ import Cli.PrettyPrinter as PP
 import Compiler.Backend
 import Compiler.PackageName as PackageName exposing (PackageName)
 import Compiler.Platform as Platform exposing (Platform)
+import Compiler.Runtime as Runtime exposing (Runtime)
 import Compiler.ModuleName as ModuleName exposing (ModuleName)
 import Terminal.Paths as Paths
 import SemanticVersion exposing (SemanticVersion)
@@ -54,6 +55,7 @@ type alias MakeFlags =
     , erlc : Maybe String
     , escript : Maybe String
     , debugInfo : Bool
+    , platform : Maybe Runtime
     , entryPoints : Array ModuleName
     }
 
@@ -317,7 +319,7 @@ parser =
                     Cli.Parser.zeroOrMoreArgs moduleNameParser
                 , flags =
                     Cli.Parser.initFlags 
-                        (\optimize sourcemaps output report erlc escript debugInfo ->
+                        (\optimize sourcemaps output report erlc escript debugInfo platform ->
                             { optimize = optimize
                             , sourcemaps = sourcemaps
                             , output = output
@@ -325,6 +327,7 @@ parser =
                             , erlc = erlc
                             , escript = escript
                             , debugInfo = debugInfo
+                            , platform = platform
                             }
                         )
                         |> Cli.Parser.toggle "optimize" "Turn on optimizations to make code smaller and faster. For example, the compiler renames record fields to be as short as possible and unboxes values to reduce allocation."
@@ -334,6 +337,7 @@ parser =
                         |> Cli.Parser.flag "erlc" programParser "The Erlang compiler a beam build runs. Without this I look for GENG_ERLC, and then for erlc on your PATH."
                         |> Cli.Parser.flag "escript" programParser "The escript runner a beam build writes its program with. Without this I look for GENG_ESCRIPT, and then for escript on your PATH."
                         |> Cli.Parser.toggle "debug-info" "Put debug information in a native program, for gdb, perf and gcov: the C is compiled with -g, and the directory holding the C and the runtime's sources is kept beside the program. Only the native target reads this."
+                        |> Cli.Parser.flag "platform" platformParser "The operating system a native program is built for, linux or windows. Without this it is the one I am running on. A build for another is a cross build: GENG_CC names the C compiler for it. Only the native target reads this."
                 , commonDescription =
                     Nothing
                 , summary =
@@ -362,6 +366,7 @@ parser =
                             , erlc = flags.erlc
                             , escript = flags.escript
                             , debugInfo = flags.debugInfo
+                            , platform = flags.platform
                             , entryPoints = args
                             }
                 }
@@ -872,6 +877,25 @@ fileParser =
     , fn = \s -> if String.isEmpty s then Nothing else Just s
     , examples =
         [ "profile.html"
+        ]
+    }
+
+
+{-| A platform a native program is built for (geng-lang D1074): one under
+`os` with a runtime (`m4-windows.md` §WN14). -}
+platformParser : Cli.Parser.ValueParser Runtime
+platformParser =
+    { singular = "platform"
+    , plural = "platforms"
+    , fn =
+        \str ->
+            when str is
+                "linux" -> Just Runtime.Linux
+                "windows" -> Just Runtime.Windows
+                _ -> Nothing
+    , examples =
+        [ "linux"
+        , "windows"
         ]
     }
 
