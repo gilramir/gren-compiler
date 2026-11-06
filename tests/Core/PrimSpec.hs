@@ -134,7 +134,7 @@ spec = do
       [(primCode p, primName p, primArity p) | p <- [StrOp SFresh, ArrOp AFresh]]
         `shouldBe` [(211, "str_fresh", 1), (212, "arr_fresh", 1)]
 
-    it "appends D1080's emit and deliver after the copies" $
+    it "appends D1100's emit and deliver after the copies" $
       -- geng-lang source-emit.md §SE6: Geng code pushing into a source,
       -- after D1059's `arr_fresh`, and apart from `source_close`, which did
       -- not move.

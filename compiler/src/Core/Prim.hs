@@ -488,7 +488,7 @@ data TaskPrim
   | TaskContext
   | TaskWithContext
   | TaskMap
-  | -- | D1080 (geng-lang @source-emit.md@ §SE5), __appended__ after 'TaskMap':
+  | -- | D1100 (geng-lang @source-emit.md@ §SE5), __appended__ after 'TaskMap':
     -- Geng code pushing into a 'SourceNew' source. @source_emit@ drops an event
     -- a closed source will not take; @source_deliver@ answers whether it took
     -- it, and @Source.deliver@ fails with @Closed@ in Geng when it did not. Two
@@ -612,7 +612,7 @@ allPrims =
     ++ [StrOp SAppendU, ArrOp AAppendU, StrOp SAppendUU, ArrOp AAppendUU]
     -- Appended by D1059 (m4-memory-proofs.md §MP16).
     ++ [StrOp SFresh, ArrOp AFresh]
-    -- Appended by D1080 (source-emit.md §SE5).
+    -- Appended by D1100 (source-emit.md §SE5).
     ++ map TaskOp [SourceEmit, SourceDeliver]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.

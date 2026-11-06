@@ -80,7 +80,7 @@ data Mode = Dev | Prod
 data Shape
   = Bare
   | NodeScript ModuleName.Raw
-  | -- | A script a page loads, which starts its @main@ when it runs (D1072).
+  | -- | A script a page loads, which starts its @main@ when it runs (D1092).
     BrowserScript ModuleName.Raw
   | HtmlPage ModuleName.Raw
 

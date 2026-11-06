@@ -306,7 +306,7 @@ data MainOf
 -- | The classification, from the module's annotations and the platform.
 --
 -- The platform decides whether a @main@ can run at all: @node@ and @browser@
--- run a task (D1072, geng-lang @browser.md@ §BR7, amending D273). @main : String@, @main : Html msg@ and @Platform.Program@ left
+-- run a task (D1092, geng-lang @browser.md@ §BR7, amending D273). @main : String@, @main : Html msg@ and @Platform.Program@ left
 -- with @Platform@ (§SO19, D273), and are refused here as any other type is.
 mainOf :: P.Platform -> Map.Map Name Can.Annotation -> MainOf
 mainOf platform annotations =

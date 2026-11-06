@@ -16,7 +16,7 @@ import Text.RawString.QQ (r)
 leadingLines :: Int
 leadingLines = 2
 
--- | A @browser@ program's page (D1072, geng-lang @browser.md@ §BR7): the
+-- | A @browser@ program's page (D1092, geng-lang @browser.md@ §BR7): the
 -- bundle, and a call that starts its @main@. A crash in the task's first
 -- slice runs inside that call and is shown on the page as well as thrown; a
 -- later one reaches the browser's console as any uncaught error does.
@@ -57,7 +57,7 @@ catch (e)
 scriptLeadingLines :: Int
 scriptLeadingLines = 0
 
--- | A @browser@ program as a script for a page of its own (D1072): the bundle,
+-- | A @browser@ program as a script for a page of its own (D1092): the bundle,
 -- and a call that starts its @main@ when the script runs. It is a classic
 -- script, since the bundle finds its global through @this@, which a module
 -- does not have.

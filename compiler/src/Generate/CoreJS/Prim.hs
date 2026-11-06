@@ -1489,7 +1489,7 @@ isSource op =
 --
 -- @emit@ and @close@ are what an extern implementation is handed (@ffi.md@ F4);
 -- they are reached from the wrapper the extern generator writes. Geng reaches
--- the same @emit@ through @source_emit@ and @source_deliver@ (D1080), which run
+-- the same @emit@ through @source_emit@ and @source_deliver@ (D1100), which run
 -- it when the task runs: waking a parked reader then only queues it, since the
 -- scheduler is stepping ('_TaskPrim_enqueue').
 sourceHelpers :: B.Builder
@@ -1539,7 +1539,7 @@ function _SourcePrim_shut(source) {
   }
 }
 
-// D1080: `Source.emit` drops what a closed source will not take, and
+// D1100: `Source.emit` drops what a closed source will not take, and
 // `Source.deliver` answers whether it took it.
 function _SourcePrim_emitTask(source, value) {
   return _TaskPrim_binding(function (callback) {
