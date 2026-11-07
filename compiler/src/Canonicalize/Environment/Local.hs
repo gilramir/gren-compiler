@@ -99,7 +99,7 @@ refineAliases :: Src.Module -> Env.Env -> Result i w Env.Env
 refineAliases module_ env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs) =
   let refined (A.At _ (Src.Alias (A.At _ name) args tipe)) =
         do
-          (ctype, refinement) <- Type.canonicalizeAliasBody True env tipe
+          (ctype, refinement) <- Type.canonicalizeAliasBody True env name tipe
           Result.ok $
             case refinement of
               Just _ -> [(name, Env.Specific home (Env.Alias (length args) home (map A.toValue args) ctype refinement))]
@@ -292,7 +292,7 @@ addAlias env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs) scc =
     Graph.AcyclicSCC alias@(A.At _ (Src.Alias (A.At _ name) _ tipe)) ->
       do
         args <- checkAliasFreeVars alias
-        (ctype, refinement) <- Type.canonicalizeAliasBody False env tipe
+        (ctype, refinement) <- Type.canonicalizeAliasBody False env name tipe
         let one = Env.Specific home (Env.Alias (length args) home args ctype refinement)
         let ts1 = Map.insert name one ts
         Result.ok $ Env.Env home vs ts1 cs bs cls ms qvs qts qcs qcls qms sigs
@@ -326,6 +326,8 @@ getEdges edges (A.At _ tipe) =
     Src.TParens inner _ ->
       getEdges edges inner
     Src.TNamed _ _ inner _ ->
+      getEdges edges inner
+    Src.TWhere inner _ ->
       getEdges edges inner
 
 -- CHECK FREE VARIABLES
@@ -389,6 +391,8 @@ addFreeVars freeVars (A.At region tipe) =
       addFreeVars freeVars inner
     Src.TNamed _ _ inner _ ->
       addFreeVars freeVars inner
+    Src.TWhere inner _ ->
+      addFreeVars freeVars inner
 
 -- ADD CTORS
 
@@ -420,7 +424,7 @@ canonicalizeAlias :: Env.Env -> A.Located Src.Alias -> Result i w ((Name.Name, C
 canonicalizeAlias env (A.At _ (Src.Alias (A.At _ name) args tipe)) =
   do
     let vars = map A.toValue args
-    (ctipe, refinement) <- Type.canonicalizeAliasBody True env tipe
+    (ctipe, refinement) <- Type.canonicalizeAliasBody True env name tipe
     Result.ok
       ((name, Can.Alias vars ctipe refinement), Dups.none)
 

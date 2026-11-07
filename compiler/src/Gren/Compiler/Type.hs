@@ -110,6 +110,8 @@ fromRawType (A.At _ astType) =
       fromRawType inner
     Src.TNamed _ _ inner _ ->
       fromRawType inner
+    Src.TWhere inner _ ->
+      fromRawType inner
 
 -- JSON for PROGRAM
 

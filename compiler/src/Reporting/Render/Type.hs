@@ -131,6 +131,8 @@ srcToDoc context (A.At _ tipe) =
       srcToDoc context inner
     Src.TNamed _ _ inner _ ->
       srcToDoc context inner
+    Src.TWhere inner _ ->
+      srcToDoc context inner
 
 srcFieldToDocs :: Src.TRecordField -> (Doc, Doc)
 srcFieldToDocs (A.At _ fieldName, fieldType, _) =

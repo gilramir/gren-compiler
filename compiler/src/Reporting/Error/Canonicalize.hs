@@ -51,6 +51,9 @@ data Error
   | ConstraintDuplicate A.Region Name.Name Name.Name
   | RefinementMisplaced A.Region Bool RefinementPlace
   | RefinedAliasMisplaced A.Region Name.Name RefinementPlace
+  | FieldRefinementMisplaced A.Region RefinementPlace
+  | FieldRefinementExtensible A.Region
+  | FieldRefinementUnknown A.Region Name.Name [Name.Name]
   | MovedMisplaced A.Region MovedPlace
   | RefinementNameUnknown A.Region Name.Name [Name.Name]
   | RefinementNameOutOfScope A.Region Name.Name Bool
@@ -438,6 +441,40 @@ toReport source err =
               "`" ++ Name.toChars name ++ "` is a refined type alias, and " ++ placeText place ++ ":",
             D.reflow $
               "A refined alias goes where a signature names a value, an argument or the result of a value's signature, top-level or in a `let`, or a field of a record there, since its predicate is about that value (D869, Dnene14)."
+          )
+    FieldRefinementMisplaced region place ->
+      Report.Report "MISPLACED REFINEMENT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This record has a refinement on a field, and " ++ placeText place ++ ":",
+            D.reflow $
+              "A record with refined fields goes where a refined alias may go: a type alias's body, or an argument or the result of a value's signature, top-level or in a `let`, since its predicate is about that value (D869, Dnene15)."
+          )
+    FieldRefinementExtensible region ->
+      Report.Report "MISPLACED REFINEMENT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow "This extensible record has a refinement on a field:",
+            D.reflow
+              "A refined field goes in a closed record, `{ items : Array Int, index : Int where index < Array.length items }`; an extensible one waits until programs show it is wanted (Dnene15)."
+          )
+    FieldRefinementUnknown region name fields ->
+      Report.Report "UNKNOWN NAME IN REFINEMENT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This field's refinement reads `" ++ Name.toChars name ++ "`, which is not a field of its record:",
+            D.reflow $
+              "A field's predicate names the record's fields, "
+                ++ commaList (map (\f -> "`" ++ Name.toChars f ++ "`") fields)
+                ++ ", and measures of them; one that reads an argument goes on the whole record, `(r : { ... } where r.index < n)` (Dnene15)."
           )
     MovedMisplaced region place ->
       Report.Report "MISPLACED MOVED" region [] $
@@ -1956,7 +1993,7 @@ placeHint :: RefinementPlace -> String
 placeHint place =
   case place of
     InAlias -> "and a type alias is refined only as the whole of its body, `type alias Nat = (n : Int where 0 <= n)` (D867)."
-    InRecordField -> "and a refined record field waits until programs show it is wanted (D816)."
+    InRecordField -> "and a record's field is refined by a predicate after its type, `index : Int where 0 <= index` (Dnene15)."
     InAnnotation -> "and a refined expression annotation waits until programs show it is wanted (D816)."
     InTypeArgument -> "where it names a value the function takes or gives; an argument of a type is no such value."
     _ -> "and this is not one."

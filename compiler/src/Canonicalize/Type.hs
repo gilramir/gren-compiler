@@ -22,6 +22,7 @@ import Data.Map qualified as Map
 import Data.Maybe qualified as Maybe
 import Data.Char qualified as Char
 import Data.Name qualified as Name
+import AST.SourceComments qualified as SC
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Reporting.Annotation qualified as A
@@ -113,14 +114,22 @@ canonicalize place env (A.At typeRegion tipe) =
       Can.TLambda
         <$> canonicalize place env a
         <*> canonicalize place env b
-    Src.TRecord fields ext ->
-      do
-        cfields <- sequenceA =<< Dups.checkFields (canonicalizeFields env fields)
-        return $ Can.TRecord cfields (fmap (A.toValue . fst) ext)
+    Src.TRecord fields ext
+      | any hasWhere fields ->
+          Result.throw $
+            case ext of
+              Just _ -> Error.FieldRefinementExtensible typeRegion
+              Nothing -> Error.FieldRefinementMisplaced typeRegion place
+      | otherwise ->
+          do
+            cfields <- sequenceA =<< Dups.checkFields (canonicalizeFields env fields)
+            return $ Can.TRecord cfields (fmap (A.toValue . fst) ext)
     Src.TParens inner _ ->
       canonicalize place env inner
     Src.TNamed _ _ _ maybePredicate ->
       Result.throw (Error.RefinementMisplaced typeRegion (Maybe.isJust maybePredicate) place)
+    Src.TWhere _ _ ->
+      Result.throw (Error.RefinementMisplaced typeRegion True place)
 
 -- | A refined alias anywhere a signature does not name a value: in a type's
 -- argument, a record's field anywhere but at a signature's position
@@ -144,12 +153,27 @@ refuseRefined place region name (tipe, refinement) =
 -- @readPredicate@ false: it says which aliases are refined, with a predicate of
 -- no meaning, and 'Canonicalize.Environment.Local' reads each predicate once
 -- the scope is complete.
-canonicalizeAliasBody :: Bool -> Env.Env -> Src.Type -> Result i w (Can.Type, Maybe Can.AliasRefinement)
-canonicalizeAliasBody readPredicate env srcType@(A.At region tipe) =
+canonicalizeAliasBody :: Bool -> Env.Env -> Name.Name -> Src.Type -> Result i w (Can.Type, Maybe Can.AliasRefinement)
+canonicalizeAliasBody readPredicate env alias srcType@(A.At region tipe) =
   case tipe of
     Src.TParens inner _
       | isNamed inner ->
-          canonicalizeAliasBody readPredicate env inner
+          canonicalizeAliasBody readPredicate env alias inner
+    -- A record with predicates on its fields (Dnene15) is the whole-record
+    -- form: named as the alias names it, lowercased, or as the name written
+    -- around it, and its fields' predicates joined to the one written there.
+    Src.TNamed movedAt name inner maybePredicate
+      | Just (plain, fieldPredicate) <- fieldPredicates (A.toValue name) inner ->
+          do
+            checkFieldNames inner
+            canonicalizeAliasBody readPredicate env alias $
+              A.At region (Src.TNamed movedAt name plain (Just (maybe fieldPredicate (\written -> andAlso region written fieldPredicate) maybePredicate)))
+    _
+      | Just (plain, fieldPredicate) <- fieldPredicates (lowerFirst alias) srcType ->
+          do
+            checkFieldNames srcType
+            canonicalizeAliasBody readPredicate env alias $
+              A.At region (Src.TNamed Nothing (A.At region (lowerFirst alias)) plain (Just fieldPredicate))
     Src.TNamed movedAt name@(A.At nameRegion nameValue) inner maybePredicate ->
       do
         maybe (Result.ok ()) (\at -> Result.throw (Error.MovedMisplaced at Error.MovedInAlias)) movedAt
@@ -355,33 +379,58 @@ recordRefinement env (A.At region tipe) =
   case tipe of
     Src.TParens inner _ ->
       recordRefinement env inner
-    Src.TRecord fields ext ->
-      do
-        typedFields <- traverse fieldOf fields
-        case [(A.toValue name, r) | (name, _, Just r) <- typedFields] of
-          [] ->
-            Result.ok Nothing
-          firstRefined@(_, Can.AliasRefinement base _ _) : rest ->
-            do
-              let len = fromIntegral (length fields)
-                  typed = zipWith (\index (name, t, _) -> (name, Result.ok (Can.FieldType index t), ())) [0 .. len] typedFields
-              cfields <- sequenceA =<< Dups.checkFields typed
-              binop <- predicateOperator env region (Name.fromChars "&&")
-              let piece (field, Can.AliasRefinement from fieldPredicate fieldSource) =
-                    ( throughField from base field region fieldPredicate,
-                      renameSource from (Name.fromChars (Name.toChars base ++ "." ++ Name.toChars field)) fieldSource
-                    )
-                  grouped (p, text) = (p, if "||" `List.isInfixOf` text then "(" ++ text ++ ")" else text)
-                  joined (p1, s1) (p2, s2) =
-                    (Can.at region (Can.Binop (Env._op binop) (Env._op_target binop) (Env._op_annotation binop) p1 p2), s1 ++ " && " ++ s2)
-                  (predicate, source) =
-                    if null rest
-                      then piece firstRefined
-                      else foldl joined (grouped (piece firstRefined)) (map (grouped . piece) rest)
-              Result.ok (Just (Can.TRecord cfields (fmap (A.toValue . fst) ext), Can.AliasRefinement base predicate source))
+    Src.TRecord fields ext
+      | Maybe.isJust ext && any hasWhere fields ->
+          -- Refused by 'canonicalize', as 'positionType' reaches it.
+          Result.ok Nothing
+      | otherwise ->
+          do
+            checkFieldNames srcRecord
+            typedFields <- traverse fieldOf (map withoutWhere fields)
+            let refinedFields = [(A.toValue name, r) | (name, _, Just r) <- typedFields]
+                -- Named as its first refined field's alias names its value,
+                -- or @record@ when only its fields' own predicates refine it.
+                base =
+                  case refinedFields of
+                    (_, Can.AliasRefinement first _ _) : _ -> first
+                    [] -> Name.fromChars "record"
+            case (refinedFields, fieldPredicates base srcRecord) of
+              ([], Nothing) ->
+                Result.ok Nothing
+              (_, written) ->
+                do
+                  let len = fromIntegral (length fields)
+                      typed = zipWith (\index (name, t, _) -> (name, Result.ok (Can.FieldType index t), ())) [0 .. len] typedFields
+                  cfields <- sequenceA =<< Dups.checkFields typed
+                  let recordType = Can.TRecord cfields (fmap (A.toValue . fst) ext)
+                  binop <- predicateOperator env region (Name.fromChars "&&")
+                  own <-
+                    case written of
+                      Nothing ->
+                        Result.ok []
+                      Just (_, (predicate, text)) ->
+                        do
+                          let self = Named region [Can.Result] (A.At region base) recordType (Just predicate) text Nothing False Nothing
+                          cpredicate <- canonicalizePredicate env (Scope self [self] []) predicate
+                          Result.ok [(cpredicate, text)]
+                  let piece (field, Can.AliasRefinement from fieldPredicate fieldSource) =
+                        ( throughField from base field region fieldPredicate,
+                          renameSource from (Name.fromChars (Name.toChars base ++ "." ++ Name.toChars field)) fieldSource
+                        )
+                      grouped (p, text) = (p, if "||" `List.isInfixOf` text then "(" ++ text ++ ")" else text)
+                      joined (p1, s1) (p2, s2) =
+                        (Can.at region (Can.Binop (Env._op binop) (Env._op_target binop) (Env._op_annotation binop) p1 p2), s1 ++ " && " ++ s2)
+                  case map piece refinedFields ++ own of
+                    [] ->
+                      Result.ok Nothing
+                    [one] ->
+                      Result.ok (Just (recordType, uncurry (Can.AliasRefinement base) one))
+                    first : rest ->
+                      Result.ok (Just (recordType, uncurry (Can.AliasRefinement base) (foldl joined (grouped first) (map grouped rest))))
     _ ->
       Result.ok Nothing
   where
+    srcRecord = A.At region tipe
     fieldOf (name, srcType, _) =
       do
         aliased <- refinedPositionAt env srcType
@@ -403,6 +452,120 @@ throughField from record field region (Can.Expr nid _ expr) =
         Can.Binop op target annotation left right -> Can.Expr nid region (Can.Binop op target annotation (go left) (go right))
         Can.Access inner f -> Can.Expr nid region (Can.Access (go inner) f)
         other -> Can.Expr nid region other
+
+-- FIELD PREDICATES
+
+-- | A closed record type with a predicate written after a field's type
+-- (geng-lang @m4-refine-t1.md@ TO8, Dnene15): the record without them, and
+-- their conjunction as the predicate of the record named @base@, each field
+-- the record has, written bare, read as @base@'s field, so @index <
+-- Array.length items@ is @m.index < Array.length m.items@ for @m@. A field's
+-- name hides any other in a predicate, as a @let@'s would. Nothing when no
+-- field has one, or when the record is extensible, which 'canonicalize'
+-- refuses.
+fieldPredicates :: Name.Name -> Src.Type -> Maybe (Src.Type, (Src.Expr, String))
+fieldPredicates base (A.At region tipe) =
+  case tipe of
+    Src.TParens inner _ ->
+      fieldPredicates base inner
+    Src.TRecord fields Nothing ->
+      let names = [A.toValue name | (name, _, _) <- fields]
+          written = [predicate | (_, A.At _ (Src.TWhere _ predicate), _) <- fields]
+          piece (predicate, text) = (throughRecord base names predicate, prefixFields base names text)
+       in case map piece written of
+            [] -> Nothing
+            first : rest -> Just (A.At region (Src.TRecord (map withoutWhere fields) Nothing), foldl (andAlso region) first rest)
+    _ ->
+      Nothing
+
+-- | Each name a field's predicate reads bare is one of its record's fields;
+-- anything else, an argument's name or a value in scope, it may not read.
+checkFieldNames :: Src.Type -> Result i w ()
+checkFieldNames (A.At _ tipe) =
+  case tipe of
+    Src.TParens inner _ ->
+      checkFieldNames inner
+    Src.TRecord fields _ ->
+      let names = [A.toValue name | (name, _, _) <- fields]
+          written = [predicate | (_, A.At _ (Src.TWhere _ (predicate, _)), _) <- fields]
+       in case [at | at@(A.At _ name) <- concatMap bareNames written, name `notElem` names] of
+            [] -> Result.ok ()
+            A.At region name : _ -> Result.throw (Error.FieldRefinementUnknown region name names)
+    _ ->
+      Result.ok ()
+
+-- | The lowercase names a predicate reads, each where it is read.
+bareNames :: Src.Expr -> [A.Located Name.Name]
+bareNames (A.At region expr) =
+  case expr of
+    Src.Var Src.LowVar name -> [A.At region name]
+    Src.Negate inner -> bareNames inner
+    Src.Binops segments final -> concatMap (\(e, _, _) -> bareNames e) segments ++ bareNames final
+    Src.Call func args -> bareNames func ++ concatMap (bareNames . snd) args
+    Src.Access inner _ -> bareNames inner
+    Src.Parens _ inner _ -> bareNames inner
+    _ -> []
+
+hasWhere :: Src.TRecordField -> Bool
+hasWhere (_, A.At _ tipe, _) =
+  case tipe of
+    Src.TWhere _ _ -> True
+    _ -> False
+
+withoutWhere :: Src.TRecordField -> Src.TRecordField
+withoutWhere field@(name, A.At _ tipe, comments) =
+  case tipe of
+    Src.TWhere inner _ -> (name, inner, comments)
+    _ -> field
+
+-- | Two predicates joined by @&&@, each grouped when it holds an @||@, in the
+-- tree and in the text.
+andAlso :: A.Region -> (Src.Expr, String) -> (Src.Expr, String) -> (Src.Expr, String)
+andAlso region (left, leftText) (right, rightText) =
+  let grouped (e@(A.At at _), text) =
+        if "||" `List.isInfixOf` text then (A.At at (Src.Parens [] e []), "(" ++ text ++ ")") else (e, text)
+      (l, lt) = grouped (left, leftText)
+      (rr, rt) = grouped (right, rightText)
+      noComments = SC.BinopsSegmentComments [] []
+   in (A.At region (Src.Binops [(l, A.At region (Name.fromChars "&&"), noComments)] rr), lt ++ " && " ++ rt)
+
+-- | A field predicate's bare field names as the record's fields.
+throughRecord :: Name.Name -> [Name.Name] -> Src.Expr -> Src.Expr
+throughRecord base names (A.At region expr) =
+  let go = throughRecord base names
+   in A.At region $
+        case expr of
+          Src.Var Src.LowVar name
+            | name `elem` names ->
+                Src.Access (A.At region (Src.Var Src.LowVar base)) (A.At region name)
+          Src.Negate inner -> Src.Negate (go inner)
+          Src.Binops segments final -> Src.Binops [(go e, op, c) | (e, op, c) <- segments] (go final)
+          Src.Call func args -> Src.Call (go func) [(c, go a) | (c, a) <- args]
+          Src.Access inner field -> Src.Access (go inner) field
+          Src.Parens before inner after -> Src.Parens before (go inner) after
+          other -> other
+
+-- | The source of a field predicate with each bare field name read through
+-- the record, as 'throughRecord' reads the tree.
+prefixFields :: Name.Name -> [Name.Name] -> String -> String
+prefixFields base names =
+  go ' '
+  where
+    fields = map Name.toChars names
+    prefix = Name.toChars base ++ "."
+    isNameChar c = Char.isAlphaNum c || c == '_'
+    go _ [] = []
+    go before text@(c : rest)
+      | isNameChar c =
+          let (word, after) = span isNameChar text
+           in (if word `elem` fields && before /= '.' && not (isNameChar before) then prefix ++ word else word) ++ go (last word) after
+      | otherwise = c : go c rest
+
+lowerFirst :: Name.Name -> Name.Name
+lowerFirst name =
+  case Name.toChars name of
+    c : rest -> Name.fromChars (Char.toLower c : rest)
+    [] -> name
 
 positionType :: Env.Env -> [Can.RefinementStep] -> Src.Type -> Result i w (Can.Type, [Named])
 positionType env path srcType =

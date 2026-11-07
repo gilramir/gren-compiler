@@ -199,6 +199,12 @@ data Type_
     -- when it is (geng-lang @m4-own.md@ D920, §OW21): the function takes the
     -- argument's value.
     TNamed (Maybe A.Region) (A.Located Name) Type (Maybe (Expr, String))
+  | -- | A record field's type with a predicate written after it, @index : Int
+    -- where index < Array.length items@, the predicate and its source text as
+    -- 'TNamed' carries them. Only a record type's field is one, and
+    -- canonicalization reads the record's field predicates as the whole
+    -- record's (geng-lang @m4-refine-t1.md@ TO8, Dnene15).
+    TWhere Type (Expr, String)
   deriving (Show)
 
 type TRecordField = (A.Located Name, Type, SC.RecordFieldComments)

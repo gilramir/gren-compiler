@@ -89,8 +89,7 @@ term =
                       do
                         word1 0x3A {-:-} E.TRecordColon
                         commentsAfterColon <- Space.chompAndCheckIndent E.TRecordSpace E.TRecordIndentType
-                        ((tipe, commentsAfterTipe), end) <- specialize E.TRecordType expression
-                        Space.checkIndent end E.TRecordIndentEnd
+                        (tipe, commentsAfterTipe) <- fieldType
                         let fieldComments = SC.RecordFieldComments commentsAfterOpenBrace commentsAfterFirstName commentsAfterColon commentsAfterTipe
                         let field = (name, tipe, fieldComments)
                         fields <- chompRecordEnd [field]
@@ -484,10 +483,33 @@ chompField commentsBefore =
     commentsAfterName <- Space.chompAndCheckIndent E.TRecordSpace E.TRecordIndentColon
     word1 0x3A {-:-} E.TRecordColon
     commentsAfterColon <- Space.chompAndCheckIndent E.TRecordSpace E.TRecordIndentType
-    ((tipe, commentsAfterTipe), end) <- specialize E.TRecordType expression
-    Space.checkIndent end E.TRecordIndentEnd
+    (tipe, commentsAfterTipe) <- fieldType
     let comments = SC.RecordFieldComments commentsBefore commentsAfterName commentsAfterColon commentsAfterTipe
     return (name, tipe, comments)
+
+-- | A field's type, and the predicate after it when a @where@ follows,
+-- @index : Int where index < Array.length items@ (geng-lang
+-- @m4-refine-t1.md@ TO8, Dnene15). The predicate is read by 'chain', as a
+-- named type's is; the comments after the type, before the @where@, are not
+-- kept, as nothing reads a predicate's.
+fieldType :: Parser E.TRecord (Src.Type, [Src.Comment])
+fieldType =
+  do
+    start <- getPosition
+    ((tipe, commentsAfterTipe), end) <- specialize E.TRecordType expression
+    Space.checkIndent end E.TRecordIndentEnd
+    oneOfWithFallback
+      [ do
+          Keyword.where_ E.TRecordEnd
+          _ <- Space.chompAndCheckIndent E.TRecordSpace E.TRecordIndentType
+          (predicate, predicateEnd, text) <- specialize inPredicate (withText chain)
+          Space.checkIndent predicateEnd E.TRecordIndentEnd
+          return (A.at start predicateEnd (Src.TWhere tipe (predicate, text)), [])
+      ]
+      (tipe, commentsAfterTipe)
+  where
+    inPredicate problem row col =
+      E.TRecordType (E.TParenthesis problem row col) row col
 
 -- VARIANT
 
