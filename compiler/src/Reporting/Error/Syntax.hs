@@ -6634,9 +6634,10 @@ toTParenthesisReport source context parenthesizedType startRow startCol =
                   "I am partway through a refinement, the predicate after `where`, and I got stuck here:",
                 D.stack
                   [ D.reflow $
-                      "A refinement can hold integer literals, the names of arguments, a measure\
-                      \ applied to a name (like `Bytes.length b`), `True`, `False`, `not`, a unary `-`,\
-                      \ parentheses, and the operators + - * < <= > >= == /= && and ||.",
+                      "A refinement can hold integer literals, the names of arguments and their\
+                      \ fields (like `m.index`), a measure applied to either (like `Bytes.length b`),\
+                      \ `True`, `False`, `not`, a unary `-`, parentheses, and the operators\
+                      \ + - * < <= > >= == /= && and ||.",
                     D.indent 4 $ D.dullyellow "(i : Int where 0 <= i && i < Bytes.length b)"
                   ]
               )

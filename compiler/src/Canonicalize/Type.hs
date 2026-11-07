@@ -495,6 +495,7 @@ renamePredicate from to region (Can.Expr nid _ expr) =
           Can.Negate inner -> Can.Negate (go inner)
           Can.Call func args -> Can.Call (go func) (map go args)
           Can.Binop op target annotation left right -> Can.Binop op target annotation (go left) (go right)
+          Can.Access record field -> Can.Access (go record) field
           other -> other
 
 -- | The alias's source with its name replaced wherever it is a name of its
@@ -541,6 +542,7 @@ predicateLocals (Can.Expr _ _ expr) =
     Can.Negate inner -> predicateLocals inner
     Can.Binop _ _ _ left right -> predicateLocals left ++ predicateLocals right
     Can.Call func args -> concatMap predicateLocals (func : args)
+    Can.Access record _ -> predicateLocals record
     _ -> []
 
 -- SCOPE
@@ -611,12 +613,10 @@ canonicalizePredicate env scope (A.At region expression) =
       Can.at region . Can.Negate <$> canonicalizePredicate env scope inner
     Src.Parens _ inner _ ->
       canonicalizePredicate env scope inner
-    Src.Var Src.LowVar name ->
-      do
-        tipe <- findName region scope name
-        if isInt tipe
-          then Result.ok (Can.at region (Can.VarLocal name))
-          else Result.throw (Error.RefinementNameNotInt region name)
+    Src.Var Src.LowVar _ ->
+      intPath
+    Src.Access _ _ ->
+      intPath
     Src.Var Src.CapVar name ->
       do
         ctor <- Env.findCtor region env name
@@ -628,8 +628,9 @@ canonicalizePredicate env scope (A.At region expression) =
                  in Result.ok (Can.at region (Can.VarCtor opts home name index (Can.Forall freeVars tipe)))
           _ ->
             Result.throw (Error.RefinementNotCore region name)
-    Src.Call (A.At funcRegion (Src.VarQual Src.LowVar prefix name)) [(_, A.At argRegion (Src.Var Src.LowVar argName))]
-      | ModuleName.Canonical _ own <- Env._home env,
+    Src.Call (A.At funcRegion (Src.VarQual Src.LowVar prefix name)) [(_, arg)]
+      | isPath arg,
+        ModuleName.Canonical _ own <- Env._home env,
         prefix == own,
         Just (Env.TopLevel _) <- Map.lookup name (Env._vars env),
         (Env._home env, name) `elem` measures ->
@@ -643,13 +644,13 @@ canonicalizePredicate env scope (A.At region expression) =
           -- predicate is no dependency of its definition, so @unsafeGet@ can
           -- be solved before @length@ is.
           do
-            argType <- findName argRegion scope argName
+            (carg, argType) <- predicatePath scope arg
             case Type.iteratedDealias argType of
               Can.TType typeHome _ typeArgs
                 | typeHome == Env._home env ->
                     let vars = Map.fromList [(v, []) | Can.TVar v <- typeArgs]
                         annotation = Can.Forall vars (Can.TLambda argType (Can.TType ModuleName.basics Name.int []))
-                     in Result.ok (Can.at region (Can.Call (Can.at funcRegion (Can.VarForeign (Env._home env) name annotation)) [Can.at argRegion (Can.VarLocal argName)]))
+                     in Result.ok (Can.at region (Can.Call (Can.at funcRegion (Can.VarForeign (Env._home env) name annotation)) [carg]))
               _ ->
                 Result.throw (Error.RefinementNotMeasure funcRegion prefix name)
     Src.Call (A.At funcRegion (Src.Var Src.LowVar name)) [(_, arg)] ->
@@ -663,7 +664,8 @@ canonicalizePredicate env scope (A.At region expression) =
               Result.throw (Error.RefinementNotCore funcRegion name)
         carg <- canonicalizePredicate env scope arg
         Result.ok (Can.at region (Can.Call func [carg]))
-    Src.Call (A.At funcRegion (Src.VarQual Src.LowVar prefix name)) [(_, A.At argRegion (Src.Var Src.LowVar argName))] ->
+    Src.Call (A.At funcRegion (Src.VarQual Src.LowVar prefix name)) [(_, arg)]
+      | isPath arg ->
       do
         func <-
           case Map.lookup name =<< Map.lookup prefix (Env._q_vars env) of
@@ -672,8 +674,8 @@ canonicalizePredicate env scope (A.At region expression) =
                   Result.ok (Can.at funcRegion (Can.VarForeign home name annotation))
             _ ->
               Result.throw (Error.RefinementNotMeasure funcRegion prefix name)
-        _ <- findName argRegion scope argName
-        Result.ok (Can.at region (Can.Call func [Can.at argRegion (Can.VarLocal argName)]))
+        (carg, _) <- predicatePath scope arg
+        Result.ok (Can.at region (Can.Call func [carg]))
     Src.Binops ops final ->
       do
         tree <-
@@ -687,6 +689,51 @@ canonicalizePredicate env scope (A.At region expression) =
     _ ->
       -- The parser builds nothing else (D815).
       Result.throw (Error.RefinementNotCore region (Name.fromChars "?"))
+  where
+    intPath =
+      do
+        (cexpr, tipe) <- predicatePath scope (A.At region expression)
+        if isInt tipe
+          then Result.ok cexpr
+          else Result.throw (Error.RefinementNameNotInt region (Name.fromChars (pathText expression)))
+
+-- | A name, or a name's fields (geng-lang @m4-refine-t1.md@ TO5, Dnene13):
+-- the read and its type, each field looked up in its record's type.
+predicatePath :: Scope -> Src.Expr -> Result i w (Can.Expr, Can.Type)
+predicatePath scope (A.At region expression) =
+  case expression of
+    Src.Access record (A.At fieldRegion field) ->
+      do
+        (crecord, recordType) <- predicatePath scope record
+        case Type.iteratedDealias recordType of
+          Can.TRecord fieldTypes _ ->
+            case Map.lookup field fieldTypes of
+              Just (Can.FieldType _ tipe) ->
+                Result.ok (Can.at region (Can.Access crecord (A.At fieldRegion field)), tipe)
+              Nothing ->
+                Result.throw (Error.RefinementNoSuchField fieldRegion (Name.fromChars (pathText (A.toValue record))) field (Map.keys fieldTypes))
+          _ ->
+            Result.throw (Error.RefinementNoSuchField fieldRegion (Name.fromChars (pathText (A.toValue record))) field [])
+    Src.Var Src.LowVar name ->
+      do
+        tipe <- findName region scope name
+        Result.ok (Can.at region (Can.VarLocal name), tipe)
+    _ ->
+      Result.throw (Error.RefinementNotCore region (Name.fromChars "?"))
+
+isPath :: Src.Expr -> Bool
+isPath (A.At _ expression) =
+  case expression of
+    Src.Var Src.LowVar _ -> True
+    Src.Access record _ -> isPath record
+    _ -> False
+
+pathText :: Src.Expr_ -> String
+pathText expression =
+  case expression of
+    Src.Var _ name -> Name.toChars name
+    Src.Access (A.At _ record) (A.At _ field) -> pathText record ++ "." ++ Name.toChars field
+    _ -> "?"
 
 findName :: A.Region -> Scope -> Name.Name -> Result i w Can.Type
 findName region scope name =

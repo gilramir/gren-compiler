@@ -676,7 +676,8 @@ instance Binary AliasRefinement where
   put (AliasRefinement a b c) = put a >> putPredicate b >> put c
 
 -- | A predicate, which D808 keeps to literals, names, @core@'s measures, the
--- operators and @True@ and @False@: only those nodes are written, unnumbered,
+-- operators and @True@ and @False@, and Dnene13 widens by a name's fields
+-- (geng-lang @m4-refine-t1.md@ TO5): only those nodes are written, unnumbered,
 -- since the module that reads it numbers its own (D871).
 putPredicate :: Expr -> Put
 putPredicate (Expr _ region expr) =
@@ -690,6 +691,7 @@ putPredicate (Expr _ region expr) =
       VarCtor a b c d e -> putWord8 4 >> put a >> put b >> put c >> put d >> put e
       Call f args -> putWord8 5 >> putPredicate f >> putPredicates args
       Binop a b c l r -> putWord8 6 >> put a >> putOpTarget b >> put c >> putPredicate l >> putPredicate r
+      Access a f -> putWord8 7 >> putPredicate a >> put f
       _ -> error "a refined alias's predicate holds a node D808 does not allow"
   where
     putPredicates xs = put (length xs) >> mapM_ putPredicate xs
@@ -708,6 +710,7 @@ getPredicate =
         4 -> VarCtor <$> get <*> get <*> get <*> get <*> get
         5 -> Call <$> getPredicate <*> (get >>= \len -> replicateM len getPredicate)
         6 -> Binop <$> get <*> getOpTarget <*> get <*> getPredicate <*> getPredicate
+        7 -> Access <$> getPredicate <*> get
         _ -> fail "binary encoding of a refined alias's predicate was corrupted"
 
 putOpTarget :: OpTarget -> Put

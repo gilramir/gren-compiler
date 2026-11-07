@@ -59,6 +59,7 @@ data Error
   | RefinementNameUnused A.Region Name.Name
   | RefinementNameNotInt A.Region Name.Name
   | RefinementNotMeasure A.Region Name.Name Name.Name
+  | RefinementNoSuchField A.Region Name.Name Name.Name [Name.Name]
   | RefinementNotCore A.Region Name.Name
   | RefinementNonlinear A.Region
   | RefinementComparesConditions A.Region
@@ -520,7 +521,21 @@ toReport source err =
           ( D.reflow $
               "This refinement calls `" ++ Name.toChars prefix ++ "." ++ Name.toChars name ++ "`, which is not one of core's measures:",
             D.reflow $
-              "A refinement may apply only `Array.length`, `Bytes.length`, `Bytes.Owned.length`, `String.count`, `Dict.count` and `Set.count`, each to a name, so that the checker knows what each means."
+              "A refinement may apply only `Array.length`, `Bytes.length`, `Bytes.Owned.length`, `String.count`, `Dict.count` and `Set.count`, each to a name or a name's field, so that the checker knows what each means."
+          )
+    RefinementNoSuchField region record field fields ->
+      Report.Report "NO SUCH FIELD IN A REFINEMENT" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "This refinement reads the field `" ++ Name.toChars field ++ "` of `" ++ Name.toChars record ++ "`, "
+                ++ (if null fields then "which is not a record:" else "which has no such field:"),
+            D.reflow $
+              if null fields
+                then "A refinement reads a field of a record only, written `" ++ Name.toChars record ++ ".field`."
+                else "Its fields are " ++ List.intercalate ", " (map (\f -> "`" ++ Name.toChars f ++ "`") fields) ++ "."
           )
     RefinementNotCore region name ->
       Report.Report "NOT CORE'S IN A REFINEMENT" region [] $

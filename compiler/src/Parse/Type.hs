@@ -185,7 +185,9 @@ upTo here@(A.Position r c) end chars =
 -- expression parser, which imports this module (D815). It holds what D808
 -- allows: integer literals, names, a qualified function applied to one name
 -- (a measure, @Bytes.length b@), @True@, @False@, @not@, unary @-@, the
--- operators @+ - * < <= > >= == /= && ||@ and parentheses.
+-- operators @+ - * < <= > >= == /= && ||@ and parentheses; and since
+-- Dnene13 a name's fields, @m.index@, alone or as a measure's argument,
+-- @Array.length m.items@ (geng-lang @m4-refine-t1.md@ TO5).
 --
 -- The operators are read as a chain, @Src.Binops@, as the expression parser
 -- reads them, and canonicalization gives them their precedence, so a predicate
@@ -273,7 +275,7 @@ operand =
                     (arg, argEnd) <- operand
                     return (A.at start argEnd (Src.Call func [(comments, arg)]), argEnd)
               | otherwise ->
-                  return (func, end)
+                  predicateFields start func end
             Src.Var Src.CapVar name
               | name == Name.fromChars "True" || name == Name.fromChars "False" ->
                   return (func, end)
@@ -282,12 +284,26 @@ operand =
                 comments <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisPredicate
                 argStart <- getPosition
                 argName <- Var.lower E.TParenthesisPredicate
-                argEnd <- getPosition
-                let arg = A.at argStart argEnd (Src.Var Src.LowVar argName)
+                nameEnd <- getPosition
+                (arg, argEnd) <- predicateFields argStart (A.at argStart nameEnd (Src.Var Src.LowVar argName)) nameEnd
                 return (A.at start argEnd (Src.Call func [(comments, arg)]), argEnd)
             _ ->
               refuseAt start
       ]
+
+-- | A name's fields, each @.field@ glued to what it reads, as the expression
+-- parser's @accessible@ reads them (Dnene13).
+predicateFields :: A.Position -> Src.Expr -> A.Position -> Parser E.TParenthesis (Src.Expr, A.Position)
+predicateFields start expr end =
+  oneOfWithFallback
+    [ do
+        word1 0x2E {-.-} E.TParenthesisPredicate
+        pos <- getPosition
+        field <- Var.lower E.TParenthesisPredicate
+        fieldEnd <- getPosition
+        predicateFields start (A.at start fieldEnd (Src.Access expr (A.at pos fieldEnd field))) fieldEnd
+    ]
+    (expr, end)
 
 -- | A predicate holds something D808 does not allow: an operator outside its
 -- list, a float, a constructor other than @True@ and @False@.
