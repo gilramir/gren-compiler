@@ -437,7 +437,7 @@ toReport source err =
           ( D.reflow $
               "`" ++ Name.toChars name ++ "` is a refined type alias, and " ++ placeText place ++ ":",
             D.reflow $
-              "A refined alias goes where a signature names a value, an argument or the result of a value's signature, top-level or in a `let`, since its predicate is about that value (D869)."
+              "A refined alias goes where a signature names a value, an argument or the result of a value's signature, top-level or in a `let`, or a field of a record there, since its predicate is about that value (D869, Dnene14)."
           )
     MovedMisplaced region place ->
       Report.Report "MISPLACED MOVED" region [] $

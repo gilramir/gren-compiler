@@ -123,9 +123,10 @@ canonicalize place env (A.At typeRegion tipe) =
       Result.throw (Error.RefinementMisplaced typeRegion (Maybe.isJust maybePredicate) place)
 
 -- | A refined alias anywhere a signature does not name a value: in a type's
--- argument, a record's field, a variant, another alias's body, an annotation
--- or a method's signature (geng-lang @m4-refine.md@ §RF35, D869). There is no
--- value there for the predicate to be about, and erasing it would promise a
+-- argument, a record's field anywhere but at a signature's position
+-- ('recordRefinement'), a variant, another alias's body, an annotation or a
+-- method's signature (geng-lang @m4-refine.md@ §RF35, D869, Dnene14). There is
+-- no value there for the predicate to be about, and erasing it would promise a
 -- reader what nothing checks.
 refuseRefined :: Error.RefinementPlace -> A.Region -> Name.Name -> (Can.Type, Maybe Can.AliasRefinement) -> Result i w Can.Type
 refuseRefined place region name (tipe, refinement) =
@@ -309,7 +310,7 @@ position env path srcType@(A.At region tipe) =
   case tipe of
     Src.TNamed movedAt name inner maybePredicate ->
       do
-        aliased <- refinedAliasAt env inner
+        aliased <- refinedPositionAt env inner
         case aliased of
           Just (innerType, refinement) ->
             Result.ok (innerType, [Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) (Just refinement) False movedAt])
@@ -322,7 +323,7 @@ position env path srcType@(A.At region tipe) =
           position env path inner
     _ ->
       do
-        aliased <- refinedAliasAt env srcType
+        aliased <- refinedPositionAt env srcType
         case aliased of
           -- A refined alias with no name of its own here is the alias's name,
           -- made distinct from the signature's other names in 'refine'.
@@ -330,6 +331,78 @@ position env path srcType@(A.At region tipe) =
             Result.ok (innerType, [Named region path (A.At region (Can._ar_name refinement)) innerType Nothing "" (Just refinement) True Nothing])
           Nothing ->
             positionType env path srcType
+
+-- | A position refined by what it is written as: a refined alias (D872), or a
+-- record one of whose fields is one.
+refinedPositionAt :: Env.Env -> Src.Type -> Result i w (Maybe (Can.Type, Can.AliasRefinement))
+refinedPositionAt env srcType =
+  do
+    aliased <- refinedAliasAt env srcType
+    case aliased of
+      Just _ -> Result.ok aliased
+      Nothing -> recordRefinement env srcType
+
+-- | A record at a signature's position with a refined alias for a field
+-- (geng-lang @m4-refine-t1.md@ TO6, Dnene14): the record is the refined
+-- position, and its predicate is each such field's alias's, read through the
+-- field, so @{ term : Term, replies : Array Bytes }@ asks and knows
+-- @Array.length t.term.named == 16@ as @Term@ alone would of @t@. A record's
+-- field that is such a record is read the same way, to any depth. The record
+-- is named as its first refined field's alias names its value, as a bare
+-- alias is.
+recordRefinement :: Env.Env -> Src.Type -> Result i w (Maybe (Can.Type, Can.AliasRefinement))
+recordRefinement env (A.At region tipe) =
+  case tipe of
+    Src.TParens inner _ ->
+      recordRefinement env inner
+    Src.TRecord fields ext ->
+      do
+        typedFields <- traverse fieldOf fields
+        case [(A.toValue name, r) | (name, _, Just r) <- typedFields] of
+          [] ->
+            Result.ok Nothing
+          firstRefined@(_, Can.AliasRefinement base _ _) : rest ->
+            do
+              let len = fromIntegral (length fields)
+                  typed = zipWith (\index (name, t, _) -> (name, Result.ok (Can.FieldType index t), ())) [0 .. len] typedFields
+              cfields <- sequenceA =<< Dups.checkFields typed
+              binop <- predicateOperator env region (Name.fromChars "&&")
+              let piece (field, Can.AliasRefinement from fieldPredicate fieldSource) =
+                    ( throughField from base field region fieldPredicate,
+                      renameSource from (Name.fromChars (Name.toChars base ++ "." ++ Name.toChars field)) fieldSource
+                    )
+                  grouped (p, text) = (p, if "||" `List.isInfixOf` text then "(" ++ text ++ ")" else text)
+                  joined (p1, s1) (p2, s2) =
+                    (Can.at region (Can.Binop (Env._op binop) (Env._op_target binop) (Env._op_annotation binop) p1 p2), s1 ++ " && " ++ s2)
+                  (predicate, source) =
+                    if null rest
+                      then piece firstRefined
+                      else foldl joined (grouped (piece firstRefined)) (map (grouped . piece) rest)
+              Result.ok (Just (Can.TRecord cfields (fmap (A.toValue . fst) ext), Can.AliasRefinement base predicate source))
+    _ ->
+      Result.ok Nothing
+  where
+    fieldOf (name, srcType, _) =
+      do
+        aliased <- refinedPositionAt env srcType
+        case aliased of
+          Just (t, r) -> Result.ok (name, t, Just r)
+          Nothing -> (\t -> (name, t, Nothing)) <$> canonicalize Error.InRecordField env srcType
+
+-- | An alias's predicate read of a record's field: the alias's name as
+-- @record.field@, every node at the position.
+throughField :: Name.Name -> Name.Name -> Name.Name -> A.Region -> Can.Expr -> Can.Expr
+throughField from record field region (Can.Expr nid _ expr) =
+  let go = throughField from record field region
+   in case expr of
+        Can.VarLocal name
+          | name == from ->
+              Can.at region (Can.Access (Can.at region (Can.VarLocal record)) (A.At region field))
+        Can.Negate inner -> Can.Expr nid region (Can.Negate (go inner))
+        Can.Call func args -> Can.Expr nid region (Can.Call (go func) (map go args))
+        Can.Binop op target annotation left right -> Can.Expr nid region (Can.Binop op target annotation (go left) (go right))
+        Can.Access inner f -> Can.Expr nid region (Can.Access (go inner) f)
+        other -> Can.Expr nid region other
 
 positionType :: Env.Env -> [Can.RefinementStep] -> Src.Type -> Result i w (Can.Type, [Named])
 positionType env path srcType =
