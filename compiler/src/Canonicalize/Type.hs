@@ -883,7 +883,7 @@ canonicalizePredicate env scope (A.At region expression) =
             (carg, argType) <- predicatePath scope arg
             case Type.iteratedDealias argType of
               Can.TType typeHome _ typeArgs
-                | typeHome == Env._home env ->
+                | ownsType (Env._home env) typeHome ->
                     let vars = Map.fromList [(v, []) | Can.TVar v <- typeArgs]
                         annotation = Can.Forall vars (Can.TLambda argType (Can.TType ModuleName.basics Name.int []))
                      in Result.ok (Can.at region (Can.Call (Can.at funcRegion (Can.VarForeign (Env._home env) name annotation)) [carg]))
@@ -985,6 +985,16 @@ isInt tipe =
     Can.TType home name [] -> home == ModuleName.basics && name == Name.int
     _ -> False
 
+-- | Whether a measure's own module may apply it to a type: its own, or, for
+-- @Array.Builder@, the transient its @Builder@ is an alias of (geng-lang
+-- @m4-refine-t1.md@ TO10).
+ownsType :: ModuleName.Canonical -> ModuleName.Canonical -> Bool
+ownsType home typeHome =
+  typeHome == home
+    || ( home == ModuleName.Canonical Pkg.core (Name.fromChars "Array.Builder")
+           && typeHome == ModuleName.Canonical Pkg.core (Name.fromChars "Array.Transient")
+       )
+
 -- | @core@'s measures (D808): the size of each of its collections.
 measures :: [(ModuleName.Canonical, Name.Name)]
 measures =
@@ -997,6 +1007,9 @@ measures =
     (ModuleName.bytesOwned, Name.fromChars "length"),
     -- Not exposed by @core@, so only @core@'s primitives name it (D846).
     (ModuleName.Canonical Pkg.core (Name.fromChars "Array.Transient"), Name.fromChars "length"),
+    -- A builder is the transient, under the name a program may write
+    -- (geng-lang @m4-refine-t1.md@ TO10).
+    (ModuleName.Canonical Pkg.core (Name.fromChars "Array.Builder"), Name.fromChars "length"),
     -- The same for the bytes transient (D863, @m4-refine.md@ §RF32).
     (ModuleName.Canonical Pkg.core (Name.fromChars "Bytes.Transient"), Name.fromChars "length")
   ]
