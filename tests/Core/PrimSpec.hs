@@ -98,7 +98,7 @@ spec = do
       -- A run, a fill, a block move and a generated push, each one handle
       -- (geng-lang m4-visiterm.md §VA11), after `bt_length`, which did not
       -- move, and apart from the seven `tr_` codes, which did not either.
-      ( map (\p -> (primCode (TransientOp p), primName (TransientOp p), primArity (TransientOp p))) [TrFill .. maxBound],
+      ( map (\p -> (primCode (TransientOp p), primName (TransientOp p), primArity (TransientOp p))) [TrFill .. TrDrop],
         primCode (BytesOp BtLength),
         primCode (TransientOp TrToArray)
       )
@@ -143,6 +143,12 @@ spec = do
         primCode (TaskOp SourceClose)
       )
         `shouldBe` ([(213, "source_emit", 2), (214, "source_deliver", 2)], 212, 156)
+
+    it "appends Dnene5's tr_new_or_crash after emit and deliver" $
+      -- geng-lang m4-refine.md §RF41: after D1100's `source_deliver`, and
+      -- apart from the transient group, whose codes did not move.
+      (primCode (TransientOp TrNewOrCrash), primName (TransientOp TrNewOrCrash), primArity (TransientOp TrNewOrCrash), primCode (TaskOp SourceDeliver), primCode (TransientOp TrDrop))
+        `shouldBe` (215, "tr_new_or_crash", 1, 214, 198)
 
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved

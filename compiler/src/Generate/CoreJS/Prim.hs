@@ -695,6 +695,7 @@ transient p args =
     (TrAppendSlice, [_, _, _, _]) -> helper "_ArrayPrim_trAppendSlice" args
     -- D1026: the drop pass is native's alone; V8 collects the buffer.
     (TrDrop, [_, v]) -> v
+    (TrNewOrCrash, [_]) -> helper "_ArrayPrim_trNewOrCrash" args
     _ -> arityError (TransientOp p) args
   where
     helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
@@ -1707,6 +1708,14 @@ function _ArrayPrim_Transient(live, state, link) {
 
 function _ArrayPrim_trNew(capacity) {
   return new _ArrayPrim_Transient(0, 0, new Array(capacity));
+}
+
+// `tr_new_or_crash`: a count below 0 stands for one past 2^31 - 1, which ends
+// the program naming the limit, as `_BytesPrim_new` does for bytes
+// (geng-lang m4-refine.md §RF41, Dnene5).
+function _ArrayPrim_trNewOrCrash(capacity) {
+  if (capacity < 0) throw new Error("Array: the result is longer than 2^31 - 1 elements");
+  return _ArrayPrim_trNew(capacity);
 }
 
 function _ArrayPrim_trFromArray(array) {

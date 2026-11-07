@@ -306,6 +306,8 @@ transientType p =
     TrAppendSlice -> fn [tTransient, tTransient, tInt, tInt] tTransient
     -- D1026: made only by the drop pass; no @\@prim@ declares it.
     TrDrop -> fn [tTransient, b] b
+    -- Dnene5: TrNew, crashing on a count below 0.
+    TrNewOrCrash -> fn [tInt] tTransient
   where
     a = Can.TVar "a"
     b = Can.TVar "b"

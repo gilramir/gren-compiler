@@ -437,6 +437,12 @@ data TransientPrim
     -- does nothing. Its result is @v@'s, so that it is the value of the
     -- binding whose computation reads @t@ last.
     TrDrop
+  | -- | @tr_new_or_crash n@: 'TrNew' without its hint's leniency. A count
+    -- below 0 stands for one past 2^31 - 1 and ends the program with a
+    -- message naming the limit, on every backend, as 'BtNew' does for bytes
+    -- (geng-lang @m4-refine.md@ §RF41, Dnene5): @Array.range@ over a span no
+    -- array can hold. Appended after every other primitive.
+    TrNewOrCrash
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | The reified @Task@ tree the runtime steps. @map@, @sequence@ and friends
@@ -603,7 +609,7 @@ allPrims =
     -- Appended by D904 and D905 (m4-visiterm.md §VA11), and after them
     -- D983's tr_slice (§VA16), D991's tr_rotate (§VA20), D996's
     -- tr_append_slice (§VA24) and D1026's tr_drop (m4-free.md).
-    ++ map TransientOp [TrFill .. maxBound]
+    ++ map TransientOp [TrFill .. TrDrop]
     -- Appended by D1031 (m4-owned-pages.md §OP13).
     ++ map BytesOp [BoFromBuilder .. maxBound]
     -- Appended by D1052 (m4-memory-proofs.md §MP11).
@@ -614,6 +620,8 @@ allPrims =
     ++ [StrOp SFresh, ArrOp AFresh]
     -- Appended by D1100 (source-emit.md §SE5).
     ++ map TaskOp [SourceEmit, SourceDeliver]
+    -- Appended by Dnene5 (m4-refine.md §RF41).
+    ++ [TransientOp TrNewOrCrash]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -805,6 +813,7 @@ transientPrimName p =
     TrRotate -> "rotate"
     TrAppendSlice -> "append_slice"
     TrDrop -> "drop"
+    TrNewOrCrash -> "new_or_crash"
 
 taskPrimName :: TaskPrim -> Text
 taskPrimName p =
@@ -984,6 +993,8 @@ primArity op =
         TrAppendSlice -> 4
         -- transient, the value answered
         TrDrop -> 2
+        -- count
+        TrNewOrCrash -> 1
     TaskOp p ->
       case p of
         TaskSucceed -> 1
