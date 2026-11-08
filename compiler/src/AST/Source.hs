@@ -195,7 +195,7 @@ data Type_
     -- grammar (D815), with its source text, the bytes from its first token to
     -- its last exactly as written, which Core carries (D812). Comments inside
     -- are not kept as comments: nothing reads a type's comments from this AST.
-    -- The first field is where @moved@ is written, @(moved b : Builder a)@,
+    -- The first field is where @taken@ is written, @(taken b : Builder a)@,
     -- when it is (geng-lang @m4-own.md@ D920, §OW21): the function takes the
     -- argument's value.
     TNamed (Maybe A.Region) (A.Located Name) Type (Maybe (Expr, String))

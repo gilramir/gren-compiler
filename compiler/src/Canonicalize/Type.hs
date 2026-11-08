@@ -163,21 +163,21 @@ canonicalizeAliasBody readPredicate env alias srcType@(A.At region tipe) =
     -- A record with predicates on its fields (Dnene15) is the whole-record
     -- form: named as the alias names it, lowercased, or as the name written
     -- around it, and its fields' predicates joined to the one written there.
-    Src.TNamed movedAt name inner maybePredicate
+    Src.TNamed takenAt name inner maybePredicate
       | Just (plain, fieldPredicate) <- fieldPredicates (A.toValue name) inner ->
           do
             checkFieldNames inner
             canonicalizeAliasBody readPredicate env alias $
-              A.At region (Src.TNamed movedAt name plain (Just (maybe fieldPredicate (\written -> andAlso region written fieldPredicate) maybePredicate)))
+              A.At region (Src.TNamed takenAt name plain (Just (maybe fieldPredicate (\written -> andAlso region written fieldPredicate) maybePredicate)))
     _
       | Just (plain, fieldPredicate) <- fieldPredicates (lowerFirst alias) srcType ->
           do
             checkFieldNames srcType
             canonicalizeAliasBody readPredicate env alias $
               A.At region (Src.TNamed Nothing (A.At region (lowerFirst alias)) plain (Just fieldPredicate))
-    Src.TNamed movedAt name@(A.At nameRegion nameValue) inner maybePredicate ->
+    Src.TNamed takenAt name@(A.At nameRegion nameValue) inner maybePredicate ->
       do
-        maybe (Result.ok ()) (\at -> Result.throw (Error.MovedMisplaced at Error.MovedInAlias)) movedAt
+        maybe (Result.ok ()) (\at -> Result.throw (Error.TakenMisplaced at Error.TakenInAlias)) takenAt
         innerType <- canonicalize Error.InAlias env inner
         case maybePredicate of
           Nothing ->
@@ -302,9 +302,9 @@ data Named = Named
     _alias :: Maybe Can.AliasRefinement,
     -- | Written as the alias alone, with no name of its own.
     _bare :: Bool,
-    -- | Where @moved@ is written before the name, when it is (geng-lang
+    -- | Where @taken@ is written before the name, when it is (geng-lang
     -- @m4-own.md@ D920).
-    _moved :: Maybe A.Region
+    _taken :: Maybe A.Region
   }
 
 -- | The arrows of a signature, or of a callback inside one: each argument a
@@ -333,16 +333,16 @@ spine env prefix =
 position :: Env.Env -> [Can.RefinementStep] -> Src.Type -> Result i w (Can.Type, [Named])
 position env path srcType@(A.At region tipe) =
   case tipe of
-    Src.TNamed movedAt name inner maybePredicate ->
+    Src.TNamed takenAt name inner maybePredicate ->
       do
         aliased <- refinedPositionAt env inner
         case aliased of
           Just (innerType, refinement) ->
-            Result.ok (innerType, [Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) (Just refinement) False movedAt])
+            Result.ok (innerType, [Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) (Just refinement) False takenAt])
           Nothing ->
             do
               (innerType, innerNamed) <- positionType env path inner
-              Result.ok (innerType, Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) Nothing False movedAt : innerNamed)
+              Result.ok (innerType, Named region path name innerType (fst <$> maybePredicate) (maybe "" snd maybePredicate) Nothing False takenAt : innerNamed)
     Src.TParens inner _
       | isNamed inner ->
           position env path inner
@@ -600,7 +600,7 @@ refine env given =
   do
     let named = distinctAliasNames (Env._signatures env) given
     checkDuplicates named
-    traverse_ checkMoved named
+    traverse_ checkTaken named
     traverse_ (checkShadows (Env._signatures env)) named
     refinements <- traverse (refineOne env named) named
     let readNames = concatMap (maybe [] predicateLocals . Can._ref_predicate) refinements
@@ -621,24 +621,24 @@ checkDuplicates named =
         )
         (Map.toList byName)
 
--- | @moved@ says the function takes an argument's value (geng-lang
+-- | @taken@ says the function takes an argument's value (geng-lang
 -- @m4-own.md@ D920), so it is written on an argument of the signature's own
 -- arrows and nowhere else (D943): the result is the function's to give, and
 -- what a callback does with its arguments is inferred and never written
 -- (D936).
-checkMoved :: Named -> Result i w ()
-checkMoved n =
-  case _moved n of
+checkTaken :: Named -> Result i w ()
+checkTaken n =
+  case _taken n of
     Nothing -> Result.ok ()
     Just at ->
       case _path n of
         [Can.Arg _] -> Result.ok ()
-        [Can.Result] -> Result.throw (Error.MovedMisplaced at Error.MovedOnResult)
-        _ -> Result.throw (Error.MovedMisplaced at Error.MovedInCallback)
+        [Can.Result] -> Result.throw (Error.TakenMisplaced at Error.TakenOnResult)
+        _ -> Result.throw (Error.TakenMisplaced at Error.TakenInCallback)
 
 -- | A name that nothing reads and that is not refined is refused, as D819
 -- refused it: it would look as if it meant something (D821). One a @let@
--- could still read is handed back. A moved name means something unread
+-- could still read is handed back. A taken name means something unread
 -- (D942).
 checkRead :: [Name.Name] -> Named -> Result i w [A.Located Name.Name]
 checkRead readNames n =
@@ -646,7 +646,7 @@ checkRead readNames n =
     Just _ -> Result.ok []
     Nothing
       | Maybe.isJust (_alias n) -> Result.ok []
-      | Maybe.isJust (_moved n) -> Result.ok []
+      | Maybe.isJust (_taken n) -> Result.ok []
     Nothing ->
       let A.At region name = _name n
        in if name `elem` readNames
@@ -690,7 +690,7 @@ refineOne env named n =
           Can._ref_type = _type n,
           Can._ref_predicate = predicate,
           Can._ref_source = source,
-          Can._ref_moved = Maybe.isJust (_moved n),
+          Can._ref_taken = Maybe.isJust (_taken n),
           Can._ref_enclosing = filter ((`elem` readNames) . A.toValue . Can._enc_name) enclosing
         }
 

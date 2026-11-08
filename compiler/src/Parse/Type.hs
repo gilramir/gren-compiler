@@ -53,12 +53,13 @@ term =
             commentsAfterOpeningParen <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisIndentOpen
             named <-
               oneOfWithFallback
-                [ lookAhead movedHead >> return (Just True),
+                [ lookAhead takenHead >> return (Just True),
+                  lookAhead movedHead >> refuseMoved,
                   lookAhead namedHead >> return (Just False)
                 ]
                 Nothing
             case named of
-              Just moved -> namedType moved start
+              Just taken -> namedType taken start
               Nothing -> do
                 ((tipe, commentsBeforeClosingParen), end) <- specialize E.TParenthesisType expression
                 Space.checkIndent end E.TParenthesisIndentEnd
@@ -110,30 +111,48 @@ namedHead =
     _ <- Space.chomp E.TParenthesisSpace
     word1 0x3A {-:-} E.TParenthesisEnd
 
--- | Whether a parenthesis opens a moved name, @(moved b : Builder a)@
--- (geng-lang @m4-own.md@ D920): @moved@, a name and a colon. @(moved : Int)@
+-- | Whether a parenthesis opens a taken name, @(taken b : Builder a)@
+-- (geng-lang @m4-own.md@ D920): @taken@, a name and a colon. @(taken : Int)@
 -- is not one, and 'namedHead' reads it as a name.
-movedHead :: Parser E.TParenthesis ()
-movedHead =
+takenHead :: Parser E.TParenthesis ()
+takenHead =
   do
-    Keyword.moved_ E.TParenthesisEnd
+    Keyword.taken_ E.TParenthesisEnd
     _ <- Space.chomp E.TParenthesisSpace
     namedHead
 
--- | @(name : Type)@ or @(name : Type where predicate)@ (geng-lang
--- @m4-refine.md@ D814), after its @(@, with @moved@ before the name when
--- 'movedHead' saw it (@m4-own.md@ D920).
-namedType :: Bool -> A.Position -> Parser E.TParenthesis Src.Type
-namedType moved start =
+-- | Whether a parenthesis opens a name marked with @moved@, the mark's word
+-- until geng-lang Dnene18 renamed it @taken@: @(moved b : Builder a)@. Only
+-- looked at, so that 'refuseMoved' can say what to write; @(moved : Int)@ is
+-- still a name.
+movedHead :: Parser E.TParenthesis ()
+movedHead =
   do
-    movedAt <-
-      if moved
+    Keyword.retiredMoved_ E.TParenthesisEnd
+    _ <- Space.chomp E.TParenthesisSpace
+    namedHead
+
+-- | The error for a name marked @moved@, at the word, which says to write
+-- @taken@.
+refuseMoved :: Parser E.TParenthesis a
+refuseMoved =
+  P.Parser $ \(P.State _ _ _ _ row col) _ _ cerr _ ->
+    cerr row col E.TParenthesisMoved
+
+-- | @(name : Type)@ or @(name : Type where predicate)@ (geng-lang
+-- @m4-refine.md@ D814), after its @(@, with @taken@ before the name when
+-- 'takenHead' saw it (@m4-own.md@ D920).
+namedType :: Bool -> A.Position -> Parser E.TParenthesis Src.Type
+namedType taken start =
+  do
+    takenAt <-
+      if taken
         then do
-          movedStart <- getPosition
-          Keyword.moved_ E.TParenthesisEnd
-          movedEnd <- getPosition
+          takenStart <- getPosition
+          Keyword.taken_ E.TParenthesisEnd
+          takenEnd <- getPosition
           _ <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisIndentEnd
-          return (Just (A.Region movedStart movedEnd))
+          return (Just (A.Region takenStart takenEnd))
         else return Nothing
     name <- addLocation (Var.lower E.TParenthesisEnd)
     _ <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisIndentEnd
@@ -152,7 +171,7 @@ namedType moved start =
         ]
         Nothing
     word1 0x29 {-)-} E.TParenthesisEnd
-    addEnd start (Src.TNamed movedAt name tipe maybePredicate)
+    addEnd start (Src.TNamed takenAt name tipe maybePredicate)
 
 -- PREDICATES
 

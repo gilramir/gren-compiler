@@ -1154,7 +1154,7 @@ signatures env defs =
 -- | The binder of every definition among these and the @let@s inside them
 -- that is written with a type signature, sorted by where it starts
 -- (geng-lang @m4-own.md@ D920, §OW28), whether or not the signature names
--- anything: the ownership checker holds those to their @moved@ marks.
+-- anything: the ownership checker holds those to their @taken@ marks.
 typed :: Env -> [Can.Def] -> [Core.Binder]
 typed env defs =
   List.sortOn
@@ -1171,7 +1171,7 @@ named env r =
           Core._namedBinder = Core.Binder name (lowerType (Can._ref_type r)) (span env region),
           Core._namedPredicate = expr env <$> Can._ref_predicate r,
           Core._namedSource = Utf8.fromChars (Can._ref_source r),
-          Core._namedMoved = Can._ref_moved r
+          Core._namedTaken = Can._ref_taken r
         }
   where
     step s =

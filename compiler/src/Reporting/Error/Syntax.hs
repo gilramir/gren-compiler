@@ -484,6 +484,8 @@ data TParenthesis
     TParenthesisIndentOpen Row Col
   | TParenthesisIndentEnd Row Col
   | TParenthesisPredicate Row Col
+  | -- | @(moved b : T)@: the mark is @taken@ since geng-lang Dnene18.
+    TParenthesisMoved Row Col
   deriving (Show)
 
 -- LITERALS
@@ -6620,6 +6622,22 @@ toTParenthesisReport source context parenthesizedType startRow startCol =
                     D.toSimpleNote $
                       "I can get confused by indentation in cases like this, so\
                       \ maybe you have a closing parenthesis but it is not indented enough?"
+                  ]
+              )
+    TParenthesisMoved row col ->
+      let region = toWiderRegion row col 5
+       in Report.Report "MOVED IS NOW TAKEN" region [] $
+            Code.toSnippet
+              source
+              region
+              Nothing
+              ( D.reflow $
+                  "A signature marks an argument the function takes with `taken`, not `moved`:",
+                D.stack
+                  [ D.indent 4 $ D.green "(taken b : Builder a)",
+                    D.reflow $
+                      "The word says what the function does to the value: its caller cannot\
+                      \ use it after the call."
                   ]
               )
     TParenthesisPredicate row col ->

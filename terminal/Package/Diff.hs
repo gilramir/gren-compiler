@@ -242,9 +242,9 @@ signatureDoc localizer named =
   where
     place path context tipe =
       case List.find (\n -> Docs._namedPath n == path) named of
-        Just (Docs.Named _ name source moved) ->
+        Just (Docs.Named _ name source taken) ->
           "("
-            <> (if moved then "moved " else D.empty)
+            <> (if taken then "taken " else D.empty)
             <> D.fromName name
             <+> ":"
             <+> inner path Type.None tipe

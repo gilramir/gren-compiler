@@ -449,7 +449,7 @@ data Module = Module
     -- signature, top-level and @let@ alike, exactly as its 'Bind' has it,
     -- sorted by where it starts (geng-lang @m4-own.md@ D920, §OW28): the
     -- ownership checker holds such a definition's affine parameters to the
-    -- signature's @moved@ marks, and infers the rest. No pass reads them.
+    -- signature's @taken@ marks, and infers the rest. No pass reads them.
     _moduleTyped :: ![Binder]
   }
   deriving (Eq, Show)
@@ -478,7 +478,7 @@ data Signature = Signature
 -- name's span. The predicate is a 'Bool' expression whose 'EVar's are the
 -- names of this signature or, in a @let@, of a signature around it (D823),
 -- lowered as a body's expression is; the source is the predicate as written
--- (D812), empty when there is no predicate. A moved name is an argument whose
+-- (D812), empty when there is no predicate. A taken name is an argument whose
 -- value the function takes (geng-lang @m4-own.md@ D920); it may have no
 -- predicate, and nothing but the ownership checker reads it.
 data Named = Named
@@ -486,7 +486,7 @@ data Named = Named
     _namedBinder :: !Binder,
     _namedPredicate :: !(Maybe Expr),
     _namedSource :: !Text,
-    _namedMoved :: !Bool
+    _namedTaken :: !Bool
   }
   deriving (Eq, Show)
 

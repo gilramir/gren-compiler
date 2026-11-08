@@ -206,13 +206,13 @@ withFacts package lns docs =
 -- | A name a signature gives an argument or its result, where in the type it is
 -- (as 'Can.Refinement' says it), and the predicate as written (D812), empty
 -- when the name has none. The documentation prints the signature with them, so
--- that a precondition is read where the call is written. A moved name is an
+-- that a precondition is read where the call is written. A taken name is an
 -- argument whose value the function takes (geng-lang @m4-own.md@ D920).
 data Named = Named
   { _namedPath :: [Can.RefinementStep],
     _namedName :: Name.Name,
     _namedSource :: String,
-    _namedMoved :: Bool
+    _namedTaken :: Bool
   }
 
 data Binop = Binop Comment Type.Type Binop.Associativity Binop.Precedence
@@ -385,13 +385,13 @@ factDecoder =
 -- | A name, its path written as steps, @"arg 1"@ for the second argument and
 -- @"result"@ for the last arrow's target, outermost first.
 encodeNamed :: Named -> E.Value
-encodeNamed (Named path name source moved) =
+encodeNamed (Named path name source taken) =
   E.object $
     [ "path" ==> E.list (E.chars . stepText) path,
       "name" ==> E.name name,
       "predicate" ==> E.chars source
     ]
-      ++ ["moved" ==> E.bool True | moved]
+      ++ ["taken" ==> E.bool True | taken]
   where
     stepText step =
       case step of
@@ -404,7 +404,7 @@ namedDecoder =
     <$> D.field "path" (D.list stepDecoder)
     <*> D.field "name" nameDecoder
     <*> D.field "predicate" (Json.toChars <$> D.string)
-    <*> D.oneOf [D.field "moved" D.bool, pure False]
+    <*> D.oneOf [D.field "taken" D.bool, pure False]
 
 stepDecoder :: D.Decoder Error Can.RefinementStep
 stepDecoder =
@@ -684,7 +684,7 @@ getType name info =
       Result.ok (Extract.fromType tipe, map toNamed refinements)
   where
     toNamed ref =
-      Named (Can._ref_path ref) (A.toValue (Can._ref_name ref)) (Can._ref_source ref) (Can._ref_moved ref)
+      Named (Can._ref_path ref) (A.toValue (Can._ref_name ref)) (Can._ref_source ref) (Can._ref_taken ref)
 
 dector :: Can.Ctor -> (Name.Name, [Type.Type])
 dector (Can.Ctor name _ _ args) =

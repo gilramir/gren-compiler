@@ -85,10 +85,10 @@ signatureDecl opts (Signature b nameds) =
     <> "\n"
     <> mconcat (map namedDecl nameds)
   where
-    namedDecl (Named path nb predicate source moved) =
+    namedDecl (Named path nb predicate source taken) =
       "  "
         <> mconcat [step st <> " " | st <- path]
-        <> (if moved then "moved " else "")
+        <> (if taken then "taken " else "")
         <> name (_binderName nb)
         <> " : "
         <> typeToBuilder opts (_binderType nb)

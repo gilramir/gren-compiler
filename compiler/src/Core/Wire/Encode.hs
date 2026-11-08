@@ -745,12 +745,12 @@ signatureEnc (Signature b nameds) =
     <> rep 2 namedEnc nameds
 
 namedEnc :: Named -> Enc
-namedEnc (Named path b predicate source moved) =
+namedEnc (Named path b predicate source taken) =
   repU32 1 (map stepCode path)
     <> msg 2 (binderEnc b)
     <> optMsg 3 exprEnc predicate
     <> text 4 source
-    <> bool_ 5 moved
+    <> bool_ 5 taken
 
 -- | A path's step: the result is 0 and argument @i@ is @i + 1@.
 stepCode :: Step -> Word32

@@ -1048,9 +1048,9 @@ namedP =
       predicate <- optMsg "predicate" 3 exprP
       sourceAt <- offset
       source <- text "source" 4
-      moved <- bool_ "moved" 5
+      taken <- bool_ "taken" 5
       if Utf8.isEmpty source == Maybe.isNothing predicate
-        then pure (Named path b predicate source moved)
+        then pure (Named path b predicate source taken)
         else failAt sourceAt "a name has source text without a predicate, or a predicate without its source text"
   where
     stepOf code =

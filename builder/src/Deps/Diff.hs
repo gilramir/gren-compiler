@@ -119,9 +119,9 @@ sameNamed (Docs.Value _ _ n1 _) (Docs.Value _ _ n2 _) =
   map key (filter refines n1) == map key (filter refines n2)
   where
     key (Docs.Named path name source _) = (path, name, source)
-    -- A name there only to say @moved@ refines nothing; what a change to
-    -- @moved@ is, is geng-lang @m4-own.md@ §OW16.6's sixth piece.
-    refines n = not (Docs._namedMoved n && null (Docs._namedSource n))
+    -- A name there only to say @taken@ refines nothing; what a change to
+    -- @taken@ is, is geng-lang @m4-own.md@ §OW16.6's sixth piece.
+    refines n = not (Docs._namedTaken n && null (Docs._namedSource n))
 
 data Changes k v = Changes
   { _added :: Map.Map k v,

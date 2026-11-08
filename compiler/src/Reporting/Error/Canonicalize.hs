@@ -6,7 +6,7 @@ module Reporting.Error.Canonicalize
     DuplicatePatternContext (..),
     PossibleNames (..),
     RefinementPlace (..),
-    MovedPlace (..),
+    TakenPlace (..),
     VarKind (..),
     toReport,
   )
@@ -54,7 +54,7 @@ data Error
   | FieldRefinementMisplaced A.Region RefinementPlace
   | FieldRefinementExtensible A.Region
   | FieldRefinementUnknown A.Region Name.Name [Name.Name]
-  | MovedMisplaced A.Region MovedPlace
+  | TakenMisplaced A.Region TakenPlace
   | RefinementNameUnknown A.Region Name.Name [Name.Name]
   | RefinementNameOutOfScope A.Region Name.Name Bool
   | RefinementNameDuplicate Name.Name A.Region A.Region
@@ -144,12 +144,12 @@ data RefinementPlace
   | InTypeArgument
   | InRecordField
 
--- | Where @moved@ was written that is not an argument of a signature's own
+-- | Where @taken@ was written that is not an argument of a signature's own
 -- arrows (geng-lang @m4-own.md@ D943).
-data MovedPlace
-  = MovedOnResult
-  | MovedInCallback
-  | MovedInAlias
+data TakenPlace
+  = TakenOnResult
+  | TakenInCallback
+  | TakenInAlias
 
 data BadArityContext
   = TypeArity
@@ -476,23 +476,23 @@ toReport source err =
                 ++ commaList (map (\f -> "`" ++ Name.toChars f ++ "`") fields)
                 ++ ", and measures of them; one that reads an argument goes on the whole record, `(r : { ... } where r.index < n)` (Dnene15)."
           )
-    MovedMisplaced region place ->
-      Report.Report "MISPLACED MOVED" region [] $
+    TakenMisplaced region place ->
+      Report.Report "MISPLACED TAKEN" region [] $
         Code.toSnippet
           source
           region
           Nothing
           ( D.reflow $
               case place of
-                MovedOnResult -> "This signature says its result is `moved`:"
-                MovedInCallback -> "This signature says a callback's argument is `moved`:"
-                MovedInAlias -> "This type alias says its value is `moved`:",
+                TakenOnResult -> "This signature says its result is `taken`:"
+                TakenInCallback -> "This signature says a callback's argument is `taken`:"
+                TakenInAlias -> "This type alias says its value is `taken`:",
             D.reflow $
-              "`moved` says that a function takes the value of one of its arguments, so that its caller cannot use it after the call. It goes on an argument of a value's signature, top-level or in a `let`, and nowhere else. "
+              "`taken` says that a function takes the value of one of its arguments, so that its caller cannot use it after the call. It goes on an argument of a value's signature, top-level or in a `let`, and nowhere else. "
                 ++ case place of
-                  MovedOnResult -> "A function's result is its own to give."
-                  MovedInCallback -> "What a callback does with its arguments is worked out from the function that calls it, and never written."
-                  MovedInAlias -> "Write it on the argument that has this type."
+                  TakenOnResult -> "A function's result is its own to give."
+                  TakenInCallback -> "What a callback does with its arguments is worked out from the function that calls it, and never written."
+                  TakenInAlias -> "Write it on the argument that has this type."
           )
     RefinementNameUnknown region name seen ->
       Report.Report "UNKNOWN NAME IN REFINEMENT" region [] $

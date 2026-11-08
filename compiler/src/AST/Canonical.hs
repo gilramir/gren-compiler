@@ -257,9 +257,9 @@ data Refinement = Refinement
     _ref_predicate :: Maybe Expr,
     -- | The predicate as written (D812), empty when there is none.
     _ref_source :: String,
-    -- | Whether @moved@ is written before the name (geng-lang @m4-own.md@
+    -- | Whether @taken@ is written before the name (geng-lang @m4-own.md@
     -- D920): the function takes the argument's value.
-    _ref_moved :: Bool,
+    _ref_taken :: Bool,
     _ref_enclosing :: [Enclosing]
   }
   deriving (Show)

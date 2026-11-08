@@ -93,7 +93,7 @@
 -- One drop rests on the checker's word instead of this walk ('setDrops',
 -- geng-lang @m4-owned-pages.md@ D1041): a call of @Array.Builder.set@ whose
 -- builder's elements hold owned bytes is followed by a drop of the element
--- it writes over, since @set@'s builder is @moved@ and what @get@ answers is
+-- it writes over, since @set@'s builder is @taken@ and what @get@ answers is
 -- only lent.
 --
 -- It changes no mark. A drop it cannot prove is not made, and the collector
@@ -192,11 +192,11 @@ data Prog = Prog
     -- | Which question the walk answers: the marks, the drops or the appends.
     _mode :: Mode,
     -- | For the drops: each function's parameters its written signature
-    -- marks @moved@ (D920), by name. The ownership checker holds every build
+    -- marks @taken@ (D920), by name. The ownership checker holds every build
     -- to the marks (D963), so the function is handed a value its caller
     -- neither uses again nor keeps a borrow of, and the walk takes it as
     -- the function's own.
-    _moved :: Map Core.QualName [Name]
+    _taken :: Map Core.QualName [Name]
   }
 
 -- | 'run' marks updates in place; 'runDrops' drops builders (D1026);
@@ -366,7 +366,7 @@ program roots modules =
             _bufHolders = fixedBuf Set.empty,
             _bufInfo = IntMap.fromList [(Core.typeId t, canHoldBufferNode prog t) | t <- types],
             _mode = Marks,
-            _moved = Map.empty
+            _taken = Map.empty
           }
    in prog
 
@@ -1367,10 +1367,10 @@ definition prog facts allExclusive q value =
   where
     (params, body) = Maybe.fromMaybe ([], value) (lambdaOf value)
     n = length params
-    movedNames = Map.findWithDefault [] q (_moved prog)
+    takenNames = Map.findWithDefault [] q (_taken prog)
     paramExcl
       | allExclusive = replicate n whole
-      | otherwise = zipWith (\e moved -> if moved then whole else e) (Map.findWithDefault (replicate n none) q (_excl facts)) [Core._binderName b `elem` movedNames | b <- params]
+      | otherwise = zipWith (\e taken -> if taken then whole else e) (Map.findWithDefault (replicate n none) q (_excl facts)) [Core._binderName b `elem` takenNames | b <- params]
     go taint joinExcl rounds =
       let env =
             Env
@@ -2599,7 +2599,7 @@ tInt = Core.TCon (Core.QualName ModuleName.basics (Name.fromChars "Int")) []
 -- >                    else let e = get b' a; r = set i' v' b' in r, then what dropping e frees
 --
 -- It rests on the checker's word, not on this pass's walk: @set@'s builder
--- is @moved@, so nothing else holds it; what @Array.Builder.get@ answers is
+-- is @taken@, so nothing else holds it; what @Array.Builder.get@ answers is
 -- lent, and a borrow is not stored, so nothing else holds the element in the
 -- slot either, and @set@'s value is not it. @update@ and @swap@, whose
 -- element lives on, write with the primitive, not with @set@, and
@@ -2726,7 +2726,7 @@ dropReporting = Maybe.isJust dropReportPath
 -- is, unwalked.
 runDrops :: [Core.QualName] -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
 runDrops roots cores =
-  let prog = (program roots (Map.elems cores)) {_mode = Drops, _moved = movedParams (Map.elems cores)}
+  let prog = (program roots (Map.elems cores)) {_mode = Drops, _taken = takenParams (Map.elems cores)}
       defs = [(Core.QualName (Core._moduleName m) (Core._binderName b), v) | m <- Map.elems cores, Core.Bind b v <- Core._moduleDefs m]
       start =
         Facts
@@ -2781,7 +2781,7 @@ appendReporting = maybe False (/= "") appendReportPath
 -- left as it is, unwalked.
 runAppends :: [Core.QualName] -> Map ModuleName.Canonical Core.Module -> Map ModuleName.Canonical Core.Module
 runAppends roots cores =
-  -- Not the drops' @moved@ parameters (D963): the checker holds an affine
+  -- Not the drops' @taken@ parameters (D963): the checker holds an affine
   -- value to one owner, but a plain field read out of it before it was moved,
   -- an @Array@ or a @String@, may still be read after (D933), and it shares
   -- the field's buffer. Whether every caller hands a value nothing else holds
@@ -3078,10 +3078,10 @@ freshAt path e =
       _ -> Nothing
 
 -- | Each top-level function's parameters its written signature marks
--- @moved@, by name: a signature is matched to the definition whose binder has
+-- @taken@, by name: a signature is matched to the definition whose binder has
 -- its name and span, as the signature's binder is the definition's.
-movedParams :: [Core.Module] -> Map Core.QualName [Name]
-movedParams modules =
+takenParams :: [Core.Module] -> Map Core.QualName [Name]
+takenParams modules =
   Map.fromList
     [ (Core.QualName (Core._moduleName m) (Core._binderName b), names)
     | m <- modules,
@@ -3090,7 +3090,7 @@ movedParams modules =
       let sb = Core._sigBinder sig,
       Core._binderName sb == Core._binderName b,
       Core._binderSpan sb == Core._binderSpan b,
-      let names = [Core._binderName (Core._namedBinder nd) | nd <- Core._sigNamed sig, Core._namedMoved nd, isArg (Core._namedPath nd)],
+      let names = [Core._binderName (Core._namedBinder nd) | nd <- Core._sigNamed sig, Core._namedTaken nd, isArg (Core._namedPath nd)],
       not (null names)
     ]
   where
