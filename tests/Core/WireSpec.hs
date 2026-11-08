@@ -125,13 +125,21 @@ spec = do
         refused ((moduleWith [bindOf (lit (LInt 1))]) {_moduleMeasures = [qual "b", qual "b"]})
 
     it "carries the record aliases a module declares (D630)" $
-      roundTrip ((moduleWith []) {_moduleAliases = [Alias (qual "Pair") ["a"] (TRecord [("x", TVar "a"), ("y", intType)] Nothing), Alias (qual "Point") [] (TRecord [("x", intType)] Nothing)]})
+      roundTrip ((moduleWith []) {_moduleAliases = [Alias (qual "Pair") ["a"] (TRecord [("x", TVar "a"), ("y", intType)] Nothing) Nothing, Alias (qual "Point") [] (TRecord [("x", intType)] Nothing) Nothing]})
+
+    it "carries a record alias's invariant (geng-lang m4-refine-t1.md TO17)" $
+      roundTrip ((moduleWith []) {_moduleAliases = [Alias (qual "Point") [] (TRecord [("x", intType)] Nothing) (Just pointInvariant)]})
+
+    it "refuses an invariant not of the record, or on an alias with parameters" $
+      do
+        refused ((moduleWith []) {_moduleAliases = [Alias (qual "Point") [] (TRecord [("x", intType)] Nothing) (Just pointInvariant {_namedPath = [StepResult]})]})
+        refused ((moduleWith []) {_moduleAliases = [Alias (qual "Pair") ["a"] (TRecord [("x", TVar "a")] Nothing) (Just pointInvariant)]})
 
     it "refuses aliases out of order" $
-      refused ((moduleWith []) {_moduleAliases = [Alias (qual "Point") [] (TRecord [("x", intType)] Nothing), Alias (qual "Pair") [] (TRecord [("x", intType)] Nothing)]})
+      refused ((moduleWith []) {_moduleAliases = [Alias (qual "Point") [] (TRecord [("x", intType)] Nothing) Nothing, Alias (qual "Pair") [] (TRecord [("x", intType)] Nothing) Nothing]})
 
     it "refuses another module's alias" $
-      refused ((moduleWith []) {_moduleAliases = [Alias (QualName otherHome "Point") [] (TRecord [("x", intType)] Nothing)]})
+      refused ((moduleWith []) {_moduleAliases = [Alias (QualName otherHome "Point") [] (TRecord [("x", intType)] Nothing) Nothing]})
 
     it "carries a signature's names, its paths, predicates and source text (D824)" $
       roundTrip ((moduleWith [bindOf (lit (LInt 1))]) {_moduleSignatures = [signatureAt 1, signatureAt 5]})
@@ -551,3 +559,8 @@ instanceDecl =
       _instOrigin = Written,
       _instMethods = [("add", var)]
     }
+
+-- | A record alias's invariant, @point.x >= 0@ (geng-lang m4-refine-t1.md TO17).
+pointInvariant :: Named
+pointInvariant =
+  Named [StepArg 0] (Binder "point" (TRecord [("x", intType)] Nothing) (at 3 6 3 11)) (Just (Expr (EVar "point") (TRecord [("x", intType)] Nothing) (at 3 20 3 25))) (utf8 "point.x >= 0") False

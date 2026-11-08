@@ -170,9 +170,18 @@ number modul =
           ds <- decls (Can._decls modul)
           is <- traverse instanceMethods (Can._instances modul)
           cs <- traverse ctorRefinement (Can._ctorRefinements modul)
-          pure (ds, is, cs)
-      ((ds', is', cs'), _) = runState numbered 0
-   in modul {Can._decls = ds', Can._instances = is', Can._ctorRefinements = cs'}
+          as <- traverse aliasInvariant (Can._aliases modul)
+          pure (ds, is, cs, as)
+      ((ds', is', cs', as'), _) = runState numbered 0
+   in modul {Can._decls = ds', Can._instances = is', Can._ctorRefinements = cs', Can._aliases = as'}
+
+-- | A record alias's invariant (geng-lang @m4-refine-t1.md@ TO17), numbered
+-- as a constructor's contract is.
+aliasInvariant :: Can.Alias -> Numbering Can.Alias
+aliasInvariant alias@(Can.Alias vars body _) =
+  case Can.aliasInvariant alias of
+    Just r -> Can.Alias vars body . Just <$> ctorRefinement r
+    Nothing -> pure alias
 
 -- | A constructor's contract (geng-lang @m4-refine-t1.md@ TO13), whose
 -- predicate is typed and elaborated as a signature's is.

@@ -196,7 +196,7 @@ lowerAlias :: ModuleName.Canonical -> Name -> Can.Alias -> Maybe Core.Alias
 lowerAlias home name (Can.Alias vars body _) =
   case lowerType body of
     tipe@(Core.TRecord (_ : _) Nothing) ->
-      Just (Core.Alias (Core.QualName home name) vars tipe)
+      Just (Core.Alias (Core.QualName home name) vars tipe Nothing)
     _ ->
       Nothing
 

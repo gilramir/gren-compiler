@@ -109,7 +109,10 @@ lower platform annotations types coreTypes elaboration modul =
           Core._moduleInline = map (Core.QualName home) (Set.toAscList (Can._inlines modul)),
           Core._moduleMeasures = map (Core.QualName home) (Set.toAscList (Can._measures modul)),
           Core._moduleAliases =
-            [a | (name, alias) <- Map.toAscList (Can._aliases modul), Just a <- [lowerAlias home name alias]],
+            [ a {Core._aliasInvariant = Expr.ctorNamed env body <$> Can.aliasInvariant alias}
+            | (name, alias@(Can.Alias _ body _)) <- Map.toAscList (Can._aliases modul),
+              Just a <- [lowerAlias home name alias]
+            ],
           Core._moduleSignatures = Expr.signatures env valueDefs,
           Core._moduleTyped = Expr.typed env valueDefs
         }

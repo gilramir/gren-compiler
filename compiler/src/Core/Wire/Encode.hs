@@ -767,10 +767,11 @@ repU32 _ [] = mempty
 repU32 tag ns = key tag WBytes <> packedRun (mconcat (map (varint . fromIntegral) ns))
 
 aliasEnc :: Alias -> Enc
-aliasEnc (Alias name params tipe) =
+aliasEnc (Alias name params tipe invariant) =
   qual 1 name
     <> repText 2 params
     <> typ 3 tipe
+    <> optMsg 4 namedEnc invariant
 
 recGroupEnc :: [QualName] -> Enc
 recGroupEnc names = repQual 1 names

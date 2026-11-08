@@ -12,6 +12,8 @@ module Generate
 where
 
 import Build qualified
+import Control.Exception qualified as Exception
+import Control.Monad (forM, forM_, unless)
 import Core.AST qualified as Core
 import Core.Dump qualified as Dump
 import Core.Pass qualified as Pass
@@ -25,6 +27,8 @@ import Core.Whole qualified as Whole
 import Core.Wire qualified as Wire
 import Data.ByteString qualified as BS
 import Data.ByteString.Builder qualified as B
+import Data.ByteString.Char8 qualified as BSC
+import Data.ByteString.UTF8 qualified as BS_UTF8
 import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Maybe qualified as Maybe
@@ -32,12 +36,14 @@ import Data.Name qualified as N
 import Data.NonEmptyList qualified as NE
 import Data.Set qualified as Set
 import Data.Utf8 qualified as Utf8
+import Directories qualified as Dirs
 import Generate.CoreJS qualified as CoreJS
 import Generate.Html qualified as Html
 import Generate.Mode qualified as Mode
 import Generate.Node qualified as Node
 import Generate.SourceMap qualified as SourceMap
 import Gren.Details qualified as Details
+import Gren.Fingerprint qualified as FP
 import Gren.Kernel qualified as K
 import Gren.ModuleName qualified as ModuleName
 import Gren.Outline qualified as Outline
@@ -46,12 +52,6 @@ import Gren.Platform qualified as Platform
 import Nitpick.Debug qualified as Nitpick
 import Reporting.Exit qualified as Exit
 import Reporting.Task qualified as Task
-import Control.Exception qualified as Exception
-import Control.Monad (forM, forM_, unless)
-import Data.ByteString.Char8 qualified as BSC
-import Data.ByteString.UTF8 qualified as BS_UTF8
-import Directories qualified as Dirs
-import Gren.Fingerprint qualified as FP
 import System.Directory qualified as Dir
 import System.Environment qualified as Env
 import System.FilePath ((<.>), (</>))
@@ -401,12 +401,46 @@ owing cores =
     -- Each constructor with a contract (geng-lang @m4-refine-t1.md@ TO13),
     -- which asks its argument of whoever applies it.
     contracted = Set.fromList (concatMap ctorContracts modules)
+    -- Each record alias's invariant (geng-lang @m4-refine-t1.md@ TO17),
+    -- asked of every record of its shape built or updated, and of an update
+    -- of an open record writing one of its fields: such a module is walked.
+    invariantShapes = [Core._aliasType a | m <- modules, a <- Core._moduleAliases m, Maybe.isJust (Core._aliasInvariant a)]
+    invariantFields = Set.fromList [f | t <- invariantShapes, Core.TRecord fields _ <- [t], (f, _) <- fields]
+    writesInvariant (t, written) =
+      case t of
+        Core.TRecord _ Nothing -> t `elem` invariantShapes
+        _ -> any (`Set.member` invariantFields) written
+    -- A top-level value of another package whose type names an invariant's
+    -- shape: what it gives or takes crosses into a module that may see the
+    -- invariant, and is asked there (geng-lang m4-refine-t1.md TO18.3).
+    shapedValues =
+      Set.fromList
+        [ Core.QualName (Core._moduleName m) (Core._binderName (Core._bindBinder b))
+        | not (null invariantShapes),
+          m <- modules,
+          b <- Core._moduleDefs m,
+          any (`elem` invariantShapes) (recordsIn (Core._binderType (Core._bindBinder b)))
+        ]
+    crossesFrom m q =
+      Set.member q shapedValues && ModuleName._package (Core._qnHome q) /= ModuleName._package (Core._moduleName m)
     owes m =
       ModuleName._package (Core._moduleName m) /= Pkg.core
         && ( any refines (Core._moduleSignatures m)
                || any (not . Set.disjoint refined . Refs._refGlobals . Refs.refsIn . Core._bindValue) (Core._moduleDefs m)
                || any (not . Set.disjoint contracted . Refs._refCtors . Refs.refsIn . Core._bindValue) (Core._moduleDefs m)
+               || (not (null invariantShapes) && any (any writesInvariant . Refs.recordWrites . Core._bindValue) (Core._moduleDefs m))
+               || (not (Set.null shapedValues) && any (any (crossesFrom m) . Set.toList . Refs._refGlobals . Refs.refsIn . Core._bindValue) (Core._moduleDefs m))
            )
+
+-- | Every closed record type in a type, itself among them.
+recordsIn :: Core.Type -> [Core.Type]
+recordsIn t =
+  case t of
+    Core.TVar _ -> []
+    Core.TCon _ args -> concatMap recordsIn args
+    Core.TFun args result -> concatMap recordsIn (result : args)
+    Core.TRecord fields row -> [t | Maybe.isNothing row] ++ concatMap (recordsIn . snd) fields
+    Core.TForall _ _ body -> recordsIn body
 
 -- | The constructors of a module that carry a contract (geng-lang
 -- @m4-refine-t1.md@ TO13).
@@ -443,11 +477,17 @@ checkerReads cores =
         Just n <- [Core._ctorRefinement c],
         Just p <- [Core._namedPredicate n]
       ]
+    -- Each record alias's invariant (geng-lang @m4-refine-t1.md@ TO17), which
+    -- the checker asks and knows wherever a record of its shape is: what its
+    -- predicate reads is kept, and so is the module declaring it.
+    invariantPredicates = [p | m <- Map.elems cores, a <- Core._moduleAliases m, Just n <- [Core._aliasInvariant a], Just p <- [Core._namedPredicate n]]
+    declaresInvariant m = any (Maybe.isJust . Core._aliasInvariant) (Core._moduleAliases m)
     start =
       Set.unions
         ( [refsOf (Core._bindValue b) | m <- Map.elems walked, b <- Core._moduleDefs m]
             ++ [predicateRefs sig | m <- Map.elems walked, sig <- Core._moduleSignatures m]
             ++ map refsOf usedContracts
+            ++ map refsOf invariantPredicates
         )
     topSignatures =
       Map.fromList
@@ -484,7 +524,7 @@ checkerReads cores =
           named q = Set.member q needed
           kept = [b | b <- Core._moduleDefs m, named (Core.QualName home (Core._binderName (Core._bindBinder b)))]
           binders = map Core._bindBinder kept
-       in if null kept && not (any (`Set.member` ctorsUsed) (ctorContracts m))
+       in if null kept && not (any (`Set.member` ctorsUsed) (ctorContracts m)) && not (declaresInvariant m)
             then Nothing
             else
               Just
@@ -955,7 +995,8 @@ coreRoots target runtime (Build.Artifacts pkg _ roots _) cores =
 -- @supervisor@ says, and which nothing in the build imports.
 callbackModule :: Core.Module -> Bool
 callbackModule modul =
-  any callback
+  any
+    callback
     [ (Core._binderName binder, Core._binderType binder)
     | binder <- map Core._bindBinder (Core._moduleDefs modul),
       Core.QualName (Core._moduleName modul) (Core._binderName binder) `elem` Core._moduleExports modul

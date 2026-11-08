@@ -9,6 +9,7 @@ module AST.Canonical
     ExternBody (..),
     NodeId (..),
     unnumbered,
+    aliasInvariant,
     at,
     exprId,
     exprRegion,
@@ -87,9 +88,9 @@ import Data.Binary
 import Data.Index qualified as Index
 import Data.List qualified as List
 import Data.Map qualified as Map
-import Data.Set qualified as Set
 import Data.Name (Name)
 import Data.Name qualified as Name
+import Data.Set qualified as Set
 import Gren.Float qualified as EF
 import Gren.ModuleName qualified as ModuleName
 import Gren.String qualified as ES
@@ -435,6 +436,17 @@ data ExternBody = ExternBody [ExternImpl] Bool
 -- §RF35, D867).
 data Alias = Alias [Name] Type (Maybe AliasRefinement)
   deriving (Eq, Show)
+
+-- | A refined alias with no parameters whose body is a closed record: a type
+-- invariant (geng-lang @m4-refine-t1.md@ TO17, Dnene22), its predicate
+-- numbered, typed and lowered as a constructor's contract is. An alias of
+-- another alias is not one of its own: its shape is the other's, declared
+-- where that one is.
+aliasInvariant :: Alias -> Maybe AliasRefinement
+aliasInvariant (Alias vars body refinement) =
+  case (vars, refinement, body) of
+    ([], Just r, TRecord _ Nothing) -> Just r
+    _ -> Nothing
 
 -- | A refined alias's name and predicate. The predicate is canonical, over the
 -- one name, and goes in the interface (D871): a module that uses another's

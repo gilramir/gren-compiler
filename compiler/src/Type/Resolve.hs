@@ -791,6 +791,7 @@ onePass env modul inferred =
           -- a signature's predicate is walked: its operators get their
           -- instances, and its name is no local.
           mapM_ (expr env tops scope . Can._ar_predicate) (Map.elems (Can._ctorRefinements modul))
+          mapM_ (expr env tops scope . Can._ar_predicate) [r | a <- Map.elems (Can._aliases modul), Just r <- [Can.aliasInvariant a]]
    in execState walk (Progress Map.empty Map.empty [] 0 inferred False Map.empty)
 
 -- | Witness parameter names for a binding whose body names nothing else local.

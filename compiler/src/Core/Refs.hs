@@ -16,6 +16,7 @@ module Core.Refs
     refsIn,
     strictIn,
     primsIn,
+    recordWrites,
     freeLocals,
     patternBinders,
   )
@@ -77,6 +78,36 @@ refsIn (Core.Expr value _ _) =
     Core.ETyApp body _ -> refsIn body
     Core.EWitLam _ body -> refsIn body
     Core.EWitApp body args -> foldMap refsIn (body : args)
+
+-- | Each record an expression builds or updates, at any depth: its type and
+-- the fields written (geng-lang @m4-refine-t1.md@ TO17), which says whether a
+-- module must be walked for a record alias's invariant.
+recordWrites :: Core.Expr -> [(Core.Type, [Name])]
+recordWrites (Core.Expr value tipe _) =
+  case value of
+    Core.EVar _ -> []
+    Core.EGlobal _ -> []
+    Core.ELit _ -> []
+    Core.ECrash (Core.Todo _ message) -> recordWrites message
+    Core.ECrash _ -> []
+    Core.ELam _ body -> recordWrites body
+    Core.EApp fn args -> concatMap recordWrites (fn : args)
+    Core.ELet binds body -> concatMap (recordWrites . Core._bindValue) binds ++ recordWrites body
+    Core.ELetRec binds body -> concatMap (recordWrites . Core._bindValue) binds ++ recordWrites body
+    Core.EJoin binds body -> concatMap (recordWrites . Core._bindValue) binds ++ recordWrites body
+    Core.EJump _ args -> concatMap recordWrites args
+    Core.ECase scrut alts fallback ->
+      recordWrites scrut ++ concatMap (recordWrites . Core._altBody) alts ++ concatMap recordWrites fallback
+    Core.ECtor _ _ args -> concatMap recordWrites args
+    Core.ERecord fields -> (tipe, map fst fields) : concatMap (recordWrites . snd) fields
+    Core.EUpdate base fields _ -> (tipe, map fst fields) : recordWrites base ++ concatMap (recordWrites . snd) fields
+    Core.EAccess base _ -> recordWrites base
+    Core.EArray items -> concatMap recordWrites items
+    Core.EPrim _ args -> concatMap recordWrites args
+    Core.ETyLam _ body -> recordWrites body
+    Core.ETyApp body _ -> recordWrites body
+    Core.EWitLam _ body -> recordWrites body
+    Core.EWitApp body args -> concatMap recordWrites (body : args)
 
 -- | The primitives an expression calls, by code (@Core.Prim.primCode@), for
 -- @GENG_DUMP_PRIMS@: what @accept/prim-coverage@ is held to (D337).

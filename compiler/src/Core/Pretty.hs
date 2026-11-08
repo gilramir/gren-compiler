@@ -155,8 +155,20 @@ typedEntry b =
 
 -- | A record alias (D630): its name, its parameters and its body.
 alias :: Options -> Alias -> B.Builder
-alias opts (Alias n params tipe) =
-  qual n <> mconcat [" " <> name p | p <- params] <> " = " <> typeToBuilder opts tipe
+alias opts (Alias n params tipe invariant) =
+  qual n
+    <> mconcat [" " <> name p | p <- params]
+    <> " = "
+    <> typeToBuilder opts tipe
+    <> maybe "" invariantOf invariant
+  where
+    -- A record alias's invariant (geng-lang m4-refine-t1.md TO17).
+    invariantOf nd =
+      "\n      "
+        <> name (_binderName (_namedBinder nd))
+        <> " where "
+        <> B.stringUtf8 (show (Utf8.toChars (_namedSource nd)))
+        <> maybe "" (\p -> "\n" <> expr opts 4 p) (_namedPredicate nd)
 
 dataDecl :: Options -> DataDecl -> B.Builder
 dataDecl opts d =

@@ -143,9 +143,14 @@ canonicalize place env (A.At typeRegion tipe) =
 -- reader what nothing checks.
 refuseRefined :: Error.RefinementPlace -> A.Region -> Name.Name -> (Can.Type, Maybe Can.AliasRefinement) -> Result i w Can.Type
 refuseRefined place region name (tipe, refinement) =
-  case refinement of
-    Nothing -> Result.ok tipe
-    Just _ -> Result.throw (Error.RefinedAliasMisplaced region name place)
+  case (refinement, tipe) of
+    (Nothing, _) -> Result.ok tipe
+    -- A refined record alias is a type invariant (geng-lang
+    -- @m4-refine-t1.md@ TO17, Dnene22): every record of its shape keeps it,
+    -- asked where one is built, so it may be anywhere a type may, a `Task`'s
+    -- argument among them.
+    (Just _, Can.TAlias _ _ [] (Can.Holey (Can.TRecord _ Nothing))) -> Result.ok tipe
+    (Just _, _) -> Result.throw (Error.RefinedAliasMisplaced region name place)
 
 -- | A type alias's body (D867): a refined alias is D814's name and predicate as
 -- the whole of it, @type alias Nat = (n : Int where 0 <= n)@, the predicate
@@ -253,6 +258,12 @@ refinedAliasAt :: Env.Env -> Src.Type -> Result i w (Maybe (Can.Type, Can.AliasR
 refinedAliasAt env (A.At typeRegion tipe) =
   let resolved found =
         case found of
+          -- A refined record alias is a type invariant (geng-lang
+          -- @m4-refine-t1.md@ TO17, Dnene22): every record of its shape is
+          -- asked it where it is built and keeps it everywhere, so where it
+          -- is written it is its type, with nothing asked of a caller and no
+          -- name to give, and a record holding one is not refined by it.
+          Env.Alias 0 _ _ (Can.TRecord _ Nothing) (Just _) -> False
           Env.Alias _ _ _ _ (Just _) -> True
           _ -> False
       expand name args info =

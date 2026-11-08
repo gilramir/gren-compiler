@@ -469,7 +469,12 @@ data Module = Module
 data Alias = Alias
   { _aliasName :: !QualName,
     _aliasParams :: ![Name],
-    _aliasType :: !Type
+    _aliasType :: !Type,
+    -- | A refined record alias's predicate, which holds of every record of
+    -- the alias's shape (geng-lang @m4-refine-t1.md@ TO17, Dnene22): its
+    -- record named as the refinement names it, at path @[StepArg 0]@, as a
+    -- constructor's contract is. No pass reads it.
+    _aliasInvariant :: !(Maybe Named)
   }
   deriving (Eq, Show)
 

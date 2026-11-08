@@ -571,20 +571,21 @@ constrainDef rtv def bodyCon =
         let restrict = if null args then CRestrict else id
         return $
           recordDefType nid tipe $
-            restrict $ CLet
-              { _rigidVars = [],
-                _flexVars = vars,
-                _header = Map.singleton name (A.At region tipe),
-                _headerCon =
-                  CLet
-                    { _rigidVars = [],
-                      _flexVars = pvars,
-                      _header = headers,
-                      _headerCon = CAnd (reverse revCons),
-                      _bodyCon = exprCon
-                    },
-                _bodyCon = bodyCon
-              }
+            restrict $
+              CLet
+                { _rigidVars = [],
+                  _flexVars = vars,
+                  _header = Map.singleton name (A.At region tipe),
+                  _headerCon =
+                    CLet
+                      { _rigidVars = [],
+                        _flexVars = pvars,
+                        _header = headers,
+                        _headerCon = CAnd (reverse revCons),
+                        _bodyCon = exprCon
+                      },
+                  _bodyCon = bodyCon
+                }
     Can.TypedDef (A.At region name) freeVars typedArgs expr srcResultType refinements ->
       do
         let newNames = Map.difference freeVars rtv
@@ -664,10 +665,17 @@ constrainRefinements rtv refinements =
 -- a 'Bool', its name bound at the constructor's argument type, whose variables
 -- are flexible, as a signature's predicate is typed.
 constrainCtorRefinement :: Can.Type -> Can.AliasRefinement -> IO Constraint
-constrainCtorRefinement argType (Can.AliasRefinement name predicate _) =
+constrainCtorRefinement argType (Can.AliasRefinement name predicate0 _) =
   do
     let vars = Map.keys (CanType.addFreeVars Map.empty argType)
-        region = Can.exprRegion predicate
+        region = Can.exprRegion predicate0
+        -- The predicate's name is bound under one no program can write, since
+        -- a value of the module's with the same name would be found first
+        -- (an outer name wins in the solver's scope; nothing may shadow):
+        -- @keys@ for @Keys@ beside a value @keys@ (geng-lang
+        -- @m4-refine-t1.md@ TO17). Types are recorded by node, not by name.
+        self = Name.fromChars "$refined"
+        predicate = renameLocal name self predicate0
     flexes <- traverse (\v -> nameToFlex v []) vars
     let rtv = Map.fromList (zip vars (map VarN flexes))
     tipe <- Instantiate.fromSrcType rtv argType
@@ -676,10 +684,24 @@ constrainCtorRefinement argType (Can.AliasRefinement name predicate _) =
       CLet
         { _rigidVars = [],
           _flexVars = flexes,
-          _header = Map.singleton name (A.At region tipe),
+          _header = Map.singleton self (A.At region tipe),
           _headerCon = CTrue,
           _bodyCon = predicateCon
         }
+
+-- | A predicate with one local name read as another, each node keeping its
+-- number.
+renameLocal :: Name.Name -> Name.Name -> Can.Expr -> Can.Expr
+renameLocal from to (Can.Expr nid region expr) =
+  let go = renameLocal from to
+   in Can.Expr nid region $
+        case expr of
+          Can.VarLocal n | n == from -> Can.VarLocal to
+          Can.Negate inner -> Can.Negate (go inner)
+          Can.Call func args -> Can.Call (go func) (map go args)
+          Can.Binop op target annotation left right -> Can.Binop op target annotation (go left) (go right)
+          Can.Access inner f -> Can.Access (go inner) f
+          other -> other
 
 -- | A predicate with D822's signatures on its operators: @+ - *@ from two
 -- 'Int's to an 'Int', the six comparisons from two 'Int's to a 'Bool', @&&@

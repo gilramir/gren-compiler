@@ -15,11 +15,14 @@ import Type.Type (Constraint (..))
 -- CONSTRAIN
 
 constrain :: Can.Module -> IO Constraint
-constrain (Can.Module _ _ _ decls unions _ _ instances _ _ _ _ _ ctorRefinements _) =
+constrain (Can.Module _ _ _ decls unions aliases _ instances _ _ _ _ _ ctorRefinements _) =
   do
     inner <- constrainInstances instances
     contracts <- constrainCtorRefinements unions ctorRefinements
-    constrainDecls decls (if null contracts then inner else CAnd (contracts ++ [inner]))
+    -- Each record alias's invariant (geng-lang m4-refine-t1.md TO17), typed
+    -- as a contract is, its record the alias's body.
+    invariants <- traverse (\(Can.Alias _ body _, r) -> Expr.constrainCtorRefinement body r) [(a, r) | a <- Map.elems aliases, Just r <- [Can.aliasInvariant a]]
+    constrainDecls decls (if null (contracts ++ invariants) then inner else CAnd (contracts ++ invariants ++ [inner]))
 
 -- | Each constructor's contract (geng-lang @m4-refine-t1.md@ TO13), where the
 -- module's own definitions are in scope, as an instance method is, since a

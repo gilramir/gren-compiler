@@ -1076,7 +1076,7 @@ namedP =
 spanStart :: Span -> (Word32, Word32)
 spanStart (Span _ row col _ _) = (row, col)
 
-strictlyAscending :: Ord a => [a] -> Bool
+strictlyAscending :: (Ord a) => [a] -> Bool
 strictlyAscending xs = and (zipWith (<) xs (drop 1 xs))
 
 aliasP :: P Alias
@@ -1086,7 +1086,14 @@ aliasP =
       name <- qual "name" 1
       params <- repText "params" 2
       tipe <- typ "type" 3
-      pure (Alias name params tipe)
+      here <- offset
+      invariant <- optMsg "invariant" 4 namedP
+      case invariant of
+        Just n
+          | _namedPath n /= [StepArg 0] || not (null params) ->
+              failAt here "an alias's invariant is not of its record, or the alias has parameters"
+        _ ->
+          pure (Alias name params tipe invariant)
 
 -- THE PROGRAM
 
