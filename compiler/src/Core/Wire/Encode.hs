@@ -674,10 +674,11 @@ dataDeclEnc (DataDecl name params transparency ctors classes affine) =
     <> bool_ 6 affine
 
 ctorEnc :: Ctor -> Enc
-ctorEnc (Ctor name tag fields) =
+ctorEnc (Ctor name tag fields refinement) =
   qual 1 name
     <> u32 2 (fromIntegral tag)
     <> repType 3 fields
+    <> optMsg 4 namedEnc refinement
 
 -- | C10 and §B10: an enum's wire codes come from a table in the source, so that
 -- reordering a data declaration cannot silently reinterpret a serialized

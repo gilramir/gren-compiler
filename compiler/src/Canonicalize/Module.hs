@@ -57,7 +57,7 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
     let home = ModuleName.Canonical pkg (Src.getName modul)
     let cbinops = Map.fromList (map canonicalizeBinop binops)
 
-    (env, cunions, caliases, cclasses) <-
+    (env, cunions, caliases, cclasses, ctorRefinements) <-
       Local.add modul
         =<< Foreign.createInitialEnv home ifaces (fmap snd imports)
 
@@ -86,7 +86,7 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
 
     checkClosedClassesCovered home (fmap snd classes) cclasses cinstances
 
-    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities)) (Set.fromList (map A.toValue inlines)) (Set.fromList (map A.toValue affines))
+    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities)) (Set.fromList (map A.toValue inlines)) (Set.fromList (map A.toValue affines)) ctorRefinements
 
 -- | Every member of a closed class this module declares has an instance here.
 --

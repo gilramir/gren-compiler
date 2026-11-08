@@ -365,7 +365,12 @@ data DataDecl = DataDecl
 data Ctor = Ctor
   { _ctorName :: !QualName,
     _ctorTag :: !Int,
-    _ctorFields :: ![Type]
+    _ctorFields :: ![Type],
+    -- | The constructor's contract, when its argument is a refined alias or a
+    -- record with refined fields (geng-lang @m4-refine-t1.md@ TO13): a
+    -- 'Named' at @[StepArg 0]@ whose predicate reads its binder's name. Only
+    -- the refinement checker reads it.
+    _ctorRefinement :: !(Maybe Named)
   }
   deriving (Eq, Show)
 

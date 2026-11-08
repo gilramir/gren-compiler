@@ -398,11 +398,21 @@ owing cores =
     -- A signature whose names only say @taken@ (geng-lang @m4-own.md@ D920)
     -- asks the refinement checker nothing.
     refines sig = any (Maybe.isJust . Core._namedPredicate) (Core._sigNamed sig)
+    -- Each constructor with a contract (geng-lang @m4-refine-t1.md@ TO13),
+    -- which asks its argument of whoever applies it.
+    contracted = Set.fromList (concatMap ctorContracts modules)
     owes m =
       ModuleName._package (Core._moduleName m) /= Pkg.core
         && ( any refines (Core._moduleSignatures m)
                || any (not . Set.disjoint refined . Refs._refGlobals . Refs.refsIn . Core._bindValue) (Core._moduleDefs m)
+               || any (not . Set.disjoint contracted . Refs._refCtors . Refs.refsIn . Core._bindValue) (Core._moduleDefs m)
            )
+
+-- | The constructors of a module that carry a contract (geng-lang
+-- @m4-refine-t1.md@ TO13).
+ctorContracts :: Core.Module -> [Core.QualName]
+ctorContracts m =
+  [Core._ctorName c | d <- Core._moduleData m, c <- Core._dataCtors d, Maybe.isJust (Core._ctorRefinement c)]
 
 -- | What the checker reads of a program (geng-lang @m4-refine.md@ §RF36,
 -- D874): the modules it walks in full, and of every other module only the
@@ -420,10 +430,24 @@ checkerReads cores =
     refsOf = Refs._refGlobals . Refs.refsIn
     predicateRefs sig =
       Set.unions [refsOf p | n <- Core._sigNamed sig, Just p <- [Core._namedPredicate n]]
+    -- The constructors the walked modules apply or match, and the contracts
+    -- of those that have one (geng-lang @m4-refine-t1.md@ TO13): a module
+    -- holding one is kept, and what its predicate reads.
+    ctorsUsed = Set.unions [Refs._refCtors (Refs.refsIn (Core._bindValue b)) | m <- Map.elems walked, b <- Core._moduleDefs m]
+    usedContracts =
+      [ p
+      | m <- Map.elems cores,
+        d <- Core._moduleData m,
+        c <- Core._dataCtors d,
+        Set.member (Core._ctorName c) ctorsUsed,
+        Just n <- [Core._ctorRefinement c],
+        Just p <- [Core._namedPredicate n]
+      ]
     start =
       Set.unions
         ( [refsOf (Core._bindValue b) | m <- Map.elems walked, b <- Core._moduleDefs m]
             ++ [predicateRefs sig | m <- Map.elems walked, sig <- Core._moduleSignatures m]
+            ++ map refsOf usedContracts
         )
     topSignatures =
       Map.fromList
@@ -446,7 +470,7 @@ checkerReads cores =
           named q = Set.member q needed
           kept = [b | b <- Core._moduleDefs m, named (Core.QualName home (Core._binderName (Core._bindBinder b)))]
           binders = map Core._bindBinder kept
-       in if null kept
+       in if null kept && not (any (`Set.member` ctorsUsed) (ctorContracts m))
             then Nothing
             else
               Just

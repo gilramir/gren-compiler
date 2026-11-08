@@ -8,14 +8,31 @@ where
 
 import AST.Canonical qualified as Can
 import Data.Map.Strict qualified as Map
+import Data.Name qualified as Name
 import Type.Constrain.Expression qualified as Expr
 import Type.Type (Constraint (..))
 
 -- CONSTRAIN
 
 constrain :: Can.Module -> IO Constraint
-constrain (Can.Module _ _ _ decls _ _ _ instances _ _ _ _ _) =
-  constrainDecls decls =<< constrainInstances instances
+constrain (Can.Module _ _ _ decls unions _ _ instances _ _ _ _ _ ctorRefinements) =
+  do
+    inner <- constrainInstances instances
+    contracts <- constrainCtorRefinements unions ctorRefinements
+    constrainDecls decls (if null contracts then inner else CAnd (contracts ++ [inner]))
+
+-- | Each constructor's contract (geng-lang @m4-refine-t1.md@ TO13), where the
+-- module's own definitions are in scope, as an instance method is, since a
+-- predicate may read a measure the module declares.
+constrainCtorRefinements :: Map.Map Name.Name Can.Union -> Map.Map Name.Name Can.AliasRefinement -> IO [Constraint]
+constrainCtorRefinements unions refinements =
+  traverse
+    (\(argType, refinement) -> Expr.constrainCtorRefinement argType refinement)
+    [ (argType, refinement)
+    | Can.Union _ ctors _ _ <- Map.elems unions,
+      Can.Ctor name _ _ [argType] <- ctors,
+      Just refinement <- [Map.lookup name refinements]
+    ]
 
 -- CONSTRAIN INSTANCES
 

@@ -18,8 +18,9 @@ spec = do
     it "has the size C13 promises" $
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
-      -- someone noticing.
-      length allPrims `shouldBe` 215
+      -- someone noticing. 216 since Dnene5's tr_new_or_crash, code 215, which
+      -- did not move it at the time (geng-lang m4-refine.md §RF41).
+      length allPrims `shouldBe` 216
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its

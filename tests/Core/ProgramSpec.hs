@@ -445,7 +445,7 @@ dataDecl name ctorName =
     { Core._dataName = q name,
       Core._dataParams = [],
       Core._dataTransparency = Core.Transparent,
-      Core._dataCtors = [Core.Ctor {Core._ctorName = q ctorName, Core._ctorTag = 0, Core._ctorFields = []}],
+      Core._dataCtors = [Core.Ctor {Core._ctorName = q ctorName, Core._ctorTag = 0, Core._ctorFields = [], Core._ctorRefinement = Nothing}],
       Core._dataClasses = [],
       Core._dataAffine = False
     }

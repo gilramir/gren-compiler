@@ -137,6 +137,11 @@ spec = do
         refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [StepArg 0] (Binder "n" intType (at 1 6 1 7)) Nothing (utf8 "n > 0") False]]})
         refused ((moduleWith []) {_moduleSignatures = [Signature (Binder "f" intType (at 1 1 1 2)) [Named [] (Binder "n" intType (at 1 6 1 7)) Nothing (utf8 "") False]]})
 
+    it "refuses a constructor's contract that is not of its one argument (geng-lang m4-refine-t1.md TO13)" $
+      do
+        refused ((moduleWith []) {_moduleData = [dataDecl {_dataCtors = [Ctor (qual "Just") 1 [TVar "a"] (Just (Named [StepResult] (Binder "x" (TVar "a") (at 3 6 3 7)) Nothing (utf8 "") False))]}]})
+        refused ((moduleWith []) {_moduleData = [dataDecl {_dataCtors = [Ctor (qual "Nothing") 0 [] (Just (Named [StepArg 0] (Binder "x" (TVar "a") (at 3 6 3 7)) Nothing (utf8 "") False))]}]})
+
     it "carries the definitions written with a signature, and refuses them out of order (D920)" $
       do
         roundTrip ((moduleWith []) {_moduleTyped = [Binder "f" intType (at 1 1 1 2), Binder "g" intType (at 3 1 3 2)]})
@@ -511,8 +516,9 @@ dataDecl =
       _dataParams = ["a"],
       _dataTransparency = Abstract,
       _dataCtors =
-        [ Ctor (qual "Nothing") 0 [],
-          Ctor (qual "Just") 1 [TVar "a"]
+        [ Ctor (qual "Nothing") 0 [] Nothing,
+          -- A constructor's contract (geng-lang m4-refine-t1.md TO13).
+          Ctor (qual "Just") 1 [TVar "a"] (Just (Named [StepArg 0] (Binder "x" (TVar "a") (at 3 6 3 7)) (Just (Expr (EVar "x") intType (at 3 20 3 21))) (utf8 "x > 0") False))
         ],
       _dataClasses = [qual "Eq", qual "Ord"],
       _dataAffine = True

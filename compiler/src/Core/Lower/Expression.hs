@@ -53,6 +53,7 @@ module Core.Lower.Expression
     def,
     signatures,
     typed,
+    ctorNamed,
     pattern,
     span,
   )
@@ -1178,6 +1179,19 @@ named env r =
       case s of
         Can.Arg i -> Core.StepArg i
         Can.Result -> Core.StepResult
+
+-- | A constructor's contract as its Core constructor carries it (geng-lang
+-- @m4-refine-t1.md@ TO13): its argument, named as the refinement names it,
+-- at the predicate's span.
+ctorNamed :: Env -> Can.Type -> Can.AliasRefinement -> Core.Named
+ctorNamed env argType (Can.AliasRefinement name predicate@(Can.Expr _ region _) source) =
+  Core.Named
+    { Core._namedPath = [Core.StepArg 0],
+      Core._namedBinder = Core.Binder name (lowerType argType) (span env region),
+      Core._namedPredicate = Just (expr env predicate),
+      Core._namedSource = Utf8.fromChars source,
+      Core._namedTaken = False
+    }
 
 -- | A definition and every definition in its body, at any depth.
 definitionsIn :: Can.Def -> [Can.Def]

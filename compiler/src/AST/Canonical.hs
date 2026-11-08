@@ -411,7 +411,12 @@ data Module = Module
     _inlines :: Set.Set Name,
     -- | The custom types declared under @\@affine@ (geng-lang @m4-own.md@
     -- D921), which lowering marks in Core for the ownership checker.
-    _affines :: Set.Set Name
+    _affines :: Set.Set Name,
+    -- | Each constructor whose argument is a refined alias or a record with
+    -- refined fields, with that refinement: the constructor's contract, which
+    -- lowering gives its Core constructor for the refinement checker
+    -- (geng-lang @m4-refine-t1.md@ TO13).
+    _ctorRefinements :: Map.Map Name AliasRefinement
   }
   deriving (Show)
 

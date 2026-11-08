@@ -4,6 +4,7 @@ module Type.Constrain.Expression
   ( constrain,
     constrainDef,
     constrainRecursiveDefs,
+    constrainCtorRefinement,
   )
 where
 
@@ -658,6 +659,27 @@ constrainRefinements rtv refinements =
             _headerCon = CTrue,
             _bodyCon = CAnd predicateCons
           }
+
+-- | A constructor's contract (geng-lang @m4-refine-t1.md@ TO13): its predicate
+-- a 'Bool', its name bound at the constructor's argument type, whose variables
+-- are flexible, as a signature's predicate is typed.
+constrainCtorRefinement :: Can.Type -> Can.AliasRefinement -> IO Constraint
+constrainCtorRefinement argType (Can.AliasRefinement name predicate _) =
+  do
+    let vars = Map.keys (CanType.addFreeVars Map.empty argType)
+        region = Can.exprRegion predicate
+    flexes <- traverse (\v -> nameToFlex v []) vars
+    let rtv = Map.fromList (zip vars (map VarN flexes))
+    tipe <- Instantiate.fromSrcType rtv argType
+    predicateCon <- constrain rtv (atInt predicate) (FromContext region (Refinement name) Type.bool)
+    return $
+      CLet
+        { _rigidVars = [],
+          _flexVars = flexes,
+          _header = Map.singleton name (A.At region tipe),
+          _headerCon = CTrue,
+          _bodyCon = predicateCon
+        }
 
 -- | A predicate with D822's signatures on its operators: @+ - *@ from two
 -- 'Int's to an 'Int', the six comparisons from two 'Int's to a 'Bool', @&&@

@@ -214,8 +214,8 @@ spec = do
                 Core._dataParams = ["a"],
                 Core._dataTransparency = Core.Transparent,
                 Core._dataCtors =
-                  [ Core.Ctor (qual "Nothing") 0 [],
-                    Core.Ctor (qual "Just") 1 [Core.TVar "a"]
+                  [ Core.Ctor (qual "Nothing") 0 [] Nothing,
+                    Core.Ctor (qual "Just") 1 [Core.TVar "a"] Nothing
                   ],
                 Core._dataClasses = [],
                 Core._dataAffine = False

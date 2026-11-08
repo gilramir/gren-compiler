@@ -195,4 +195,4 @@ modul defs =
     }
 
 ctorDecl :: Name -> Int -> [Core.Type] -> Core.Ctor
-ctorDecl n tag fields = Core.Ctor (q n) tag fields
+ctorDecl n tag fields = Core.Ctor (q n) tag fields Nothing

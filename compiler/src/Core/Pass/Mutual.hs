@@ -293,12 +293,12 @@ bySum home prefix sp members =
         vars = List.nub (concatMap (typeVars . Core._binderType) [p | (_, params, _) <- members, p <- params])
         dataType = Core.TCon dataName (map Core.TVar vars)
         ctorName b = Core.QualName home (Name.fromChars ("$G" ++ drop 2 prefix ++ "$" ++ Name.toChars (Core._binderName b)))
-        ctors = [Core.Ctor (ctorName b) i (map Core._binderType params) | ((b, params, _), i) <- zip members [0 ..]]
+        ctors = [Core.Ctor (ctorName b) i (map Core._binderType params) Nothing | ((b, params, _), i) <- zip members [0 ..]]
         arg = Core.Binder (Name.fromChars (prefix ++ "$c")) dataType sp
-        alt (Core.Ctor q i _) (_, params, body) = Core.Alt (Core.PCtor q i (map Core.PVar params)) body
+        alt (Core.Ctor q i _ _) (_, params, body) = Core.Alt (Core.PCtor q i (map Core.PVar params)) body
         callOf i args =
           case drop i ctors of
-            Core.Ctor q tag _ : _ -> [Core.Expr (Core.ECtor q tag args) dataType sp]
+            Core.Ctor q tag _ _ : _ -> [Core.Expr (Core.ECtor q tag args) dataType sp]
             [] -> error "Core.Pass.Mutual: a call to a member the group does not have"
     declare
       Core.DataDecl

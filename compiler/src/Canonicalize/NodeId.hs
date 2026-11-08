@@ -169,9 +169,16 @@ number modul =
         do
           ds <- decls (Can._decls modul)
           is <- traverse instanceMethods (Can._instances modul)
-          pure (ds, is)
-      ((ds', is'), _) = runState numbered 0
-   in modul {Can._decls = ds', Can._instances = is'}
+          cs <- traverse ctorRefinement (Can._ctorRefinements modul)
+          pure (ds, is, cs)
+      ((ds', is', cs'), _) = runState numbered 0
+   in modul {Can._decls = ds', Can._instances = is', Can._ctorRefinements = cs'}
+
+-- | A constructor's contract (geng-lang @m4-refine-t1.md@ TO13), whose
+-- predicate is typed and elaborated as a signature's is.
+ctorRefinement :: Can.AliasRefinement -> Numbering Can.AliasRefinement
+ctorRefinement (Can.AliasRefinement name predicate source) =
+  (\p -> Can.AliasRefinement name p source) <$> expr predicate
 
 instanceMethods :: Can.Instance -> Numbering Can.Instance
 instanceMethods (Can.Instance head_ origin methods) =

@@ -5,6 +5,7 @@ module Canonicalize.Type
     checkBody,
     canonicalize,
     canonicalizeAliasBody,
+    canonicalizeVariantArg,
     addFreeVars,
     equatesConditions,
   )
@@ -192,6 +193,20 @@ canonicalizeAliasBody readPredicate env alias srcType@(A.At region tipe) =
                 Result.ok (innerType, Just (Can.AliasRefinement nameValue (Can.at region (Can.Int 0)) source))
     _ ->
       (\t -> (t, Nothing)) <$> canonicalize Error.InAlias env srcType
+
+-- | A variant's argument (geng-lang @m4-refine-t1.md@ TO13, Dnene17): a
+-- refined alias, or a record with refined fields, is the constructor's
+-- contract, asked where the constructor is applied and known where it is
+-- matched, so the refinement comes back with the type. Anything else is
+-- canonicalized as any type there is, so a name or a predicate written on the
+-- argument itself is still refused, as Dnene17 has it.
+canonicalizeVariantArg :: Env.Env -> Src.Type -> Result i w (Can.Type, Maybe Can.AliasRefinement)
+canonicalizeVariantArg env srcType =
+  do
+    refined <- refinedPositionAt env srcType
+    case refined of
+      Just (tipe, refinement) -> Result.ok (tipe, Just refinement)
+      Nothing -> (\tipe -> (tipe, Nothing)) <$> canonicalize Error.InConstructor env srcType
 
 -- | The refined alias a signature's position is written as, when it is one,
 -- canonicalized: its type, and its name and predicate (D872).

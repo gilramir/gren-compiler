@@ -100,7 +100,6 @@ signatureDecl opts (Signature b nameds) =
         StepArg i -> "arg " <> B.intDec i
         StepResult -> "result"
 
-
 -- | An @\@extern@ declaration (D196): the binder, then one line per language,
 -- and a last line when the declaration has a Geng body (D222), which is the
 -- binding of the same name below.
@@ -183,6 +182,16 @@ ctor opts c =
     <> qual (_ctorName c)
     <> mconcat [" " <> atomicType opts t | t <- _ctorFields c]
     <> "\n"
+    <> maybe "" contract (_ctorRefinement c)
+  where
+    -- A constructor's contract (geng-lang m4-refine-t1.md TO13).
+    contract n =
+      "      "
+        <> name (_binderName (_namedBinder n))
+        <> " where "
+        <> B.stringUtf8 (show (Utf8.toChars (_namedSource n)))
+        <> "\n"
+        <> maybe "" (\p -> expr opts 4 p <> "\n") (_namedPredicate n)
 
 classDecl :: Options -> ClassDecl -> B.Builder
 classDecl opts c =

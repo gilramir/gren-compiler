@@ -84,12 +84,13 @@ lower platform annotations types coreTypes elaboration modul =
         { Core._moduleName = home,
           Core._moduleFiles = Map.singleton selfFile home,
           Core._moduleData =
-            [ lowerUnion
-                (if Can.isAbstract (Can._exports modul) name then Core.Abstract else Core.Transparent)
-                (Set.member name (Can._affines modul))
-                home
-                name
-                union
+            [ withContracts env (Can._ctorRefinements modul) union $
+                lowerUnion
+                  (if Can.isAbstract (Can._exports modul) name then Core.Abstract else Core.Transparent)
+                  (Set.member name (Can._affines modul))
+                  home
+                  name
+                  union
             | (name, union) <- Map.toAscList (Can._unions modul)
             ],
           Core._moduleClasses =
@@ -111,6 +112,18 @@ lower platform annotations types coreTypes elaboration modul =
           Core._moduleSignatures = Expr.signatures env valueDefs,
           Core._moduleTyped = Expr.typed env valueDefs
         }
+
+-- | A data declaration's constructors given their contracts, each whose
+-- argument is a refined alias or a refined record (geng-lang
+-- @m4-refine-t1.md@ TO13).
+withContracts :: Expr.Env -> Map.Map Name Can.AliasRefinement -> Can.Union -> Core.DataDecl -> Core.DataDecl
+withContracts env refinements (Can.Union _ ctors _ _) decl =
+  let argOf name = [t | Can.Ctor n _ _ [t] <- ctors, n == name]
+      contract c =
+        case (Map.lookup (Core._qnName (Core._ctorName c)) refinements, argOf (Core._qnName (Core._ctorName c))) of
+          (Just refinement, [argType]) -> c {Core._ctorRefinement = Just (Expr.ctorNamed env argType refinement)}
+          _ -> c
+   in decl {Core._dataCtors = map contract (Core._dataCtors decl)}
 
 -- EXTERNS
 

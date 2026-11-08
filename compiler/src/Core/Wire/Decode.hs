@@ -868,12 +868,19 @@ dataDeclP =
 
 ctorP :: P Ctor
 ctorP =
-  message "Ctor" 3 $
+  message "Ctor" 4 $
     do
       name <- qual "name" 1
       tag <- u32 "tag" 2
       fields <- repType "fields" 3
-      pure (Ctor name (fromIntegral tag) fields)
+      here <- offset
+      refinement <- optMsg "refinement" 4 namedP
+      case refinement of
+        Just n
+          | _namedPath n /= [StepArg 0] || length fields /= 1 ->
+              failAt here "a constructor's refinement is not of its one argument"
+        _ ->
+          pure (Ctor name (fromIntegral tag) fields refinement)
 
 transparencyFromCode :: Word32 -> Maybe Transparency
 transparencyFromCode 0 = Just Transparent

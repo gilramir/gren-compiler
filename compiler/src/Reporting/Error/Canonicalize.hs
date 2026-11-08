@@ -440,7 +440,7 @@ toReport source err =
           ( D.reflow $
               "`" ++ Name.toChars name ++ "` is a refined type alias, and " ++ placeText place ++ ":",
             D.reflow $
-              "A refined alias goes where a signature names a value, an argument or the result of a value's signature, top-level or in a `let`, or a field of a record there, since its predicate is about that value (D869, Dnene14)."
+              "A refined alias goes where a signature names a value, an argument or the result of a value's signature, top-level or in a `let`, or a field of a record there, or as the whole argument of a variant, since its predicate is about that value (D869, Dnene14, Dnene17)."
           )
     FieldRefinementMisplaced region place ->
       Report.Report "MISPLACED REFINEMENT" region [] $
@@ -451,7 +451,7 @@ toReport source err =
           ( D.reflow $
               "This record has a refinement on a field, and " ++ placeText place ++ ":",
             D.reflow $
-              "A record with refined fields goes where a refined alias may go: a type alias's body, or an argument or the result of a value's signature, top-level or in a `let`, since its predicate is about that value (D869, Dnene15)."
+              "A record with refined fields goes where a refined alias may go: a type alias's body, an argument or the result of a value's signature, top-level or in a `let`, or the whole argument of a variant, since its predicate is about that value (D869, Dnene15, Dnene17)."
           )
     FieldRefinementExtensible region ->
       Report.Report "MISPLACED REFINEMENT" region [] $

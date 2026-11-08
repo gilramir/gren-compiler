@@ -16,6 +16,7 @@ import Data.Graph qualified as Graph
 import Data.Index qualified as Index
 import Data.List qualified as List
 import Data.Map.Strict qualified as Map
+import Data.Maybe qualified as Maybe
 import Data.Name qualified as Name
 import Gren.ModuleName qualified as ModuleName
 import Reporting.Annotation qualified as A
@@ -33,6 +34,10 @@ type Aliases = Map.Map Name.Name Can.Alias
 
 type Classes = Map.Map Name.Name Can.ClassDecl
 
+-- | Each constructor whose argument is a refined alias or a refined record,
+-- with that refinement (geng-lang @m4-refine-t1.md@ TO13).
+type CtorRefinements = Map.Map Name.Name Can.AliasRefinement
+
 -- | The local module's own names, added to an environment that already holds
 -- the imported ones.
 --
@@ -40,7 +45,7 @@ type Classes = Map.Map Name.Name Can.ClassDecl
 -- After the types, because a method's signature may name one; before the
 -- values, because a method name and a top-level name are the same name and one
 -- 'Dups.detect' has to see both (§G20).
-add :: Src.Module -> Env.Env -> Result i w (Env.Env, Unions, Aliases, Classes)
+add :: Src.Module -> Env.Env -> Result i w (Env.Env, Unions, Aliases, Classes, CtorRefinements)
 add module_ env =
   do
     envWithTypes <- addTypes module_ env
@@ -48,8 +53,8 @@ add module_ env =
     envWithVars <- addVars module_ classes envWithClasses
     envWithOps <- addOwnBinops module_ classes envWithVars
     envWithRefined <- refineAliases module_ envWithOps
-    (envWithCtors, unions, aliases) <- addCtors module_ envWithRefined
-    Result.ok (envWithCtors, unions, aliases, classes)
+    (envWithCtors, unions, aliases, ctorRefinements) <- addCtors module_ envWithRefined
+    Result.ok (envWithCtors, unions, aliases, classes, ctorRefinements)
 
 -- OWN OPERATORS
 
@@ -396,7 +401,7 @@ addFreeVars freeVars (A.At region tipe) =
 
 -- ADD CTORS
 
-addCtors :: Src.Module -> Env.Env -> Result i w (Env.Env, Unions, Aliases)
+addCtors :: Src.Module -> Env.Env -> Result i w (Env.Env, Unions, Aliases, CtorRefinements)
 addCtors (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _ _ _) env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs) =
   do
     unionInfo <- traverse (canonicalizeUnion env) (fmap snd unions)
@@ -405,15 +410,16 @@ addCtors (Src.Module _ _ _ _ _ _ _ unions aliases _ _ _ _ _ _) env@(Env.Env home
     ctors <-
       Dups.detect Error.DuplicateCtor $
         Dups.union
-          (Dups.unions (map snd unionInfo))
+          (Dups.unions (map (\(_, dups, _) -> dups) unionInfo))
           (Dups.unions (map snd aliasInfo))
 
     let cs2 = Map.union ctors cs
 
     Result.ok
       ( Env.Env home vs ts cs2 bs cls ms qvs qts qcs qcls qms sigs,
-        Map.fromList (map fst unionInfo),
-        Map.fromList (map fst aliasInfo)
+        Map.fromList (map (\(union, _, _) -> union) unionInfo),
+        Map.fromList (map fst aliasInfo),
+        Map.fromList (concatMap (\(_, _, refined) -> refined) unionInfo)
       )
 
 type CtorDups = Dups.Dict (Env.Info Env.Ctor)
@@ -430,28 +436,32 @@ canonicalizeAlias env (A.At _ (Src.Alias (A.At _ name) args tipe)) =
 
 -- CANONICALIZE UNION
 
-canonicalizeUnion :: Env.Env -> A.Located Src.Union -> Result i w ((Name.Name, Can.Union), CtorDups)
+canonicalizeUnion :: Env.Env -> A.Located Src.Union -> Result i w ((Name.Name, Can.Union), CtorDups, [(Name.Name, Can.AliasRefinement)])
 canonicalizeUnion env@(Env.Env home _ _ _ _ _ _ _ _ _ _ _ _) (A.At _ (Src.Union (A.At _ name) avars ctors _ _)) =
   do
-    cctors <- Index.indexedTraverse (canonicalizeCtor env) ctors
+    canonical <- Index.indexedTraverse (canonicalizeCtor env) ctors
+    let cctors = map fst canonical
     let vars = map (A.toValue . snd) avars
     let alts = map A.toValue cctors
     let union = Can.Union vars alts (length alts) (toOpts ctors)
     Result.ok
       ( (name, union),
-        Dups.unions $ map (toCtor home name union) cctors
+        Dups.unions $ map (toCtor home name union) cctors,
+        [(ctorName, refinement) | (A.At _ (Can.Ctor ctorName _ _ _), Just refinement) <- canonical]
       )
 
-canonicalizeCtor :: Env.Env -> Index.ZeroBased -> Src.UnionVariant -> Result i w (A.Located Can.Ctor)
+canonicalizeCtor :: Env.Env -> Index.ZeroBased -> Src.UnionVariant -> Result i w (A.Located Can.Ctor, Maybe Can.AliasRefinement)
 canonicalizeCtor env index (_, A.At region ctor, tipes, _) =
   let argLength = length tipes
    in if argLength > 1
         then Result.throw (Error.CustomTypeTooManyParams region ctor argLength)
         else do
-          ctipes <- traverse (Type.canonicalize Error.InConstructor env) (fmap snd tipes)
-          Result.ok $
-            A.At region $
-              Can.Ctor ctor index (length ctipes) ctipes
+          canonical <- traverse (Type.canonicalizeVariantArg env) (fmap snd tipes)
+          let ctipes = map fst canonical
+          Result.ok
+            ( A.At region (Can.Ctor ctor index (length ctipes) ctipes),
+              Maybe.listToMaybe (Maybe.mapMaybe snd canonical)
+            )
 
 toOpts :: [Src.UnionVariant] -> Can.CtorOpts
 toOpts ctors =
