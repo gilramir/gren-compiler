@@ -6,6 +6,7 @@ module Canonicalize.Type
     canonicalize,
     canonicalizeAliasBody,
     addFreeVars,
+    equatesConditions,
   )
 where
 
@@ -885,7 +886,8 @@ canonicalizePredicate env scope (A.At region expression) =
               Can.TType typeHome _ typeArgs
                 | ownsType (Env._home env) typeHome ->
                     let vars = Map.fromList [(v, []) | Can.TVar v <- typeArgs]
-                        annotation = Can.Forall vars (Can.TLambda argType (Can.TType ModuleName.basics Name.int []))
+                        answer = if (Env._home env, name) `elem` boolMeasures then Name.bool else Name.int
+                        annotation = Can.Forall vars (Can.TLambda argType (Can.TType ModuleName.basics answer []))
                      in Result.ok (Can.at region (Can.Call (Can.at funcRegion (Can.VarForeign (Env._home env) name annotation)) [carg]))
               _ ->
                 Result.throw (Error.RefinementNotMeasure funcRegion prefix name)
@@ -1013,6 +1015,15 @@ measures =
     -- The same for the bytes transient (D863, @m4-refine.md@ §RF32).
     (ModuleName.Canonical Pkg.core (Name.fromChars "Bytes.Transient"), Name.fromChars "length")
   ]
+    ++ boolMeasures
+
+-- | @core@'s measures that answer a 'Bool': which constructor a value is
+-- (geng-lang @m4-refine-t1.md@ Dnene17). Each is a condition, not a sum.
+boolMeasures :: [(ModuleName.Canonical, Name.Name)]
+boolMeasures =
+  [ (ModuleName.Canonical Pkg.core (Name.fromChars "Maybe"), Name.fromChars "isJust"),
+    (ModuleName.Canonical Pkg.core (Name.fromChars "Result"), Name.fromChars "isOk")
+  ]
 
 -- | An operator of D808's, resolved as any operator is.
 predicateOperator :: Env.Env -> A.Region -> Name.Name -> Result i w Env.Binop
@@ -1037,7 +1048,8 @@ operators =
 
 -- | What §RF13.4's layers said that a chain does not: a @*@ has a literal
 -- on one side, so that the arithmetic stays linear, and a comparison compares
--- two sums, never two conditions.
+-- two sums, never two conditions, but that @==@ and @/=@ may compare two
+-- conditions, as @Maybe.isJust r == (Array.length a > 0)@ does (Dnene17).
 checkShape :: Can.Expr -> Result i w ()
 checkShape (Can.Expr _ region expr) =
   case expr of
@@ -1048,7 +1060,7 @@ checkShape (Can.Expr _ region expr) =
         if Name.toChars op == "*" && not (isLiteral left || isLiteral right)
           then Result.throw (Error.RefinementNonlinear region)
           else Result.ok ()
-        if Name.toChars op `elem` comparisons
+        if Name.toChars op `elem` comparisons && not (equatesConditions op left right)
           then traverse_ checkSum [left, right]
           else Result.ok ()
     Can.Negate inner -> checkShape inner
@@ -1064,11 +1076,17 @@ comparisons :: [String]
 comparisons =
   ["<", "<=", ">", ">=", "==", "/="]
 
+-- | @==@ or @/=@ between two conditions, which the type checker reads at
+-- 'Bool' ("Type.Constrain.Expression").
+equatesConditions :: Name.Name -> Can.Expr -> Can.Expr -> Bool
+equatesConditions op left right =
+  Name.toChars op `elem` ["==", "/="] && isCondition left && isCondition right
+
 isCondition :: Can.Expr -> Bool
 isCondition (Can.Expr _ _ expr) =
   case expr of
     Can.Binop op _ _ _ _ -> Name.toChars op `elem` ("&&" : "||" : comparisons)
-    Can.Call (Can.Expr _ _ (Can.VarForeign home _ _)) _ -> home == ModuleName.basics
+    Can.Call (Can.Expr _ _ (Can.VarForeign home name _)) _ -> home == ModuleName.basics || (home, name) `elem` boolMeasures
     Can.VarCtor {} -> True
     _ -> False
 

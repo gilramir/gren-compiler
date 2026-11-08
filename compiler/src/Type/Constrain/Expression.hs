@@ -8,6 +8,7 @@ module Type.Constrain.Expression
 where
 
 import AST.Canonical qualified as Can
+import Canonicalize.Type qualified as CanType
 import Core.Prim qualified as Prim
 import Data.Index qualified as Index
 import Data.Map.Strict qualified as Map
@@ -660,17 +661,27 @@ constrainRefinements rtv refinements =
 
 -- | A predicate with D822's signatures on its operators: @+ - *@ from two
 -- 'Int's to an 'Int', the six comparisons from two 'Int's to a 'Bool', @&&@
--- and @||@ on 'Bool's. Only what the checker sees changes; the canonical
--- predicate keeps each operator's own annotation for the elaborator.
+-- and @||@ on 'Bool's, and @==@ and @/=@ between two conditions on 'Bool's
+-- (geng-lang @m4-refine-t1.md@ Dnene17). Only what the checker sees changes;
+-- the canonical predicate keeps each operator's own annotation for the
+-- elaborator, which gives @==@ the instance its operands' type takes.
 atInt :: Can.Expr -> Can.Expr
 atInt (Can.Expr nid region expr) =
   Can.Expr nid region $
     case expr of
+      Can.Binop op target _ left right
+        | CanType.equatesConditions op left right ->
+            Can.Binop op target boolSignature (atInt left) (atInt right)
       Can.Binop op target annotation left right ->
         Can.Binop op target (maybe annotation id (intSignature op)) (atInt left) (atInt right)
       Can.Negate inner -> Can.Negate (atInt inner)
       Can.Call func args -> Can.Call func (map atInt args)
       _ -> expr
+
+boolSignature :: Can.Annotation
+boolSignature =
+  let canBool = Can.TType ModuleName.basics Name.bool []
+   in Can.Forall Map.empty (Can.TLambda canBool (Can.TLambda canBool canBool))
 
 intSignature :: Name.Name -> Maybe Can.Annotation
 intSignature op =

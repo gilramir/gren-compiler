@@ -558,7 +558,7 @@ toReport source err =
           ( D.reflow $
               "This refinement calls `" ++ Name.toChars prefix ++ "." ++ Name.toChars name ++ "`, which is not one of core's measures:",
             D.reflow $
-              "A refinement may apply only `Array.length`, `Array.Builder.length`, `Bytes.length`, `Bytes.Owned.length`, `String.count`, `Dict.count` and `Set.count`, each to a name or a name's field, so that the checker knows what each means."
+              "A refinement may apply only `Array.length`, `Array.Builder.length`, `Bytes.length`, `Bytes.Owned.length`, `String.count`, `Dict.count`, `Set.count`, `Maybe.isJust` and `Result.isOk`, each to a name or a name's field, so that the checker knows what each means."
           )
     RefinementNoSuchField region record field fields ->
       Report.Report "NO SUCH FIELD IN A REFINEMENT" region [] $
@@ -594,7 +594,7 @@ toReport source err =
           ( D.reflow $
               "This refinement compares a condition:",
             D.reflow $
-              "A comparison in a refinement compares two `Int`s, never two conditions. Conditions are joined with `&&`, `||` and `not`."
+              "A comparison in a refinement compares two `Int`s, or with `==` and `/=` two conditions, never a condition and an `Int`. Conditions are joined with `&&`, `||` and `not`."
           )
     RefinementNonlinear region ->
       Report.Report "NONLINEAR REFINEMENT" region [] $
