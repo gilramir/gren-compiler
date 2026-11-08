@@ -115,6 +115,15 @@ spec = do
         refused ((moduleWith [bindOf (lit (LInt 1)), Bind (binder "c") (lit (LInt 2))]) {_moduleInline = [qual "c", qual "b"]})
         refused ((moduleWith [bindOf (lit (LInt 1))]) {_moduleInline = [qual "b", qual "b"]})
 
+    it "carries the bindings declared @measure (geng-lang m4-refine-t1.md TO14)" $
+      roundTrip ((moduleWith [bindOf (lit (LInt 1)), Bind (binder "c") (lit (LInt 2))]) {_moduleMeasures = [qual "b", qual "c"]})
+
+    it "refuses a @measure that names no binding of the module, or is out of order" $
+      do
+        refused ((moduleWith []) {_moduleMeasures = [qual "b"]})
+        refused ((moduleWith [bindOf (lit (LInt 1)), Bind (binder "c") (lit (LInt 2))]) {_moduleMeasures = [qual "c", qual "b"]})
+        refused ((moduleWith [bindOf (lit (LInt 1))]) {_moduleMeasures = [qual "b", qual "b"]})
+
     it "carries the record aliases a module declares (D630)" $
       roundTrip ((moduleWith []) {_moduleAliases = [Alias (qual "Pair") ["a"] (TRecord [("x", TVar "a"), ("y", intType)] Nothing), Alias (qual "Point") [] (TRecord [("x", intType)] Nothing)]})
 
@@ -404,6 +413,7 @@ moduleWith defs =
       _moduleMain = Nothing,
       _moduleExterns = [],
       _moduleInline = [],
+      _moduleMeasures = [],
       _moduleAliases = [],
       _moduleSignatures = [],
       _moduleTyped = []

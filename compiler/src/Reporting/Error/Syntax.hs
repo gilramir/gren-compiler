@@ -181,6 +181,7 @@ data Attribute
   | AttributeAfterExtern Name.Name Row Col
   | AttributeCapabilityAnnotation Row Col
   | AttributeInlineNotOnValue Row Col
+  | AttributeMeasureNotOnValue Row Col
   | AttributeAffineNotOnCustomType Row Col
   | --
     AttributeIndentName Row Col
@@ -1724,6 +1725,12 @@ toAttributeReport source attribute startRow startCol =
               "I was expecting a value declaration with a type annotation after this attribute.\
               \ `@inline` says the inliner opens every call to a value, and its annotation is\
               \ the line the attribute stands above."
+        AttributeMeasureNotOnValue row col ->
+          stuck row col "MISPLACED ATTRIBUTE" $
+            D.reflow
+              "I was expecting a value declaration with a type annotation after this attribute.\
+              \ `@measure` says a refinement's predicate may call a function, and its annotation\
+              \ says what the function measures and what it answers."
         AttributeAffineNotOnCustomType row col ->
           stuck row col "MISPLACED ATTRIBUTE" $
             D.reflow

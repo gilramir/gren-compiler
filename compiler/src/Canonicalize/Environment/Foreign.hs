@@ -15,6 +15,7 @@ import Data.List qualified as List
 import Data.Map.Strict ((!))
 import Data.Map.Strict qualified as Map
 import Data.Name qualified as Name
+import Data.Set qualified as Set
 import Gren.Interface qualified as I
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
@@ -31,7 +32,30 @@ createInitialEnv :: ModuleName.Canonical -> Map.Map ModuleName.Raw I.Interface -
 createInitialEnv home ifaces imports =
   do
     (State vs ts cs bs cls ms qvs qts qcs qcls qms) <- foldM (addImport ifaces) emptyState (toSafeImports home imports)
-    Result.ok (Env.Env home (Map.map infoToVar vs) ts cs bs cls ms qvs qts qcs qcls qms [])
+    Result.ok (Env.Env home (Map.map infoToVar vs) ts cs bs cls ms qvs qts qcs qcls qms [] (importedMeasures ifaces))
+
+-- | Every imported module's measures (geng-lang @m4-refine-t1.md@ TO14),
+-- whether or not the import exposes them, as a predicate names a measure by
+-- its module: each with whether it answers a 'Bool'.
+importedMeasures :: Map.Map ModuleName.Raw I.Interface -> Map.Map (ModuleName.Canonical, Name.Name) (Bool, Maybe Name.Name)
+importedMeasures ifaces =
+  Map.fromList
+    [ ((ModuleName.Canonical (I._home iface) raw, name), (maybe False answersBool (Map.lookup name (I._values iface)), Nothing))
+    | (raw, iface) <- Map.toList ifaces,
+      name <- Set.toList (I._measures iface)
+    ]
+
+-- | Whether a function's annotation answers a 'Bool'.
+answersBool :: Can.Annotation -> Bool
+answersBool (Can.Forall _ tipe) =
+  case final tipe of
+    Can.TType home name [] -> home == ModuleName.basics && name == Name.bool
+    _ -> False
+  where
+    final t =
+      case t of
+        Can.TLambda _ result -> final result
+        _ -> t
 
 infoToVar :: Env.Info Can.Annotation -> Env.Var
 infoToVar info =
@@ -83,7 +107,7 @@ isNormal (Src.Import (A.At _ name) maybeAlias _ _ _) =
 
 addImport :: Map.Map ModuleName.Raw I.Interface -> State -> Src.Import -> Result i w State
 addImport ifaces (State vs ts cs bs cls ms qvs qts qcs qcls qms) (Src.Import (A.At _ name) maybeAlias exposing _ _) =
-  let (I.Interface pkg defs unions aliases binops iClasses _ _) = ifaces ! name
+  let (I.Interface pkg defs unions aliases binops iClasses _ _ _) = ifaces ! name
       !prefix = maybe name id (fmap fst maybeAlias)
       !home = ModuleName.Canonical pkg name
 

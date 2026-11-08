@@ -293,7 +293,22 @@ operand =
                     (arg, argEnd) <- operand
                     return (A.at start argEnd (Src.Call func [(comments, arg)]), argEnd)
               | otherwise ->
-                  predicateFields start func end
+                  -- A name followed by a name is a call: a measure of the
+                  -- program's own, written bare in its module or exposed by
+                  -- an import, @size t@ (geng-lang @m4-refine-t1.md@ TO14).
+                  -- Looked at first, so that a name followed by an operator
+                  -- or the predicate's end is a name, as before.
+                  do
+                    called <- oneOfWithFallback [lookAhead (Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisPredicate >> Var.lower E.TParenthesisPredicate) >> return True] False
+                    if called
+                      then do
+                        comments <- Space.chompAndCheckIndent E.TParenthesisSpace E.TParenthesisPredicate
+                        argStart <- getPosition
+                        argName <- Var.lower E.TParenthesisPredicate
+                        nameEnd <- getPosition
+                        (arg, argEnd) <- predicateFields argStart (A.at argStart nameEnd (Src.Var Src.LowVar argName)) nameEnd
+                        return (A.at start argEnd (Src.Call func [(comments, arg)]), argEnd)
+                      else predicateFields start func end
             Src.Var Src.CapVar name
               | name == Name.fromChars "True" || name == Name.fromChars "False" ->
                   return (func, end)

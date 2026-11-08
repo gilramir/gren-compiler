@@ -44,6 +44,10 @@ data Decl
     -- collects for the inliner. Only @core@ may write one, which
     -- canonicalization checks, as it does for @\@prim@.
     Inline (Maybe Src.DocComment) (A.Located Src.Value)
+  | -- | A value declaration under @\@measure@ (geng-lang @m4-refine-t1.md@
+    -- TO14, Dnene17): an ordinary value, and a name "Parse.Module" collects;
+    -- canonicalization holds it to a measure's rules.
+    Measure (Maybe Src.DocComment) (A.Located Src.Value)
   | -- | A custom type under @\@affine@ (geng-lang @m4-own.md@ D921): an
     -- ordinary custom type, and a name "Parse.Module" collects for Core.
     Affine (Maybe Src.DocComment) (A.Located Src.Union)
@@ -106,6 +110,18 @@ declaration =
                 _ -> inlineNotOnValue start,
             inlineNotOnValue start
           ]
+      Just MeasureAttribute ->
+        -- An annotated value and nothing else, as after `@inline`: a
+        -- measure's annotation says what it measures and what it answers.
+        oneOf
+          E.DeclStart
+          [ do
+              ((decl, comments), end) <- valueDecl maybeDocs start
+              case decl of
+                Value docs value@(A.At _ (Src.Value _ _ _ (Just _) _)) -> return ((Measure docs value, comments), end)
+                _ -> measureNotOnValue start,
+            measureNotOnValue start
+          ]
       Just AffineAttribute ->
         -- A custom type and nothing else (D944): a record is affine by its
         -- fields, so a type alias has nothing to declare, and a value is not a
@@ -149,6 +165,9 @@ data Attribute
   | -- | @\@affine@, bare, on a custom type whose values are used at most once
     -- (geng-lang @m4-own.md@ D921).
     AffineAttribute
+  | -- | @\@measure@, bare, on a value a refinement's predicate may call
+    -- (geng-lang @m4-refine-t1.md@ TO14).
+    MeasureAttribute
 
 chompAttribute :: Parser E.Decl (Maybe Attribute)
 chompAttribute =
@@ -165,6 +184,8 @@ chompAttribute =
             then Just InlineAttribute <$ chompBareAttributeEnd
             else if name == Name.fromChars "affine"
             then Just AffineAttribute <$ chompBareAttributeEnd
+            else if name == Name.fromChars "measure"
+            then Just MeasureAttribute <$ chompBareAttributeEnd
             else
               if name == Name.fromChars "prim"
                 then Just . Prim <$> chompPrimArg
@@ -353,6 +374,11 @@ affineNotOnCustomType :: A.Position -> Space.Parser E.Decl (Decl, [Src.Comment])
 affineNotOnCustomType (A.Position row col) =
   P.Parser $ \_ _ _ cerr _ ->
     cerr row col (E.DeclAttribute (E.AttributeAffineNotOnCustomType row col))
+
+measureNotOnValue :: A.Position -> Space.Parser E.Decl (Decl, [Src.Comment])
+measureNotOnValue (A.Position row col) =
+  P.Parser $ \_ _ _ cerr _ ->
+    cerr row col (E.DeclAttribute (E.AttributeMeasureNotOnValue row col))
 
 inlineNotOnValue :: A.Position -> Space.Parser E.Decl (Decl, [Src.Comment])
 inlineNotOnValue (A.Position row col) =

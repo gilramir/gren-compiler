@@ -6,6 +6,7 @@ module Reporting.Error.Canonicalize
     DuplicatePatternContext (..),
     PossibleNames (..),
     RefinementPlace (..),
+    MeasureRule (..),
     TakenPlace (..),
     VarKind (..),
     toReport,
@@ -66,6 +67,9 @@ data Error
   | RefinementNotCore A.Region Name.Name
   | RefinementNonlinear A.Region
   | RefinementComparesConditions A.Region
+  | -- | A @\@measure@ that breaks one of its rules (geng-lang
+    -- @m4-refine-t1.md@ TO14): where, the measure's name, and the rule.
+    MeasureBroken A.Region Name.Name MeasureRule
   | ConstraintNotAClass A.Region Name.Name
   | ConstraintVarUnbound A.Region Name.Name Name.Name
   | DeriveComponentIsFunction A.Region Name.Name Int [Name.Name]
@@ -146,6 +150,15 @@ data RefinementPlace
 
 -- | Where @taken@ was written that is not an argument of a signature's own
 -- arrows (geng-lang @m4-own.md@ D943).
+-- | The rule a @\@measure@ breaks (geng-lang @m4-refine-t1.md@ TO14).
+data MeasureRule
+  = MeasureArgument
+  | MeasureNotOwnType
+  | MeasureAnswer
+  | MeasureTerm
+  | MeasureRecursion
+  deriving (Show)
+
 data TakenPlace
   = TakenOnResult
   | TakenInCallback
@@ -556,9 +569,9 @@ toReport source err =
           region
           Nothing
           ( D.reflow $
-              "This refinement calls `" ++ Name.toChars prefix ++ "." ++ Name.toChars name ++ "`, which is not one of core's measures:",
+              "This refinement calls `" ++ (if Name.toChars prefix == "" then "" else Name.toChars prefix ++ ".") ++ Name.toChars name ++ "`, which is not a measure here:",
             D.reflow $
-              "A refinement may apply only `Array.length`, `Array.Builder.length`, `Bytes.length`, `Bytes.Owned.length`, `String.count`, `Dict.count`, `Set.count`, `Maybe.isJust` and `Result.isOk`, each to a name or a name's field, so that the checker knows what each means."
+              "A refinement may apply only a measure, each to a name or a name's field, so that the checker knows what each means: core's `Array.length`, `Array.Builder.length`, `Bytes.length`, `Bytes.Owned.length`, `String.count`, `Dict.count`, `Set.count`, `Maybe.isJust` and `Result.isOk`, or a function declared `@measure`, applied to the type it measures."
           )
     RefinementNoSuchField region record field fields ->
       Report.Report "NO SUCH FIELD IN A REFINEMENT" region [] $
@@ -584,6 +597,17 @@ toReport source err =
               "This refinement uses `" ++ Name.toChars name ++ "`, and it does not name core's:",
             D.reflow $
               "In a refinement, `not`, `True`, `False` and the operators mean what core's Basics defines, since the checker reads them as that. Make sure nothing in this module hides them."
+          )
+    MeasureBroken region name rule ->
+      Report.Report "NOT A MEASURE" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "`" ++ Name.toChars name ++ "` is declared `@measure`, and " ++ measureProblem rule,
+            D.reflow $
+              measureRuleText rule
           )
     RefinementComparesConditions region ->
       Report.Report "COMPARED CONDITIONS" region [] $
@@ -2004,3 +2028,27 @@ commaList items =
     [] -> ""
     [one] -> one
     final : rest -> List.intercalate ", " (reverse rest) ++ " and " ++ final
+
+
+measureProblem :: MeasureRule -> String
+measureProblem rule =
+  case rule of
+    MeasureArgument -> "it does not take one argument by name:"
+    MeasureNotOwnType -> "the type it measures is not declared in this module:"
+    MeasureAnswer -> "it does not answer an `Int` or a `Bool`:"
+    MeasureTerm -> "this is not something a refinement can say:"
+    MeasureRecursion -> "it calls itself here:"
+
+measureRuleText :: MeasureRule -> String
+measureRuleText rule =
+  case rule of
+    MeasureArgument ->
+      "A measure takes one argument, named in its definition, `size tree = ...`, so that the checker can read its body with that argument's value."
+    MeasureNotOwnType ->
+      "A measure is declared in the module of the type it measures, a custom type or a record alias, so that what it says is known wherever that type is matched."
+    MeasureAnswer ->
+      "A measure answers an `Int`, which a refinement compares, or a `Bool`, which is a condition."
+    MeasureTerm ->
+      "A measure's body is one `when` over its argument whose every branch is a refinement's term, or such a term over the argument itself: an `Int`, `True`, `False`, a name the pattern binds or its field, a measure applied to one, `not`, and the arithmetic and comparisons a refinement may use."
+    MeasureRecursion ->
+      "A measure may not call itself yet: a recursive measure, a tree's size, is a later step."

@@ -736,6 +736,7 @@ moduleEnc m =
     <> rep 17 aliasEnc (_moduleAliases m)
     <> rep 18 signatureEnc (_moduleSignatures m)
     <> rep 19 binderEnc (_moduleTyped m)
+    <> repQual 20 (_moduleMeasures m)
 
 -- | A signature that names an argument or its result (D824): the
 -- definition's binder, then each name. Nothing here is inside an 'Expr', so

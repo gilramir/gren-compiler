@@ -457,12 +457,26 @@ checkerReads cores =
           sig <- Core._moduleSignatures m,
           Core._sigBinder sig `elem` binders
         ]
+    -- A measure's body, which the checker unfolds where a predicate calls
+    -- it, and so what the body calls (geng-lang @m4-refine-t1.md@ TO14).
+    measureBodies =
+      Map.fromList
+        [ (q, refsOf (Core._bindValue b))
+        | m <- Map.elems others,
+          let home = Core._moduleName m,
+          b <- Core._moduleDefs m,
+          let q = Core.QualName home (Core._binderName (Core._bindBinder b)),
+          q `elem` Core._moduleMeasures m
+        ]
     close seen frontier
       | Set.null frontier = seen
       | otherwise =
           let seen' = Set.union seen frontier
               next =
-                Set.unions [predicateRefs sig | q <- Set.toList frontier, Just sig <- [Map.lookup q topSignatures]]
+                Set.unions
+                  ( [predicateRefs sig | q <- Set.toList frontier, Just sig <- [Map.lookup q topSignatures]]
+                      ++ [refs | q <- Set.toList frontier, Just refs <- [Map.lookup q measureBodies]]
+                  )
            in close seen' (Set.difference next seen')
     needed = close Set.empty start
     cut m =
@@ -479,6 +493,7 @@ checkerReads cores =
                     Core._moduleDefsRec = filter (not . null) (map (filter named) (Core._moduleDefsRec m)),
                     Core._moduleExports = filter named (Core._moduleExports m),
                     Core._moduleInline = filter named (Core._moduleInline m),
+                    Core._moduleMeasures = filter named (Core._moduleMeasures m),
                     Core._moduleExterns = filter (named . Core.QualName home . Core._binderName . Core._externBinder) (Core._moduleExterns m),
                     Core._moduleSignatures = [sig | sig <- Core._moduleSignatures m, Core._sigBinder sig `elem` binders],
                     -- the ownership checker's, which the refinement checker does not read

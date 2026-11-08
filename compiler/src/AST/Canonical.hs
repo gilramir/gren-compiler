@@ -416,7 +416,11 @@ data Module = Module
     -- refined fields, with that refinement: the constructor's contract, which
     -- lowering gives its Core constructor for the refinement checker
     -- (geng-lang @m4-refine-t1.md@ TO13).
-    _ctorRefinements :: Map.Map Name AliasRefinement
+    _ctorRefinements :: Map.Map Name AliasRefinement,
+    -- | The values declared under @\@measure@ (geng-lang @m4-refine-t1.md@
+    -- TO14), held to a measure's rules: lowering lists them in Core for the
+    -- refinement checker, and the interface for an importer's predicates.
+    _measures :: Set.Set Name
   }
   deriving (Show)
 

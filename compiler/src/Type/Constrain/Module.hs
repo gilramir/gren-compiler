@@ -15,7 +15,7 @@ import Type.Type (Constraint (..))
 -- CONSTRAIN
 
 constrain :: Can.Module -> IO Constraint
-constrain (Can.Module _ _ _ decls unions _ _ instances _ _ _ _ _ ctorRefinements) =
+constrain (Can.Module _ _ _ decls unions _ _ instances _ _ _ _ _ ctorRefinements _) =
   do
     inner <- constrainInstances instances
     contracts <- constrainCtorRefinements unions ctorRefinements

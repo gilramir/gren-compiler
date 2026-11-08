@@ -60,7 +60,10 @@ data Interface = Interface
     -- | The exposed values declared under @\@capability@ (D258,
     -- @m1b-source.md@ §SO12.4), which an importer outside '_home' may refer to
     -- only if it is the application's.
-    _capabilities :: Set.Set Name.Name
+    _capabilities :: Set.Set Name.Name,
+    -- | The exposed values declared under @\@measure@ (geng-lang
+    -- @m4-refine-t1.md@ TO14), which an importer's predicates may call.
+    _measures :: Set.Set Name.Name
   }
   deriving (Eq, Show)
 
@@ -99,7 +102,7 @@ data Binop = Binop
 -- FROM MODULE
 
 fromModule :: Pkg.Name -> Map.Map ModuleName.Raw Interface -> Can.Module -> Map.Map Name.Name Can.Annotation -> Interface
-fromModule home imports (Can.Module _ exports _ _ unions aliases classes instances binops _ capabilities _ _ _) annotations =
+fromModule home imports (Can.Module _ exports _ _ unions aliases classes instances binops _ capabilities _ _ _ measures) annotations =
   Interface
     { _home = home,
       _values = restrict exports annotations,
@@ -111,7 +114,8 @@ fromModule home imports (Can.Module _ exports _ _ unions aliases classes instanc
         Map.union
           (Map.map Can._in_head instances)
           (Map.unions (map _instances (Map.elems imports))),
-      _capabilities = Map.keysSet (restrict exports (Map.fromSet id capabilities))
+      _capabilities = Map.keysSet (restrict exports (Map.fromSet id capabilities)),
+      _measures = Map.keysSet (restrict exports (Map.fromSet id measures))
     }
 
 restrict :: Can.Exports -> Map.Map Name.Name a -> Map.Map Name.Name a
@@ -240,7 +244,7 @@ public =
   Public
 
 private :: Interface -> DependencyInterface
-private (Interface pkg _ unions aliases _ _ _ _) =
+private (Interface pkg _ unions aliases _ _ _ _ _) =
   Private pkg (Map.map extractUnion unions) (Map.map extractAlias aliases)
 
 extractUnion :: Union -> Can.Union
@@ -265,8 +269,8 @@ privatize di =
 -- BINARY
 
 instance Binary Interface where
-  get = Interface <$> get <*> get <*> get <*> get <*> get <*> get <*> get <*> get
-  put (Interface a b c d e f g h) = put a >> put b >> put c >> put d >> put e >> put f >> put g >> put h
+  get = Interface <$> get <*> get <*> get <*> get <*> get <*> get <*> get <*> get <*> get
+  put (Interface a b c d e f g h i) = put a >> put b >> put c >> put d >> put e >> put f >> put g >> put h >> put i
 
 instance Binary Union where
   put union =

@@ -266,12 +266,15 @@ data Module = Module
     _inlines :: [A.Located Name],
     -- | The custom types declared under @\@affine@ (geng-lang @m4-own.md@
     -- D921): a value of one is used at most once.
-    _affines :: [A.Located Name]
+    _affines :: [A.Located Name],
+    -- | The values declared under @\@measure@ (geng-lang @m4-refine-t1.md@
+    -- TO14): functions a refinement's predicate may call.
+    _measures :: [A.Located Name]
   }
   deriving (Show)
 
 getName :: Module -> Name
-getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _ _ _ _) =
+getName (Module maybeName _ _ _ _ _ _ _ _ _ _ _ _ _ _ _) =
   case maybeName of
     Just (A.At _ name) ->
       name

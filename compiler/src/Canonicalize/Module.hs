@@ -17,6 +17,7 @@ import Canonicalize.Environment.Local qualified as Local
 import Canonicalize.Expression qualified as Expr
 import Canonicalize.Implicit qualified as Implicit
 import Canonicalize.Instance qualified as Instance
+import Canonicalize.Measure qualified as Measure
 import Canonicalize.Pattern qualified as Pattern
 import Canonicalize.Type qualified as Type
 import Control.Monad (foldM)
@@ -48,7 +49,7 @@ type Result i w a =
 -- MODULES
 
 canonicalize :: Pkg.Name -> Map.Map ModuleName.Raw I.Interface -> Src.Module -> Result i [W.Warning] Can.Module
-canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ capabilities inlines affines) =
+canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourceOrder classes instances unions _ (_, binops) _ _ capabilities inlines affines measures) =
   do
     checkClassesAreFirstParty pkg (fmap snd classes)
     checkInlinesAreCore pkg inlines
@@ -59,9 +60,16 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
 
     (env, cunions, caliases, cclasses, ctorRefinements) <-
       Local.add modul
+        . withOwnMeasures home measures values
         =<< Foreign.createInitialEnv home ifaces (fmap snd imports)
 
     cvalues <- canonicalizeValues env values
+    Measure.check
+      home
+      (\h n -> (h, n) `elem` Type.measures || Map.member (h, n) (Env._measures env))
+      Type.operators
+      (Set.fromList (map A.toValue measures))
+      cvalues
     cexports <- canonicalizeExports values cunions caliases cclasses cbinops exports
 
     -- Derived instances first, so that a hand-written one for the same type and
@@ -86,7 +94,50 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
 
     checkClosedClassesCovered home (fmap snd classes) cclasses cinstances
 
-    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities)) (Set.fromList (map A.toValue inlines)) (Set.fromList (map A.toValue affines)) ctorRefinements
+    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities)) (Set.fromList (map A.toValue inlines)) (Set.fromList (map A.toValue affines)) ctorRefinements (Set.fromList (map A.toValue measures))
+
+-- | This module's own measures, in the environment its predicates are read
+-- in (geng-lang @m4-refine-t1.md@ TO14): each with whether its annotation
+-- answers a 'Bool', read from the annotation as written, since its rules are
+-- checked once its definition is canonical.
+withOwnMeasures :: ModuleName.Canonical -> [A.Located Name.Name] -> [A.Located Src.Value] -> Env.Env -> Env.Env
+withOwnMeasures home measures values env =
+  let named = Set.fromList (map A.toValue measures)
+      own =
+        Map.fromList
+          [ ((home, name), maybe (False, Nothing) (\(Src.Annotation _ tipe _) -> (writesBool tipe, measuredName tipe)) annotation)
+            | A.At _ (Src.Value (A.At _ name) _ _ annotation _) <- values,
+              Set.member name named
+          ]
+   in env {Env._measures = Map.union own (Env._measures env)}
+
+-- | The name of the type a measure's annotation measures, as written: its
+-- first argument's.
+measuredName :: Src.Type -> Maybe Name.Name
+measuredName (A.At _ tipe) =
+  case tipe of
+    Src.TLambda arg _ _ -> typeName arg
+    Src.TParens inner _ -> measuredName inner
+    _ -> Nothing
+  where
+    typeName (A.At _ t) =
+      case t of
+        Src.TType _ name _ -> Just name
+        Src.TTypeQual _ _ name _ -> Just name
+        Src.TParens inner _ -> typeName inner
+        Src.TNamed _ _ inner _ -> typeName inner
+        _ -> Nothing
+
+-- | Whether a type as written answers a 'Bool': its last arrow's result.
+writesBool :: Src.Type -> Bool
+writesBool (A.At _ tipe) =
+  case tipe of
+    Src.TLambda _ result _ -> writesBool result
+    Src.TParens inner _ -> writesBool inner
+    Src.TNamed _ _ inner _ -> writesBool inner
+    Src.TType _ name [] -> name == Name.bool
+    Src.TTypeQual _ _ name [] -> name == Name.bool
+    _ -> False
 
 -- | Every member of a closed class this module declares has an instance here.
 --

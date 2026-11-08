@@ -8,6 +8,8 @@ module Canonicalize.Type
     canonicalizeVariantArg,
     addFreeVars,
     equatesConditions,
+    measures,
+    operators,
   )
 where
 
@@ -906,24 +908,51 @@ canonicalizePredicate env scope (A.At region expression) =
                      in Result.ok (Can.at region (Can.Call (Can.at funcRegion (Can.VarForeign (Env._home env) name annotation)) [carg]))
               _ ->
                 Result.throw (Error.RefinementNotMeasure funcRegion prefix name)
+    Src.Call (A.At funcRegion (Src.Var Src.LowVar name)) [(_, arg)]
+      | isPath arg,
+        Just (Env.TopLevel _) <- Map.lookup name (Env._vars env),
+        Just (answersBool, measured) <- Map.lookup (Env._home env, name) (Env._measures env) ->
+          -- This module's own measure, by its own name (geng-lang
+          -- @m4-refine-t1.md@ TO14), made a foreign reference typed from its
+          -- argument as `core`'s own are above, and held to the type it
+          -- measures by name, since nothing else checks that type here.
+          do
+            (carg, argType) <- predicatePath scope arg
+            if measures_ (Env._home env) measured argType
+              then
+                let answer = if answersBool then Name.bool else Name.int
+                    annotation = Can.Forall Map.empty (Can.TLambda argType (Can.TType ModuleName.basics answer []))
+                 in Result.ok (Can.at region (Can.Call (Can.at funcRegion (Can.VarForeign (Env._home env) name annotation)) [carg]))
+              else Result.throw (Error.RefinementNotMeasure funcRegion (Name.fromChars "") name)
     Src.Call (A.At funcRegion (Src.Var Src.LowVar name)) [(_, arg)] ->
       do
-        func <-
-          case Map.lookup name (Env._vars env) of
-            Just (Env.Foreign home annotation)
-              | home == ModuleName.basics ->
-                  Result.ok (Can.at funcRegion (Can.VarForeign home name annotation))
-            _ ->
-              Result.throw (Error.RefinementNotCore funcRegion name)
-        carg <- canonicalizePredicate env scope arg
-        Result.ok (Can.at region (Can.Call func [carg]))
+        case Map.lookup name (Env._vars env) of
+          Just (Env.Foreign home annotation)
+            | home == ModuleName.basics ->
+                do
+                  carg <- canonicalizePredicate env scope arg
+                  Result.ok (Can.at region (Can.Call (Can.at funcRegion (Can.VarForeign home name annotation)) [carg]))
+            | Map.member (home, name) (Env._measures env),
+              isPath arg ->
+                -- An imported measure the import exposes (TO14).
+                do
+                  (carg, _) <- predicatePath scope arg
+                  Result.ok (Can.at region (Can.Call (Can.at funcRegion (Can.VarForeign home name annotation)) [carg]))
+            | otherwise ->
+                -- An imported function that is no measure.
+                Result.throw (Error.RefinementNotMeasure funcRegion (ModuleName._module home) name)
+          Just (Env.TopLevel _) ->
+            -- This module's own function, not declared `@measure` (TO14).
+            Result.throw (Error.RefinementNotMeasure funcRegion (Name.fromChars "") name)
+          _ ->
+            Result.throw (Error.RefinementNotCore funcRegion name)
     Src.Call (A.At funcRegion (Src.VarQual Src.LowVar prefix name)) [(_, arg)]
       | isPath arg ->
       do
         func <-
           case Map.lookup name =<< Map.lookup prefix (Env._q_vars env) of
             Just (Env.Specific home annotation)
-              | (home, name) `elem` measures ->
+              | (home, name) `elem` measures || Map.member (home, name) (Env._measures env) ->
                   Result.ok (Can.at funcRegion (Can.VarForeign home name annotation))
             _ ->
               Result.throw (Error.RefinementNotMeasure funcRegion prefix name)
@@ -1000,6 +1029,16 @@ isInt :: Can.Type -> Bool
 isInt tipe =
   case Type.iteratedDealias tipe of
     Can.TType home name [] -> home == ModuleName.basics && name == Name.int
+    _ -> False
+
+-- | Whether a type is the one a module's own measure measures, by the name
+-- its annotation writes (geng-lang @m4-refine-t1.md@ TO14): a custom type or
+-- a record alias the module declares.
+measures_ :: ModuleName.Canonical -> Maybe Name.Name -> Can.Type -> Bool
+measures_ home measured tipe =
+  case (measured, tipe) of
+    (Just name, Can.TType typeHome typeName _) -> typeHome == home && typeName == name
+    (Just name, Can.TAlias typeHome typeName _ _) -> typeHome == home && typeName == name
     _ -> False
 
 -- | Whether a measure's own module may apply it to a type: its own, or, for

@@ -455,7 +455,12 @@ data Module = Module
     -- sorted by where it starts (geng-lang @m4-own.md@ D920, §OW28): the
     -- ownership checker holds such a definition's affine parameters to the
     -- signature's @taken@ marks, and infers the rest. No pass reads them.
-    _moduleTyped :: ![Binder]
+    _moduleTyped :: ![Binder],
+    -- | The bindings declared @\@measure@, sorted by name (geng-lang
+    -- @m4-refine-t1.md@ TO14): functions a refinement's predicate may call,
+    -- which the refinement checker unfolds where one is called. No pass reads
+    -- them.
+    _moduleMeasures :: ![QualName]
   }
   deriving (Eq, Show)
 

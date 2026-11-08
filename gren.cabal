@@ -114,6 +114,7 @@ Library common
         Canonicalize.Expression
         Canonicalize.Implicit
         Canonicalize.Instance
+        Canonicalize.Measure
         Canonicalize.Module
         Canonicalize.NodeId
         Canonicalize.Pattern

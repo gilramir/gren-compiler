@@ -1005,6 +1005,15 @@ moduleBodyP =
     if not (strictlyAscending (map (spanStart . _binderSpan) typed))
       then failAt typedAt "typed is not sorted by where each binder starts, or has two that start together"
       else pure ()
+    measuresAt <- offset
+    measures <- repQual "measures" 20
+    case [q | q@(QualName home n) <- measures, home /= name || not (Set.member n bound)] of
+      [] -> pure ()
+      QualName home n : _ ->
+        failAt measuresAt ("measures names " ++ Name.toChars (ModuleName._module home) ++ "." ++ Name.toChars n ++ ", which is not a binding of this module")
+    if List.sort measures /= measures || length (List.nub measures) /= length measures
+      then failAt measuresAt "measures is not sorted by name, or names one binding twice"
+      else pure ()
     pure
       Module
         { _moduleName = name,
@@ -1020,7 +1029,8 @@ moduleBodyP =
           _moduleInline = inline,
           _moduleAliases = aliases,
           _moduleSignatures = signatures,
-          _moduleTyped = typed
+          _moduleTyped = typed,
+          _moduleMeasures = measures
         }
 
 -- | A signature (D824): its binder, then at least one name, in the order

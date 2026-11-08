@@ -189,6 +189,7 @@ modul defs =
       Core._moduleExports = [],
       Core._moduleExterns = [],
       Core._moduleInline = [],
+      Core._moduleMeasures = [],
       Core._moduleAliases = [],
       Core._moduleSignatures = [],
       Core._moduleTyped = []
