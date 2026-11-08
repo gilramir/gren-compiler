@@ -71,12 +71,12 @@ addOwnBinops module_ classes env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qc
         signatures =
           Map.fromList
             [ (name, annotation)
-              | (_, A.At _ (Src.Value (A.At _ name) _ _ (Just annotation) _)) <- Src._values module_
+            | (_, A.At _ (Src.Value (A.At _ name) _ _ (Just annotation) _)) <- Src._values module_
             ]
         method func =
           case [ (className, param, annotation)
-                 | (className, Can.ClassDecl param methods) <- Map.toList classes,
-                   Just annotation <- [Map.lookup func methods]
+               | (className, Can.ClassDecl param methods) <- Map.toList classes,
+                 Just annotation <- [Map.lookup func methods]
                ] of
             found : _ -> Just found
             [] -> Nothing
@@ -100,20 +100,22 @@ addOwnBinops module_ classes env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qc
 
 -- | Each refined alias of the module with its predicate read, now that the
 -- scope holds what a predicate reads (D872).
+--
+-- They are read in the order of what each names, as 'addAliases' adds them,
+-- each into the scope the next is read in: a record alias with a refined
+-- alias for a field reads that alias's predicate (geng-lang
+-- @m4-refine-t1.md@ TO15, Dnene21), which must be its own and not the first
+-- pass's placeholder.
 refineAliases :: Src.Module -> Env.Env -> Result i w Env.Env
-refineAliases module_ env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs mss) =
-  let refined (A.At _ (Src.Alias (A.At _ name) args tipe)) =
+refineAliases module_ env0 =
+  let refined env@(Env.Env home vs ts cs bs cls ms qvs qts qcs qcls qms sigs mss) (A.At _ (Src.Alias (A.At _ name) args tipe)) =
         do
           (ctype, refinement) <- Type.canonicalizeAliasBody True env name tipe
           Result.ok $
             case refinement of
-              Just _ -> [(name, Env.Specific home (Env.Alias (length args) home (map A.toValue args) ctype refinement))]
-              Nothing -> []
-   in do
-        found <- concat <$> traverse refined (fmap snd (Src._aliases module_))
-        if null found
-          then Result.ok env
-          else Result.ok (Env.Env home vs (foldr (uncurry Map.insert) ts found) cs bs cls ms qvs qts qcs qcls qms sigs mss)
+              Just _ -> Env.Env home vs (Map.insert name (Env.Specific home (Env.Alias (length args) home (map A.toValue args) ctype refinement)) ts) cs bs cls ms qvs qts qcs qcls qms sigs mss
+              Nothing -> env
+   in foldM refined env0 (Graph.flattenSCCs (Graph.stronglyConnComp (map toNode (fmap snd (Src._aliases module_)))))
 
 -- ADD VARS
 

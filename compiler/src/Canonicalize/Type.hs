@@ -15,18 +15,18 @@ where
 
 import AST.Canonical qualified as Can
 import AST.Source qualified as Src
+import AST.SourceComments qualified as SC
 import AST.Utils.Type qualified as Type
 import Canonicalize.Binops qualified as Binops
 import Canonicalize.Environment qualified as Env
 import Canonicalize.Environment.Dups qualified as Dups
 import Canonicalize.NodeId qualified as NodeId
 import Control.Monad (foldM)
+import Data.Char qualified as Char
 import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Maybe qualified as Maybe
-import Data.Char qualified as Char
 import Data.Name qualified as Name
-import AST.SourceComments qualified as SC
 import Gren.ModuleName qualified as ModuleName
 import Gren.Package qualified as Pkg
 import Reporting.Annotation qualified as A
@@ -158,11 +158,48 @@ refuseRefined place region name (tipe, refinement) =
 -- no meaning, and 'Canonicalize.Environment.Local' reads each predicate once
 -- the scope is complete.
 canonicalizeAliasBody :: Bool -> Env.Env -> Name.Name -> Src.Type -> Result i w (Can.Type, Maybe Can.AliasRefinement)
-canonicalizeAliasBody readPredicate env alias srcType@(A.At region tipe) =
+canonicalizeAliasBody readPredicate env alias srcType =
+  do
+    -- An alias of a refined alias is that alias, its predicate and its
+    -- name: @type alias Term = State.Term@ re-exports it (Dnene21).
+    same <- refinedAliasAt env srcType
+    nested <- maybe (hasRefinedField env srcType) (const (Result.ok False)) same
+    case same of
+      Just (ctype, refinement) -> Result.ok (ctype, Just refinement)
+      Nothing -> recordOrPlain readPredicate env alias srcType nested
+
+recordOrPlain :: Bool -> Env.Env -> Name.Name -> Src.Type -> Bool -> Result i w (Can.Type, Maybe Can.AliasRefinement)
+recordOrPlain readPredicate env alias srcType nested =
+  do
+    if nested
+      then do
+        refined <- recordRefinementAs readPredicate (Just (lowerFirst alias)) env srcType
+        case refined of
+          Just (ctype, refinement) -> Result.ok (ctype, Just refinement)
+          Nothing -> aliasBody readPredicate env alias srcType
+      else aliasBody readPredicate env alias srcType
+
+-- | Whether an alias's body is a closed record one of whose fields is a
+-- refined alias, or a record that is one (geng-lang @m4-refine-t1.md@ TO15,
+-- Dnene21): @type alias Term = { screen : Screen, ... }@ is then refined, its
+-- predicate each such field's, read through the field, as a signature's
+-- record is (Dnene14), named after the alias.
+hasRefinedField :: Env.Env -> Src.Type -> Result i w Bool
+hasRefinedField env (A.At _ tipe) =
+  case tipe of
+    Src.TParens inner _ ->
+      hasRefinedField env inner
+    Src.TRecord fields Nothing ->
+      or <$> traverse (\field -> let (_, fieldType, _) = withoutWhere field in Maybe.isJust <$> refinedPositionAt env fieldType) fields
+    _ ->
+      Result.ok False
+
+aliasBody :: Bool -> Env.Env -> Name.Name -> Src.Type -> Result i w (Can.Type, Maybe Can.AliasRefinement)
+aliasBody readPredicate env alias srcType@(A.At region tipe) =
   case tipe of
     Src.TParens inner _
       | isNamed inner ->
-          canonicalizeAliasBody readPredicate env alias inner
+          aliasBody readPredicate env alias inner
     -- A record with predicates on its fields (Dnene15) is the whole-record
     -- form: named as the alias names it, lowercased, or as the name written
     -- around it, and its fields' predicates joined to the one written there.
@@ -294,9 +331,9 @@ checkBody (Signature _ _ _ defName unread) body =
     else
       let nestedReads =
             [ A.toValue (Can._enc_name e)
-              | r <- NodeId.exprRefinements body,
-                e <- Can._ref_enclosing r,
-                Can._enc_def e == defName
+            | r <- NodeId.exprRefinements body,
+              e <- Can._ref_enclosing r,
+              Can._enc_def e == defName
             ]
        in traverse_
             ( \(A.At region name) ->
@@ -393,10 +430,19 @@ refinedPositionAt env srcType =
 -- is named as its first refined field's alias names its value, as a bare
 -- alias is.
 recordRefinement :: Env.Env -> Src.Type -> Result i w (Maybe (Can.Type, Can.AliasRefinement))
-recordRefinement env (A.At region tipe) =
+recordRefinement =
+  recordRefinementAs True Nothing
+
+-- | 'recordRefinement' with the record's name given, as an alias's body has
+-- it (@term@ for @Term@, geng-lang @m4-refine-t1.md@ TO15, Dnene21), and
+-- whether the predicates written on its fields are read: an alias's first
+-- pass asks only whether it is refined, before a predicate's names are in
+-- scope, and is given the fields' own placeholders.
+recordRefinementAs :: Bool -> Maybe Name.Name -> Env.Env -> Src.Type -> Result i w (Maybe (Can.Type, Can.AliasRefinement))
+recordRefinementAs readOwn named env (A.At region tipe) =
   case tipe of
     Src.TParens inner _ ->
-      recordRefinement env inner
+      recordRefinementAs readOwn named env inner
     Src.TRecord fields ext
       | Maybe.isJust ext && any hasWhere fields ->
           -- Refused by 'canonicalize', as 'positionType' reaches it.
@@ -409,9 +455,10 @@ recordRefinement env (A.At region tipe) =
                 -- Named as its first refined field's alias names its value,
                 -- or @record@ when only its fields' own predicates refine it.
                 base =
-                  case refinedFields of
-                    (_, Can.AliasRefinement first _ _) : _ -> first
-                    [] -> Name.fromChars "record"
+                  case (named, refinedFields) of
+                    (Just name, _) -> name
+                    (Nothing, (_, Can.AliasRefinement first _ _) : _) -> first
+                    (Nothing, []) -> Name.fromChars "record"
             case (refinedFields, fieldPredicates base srcRecord) of
               ([], Nothing) ->
                 Result.ok Nothing
@@ -426,6 +473,9 @@ recordRefinement env (A.At region tipe) =
                     case written of
                       Nothing ->
                         Result.ok []
+                      Just _
+                        | not readOwn ->
+                            Result.ok [(Can.at region (Can.Int 0), "")]
                       Just (_, (predicate, text)) ->
                         do
                           let self = Named region [Can.Result] (A.At region base) recordType (Just predicate) text Nothing False Nothing
@@ -615,7 +665,7 @@ isNamed (A.At _ tipe) =
 refine :: Env.Env -> [Named] -> Result i w ([Can.Refinement], [A.Located Name.Name])
 refine env given =
   do
-    let named = distinctAliasNames (Env._signatures env) given
+    let named = distinctAliasNames (Env._signatures env) (Map.keys (Env._vars env)) given
     checkDuplicates named
     traverse_ checkTaken named
     traverse_ (checkShadows (Env._signatures env)) named
@@ -771,10 +821,13 @@ renameSource from to =
 
 -- | A refined alias written with no name of its own is named as the alias
 -- names its value, unless the signature, or one around it, already gives that
--- name; then a number is added until it is one neither gives.
-distinctAliasNames :: [Can.Enclosing] -> [Named] -> [Named]
-distinctAliasNames enclosing named =
-  let written = [A.toValue (_name n) | n <- named, not (isBare n)] ++ map (A.toValue . Can._enc_name) enclosing
+-- name, or a value in scope has it; then a number is added until it is one
+-- none of them has. A value's name is avoided because a predicate's name is
+-- read where the module's values are in scope, and @term@ for a bare @Term@
+-- would be read as a function @term@ beside it (Dnene21).
+distinctAliasNames :: [Can.Enclosing] -> [Name.Name] -> [Named] -> [Named]
+distinctAliasNames enclosing values named =
+  let written = [A.toValue (_name n) | n <- named, not (isBare n)] ++ map (A.toValue . Can._enc_name) enclosing ++ values
       isBare = _bare
       fresh taken base =
         let numbered i = if i == (1 :: Int) then base else Name.fromChars (Name.toChars base ++ show i)
@@ -948,16 +1001,16 @@ canonicalizePredicate env scope (A.At region expression) =
             Result.throw (Error.RefinementNotCore funcRegion name)
     Src.Call (A.At funcRegion (Src.VarQual Src.LowVar prefix name)) [(_, arg)]
       | isPath arg ->
-      do
-        func <-
-          case Map.lookup name =<< Map.lookup prefix (Env._q_vars env) of
-            Just (Env.Specific home annotation)
-              | (home, name) `elem` measures || Map.member (home, name) (Env._measures env) ->
-                  Result.ok (Can.at funcRegion (Can.VarForeign home name annotation))
-            _ ->
-              Result.throw (Error.RefinementNotMeasure funcRegion prefix name)
-        (carg, _) <- predicatePath scope arg
-        Result.ok (Can.at region (Can.Call func [carg]))
+          do
+            func <-
+              case Map.lookup name =<< Map.lookup prefix (Env._q_vars env) of
+                Just (Env.Specific home annotation)
+                  | (home, name) `elem` measures || Map.member (home, name) (Env._measures env) ->
+                      Result.ok (Can.at funcRegion (Can.VarForeign home name annotation))
+                _ ->
+                  Result.throw (Error.RefinementNotMeasure funcRegion prefix name)
+            (carg, _) <- predicatePath scope arg
+            Result.ok (Can.at region (Can.Call func [carg]))
     Src.Binops ops final ->
       do
         tree <-
