@@ -584,7 +584,7 @@ data Expr_
   | -- | The record, the fields replaced, and whether the record is copied or
     -- written in place. Every update is 'Copy' until "Core.Pass.InPlace",
     -- the last pass, marks one whose record nothing reads after it
-    -- (geng-lang @m4-visiterm.md@ §VA17).
+    -- (geng-lang @m4-puritty.md@ §VA17).
     EUpdate !Expr ![(Field, Expr)] !Write
   | EAccess !Expr !Field
   | -- | An array literal. Primitive because array literals are surface syntax
@@ -622,7 +622,7 @@ data Expr_
   deriving (Eq, Show)
 
 -- | What a record update does to the record it is given (geng-lang
--- @m4-visiterm.md@ §VA17, D984): 'Copy' makes a new one, which is what an
+-- @m4-puritty.md@ §VA17, D984): 'Copy' makes a new one, which is what an
 -- update means; 'InPlace' writes the fields into the one it is given, which
 -- "Core.Pass.InPlace" asks for only where nothing reads that record again.
 -- A backend that cannot write a record copies it (the BEAM's tuples).

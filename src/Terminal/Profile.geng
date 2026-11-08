@@ -948,7 +948,7 @@ readNotes config =
 {-| The functions with an update that copies, and those that hand an argument
 shared to one of them: what a reason the in-place pass gave matters to. The
 pass says of every affine record handed on shared, to `phys`, which only
-reads it, as to a function that updates it (m4-visiterm.md §VA27). -}
+reads it, as to a function that updates it (m4-puritty.md §VA27). -}
 copying : Array { m : String, fn : String, row : String, why : String } -> Dict String Bool
 copying rows =
     let

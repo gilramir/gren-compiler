@@ -307,7 +307,7 @@ data BytesPrim
     BToArray
   | -- | Retired by D233, and given a type again by D1018: an @Array UInt8@'s
     -- bytes as a @Bytes@, one copy, so that a program writes bytes a piece at
-    -- a time onto an @Array.Builder UInt8@ (geng-lang @m4-visiterm.md@ §VA47).
+    -- a time onto an @Array.Builder UInt8@ (geng-lang @m4-puritty.md@ §VA47).
     BFromArray
   | -- | A bytes transient for @Bytes.Encode@ and @Bytes.flatten@, zeroed, of
     -- the given length. Its linear use is not checked (D233).
@@ -393,7 +393,7 @@ data TransientPrim
   | TrGet
   | TrLength
   | TrToArray
-  | -- | D904 and D905's four (geng-lang @m4-visiterm.md@ §VA11), __appended__
+  | -- | D904 and D905's four (geng-lang @m4-puritty.md@ §VA11), __appended__
     -- after every other primitive and not with the seven above, so that no
     -- earlier code moved. Each is one call and one handle where a loop of
     -- @push@ or @set@ was a handle an item.
@@ -412,18 +412,18 @@ data TransientPrim
     TrGenerate
   | -- | @tr_slice t lo hi@: the items from @lo@ up to @hi@ as an array, @t@
     -- left as it was: one copy where a loop of @get@ and @push@ was a call an
-    -- item (geng-lang @m4-visiterm.md@ §VA16, D978), appended after D904's and
+    -- item (geng-lang @m4-puritty.md@ §VA16, D978), appended after D904's and
     -- D905's four. Precondition: @0 <= lo <= hi <= length@.
     TrSlice
   | -- | @tr_rotate t from n by@: the @n@ items from @from@ turned @by@ places
     -- toward the start, those that pass it coming back in at the end, so that
-    -- each item is in one place afterwards (geng-lang @m4-visiterm.md@ §VA20,
+    -- each item is in one place afterwards (geng-lang @m4-puritty.md@ §VA20,
     -- D991): a region of a terminal's rows scrolled with no placeholder.
     -- Precondition: @0 <= from@, @from + n <= length@, @0 < by < n@.
     TrRotate
   | -- | @tr_append_slice t s lo hi@: @s@'s items from @lo@ up to @hi@ pushed
     -- onto @t@, @s@ left as it was: one copy where a slice and an append made
-    -- an array between them (geng-lang @m4-visiterm.md@ §VA24, D996): a
+    -- an array between them (geng-lang @m4-puritty.md@ §VA24, D996): a
     -- terminal's row trimmed onto its page. Precondition:
     -- @0 <= lo <= hi <= length s@.
     TrAppendSlice
@@ -606,7 +606,7 @@ allPrims =
     ++ map DictOp [minBound .. maxBound]
     -- Appended by D863 (m4-refine.md §RF32).
     ++ [BytesOp BtLength]
-    -- Appended by D904 and D905 (m4-visiterm.md §VA11), and after them
+    -- Appended by D904 and D905 (m4-puritty.md §VA11), and after them
     -- D983's tr_slice (§VA16), D991's tr_rotate (§VA20), D996's
     -- tr_append_slice (§VA24) and D1026's tr_drop (m4-free.md).
     ++ map TransientOp [TrFill .. TrDrop]

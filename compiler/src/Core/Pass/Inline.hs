@@ -35,7 +35,7 @@
 --   * a @let@ whose body is a case of the name it binds, which nothing else
 --     names, is the case of the bound value, evaluated where it was: what
 --     inlining @Maybe.withDefault d (get i b)@ leaves, which case-of-case
---     then reaches (geng-lang @m4-visiterm.md@ §VA26, D999);
+--     then reaches (geng-lang @m4-puritty.md@ §VA26, D999);
 --   * a case of a @let@ is the @let@ of the case, when the branches name
 --     nothing the @let@ binds, so that the two rules above reach the @case@
 --     an inlined body such as @Array.get@'s ends in, behind the @let@s it
@@ -48,13 +48,13 @@
 --     its answer, a shift only by a count in its primitive's @[0, width)@,
 --     and a top-level binding that is a literal or a nullary constructor is
 --     that, so a constant written as a mask of others is a literal too
---     (geng-lang @m4-visiterm.md@ §VA54, D1023).
+--     (geng-lang @m4-puritty.md@ §VA54, D1023).
 --   * a partial application of a global bound by a @let@ and applied at
 --     once, with every argument a value, is the one saturated call — what
 --     inlining @apR@ leaves of @x |> f a@; and one whose arguments are free
 --     of effects, applied once further in, under no lambda or join, which is
 --     what inlining a higher-order function leaves of a call that passed one
---     (@Array.Builder.update p (write a b) row@, geng-lang @m4-visiterm.md@
+--     (@Array.Builder.update p (write a b) row@, geng-lang @m4-puritty.md@
 --     §VA16, D982), and one holding a call, which is bound by a @let@ where
 --     the partial application was so that the application holds its name
 --     (§VA22, D994);
@@ -450,7 +450,7 @@ simplify ctx e =
 -- effects keeps only those fields, in order, each bound to a name made from
 -- the binding's: the structure has no effect, and what is computed for it
 -- still is, when it was. It is what a case decided by D999's fold leaves of a
--- failure record holding an @inspect@ (geng-lang @m4-visiterm.md@ §VA26).
+-- failure record holding an @inspect@ (geng-lang @m4-puritty.md@ §VA26).
 unused :: [Core.Bind] -> Core.Expr -> Maybe [Core.Bind]
 unused binds body =
   let go rest =
@@ -587,7 +587,7 @@ node ctx e@(Core.Expr value tipe sp) =
     -- A value bound once and matched at once, which is what inlining
     -- @Maybe.withDefault d (get i b)@ leaves: the case is of the value
     -- itself, evaluated where it was, so that case-of-case reaches the
-    -- constructors it is built of (geng-lang @m4-visiterm.md@ §VA26, D999).
+    -- constructors it is built of (geng-lang @m4-puritty.md@ §VA26, D999).
     -- Only when the value's type is the name's: a binder may say more than
     -- the value it is bound to does (beta's 'refine'), and a backend reads
     -- a scrutinee's shape from its type, so a case of the value would match
@@ -605,7 +605,7 @@ node ctx e@(Core.Expr value tipe sp) =
     -- so that it runs at most once. It is what inlining a higher-order
     -- function such as @Array.Builder.update@ leaves of @update p (write a b)
     -- row@: the closure bound before the bounds test, and applied in its
-    -- branch (geng-lang @m4-visiterm.md@ §VA16, D982). The arguments it holds
+    -- branch (geng-lang @m4-puritty.md@ §VA16, D982). The arguments it holds
     -- are free of effects, so moving them to the call changes nothing but
     -- when they are computed, and nothing on the way binds a name they use.
     Core.ELet [Core.Bind b bound] body
@@ -621,7 +621,7 @@ node ctx e@(Core.Expr value tipe sp) =
     -- (@Builder.fill 0 (extentAt y s) blank@): each such argument is bound
     -- by a @let@ where the partial application was, in order, so that it is
     -- computed where and when it was, and the application holds only the
-    -- names, which the rule above then moves (geng-lang @m4-visiterm.md@
+    -- names, which the rule above then moves (geng-lang @m4-puritty.md@
     -- §VA22, D994). The names are fresh, so nothing on the way binds one.
     Core.ELet [Core.Bind b bound] body
       | Just (h, earlier) <- partial bound,
@@ -1068,7 +1068,7 @@ atomic e =
 
 -- | A field of a local, or of one of its fields: substituted at each use as
 -- the local is, rather than bound to a local of its own, which would be a
--- second name for what the field holds (geng-lang @m4-visiterm.md@ §VA52).
+-- second name for what the field holds (geng-lang @m4-puritty.md@ §VA52).
 fieldOfLocal :: Core.Expr -> Bool
 fieldOfLocal e =
   case Core._exprValue e of
@@ -1182,7 +1182,7 @@ caseOf ctx e scrut alts fallback =
     -- scrutinee that may have an effect, which D999's fold can leave of a
     -- record matched field by field with wildcards: the scrutinee bound by
     -- a @let@ nothing names, which 'unused' then takes down to what of it
-    -- must still be computed (geng-lang @m4-visiterm.md@ §VA26).
+    -- must still be computed (geng-lang @m4-puritty.md@ §VA26).
     Nothing
       | [Core.Alt p body] <- alts,
         ignores (Refs.freeLocals body) p ->

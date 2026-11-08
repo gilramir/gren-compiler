@@ -96,7 +96,7 @@ spec = do
 
     it "appends D904's and D905's tr_ primitives after every code that existed" $
       -- A run, a fill, a block move and a generated push, each one handle
-      -- (geng-lang m4-visiterm.md §VA11), after `bt_length`, which did not
+      -- (geng-lang m4-puritty.md §VA11), after `bt_length`, which did not
       -- move, and apart from the seven `tr_` codes, which did not either.
       ( map (\p -> (primCode (TransientOp p), primName (TransientOp p), primArity (TransientOp p))) [TrFill .. TrDrop],
         primCode (BytesOp BtLength),

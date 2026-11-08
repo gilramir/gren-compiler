@@ -115,7 +115,7 @@
 -- only a loop that pops the last element and pushes back, which a slice
 -- leaves quadratic (D708).
 --
--- __Updates in place are last__ (D984, geng-lang @m4-visiterm.md@ §VA17): an
+-- __Updates in place are last__ (D984, geng-lang @m4-puritty.md@ §VA17): an
 -- update of an affine record whose old record nothing reads again is marked
 -- to be written into it. It needs the whole program, to know every call of a
 -- function whose parameter it writes, and the build's roots, whose callers

@@ -45,8 +45,8 @@
 --     @$n0 = s.cells@ crosses a write of @s.cells@. The inliner binds every
 --     argument that is not atomic to such a local ('Inline.bindAll'), a
 --     field among them, and a read through one, inlined from
---     'Array.Builder.get', once moved past the write (visiterm's
---     @printUnicode@, geng-lang @m4-visiterm.md@ §VA52).
+--     'Array.Builder.get', once moved past the write (puritty's
+--     @printUnicode@, geng-lang @m4-puritty.md@ §VA52).
 --
 -- The last is not relaxed for a program that never logs: the passes see every
 -- module but not the roots, so they cannot tell, and a log added in one place

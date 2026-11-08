@@ -1,7 +1,7 @@
 {-# OPTIONS_GHC -Wall #-}
 
 -- | An update of an affine record whose old record nothing reads again is
--- written into that record rather than copied (geng-lang @m4-visiterm.md@
+-- written into that record rather than copied (geng-lang @m4-puritty.md@
 -- §VA17, D984–D987). It marks the update 'Core.InPlace'; the C backend and
 -- JavaScript write the fields into the record they are given, and the BEAM,
 -- whose tuples are values, copies as before.
@@ -87,7 +87,7 @@
 -- primitive's result as its own when what it may hold is ('primHolds'), and
 -- a read of an element as a part of its container, linked and not handed on
 -- (geng-lang @m4-owned-pages.md@ D1036). The marks met these with a builder
--- of affine records, visiterm's scrollback, where taking every primitive's
+-- of affine records, puritty's scrollback, where taking every primitive's
 -- result as shared made every record that holds one shared.
 --
 -- One drop rests on the checker's word instead of this walk ('setDrops',
@@ -1148,7 +1148,7 @@ covers e p = any (`List.isPrefixOf` p) e
 -- | How deep a part may be, in steps from its value. A value of a recursive
 -- type has parts at every depth, and a loop that nests its parameter in what
 -- it hands the next time round would make its own parts one step deeper each
--- round of the fixed point, never reaching it. Three is visiterm's deepest.
+-- round of the fixed point, never reaching it. Three is puritty's deepest.
 maxPartDepth :: Int
 maxPartDepth = 3
 
@@ -1989,7 +1989,7 @@ lets env live keep e binds body =
             -- and a later mention of it is no read of its record. As an alias,
             -- @n = back.rows@ read after @takePages back@ handed the pages on
             -- made @back@ read there, and its pages dropped through the
-            -- builder @toArray@ had taken (visiterm @phase2-window.md@ §15.6).
+            -- builder @toArray@ had taken (puritty @phase2-window.md@ §15.6).
             Just (ref, steps) | _mode (_prog env) == Marks || tracks env (Core._exprType v) ->
               let p = Place (_root (_refPlace ref)) (_path (_refPlace ref) ++ steps)
                   alias = Ref p (length (_path p)) (_refTracked ref)
