@@ -18,9 +18,9 @@ spec = do
     it "has the size C13 promises" $
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
-      -- someone noticing. 216 since Dnene5's tr_new_or_crash, code 215, which
-      -- did not move it at the time (geng-lang m4-refine.md §RF41).
-      length allPrims `shouldBe` 216
+      -- someone noticing. 217 since Dnene27's bytes_span_within, code 216
+      -- (geng-lang m3-bytes-access.md §BA19).
+      length allPrims `shouldBe` 217
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -108,7 +108,7 @@ spec = do
     it "appends D1031's bo_ primitives after every code that existed" $
       -- `Bytes.Owned`'s seven (geng-lang m4-owned-pages.md §OP13), after
       -- D1026's `tr_drop`, which did not move.
-      ( map (\p -> (primCode (BytesOp p), primName (BytesOp p), primArity (BytesOp p))) [BoFromBuilder .. maxBound],
+      ( map (\p -> (primCode (BytesOp p), primName (BytesOp p), primArity (BytesOp p))) [BoFromBuilder .. BoDrop],
         primCode (TransientOp TrDrop)
       )
         `shouldBe` ([(199, "bo_from_builder", 1), (200, "bo_length", 1), (201, "bo_get_u8", 2), (202, "bo_append_to", 4), (203, "bo_take_first", 2), (204, "bo_to_bytes", 1), (205, "bo_drop", 2)], 198)
@@ -150,6 +150,12 @@ spec = do
       -- apart from the transient group, whose codes did not move.
       (primCode (TransientOp TrNewOrCrash), primName (TransientOp TrNewOrCrash), primArity (TransientOp TrNewOrCrash), primCode (TaskOp SourceDeliver), primCode (TransientOp TrDrop))
         `shouldBe` (215, "tr_new_or_crash", 1, 214, 198)
+
+    it "appends Dnene27's bytes_span_within after tr_new_or_crash" $
+      -- geng-lang m3-bytes-access.md §BA19: after Dnene5's 215, and apart
+      -- from the bytes group, whose codes did not move.
+      (primCode (BytesOp BSpanWithin), primName (BytesOp BSpanWithin), primArity (BytesOp BSpanWithin), primCode (TransientOp TrNewOrCrash), primCode (BytesOp BoDrop))
+        `shouldBe` (216, "bytes_span_within", 5, 215, 205)
 
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved

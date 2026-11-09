@@ -249,6 +249,8 @@ bytesType p =
     BoToBytes -> Just (fn [tOwned] tBytes)
     -- D1032: made only by the drop pass; no @\@prim@ declares it.
     BoDrop -> Just (fn [tOwned, Can.TVar "b"] (Can.TVar "b"))
+    -- Dnene27: bytes, lo, hi, from, stop; an index.
+    BSpanWithin -> Just (fn [tBytes, tInt, tInt, tInt, tInt] tInt)
   where
     tTransient = Can.TType ModuleName.bytesTransient "Transient" []
     tOwned = Can.TType ModuleName.bytesOwned "Owned" []

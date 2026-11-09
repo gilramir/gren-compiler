@@ -562,6 +562,7 @@ bytes p args =
     (BoTakeFirst, [o, n]) -> helper "_BytesPrim_slice" [o, JS.Int 0, n]
     (BoToBytes, [o]) -> o
     (BoDrop, [_, v]) -> v
+    (BSpanWithin, [_, _, _, _, _]) -> helper "_BytesPrim_spanWithin" args
     _ -> arityError (BytesOp p) args
   where
     ref name = JS.Ref (JsName.fromLocalHumanReadable name)
@@ -594,6 +595,21 @@ function _BytesPrim_new(n) {
 
 // A view onto the same buffer, O(1) (docs/m1b-bytes-prim.md §BY4).
 function _BytesPrim_slice(b, i, j) { return new DataView(b.buffer, b.byteOffset + i, j - i); }
+
+// `bytes_span_within`: the first index from `from`, below `stop` and the
+// length, whose byte is outside `lo..hi`; `from` when there is none to look
+// at (geng-lang m3-bytes-access.md §BA19, Dnene27).
+function _BytesPrim_spanWithin(b, lo, hi, from, stop) {
+  var end = stop < b.byteLength ? stop : b.byteLength;
+  var i = from < 0 ? 0 : from;
+  if (i >= end) return from;
+  while (i < end) {
+    var c = b.getUint8(i);
+    if (c < lo || c > hi) return i;
+    i++;
+  }
+  return i;
+}
 
 // Content, not identity: two views of different buffers, or of one buffer at
 // different offsets, are equal when their bytes are.

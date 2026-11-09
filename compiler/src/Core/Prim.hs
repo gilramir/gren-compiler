@@ -352,6 +352,14 @@ data BytesPrim
     -- as 'TrDrop' does a builder's buffer. Only the @drop@ pass makes one,
     -- natively; JavaScript and the BEAM answer @v@.
     BoDrop
+  | -- | @bytes_span_within b lo hi from stop@: the first index from @from@,
+    -- below @stop@ and the length, whose byte is outside @lo..hi@ (both
+    -- included); @from@ when there is none to look at. @from@ is taken as 0
+    -- below 0 and @stop@ as the length past it, so it has no precondition.
+    -- A scanner's run: puritty's printable ASCII, a JSON string's plain
+    -- bytes, a token (geng-lang @m3-bytes-access.md@ §BA19, Dnene27).
+    -- __Appended__ after every other primitive.
+    BSpanWithin
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | C7's contract: @Array@ is flat and dense, @get@ and @length@ are O(1) and
@@ -611,7 +619,7 @@ allPrims =
     -- tr_append_slice (§VA24) and D1026's tr_drop (m4-free.md).
     ++ map TransientOp [TrFill .. TrDrop]
     -- Appended by D1031 (m4-owned-pages.md §OP13).
-    ++ map BytesOp [BoFromBuilder .. maxBound]
+    ++ map BytesOp [BoFromBuilder .. BoDrop]
     -- Appended by D1052 (m4-memory-proofs.md §MP11).
     ++ [StrOp SJoin]
     -- Appended by D1056 (m4-memory-proofs.md §MP12).
@@ -622,6 +630,8 @@ allPrims =
     ++ map TaskOp [SourceEmit, SourceDeliver]
     -- Appended by Dnene5 (m4-refine.md §RF41).
     ++ [TransientOp TrNewOrCrash]
+    -- Appended by Dnene27 (m3-bytes-access.md §BA19).
+    ++ [BytesOp BSpanWithin]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -780,6 +790,7 @@ bytesPrimName p =
     BoTakeFirst -> "bo_take_first"
     BoToBytes -> "bo_to_bytes"
     BoDrop -> "bo_drop"
+    BSpanWithin -> "bytes_span_within"
 
 arrPrimName :: ArrPrim -> Text
 arrPrimName p =
@@ -956,6 +967,8 @@ primArity op =
         BoToBytes -> 1
         -- owned, the value answered
         BoDrop -> 2
+        -- bytes, lo, hi, from, stop
+        BSpanWithin -> 5
     ArrOp p ->
       case p of
         ALength -> 1
