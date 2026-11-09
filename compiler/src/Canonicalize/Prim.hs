@@ -310,11 +310,18 @@ transientType p =
     TrDrop -> fn [tTransient, b] b
     -- Dnene5: TrNew, crashing on a count below 0.
     TrNewOrCrash -> fn [tInt] tTransient
+    -- Dnene32: a code point's UTF-8 onto bytes; a run of words alike under
+    -- a mask; words' low bytes onto bytes.
+    TrPushUtf8 -> fn [tBytesT, tInt] tBytesT
+    TrSpanMasked -> fn [tWordsT, tInt64, tInt64, tInt, tInt] tInt
+    TrAppendNarrowed -> fn [tBytesT, tWordsT, tInt, tInt] tBytesT
   where
     a = Can.TVar "a"
     b = Can.TVar "b"
     tArray = Can.TType ModuleName.array "Array" [a]
     tTransient = Can.TType ModuleName.arrayTransient "Transient" [a]
+    tBytesT = Can.TType ModuleName.arrayTransient "Transient" [tUInt8]
+    tWordsT = Can.TType ModuleName.arrayTransient "Transient" [tInt64]
 
 -- | D579's @Dict@ transient (D582, geng-lang @m3-fold.md@ §FL10), over the
 -- node @core@'s @Dict@ declares: an owner is an @Int@, the node's colour is

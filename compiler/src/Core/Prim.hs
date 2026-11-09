@@ -451,6 +451,27 @@ data TransientPrim
     -- (geng-lang @m4-refine.md@ §RF41, Dnene5): @Array.range@ over a span no
     -- array can hold. Appended after every other primitive.
     TrNewOrCrash
+  | -- | @tr_push_utf8 t cp@: the UTF-8 encoding of code point @cp@ pushed
+    -- onto a transient of @UInt8@, one to four items in one write; a value
+    -- that is not a scalar value (below 0, a surrogate, past U+10FFFF) is
+    -- pushed as U+FFFD's three. An encoder's step: JSON, protobuf strings, a
+    -- terminal's scrollback (geng-lang @m3-bytes-access.md@ §BA21, Dnene32).
+    -- __Appended__ after every other primitive, with the two below.
+    TrPushUtf8
+  | -- | @tr_span_masked t mask want from stop@: over a transient of @Int64@,
+    -- the first index from @from@, below @stop@ and the length, whose item
+    -- @x@ has @x & mask /= want@; @from@ when there is none to look at, with
+    -- @from@ taken as 0 below 0 and @stop@ as the length past it, as
+    -- 'BSpanWithin' does for bytes, so it has no precondition. A run of
+    -- items alike in some bits: one tag, flags clear, ASCII.
+    TrSpanMasked
+  | -- | @tr_append_narrowed t s from stop@: the low 8 bits of each of @s@'s
+    -- items from @from@ up to @stop@ pushed onto @t@, a transient of @UInt8@
+    -- from one of @Int64@, @s@ left as it was: 'TrAppendSlice' with a
+    -- conversion. @from@ and @stop@ are clamped as 'TrSpanMasked''s are,
+    -- and nothing is pushed when the run is empty, so it has no
+    -- precondition.
+    TrAppendNarrowed
   deriving (Eq, Ord, Show, Enum, Bounded)
 
 -- | The reified @Task@ tree the runtime steps. @map@, @sequence@ and friends
@@ -632,6 +653,8 @@ allPrims =
     ++ [TransientOp TrNewOrCrash]
     -- Appended by Dnene27 (m3-bytes-access.md §BA19).
     ++ [BytesOp BSpanWithin]
+    -- Appended by Dnene32 (m3-bytes-access.md §BA21).
+    ++ map TransientOp [TrPushUtf8, TrSpanMasked, TrAppendNarrowed]
 
 -- | The spelling @core@ uses in an @\@prim@ declaration: @\<type\>_\<op\>@.
 primName :: PrimOp -> Text
@@ -825,6 +848,9 @@ transientPrimName p =
     TrAppendSlice -> "append_slice"
     TrDrop -> "drop"
     TrNewOrCrash -> "new_or_crash"
+    TrPushUtf8 -> "push_utf8"
+    TrSpanMasked -> "span_masked"
+    TrAppendNarrowed -> "append_narrowed"
 
 taskPrimName :: TaskPrim -> Text
 taskPrimName p =
@@ -1008,6 +1034,12 @@ primArity op =
         TrDrop -> 2
         -- count
         TrNewOrCrash -> 1
+        -- transient, code point
+        TrPushUtf8 -> 2
+        -- transient, mask, want, from, stop
+        TrSpanMasked -> 5
+        -- transient, source, from, stop
+        TrAppendNarrowed -> 4
     TaskOp p ->
       case p of
         TaskSucceed -> 1

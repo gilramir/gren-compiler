@@ -712,6 +712,9 @@ transient p args =
     -- D1026: the drop pass is native's alone; V8 collects the buffer.
     (TrDrop, [_, v]) -> v
     (TrNewOrCrash, [_]) -> helper "_ArrayPrim_trNewOrCrash" args
+    (TrPushUtf8, [_, _]) -> helper "_ArrayPrim_trPushUtf8" args
+    (TrSpanMasked, [_, _, _, _, _]) -> helper "_ArrayPrim_trSpanMasked" args
+    (TrAppendNarrowed, [_, _, _, _]) -> helper "_ArrayPrim_trAppendNarrowed" args
     _ -> arityError (TransientOp p) args
   where
     helper name as = JS.Call (JS.Ref (JsName.fromLocalHumanReadable name)) as
@@ -1845,6 +1848,46 @@ function _ArrayPrim_trAppendSlice(t, source, from, to) {
   return _ArrayPrim_trRun(t, t.live, count, function (array, at) {
     var items = source.link;
     for (var k = 0; k < count; k++) array[at + k] = items[from + k];
+  });
+}
+
+// `tr_push_utf8`: a code point's UTF-8, one to four bytes in one write; a
+// value that is not a scalar value is U+FFFD's (geng-lang
+// m3-bytes-access.md §BA21, Dnene32).
+function _ArrayPrim_trPushUtf8(t, cp) {
+  var bytes;
+  if (cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) bytes = [0xef, 0xbf, 0xbd];
+  else if (cp < 0x80) bytes = [cp];
+  else if (cp < 0x800) bytes = [0xc0 | (cp >> 6), 0x80 | (cp & 0x3f)];
+  else if (cp < 0x10000) bytes = [0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f)];
+  else bytes = [0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f)];
+  return _ArrayPrim_trRun(t, t.live, bytes.length, function (array, at) {
+    for (var k = 0; k < bytes.length; k++) array[at + k] = bytes[k];
+  });
+}
+
+// `tr_span_masked`: over Int64 items, BigInts, the first index from `from`,
+// below `stop` and the length, whose item masked is not `want`; `from` when
+// there is none to look at (Dnene32).
+function _ArrayPrim_trSpanMasked(t, mask, want, from, stop) {
+  var end = stop < t.live ? stop : t.live;
+  var i = from < 0 ? 0 : from;
+  if (i >= end) return from;
+  var items = t.link;
+  while (i < end && (items[i] & mask) === want) i++;
+  return i;
+}
+
+// `tr_append_narrowed`: the low 8 bits of `source`'s Int64 items from
+// `from` up to `stop`, clamped, pushed onto `t`'s UInt8 items (Dnene32).
+function _ArrayPrim_trAppendNarrowed(t, source, from, stop) {
+  var end = stop < source.live ? stop : source.live;
+  var start = from < 0 ? 0 : from;
+  var count = end - start;
+  if (count <= 0) return t;
+  return _ArrayPrim_trRun(t, t.live, count, function (array, at) {
+    var items = source.link;
+    for (var k = 0; k < count; k++) array[at + k] = Number(BigInt.asUintN(8, items[start + k]));
   });
 }
 

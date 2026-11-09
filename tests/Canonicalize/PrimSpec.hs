@@ -139,6 +139,13 @@ spec = do
                      Just (fn [tTransientA, tTransientA, tInt, tInt] tTransientA)
                    ]
 
+    it "Dnene32's transient primitives are over UInt8 and Int64 items" $
+      map typeOf ["tr_push_utf8", "tr_span_masked", "tr_append_narrowed"]
+        `shouldBe` [ Just (fn [tBytesT, tInt] tBytesT),
+                     Just (fn [tWordsT, tInt64, tInt64, tInt, tInt] tInt),
+                     Just (fn [tBytesT, tWordsT, tInt, tInt] tBytesT)
+                   ]
+
     it "D1026's tr_drop answers the value it is given" $
       typeOf "tr_drop" `shouldBe` Just (fn [tTransientA, Can.TVar "b"] (Can.TVar "b"))
 
@@ -301,3 +308,9 @@ tOwned = Can.TType ModuleName.bytesOwned "Owned" []
 
 tBuilderU8 :: Can.Type
 tBuilderU8 = Can.TType ModuleName.arrayTransient "Transient" [tUInt8]
+
+tBytesT :: Can.Type
+tBytesT = Can.TType ModuleName.arrayTransient "Transient" [Can.TType ModuleName.basics "UInt8" []]
+
+tWordsT :: Can.Type
+tWordsT = Can.TType ModuleName.arrayTransient "Transient" [tInt64]

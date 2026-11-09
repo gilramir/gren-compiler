@@ -18,9 +18,9 @@ spec = do
     it "has the size C13 promises" $
       -- "About 150 primitives in total." The exact number is a fact about the
       -- table rather than a requirement, but it should not move without
-      -- someone noticing. 217 since Dnene27's bytes_span_within, code 216
-      -- (geng-lang m3-bytes-access.md §BA19).
-      length allPrims `shouldBe` 217
+      -- someone noticing. 220 since Dnene32's three transient primitives,
+      -- codes 217 to 219 (geng-lang m3-bytes-access.md §BA21).
+      length allPrims `shouldBe` 220
 
     it "appends D206's and D210's primitives after every code that existed" $
       -- A code is an index into `allPrims`, so a primitive added in its
@@ -156,6 +156,15 @@ spec = do
       -- from the bytes group, whose codes did not move.
       (primCode (BytesOp BSpanWithin), primName (BytesOp BSpanWithin), primArity (BytesOp BSpanWithin), primCode (TransientOp TrNewOrCrash), primCode (BytesOp BoDrop))
         `shouldBe` (216, "bytes_span_within", 5, 215, 205)
+
+    it "appends Dnene32's three transient primitives after bytes_span_within" $
+      -- geng-lang m3-bytes-access.md §BA21: after Dnene27's 216, and apart
+      -- from the transient group, whose codes did not move.
+      ( map (\p -> (primCode (TransientOp p), primName (TransientOp p), primArity (TransientOp p))) [TrPushUtf8, TrSpanMasked, TrAppendNarrowed],
+        primCode (BytesOp BSpanWithin),
+        primCode (TransientOp TrNewOrCrash)
+      )
+        `shouldBe` ([(217, "tr_push_utf8", 2), (218, "tr_span_masked", 5), (219, "tr_append_narrowed", 4)], 216, 215)
 
     it "appends D233's primitive after every code that existed" $
       -- The four D233 retires keep their codes, so nothing after them moved
