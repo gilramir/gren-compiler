@@ -57,6 +57,8 @@ type alias MakeFlags =
     , escript : Maybe String
     , debugInfo : Bool
     , platform : Maybe Runtime
+    , profileGenerate : Bool
+    , profileUse : Maybe String
     , entryPoints : Array ModuleName
     }
 
@@ -329,7 +331,7 @@ parser =
                     Cli.Parser.zeroOrMoreArgs moduleNameParser
                 , flags =
                     Cli.Parser.initFlags 
-                        (\optimize sourcemaps output report erlc escript debugInfo platform ->
+                        (\optimize sourcemaps output report erlc escript debugInfo platform profileGenerate profileUse ->
                             { optimize = optimize
                             , sourcemaps = sourcemaps
                             , output = output
@@ -338,6 +340,8 @@ parser =
                             , escript = escript
                             , debugInfo = debugInfo
                             , platform = platform
+                            , profileGenerate = profileGenerate
+                            , profileUse = profileUse
                             }
                         )
                         |> Cli.Parser.toggle "optimize" "Turn on optimizations to make code smaller and faster. For example, the compiler renames record fields to be as short as possible and unboxes values to reduce allocation."
@@ -348,6 +352,8 @@ parser =
                         |> Cli.Parser.flag "escript" programParser "The escript runner a beam build writes its program with. Without this I look for GENG_ESCRIPT, and then for escript on your PATH."
                         |> Cli.Parser.toggle "debug-info" "Put debug information in a native program, for gdb, perf and gcov: the C is compiled with -g, and the directory holding the C and the runtime's sources is kept beside the program. Only the native target reads this."
                         |> Cli.Parser.flag "platform" platformParser "The operating system a native program is built for, linux or windows. Without this it is the one I am running on. A build for another is a cross build: GENG_CC names the C compiler for it. Only the native target reads this."
+                        |> Cli.Parser.toggle "profile-generate" "Build a native program that counts where it goes as it runs, for --profile-use: its runs write the counts into a directory beside it named after it, with .profile on the end. It runs slower; train it on the work the program is for. The C compiler has to be clang. Only the native target reads this."
+                        |> Cli.Parser.flag "profile-use" profileParser "Compile a native program with the counts runs of a --profile-generate build wrote: the .profile directory, a .profraw file, or a .profdata file. A directory or .profraw file is merged with llvm-profdata, or the one GENG_LLVM_PROFDATA names. Code the runs never reached is laid out as rarely run, so train on every kind of work that matters. Only the native target reads this."
                 , commonDescription =
                     Nothing
                 , summary =
@@ -377,6 +383,8 @@ parser =
                             , escript = flags.escript
                             , debugInfo = flags.debugInfo
                             , platform = flags.platform
+                            , profileGenerate = flags.profileGenerate
+                            , profileUse = flags.profileUse
                             , entryPoints = args
                             }
                 }
@@ -950,6 +958,18 @@ programParser =
     , examples =
         [ "erlc"
         , "/usr/lib/erlang/bin/erlc"
+        ]
+    }
+
+
+profileParser : Cli.Parser.ValueParser String
+profileParser =
+    { singular = "profile"
+    , plural = "profiles"
+    , fn = Just
+    , examples =
+        [ "app.profile"
+        , "bench.profdata"
         ]
     }
 

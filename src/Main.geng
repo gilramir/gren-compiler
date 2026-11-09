@@ -454,17 +454,23 @@ parseUserArgs context compilerPath =
                                     -- The same for `native`: the backend is
                                     -- `packages/c-backend` (D491, geng-lang
                                     -- `m3-native.md` §NA25).
-                                    nativeMake context
-                                        compilerPath
-                                        { encodedCommand = encodeFor command
-                                        , headless = False
-                                        , output = flags.output
-                                        , optimization = "-O2"
-                                        , debugInfo = flags.debugInfo
-                                        , platform = Maybe.withDefault context.host flags.platform
-                                        }
-                                        resolved
-                                        (makeBackend resolved command)
+                                    when nativeProfile context flags is
+                                        Err report ->
+                                            Task.fail report
+
+                                        Ok profile ->
+                                            nativeMake context
+                                                compilerPath
+                                                { encodedCommand = encodeFor command
+                                                , headless = False
+                                                , output = flags.output
+                                                , optimization = "-O2"
+                                                , debugInfo = flags.debugInfo
+                                                , profile = profile
+                                                , platform = Maybe.withDefault context.host flags.platform
+                                                }
+                                                resolved
+                                                (makeBackend resolved command)
 
                                 else
                                     makeBackend resolved command
@@ -637,6 +643,7 @@ parseUserArgs context compilerPath =
                                                             , output = Just compiling.output
                                                             , optimization = "-O0"
                                                             , debugInfo = opts.debugInfo
+                                                            , profile = Terminal.Native.NoProfile
                                                             , platform = context.host
                                                             }
                                                             compiling.resolution
@@ -732,6 +739,7 @@ parseUserArgs context compilerPath =
                                                     , output = Just compiling.output
                                                     , optimization = "-O2"
                                                     , debugInfo = True
+                                                    , profile = Terminal.Native.NoProfile
                                                     , platform = context.host
                                                     }
                                                     compiling.resolution
@@ -869,6 +877,7 @@ parseUserArgs context compilerPath =
                                                             , output = Just compiling.output
                                                             , optimization = "-O0"
                                                             , debugInfo = False
+                                                            , profile = Terminal.Native.NoProfile
                                                             , platform = context.host
                                                             }
                                                             compiling.resolution
@@ -1314,7 +1323,7 @@ run` at `-O0` (§NA28), and either with `-g` when `--debug-info` asks (D512).
 nativeMake :
     Context
     -> Path
-    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String, debugInfo : Bool, platform : Runtime }
+    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String, debugInfo : Bool, profile : Terminal.Native.Profile, platform : Runtime }
     -> Terminal.PackageInstall.PackageResolution
     -> Task Report Int
     -> Task Report Int
@@ -1332,7 +1341,7 @@ nativeMake context compilerPath flags resolved ordinary =
 nativeMakeBuild :
     Context
     -> Path
-    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String, debugInfo : Bool, platform : Runtime }
+    -> { encodedCommand : Bytes, headless : Bool, output : Maybe Compiler.Backend.MakeOutput, optimization : String, debugInfo : Bool, profile : Terminal.Native.Profile, platform : Runtime }
     -> Terminal.PackageInstall.PackageResolution
     -> Task Report Int
     -> Task Report Int
@@ -1395,6 +1404,7 @@ nativeMakeBuild context compilerPath flags resolved ordinary =
                                         , platform = flags.platform
                                         , optimization = flags.optimization
                                         , debugInfo = flags.debugInfo
+                                        , profile = flags.profile
                                         , packages = beamPackages context resolved
                                         , linked = nativeLinked resolved
                                         , sources = nativeSources context resolved
@@ -1406,6 +1416,30 @@ nativeMakeBuild context compilerPath flags resolved ordinary =
                                 Terminal.Native.abandon context.fsPermission thePlan
                                     |> Task.andThen (\_ -> Task.fail report)
                             )
+
+
+{-| `geng make`'s profile-guided build (geng-lang `m4-profile.md` §PF12,
+Dnene31), or a report when both halves are asked for at once. -}
+nativeProfile : Context -> { a | profileGenerate : Bool, profileUse : Maybe String } -> Result Report Terminal.Native.Profile
+nativeProfile context flags =
+    when flags.profileUse is
+        Just path ->
+            if flags.profileGenerate then
+                Err <|
+                    Report.create
+                        "ONE HALF OF A PROFILE-GUIDED BUILD AT A TIME"
+                        Nothing
+                        (PP.words "--profile-generate builds a program that counts where it goes, and --profile-use builds one with the counts. Build with the first, run the program on its work, then build with the second.")
+
+            else
+                Ok (Terminal.Native.Use (context.pathFromString path))
+
+        Nothing ->
+            if flags.profileGenerate then
+                Ok Terminal.Native.Generate
+
+            else
+                Ok Terminal.Native.NoProfile
 
 
 {-| The native build's plan, once its platform is one there is a runtime for

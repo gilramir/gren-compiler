@@ -2,6 +2,7 @@ module Terminal.Native exposing
     ( Config
     , Linked
     , Plan
+    , Profile(..)
     , abandon
     , build
     , isTarget
@@ -149,7 +150,18 @@ type alias Toolchain =
     , flags : Array String
     , linkFlags : Array String
     , pkgConfig : String
+    , profdata : String
     }
+
+
+{-| A profile-guided build (geng-lang `m4-profile.md` §PF12,
+Dnene31): none; a program that counts where it goes, written beside it
+(`--profile-generate`); or one compiled with what such runs counted
+(`--profile-use=PATH`). -}
+type Profile
+    = NoProfile
+    | Generate
+    | Use Path
 
 
 {-| A package whose `[native]` table names `pkg-config` modules (D890): its
@@ -170,6 +182,7 @@ type alias Config =
     , platform : Runtime.Runtime
     , optimization : String
     , debugInfo : Bool
+    , profile : Profile
     , packages : Array Path
     , linked : Array Linked
     , sources : Array { name : String, path : String }
@@ -275,6 +288,7 @@ toolchain envVars =
     in
     { cc = Maybe.withDefault "clang" (Dict.get "GENG_CC" envVars)
     , pkgConfig = Maybe.withDefault "pkg-config" (Dict.get "GENG_PKG_CONFIG" envVars)
+    , profdata = Maybe.withDefault "llvm-profdata" (Dict.get "GENG_LLVM_PROFDATA" envVars)
     , flags = words "GENG_CFLAGS"
     , linkFlags = words "GENG_LDFLAGS"
     }
@@ -488,7 +502,12 @@ buildStage config thePlan =
                         Task.fail (failureText trouble.what trouble.why)
 
                     Library header ->
-                        buildLibrary config thePlan header
+                        if config.profile /= NoProfile then
+                            abandon config.fs thePlan
+                                |> Task.andThen (\_ -> Task.fail profiledLibrary)
+
+                        else
+                            buildLibrary config thePlan header
 
                     NoEntry why ->
                         abandon config.fs thePlan
@@ -511,13 +530,171 @@ buildStage config thePlan =
                             |> Task.andThen (\_ -> externSources config)
                             |> Task.andThen
                                 (\externs ->
-                                    compileBoehm config thePlan [ "-DGC_THREADS" ]
-                                        |> Task.andThen (\_ -> compileLinked config thePlan (executableFlags config thePlan) externs)
-                                        |> Task.andThen (\linked -> compile config thePlan linked)
+                                    profileFlags config thePlan
+                                        |> Task.andThen
+                                            (\extra ->
+                                                let
+                                                    tools =
+                                                        config.tools
+
+                                                    profiled =
+                                                        { config | tools = { tools | flags = tools.flags ++ extra } }
+                                                in
+                                                compileBoehm profiled thePlan [ "-DGC_THREADS" ]
+                                                    |> Task.andThen (\_ -> compileLinked profiled thePlan (executableFlags profiled thePlan) externs)
+                                                    |> Task.andThen (\linked -> compile profiled thePlan linked)
+                                            )
                                 )
                             |> Task.andThen (\_ -> finish config thePlan)
                             |> Task.map (\_ -> 0)
             )
+
+
+{-| The C compiler's flags for a profile-guided build (Dnene31), which go
+with `GENG_CFLAGS`, to Boehm and to every C file of the program alike.
+
+`--profile-generate` builds a program that counts its branches and calls as
+it runs, clang's `-fprofile-instr-generate`, and writes them into the
+directory `<program>.profile` beside it, which the build empties first so
+that a profile never mixes two builds. Each run adds its counts to the one
+file there (`%m`, clang's merging of runs of one binary); `LLVM_PROFILE_FILE`
+at run time puts them elsewhere.
+
+`--profile-use=PATH` compiles with those counts: PATH is that directory, or a
+`.profraw` file, which `llvm-profdata` (`GENG_LLVM_PROFDATA`) merges into the
+build directory, or a `.profdata` file already merged, used as it is. Clang
+says in one line how many functions' counts no longer match the C; a
+function with none is compiled as it would be without, and the one-line
+warnings for each are left out.
+-}
+profileFlags : Config -> Plan -> Task Report (Array String)
+profileFlags config thePlan =
+    when config.profile is
+        NoProfile ->
+            Task.succeed []
+
+        Generate ->
+            let
+                parent =
+                    Path.parentPath thePlan.exe |> Maybe.withDefault (Path.fromPosixString ".")
+
+                name =
+                    Path.filenameWithExtension thePlan.exe ++ ".profile"
+            in
+            FileSystem.realPath config.fs parent
+                |> Task.mapError (failure "I cannot find the directory the program goes in")
+                |> Task.andThen
+                    (\absolute ->
+                        let
+                            directory =
+                                Path.append (Path.fromPosixString name) absolute
+                        in
+                        FileSystem.remove config.fs { recursive = True } directory
+                            |> Task.map (\_ -> {})
+                            |> Task.onError (\_ -> Task.succeed {})
+                            |> Task.map (\_ -> [ "-fprofile-instr-generate=" ++ config.toString directory ++ "/%m.profraw" ])
+                    )
+
+        Use path ->
+            let
+                usedWith profdata =
+                    [ "-fprofile-instr-use=" ++ profdata, "-Wno-profile-instr-unprofiled", "-Wno-profile-instr-missing" ]
+
+                merged =
+                    Path.append (Path.fromPosixString "program.profdata") thePlan.work
+            in
+            if String.endsWith ".profdata" (config.toString path) then
+                FileSystem.realPath config.fs path
+                    |> Task.mapError (failure ("I cannot read the profile " ++ config.toString path))
+                    |> Task.map (\absolute -> usedWith (config.toString absolute))
+
+            else
+                rawProfiles config path
+                    |> Task.andThen
+                        (\raws ->
+                            if Array.isEmpty raws then
+                                Task.fail (noProfiles (config.toString path))
+
+                            else
+                                mergeProfiles config (config.toString merged) raws
+                                    |> Task.map (\_ -> usedWith (config.toString merged))
+                        )
+
+
+{-| The `.profraw` files PATH is, or holds: the file itself, or every one in
+the directory, sorted. -}
+rawProfiles : Config -> Path -> Task Report (Array String)
+rawProfiles config path =
+    if String.endsWith ".profraw" (config.toString path) then
+        FileSystem.checkAccess config.fs [] path
+            |> Task.map (\_ -> [ config.toString path ])
+            |> Task.mapError (failure ("I cannot read the profile " ++ config.toString path))
+
+    else
+        FileSystem.listDirectory config.fs path
+            |> Task.mapError (failure ("I cannot read the profile directory " ++ config.toString path))
+            |> Task.map
+                (\entries ->
+                    entries
+                        |> Array.map (\entry -> Path.filenameWithExtension entry.path)
+                        |> Array.keepIf (String.endsWith ".profraw")
+                        |> Array.sort
+                        |> Array.map (\file -> config.toString (Path.append (Path.fromPosixString file) path))
+                )
+
+
+mergeProfiles : Config -> String -> Array String -> Task Report {}
+mergeProfiles config output raws =
+    { (ChildProcess.defaultSpawnOptions ChildProcess.Integrated)
+        | shell = ChildProcess.NoShell
+    }
+        |> ChildProcess.spawn config.cp config.tools.profdata ([ "merge", "-o", output ] ++ raws)
+        |> Task.mapError
+            (\err ->
+                Report.create
+                    "I CANNOT RUN LLVM-PROFDATA"
+                    Nothing
+                    (PP.verticalBlock
+                        [ PP.words ("A build with --profile-use merges the runs' counts with " ++ config.tools.profdata ++ ", and I could not start it: " ++ err.errorCode ++ ".")
+                        , PP.empty
+                        , PP.words "It comes with LLVM, and has to be the version of the clang that compiles the program. Put it on your PATH, or name it with the GENG_LLVM_PROFDATA environment variable. A .profdata file it has merged already is used as it is."
+                        ]
+                    )
+            )
+        |> Task.andThen ChildProcess.waitForExit
+        |> Task.andThen
+            (\exitCode ->
+                if exitCode == 0 then
+                    Task.succeed {}
+
+                else
+                    Task.fail <|
+                        Report.create
+                            "LLVM-PROFDATA REFUSED THE PROFILE"
+                            Nothing
+                            (PP.words (config.tools.profdata ++ " exited with status " ++ String.fromInt exitCode ++ ", and what it printed is above. A profile written by another version of clang than the one that reads it is the likeliest cause."))
+            )
+
+
+noProfiles : String -> Report
+noProfiles path =
+    Report.create
+        "THERE IS NO PROFILE THERE"
+        Nothing
+        (PP.verticalBlock
+            [ PP.words ("--profile-use names " ++ path ++ ", and there is no .profraw file there.")
+            , PP.empty
+            , PP.words "Build the program with --profile-generate and run it: its runs write their counts into the directory beside it named after it, with .profile on the end. Name that directory, a .profraw file, or a .profdata file."
+            ]
+        )
+
+
+profiledLibrary : Report
+profiledLibrary =
+    Report.create
+        "A PROFILE-GUIDED BUILD IS FOR A PROGRAM"
+        Nothing
+        (PP.words "--profile-generate and --profile-use build a program with a main, and this one is a library, whose runs are its host's. Build it without them.")
 
 
 {-| What the backend's part of a build answered (D645): the backend's refusal,
