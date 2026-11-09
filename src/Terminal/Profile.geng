@@ -71,6 +71,7 @@ type alias Config =
     , modules : Dict String String
     , valgrind : String
     , addr2line : String
+    , perf : String
     , options : Options
     }
 
@@ -108,7 +109,8 @@ profile config =
                                                 (\sources ->
                                                     writeOptional config config.options.json (\_ -> Json.encode 1 (jsonReport config.options report))
                                                         |> Task.andThen (\_ -> writeOptional config config.options.html (\_ -> htmlReport config.options sources report))
-                                                        |> Task.map (\_ -> { text = textReport config.options sources report, exitCode = got.exitCode })
+                                                        |> Task.andThen (\_ -> measureNatively config)
+                                                        |> Task.map (\measured -> { text = measured ++ textReport config.options sources report, exitCode = got.exitCode })
                                                 )
                                     )
                         )
@@ -139,6 +141,109 @@ runCallgrind config out =
                     "geng profile runs the program under valgrind's callgrind, which is not part of this compiler. Install valgrind, or tell me which one to run with the GENG_VALGRIND environment variable."
             )
         |> Task.andThen ChildProcess.waitForExit
+
+
+{-| The program run natively, as it runs outside callgrind, five times
+under `perf stat`: the median of its instructions and of its cycles, and
+the instructions a cycle (geng-lang `m4-investigate.md` I4). Callgrind
+counts instructions in a simulation, which is what the report charges; the
+cycles are the time, and a change can move the two apart (a SIMD step reads
+16 bytes in an instruction or two). A line saying why when `perf` cannot
+run: the report does not need it. -}
+measureNatively : Config -> Task x String
+measureNatively config =
+    let
+        once =
+            ChildProcess.run config.cp
+                config.perf
+                ([ "stat", "-x,", "-e", "instructions:u,cycles:u", "--", config.toString config.exe ] ++ config.options.arguments)
+                { (ChildProcess.defaultRunOptions)
+                    | shell = ChildProcess.NoShell
+                    , maximumBytesWrittenToStreams = 256 * 1024 * 1024
+                }
+                |> Task.map (\done -> countsIn (Bytes.toString done.stderr |> Maybe.withDefault ""))
+                |> Task.onError
+                    (\err ->
+                        when err is
+                            ChildProcess.ProgramError e ->
+                                Task.succeed (countsIn (Bytes.toString e.stderr |> Maybe.withDefault ""))
+
+                            ChildProcess.InitError _ ->
+                                Task.succeed Nothing
+                    )
+
+        median xs =
+            Array.sort xs |> Array.get (Array.length xs // 2) |> Maybe.withDefault 0
+
+        millions n =
+            String.fromFloat (toFloat (round (toFloat n / 100000)) / 10)
+    in
+    Task.sequence [ once, once, once, once, once ]
+        |> Task.map
+            (\runs ->
+                let
+                    got =
+                        Array.mapAndKeepJust identity runs
+                in
+                if Array.isEmpty got then
+                    "Natively: " ++ config.perf ++ " stat could not count the program's cycles (geng profile runs perf; GENG_PERF names another).\n\n"
+
+                else
+                    let
+                        instructions =
+                            median (Array.map .instructions got)
+
+                        cycles =
+                            median (Array.map .cycles got)
+                    in
+                    "Natively, outside callgrind (perf stat, the median of "
+                        ++ String.fromInt (Array.length got)
+                        ++ " runs): "
+                        ++ millions instructions
+                        ++ " M instructions, "
+                        ++ millions cycles
+                        ++ " M cycles, "
+                        ++ (if cycles > 0 then
+                                String.fromFloat (toFloat (round (100 * toFloat instructions / toFloat cycles)) / 100)
+
+                            else
+                                "?"
+                           )
+                        ++ " instructions a cycle. The report below charges the instructions; the cycles are the time, and two builds can move them apart.\n\n"
+            )
+
+
+{-| `perf stat -x,`'s two counts, from its comma-separated lines. -}
+countsIn : String -> Maybe { instructions : Int, cycles : Int }
+countsIn text =
+    let
+        valueOf event =
+            String.lines text
+                |> Array.mapAndKeepJust
+                    (\line ->
+                        let
+                            fields =
+                                String.split "," line
+                        in
+                        when { value = Array.get 0 fields, name = Array.get 2 fields } is
+                            { value = Just value, name = Just name } ->
+                                if String.startsWith event name then
+                                    String.toInt value
+
+                                else
+                                    Nothing
+
+                            _ ->
+                                Nothing
+                    )
+                |> Array.first
+    in
+    when { i = valueOf "instructions", c = valueOf "cycles" } is
+        { i = Just i, c = Just c } ->
+            Just { instructions = i, cycles = c }
+
+        _ ->
+            Nothing
 
 
 missing : String -> String -> String -> String -> Report.Report

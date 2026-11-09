@@ -757,6 +757,7 @@ parseUserArgs context compilerPath =
                                                                     , modules = Dict.foldl (\name file acc -> Dict.set (context.pathToString file.path) name acc) Dict.empty compiling.resolution.rootSources
                                                                     , valgrind = Dict.get "GENG_VALGRIND" context.envVars |> Maybe.withDefault "valgrind"
                                                                     , addr2line = Dict.get "GENG_ADDR2LINE" context.envVars |> Maybe.withDefault "addr2line"
+                                                                    , perf = Dict.get "GENG_PERF" context.envVars |> Maybe.withDefault "perf"
                                                                     , options =
                                                                         { arguments = opts.arguments
                                                                         , ops = opts.ops

@@ -41,6 +41,9 @@ are about (geng-lang `m4-investigate.md` I1, I2): `GENG_REFINE_PROFILE`
 names one for its work by definition, the questions and Omega tests each
 took, most first, and its costliest questions; `GENG_REFINE_SUMMARY` names
 one for the errors grouped by what was asked, the largest group first.
+`GENG_REFINE_EXPLAIN` has each error say which atoms of its goal nothing
+given to the solver mentions, and where a fact about each was let go of
+(I5).
 
 `core`'s modules are read for their signatures and not checked (§RF27,
 D845): `core` is the compiler's, its goals the same in every program, and
@@ -456,6 +459,7 @@ goalErrors config modules =
                 Check.checkWith
                     { recording = Dict.member "GENG_REFINE_QUERIES" config.envVars || Dict.member "GENG_REFINE_PROFILE" config.envVars
                     , everyModule = Dict.member "GENG_REFINE_EVERY_MODULE" config.envVars
+                    , explain = Dict.member "GENG_REFINE_EXPLAIN" config.envVars
                     }
                     (\name -> withCore || name.package /= "core")
                     modules
