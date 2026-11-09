@@ -40,6 +40,7 @@ import Terminal.PackageValidate
 import Terminal.Parser as CliParser
 import Terminal.Paths
 import Terminal.Profile
+import Terminal.Decisions
 import Terminal.Protobuf
 import Terminal.Refine
 import Terminal.Run
@@ -773,6 +774,18 @@ parseUserArgs context compilerPath =
                                             )
                             )
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
+
+                CliParser.Decisions opts ->
+                    -- `geng decisions` (geng-lang `m4-investigate.md` I3): two
+                    -- `--debug-info` builds' accounts compared.
+                    Terminal.Decisions.diff
+                        { fs = context.fsPermission
+                        , fromString = context.pathFromString
+                        , top = Maybe.withDefault 20 opts.top
+                        }
+                        opts.old
+                        opts.new
+                        |> Task.andThen (\text -> Stream.Log.string context.stdout text |> Task.map (\_ -> 0))
 
                 CliParser.Test opts ->
                     -- `geng test` (D461, geng-lang `m2-beam-toptier.md` §TT33):

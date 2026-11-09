@@ -36,6 +36,7 @@ type Command
     | Paths Paths.Options
     | Run RunOptions
     | Profile ProfileOptions
+    | Decisions DecisionsOptions
     | Test TestOptions
     | Format FormatFlags
     | Protobuf ProtobufFlags
@@ -110,6 +111,15 @@ type alias ProfileOptions =
     , ops : Maybe Int
     , json : Maybe String
     , html : Maybe String
+    , top : Maybe Int
+    }
+
+
+{-| `geng decisions OLD NEW` (geng-lang `m4-investigate.md` I3): two builds'
+kept directories, and how many functions and callees each table lists. -}
+type alias DecisionsOptions =
+    { old : String
+    , new : String
     , top : Maybe Int
     }
 
@@ -456,6 +466,38 @@ parser =
                             , debugInfo = flags.debugInfo
                             }
                     )
+                }
+            |> Cli.Parser.withCommand
+                { word = "decisions"
+                , arguments =
+                    Cli.Parser.twoArgs (\old new -> { old = old, new = new }) fileParser fileParser
+                , flags =
+                    Cli.Parser.initFlags (\top -> { top = top })
+                        |> Cli.Parser.flag "top" countParser "How many functions and callees each table lists. 20 without this."
+                , commonDescription =
+                    Nothing
+                , summary =
+                    "The `decisions` command says what the compiler decided differently in two builds of a program:"
+                , example =
+                    PP.verticalBlock
+                        [ PP.words "For example:"
+                        , PP.empty
+                        , PP.words "geng decisions before.native-build after.native-build"
+                            |> PP.indent
+                            |> PP.color PP.Green
+                        , PP.empty
+                        , PP.words
+                            """
+                            Each is the directory a native build with --debug-info keeps beside the program. It lists the functions whose updates went from in place to a copy, and why, the results that are no longer fresh first, since that is where copies start; and the callees the compiler now leaves calls in more places, and why.
+                            """
+                        ]
+                , builder =
+                    \args flags ->
+                        Decisions
+                            { old = args.old
+                            , new = args.new
+                            , top = flags.top
+                            }
                 }
             |> Cli.Parser.withCommand
                 { word = "profile"

@@ -36,6 +36,12 @@ to Z3 (§RF25, D803); `GENG_REFINE_EVERY_MODULE` has the checker walk every
 module of the program, so that the questions `core`'s loops raise are among
 them.
 
+Two more files help find where the checker's time goes and what its errors
+are about (geng-lang `m4-investigate.md` I1, I2): `GENG_REFINE_PROFILE`
+names one for its work by definition, the questions and Omega tests each
+took, most first, and its costliest questions; `GENG_REFINE_SUMMARY` names
+one for the errors grouped by what was asked, the largest group first.
+
 `core`'s modules are read for their signatures and not checked (§RF27,
 D845): `core` is the compiler's, its goals the same in every program, and
 `harness/refine.py` holds them. `GENG_REFINE_CORE` checks them too, which is
@@ -448,7 +454,7 @@ goalErrors config modules =
         let
             checkedRun =
                 Check.checkWith
-                    { recording = Dict.member "GENG_REFINE_QUERIES" config.envVars
+                    { recording = Dict.member "GENG_REFINE_QUERIES" config.envVars || Dict.member "GENG_REFINE_PROFILE" config.envVars
                     , everyModule = Dict.member "GENG_REFINE_EVERY_MODULE" config.envVars
                     }
                     (\name -> withCore || name.package /= "core")
@@ -466,6 +472,8 @@ goalErrors config modules =
         in
         writeReport config goals
             |> Task.andThen (\_ -> writeQueries config checkedRun.queries)
+            |> Task.andThen (\_ -> writeFileAt config "GENG_REFINE_PROFILE" "the refinement profile" (Check.renderProfile goals checkedRun.queries))
+            |> Task.andThen (\_ -> writeFileAt config "GENG_REFINE_SUMMARY" "the refinement summary" (Check.renderSummary goals))
             |> Task.map (\_ -> refusing)
 
 
@@ -488,6 +496,19 @@ writeQueries config queries =
             FileSystem.writeFile config.fs (Bytes.fromString (Check.renderQueries queries)) (config.fromString out)
                 |> Task.map (\_ -> {})
                 |> Task.mapError (\e -> failure "I cannot write the refinement queries" (FileSystem.errorToString e))
+
+        Nothing ->
+            Task.succeed {}
+
+
+{-| `text` into the file the variable names, when it names one. -}
+writeFileAt : Config -> String -> String -> String -> Task Report {}
+writeFileAt config variable what text =
+    when Dict.get variable config.envVars is
+        Just out ->
+            FileSystem.writeFile config.fs (Bytes.fromString text) (config.fromString out)
+                |> Task.map (\_ -> {})
+                |> Task.mapError (\e -> failure ("I cannot write " ++ what) (FileSystem.errorToString e))
 
         Nothing ->
             Task.succeed {}

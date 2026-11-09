@@ -1,0 +1,338 @@
+module Terminal.Decisions exposing (Config, diff)
+
+{-| `geng decisions OLD NEW` (geng-lang `m4-investigate.md` I3): what the
+compiler decided differently in two builds of a program. Each build is the
+directory a `--debug-info` build keeps (`geng profile`'s, or `geng make
+--debug-info`'s `<program>.native-build`), with the Inline pass's account
+(`inline.tsv`, D1005) and the in-place pass's (`inplace.tsv`, D987, D1006).
+
+It says which functions' updates went from in place to a copy and why, the
+results that are no longer fresh first, since a copy starts where a result
+stops being one; and which callees are left calls in more places, with the
+Inline pass's reason. A function is named without its specializations'
+suffixes (`foldl$q947` is `foldl`), so that a rebuild that numbers them
+anew compares.
+
+puritty's scrolling, 117% slower after an edit to its resize, was one such
+change: `resizeTo`'s result not fresh, so `dispatch`'s not, so every line
+feed copied the screen. A profile showed only `memmove`.
+
+-}
+
+import Bytes
+import Char
+import Dict exposing (Dict)
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Task exposing (Task)
+
+
+type alias Config =
+    { fs : FileSystem.Permission
+    , fromString : String -> Path
+    , top : Int
+    }
+
+
+{-| The two builds' differences, as text. -}
+diff : Config -> String -> String -> Task x String
+diff config old new =
+    Task.map2 (\o n -> report config.top o n) (readBuild config old) (readBuild config new)
+
+
+type alias Build =
+    { inline : String
+    , inPlace : String
+    }
+
+
+readBuild : Config -> String -> Task x Build
+readBuild config dir =
+    let
+        read name =
+            FileSystem.readFile config.fs (Path.append (Path.fromPosixString name) (config.fromString dir))
+                |> Task.map (\bytes -> Bytes.toString bytes |> Maybe.withDefault "")
+                |> Task.onError (\_ -> Task.succeed "")
+    in
+    Task.map2 (\i p -> { inline = i, inPlace = p }) (read "inline.tsv") (read "inplace.tsv")
+
+
+{-| A name without the `$`-suffixes specialization and lifting give it. -}
+plain : String -> String
+plain name =
+    String.split "$" name |> Array.first |> Maybe.withDefault name
+
+
+{-| A reason with each `$`-suffixed name in it made plain, and its numbers
+left out, so that "30 nodes" and "32 nodes" are one reason. -}
+reasonKey : String -> String
+reasonKey why =
+    String.words why
+        |> Array.map plain
+        |> Array.map (\w -> if String.all Char.isDigit w then "N" else w)
+        |> String.join " "
+
+
+-- IN PLACE
+
+
+type alias Update =
+    { function : String
+    , inPlace : Bool
+    , why : String
+    }
+
+
+updates : String -> Array Update
+updates text =
+    String.lines text
+        |> Array.mapAndKeepJust
+            (\line ->
+                when String.split "\t" line is
+                    [ m, fn, _, why ] ->
+                        if String.startsWith "facts:" why then
+                            Nothing
+
+                        else
+                            Just { function = m ++ "." ++ plain fn, inPlace = String.startsWith "in place" why, why = why }
+
+                    _ ->
+                        Nothing
+            )
+
+
+{-| Each function's updates that copy, and their reasons: a copy of its
+own, or an argument handed shared to a function that copies, as `geng
+profile` counts them (the pass notes every record handed on shared, to a
+function that only reads it too). -}
+copies : Array Update -> Dict String (Array String)
+copies us =
+    let
+        own u =
+            Basics.not u.inPlace && Basics.not (String.startsWith "hands " u.why) && Basics.not (String.startsWith "jumps " u.why)
+
+        copiers =
+            Array.foldl (\u acc -> if own u then Dict.set (plain (lastPart u.function)) {} acc else acc) Dict.empty us
+
+        counts u =
+            own u
+                || (when handedTo u.why is
+                        Just callee ->
+                            Dict.member (plain callee) copiers
+
+                        Nothing ->
+                            False
+                   )
+    in
+    Array.foldl
+        (\u acc ->
+            if counts u then
+                Dict.updateWithDefault u.function [] (Array.pushLast u.why) acc
+
+            else
+                acc
+        )
+        Dict.empty
+        us
+
+
+lastPart : String -> String
+lastPart name =
+    String.split "." name |> Array.last |> Maybe.withDefault name
+
+
+handedTo : String -> Maybe String
+handedTo why =
+    if String.startsWith "hands " why then
+        String.split " " why |> Array.get 1
+
+    else
+        Nothing
+
+
+{-| The reasons in `new` that `old` does not have, as many times as `new`
+has them more. -}
+added : Array String -> Array String -> Array String
+added old new =
+    let
+        had =
+            Array.foldl (\x acc -> Dict.updateWithDefault (reasonKey x) 0 (\n -> n + 1) acc) Dict.empty old
+    in
+    Array.foldl
+        (\x acc ->
+            let
+                key =
+                    reasonKey x
+
+                used =
+                    Dict.get key acc.used |> Maybe.withDefault 0
+            in
+            if used < (Dict.get key had |> Maybe.withDefault 0) then
+                { acc | used = Dict.set key (used + 1) acc.used }
+
+            else
+                { acc | kept = Array.pushLast x acc.kept }
+        )
+        { kept = [], used = Dict.empty }
+        new
+        |> .kept
+
+
+{-| The function a reason says gives a result that is not fresh: `a call
+of resizeTo, whose result is not fresh`. -}
+notFreshIn : String -> Maybe String
+notFreshIn why =
+    when String.split ", whose result is not fresh" why is
+        [ before, _ ] ->
+            String.split "a call of " before |> Array.last |> Maybe.map plain
+
+        _ ->
+            Nothing
+
+
+-- INLINE
+
+
+{-| How many calls of each callee the Inline pass left calls, and a reason
+it gave. -}
+leftCalls : String -> Dict String { count : Int, why : String }
+leftCalls text =
+    String.lines text
+        |> Array.foldl
+            (\line acc ->
+                when String.split "\t" line is
+                    [ _, _, _, callee, why ] ->
+                        Dict.updateWithDefault (plain callee) { count = 0, why = why } (\r -> { r | count = r.count + 1, why = why }) acc
+
+                    _ ->
+                        acc
+            )
+            Dict.empty
+
+
+-- REPORT
+
+
+report : Int -> Build -> Build -> String
+report top old new =
+    let
+        oldUpdates =
+            updates old.inPlace
+
+        newUpdates =
+            updates new.inPlace
+
+        oldCopies =
+            copies oldUpdates
+
+        newCopies =
+            copies newUpdates
+
+        grew =
+            Dict.foldl
+                (\fn whys acc ->
+                    let
+                        before =
+                            Dict.get fn oldCopies |> Maybe.withDefault []
+
+                        more =
+                            added before whys
+                    in
+                    if Array.isEmpty more then
+                        acc
+
+                    else
+                        Array.pushLast { function = fn, before = Array.length before, after = Array.length whys, more = more } acc
+                )
+                []
+                newCopies
+                |> Array.sortBy (\g -> 0 - Array.length g.more)
+
+        notFresh =
+            grew
+                |> Array.mapAndFlatten (\g -> Array.mapAndKeepJust notFreshIn g.more)
+                |> Array.foldl (\f acc -> if Array.member f acc then acc else Array.pushLast f acc) []
+
+        oldCalls =
+            leftCalls old.inline
+
+        newCalls =
+            leftCalls new.inline
+
+        calls =
+            Dict.foldl
+                (\callee r acc ->
+                    let
+                        before =
+                            Dict.get callee oldCalls |> Maybe.map .count |> Maybe.withDefault 0
+                    in
+                    if r.count > before then
+                        Array.pushLast { callee = callee, before = before, after = r.count, why = r.why } acc
+
+                    else
+                        acc
+                )
+                []
+                newCalls
+                |> Array.sortBy (\c -> c.before - c.after)
+
+        totalCopies us =
+            Dict.foldl (\_ whys n -> n + Array.length whys) 0 (copies us)
+
+        totalInPlace us =
+            Array.length (Array.keepIf .inPlace us)
+
+        missing =
+            (if String.isEmpty old.inPlace || String.isEmpty new.inPlace then
+                [ "A build has no inplace.tsv: build it with --debug-info." ]
+
+             else
+                []
+            )
+                ++ (if String.isEmpty old.inline || String.isEmpty new.inline then
+                        [ "A build has no inline.tsv: build it with --debug-info." ]
+
+                    else
+                        []
+                   )
+    in
+    String.join "\n"
+        (missing
+            ++ [ "Updates in place: " ++ String.fromInt (totalInPlace oldUpdates) ++ " then " ++ String.fromInt (totalInPlace newUpdates)
+                    ++ "; copied: "
+                    ++ String.fromInt (totalCopies oldUpdates)
+                    ++ " then "
+                    ++ String.fromInt (totalCopies newUpdates)
+                    ++ "."
+               , ""
+               ]
+            ++ (if Array.isEmpty notFresh then
+                    []
+
+                else
+                    [ "Results no longer fresh, where copies start:" ]
+                        ++ Array.map (\f -> "    " ++ f) notFresh
+                        ++ [ "" ]
+               )
+            ++ (if Array.isEmpty grew then
+                    [ "No function copies more than it did.", "" ]
+
+                else
+                    [ "Functions that copy more (copies before, after, and the new reasons):" ]
+                        ++ Array.mapAndFlatten
+                            (\g ->
+                                Array.pushFirst ("    " ++ g.function ++ "  " ++ String.fromInt g.before ++ " -> " ++ String.fromInt g.after)
+                                    (Array.map (\w -> "        " ++ w) (Array.takeFirst 5 g.more))
+                            )
+                            (Array.takeFirst top grew)
+                        ++ [ "" ]
+               )
+            ++ (if Array.isEmpty calls then
+                    [ "No callee is left a call in more places." ]
+
+                else
+                    [ "Callees left calls in more places (before, after, and why):" ]
+                        ++ Array.map (\c -> "    " ++ c.callee ++ "  " ++ String.fromInt c.before ++ " -> " ++ String.fromInt c.after ++ "  " ++ c.why) (Array.takeFirst top calls)
+               )
+        )
+        ++ "\n"
