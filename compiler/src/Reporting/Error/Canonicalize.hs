@@ -631,9 +631,9 @@ toReport source err =
           region
           Nothing
           ( D.reflow $
-              "This refinement multiplies two things that are not numbers written out:",
+              "This refinement multiplies more than two values:",
             D.reflow $
-              "A refinement's arithmetic is linear, which is what lets the checker decide it: one side of each `*` is a literal, as in `2 * n`."
+              "A refinement may multiply two values, as in `rows * cols`, which the checker reads as a value of its own; a product of three, `a * b * c`, it cannot reason about. State what you need of it another way, with a product of two."
           )
     ConstraintDuplicate region className var ->
       Report.Report "DUPLICATE CONSTRAINT" region [] $

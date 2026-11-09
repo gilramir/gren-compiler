@@ -1164,8 +1164,10 @@ operators :: [String]
 operators =
   ["+", "-", "*", "<", "<=", ">", ">=", "==", "/=", "&&", "||"]
 
--- | What §RF13.4's layers said that a chain does not: a @*@ has a literal
--- on one side, so that the arithmetic stays linear, and a comparison compares
+-- | What §RF13.4's layers said that a chain does not: a @*@ multiplies at
+-- most two values, @size * stride@ but not @a * b * c@, which the checker
+-- reads as an atom of its own (geng-lang @m4-refine-t1.md@ TO19, Dnene21;
+-- until then one side was a literal, D808), and a comparison compares
 -- two sums, never two conditions, but that @==@ and @/=@ may compare two
 -- conditions, as @Maybe.isJust r == (Array.length a > 0)@ does (Dnene17).
 checkShape :: Can.Expr -> Result i w ()
@@ -1175,7 +1177,7 @@ checkShape (Can.Expr _ region expr) =
       do
         checkShape left
         checkShape right
-        if Name.toChars op == "*" && not (isLiteral left || isLiteral right)
+        if Name.toChars op == "*" && degree left + degree right > 2
           then Result.throw (Error.RefinementNonlinear region)
           else Result.ok ()
         if Name.toChars op `elem` comparisons && not (equatesConditions op left right)
@@ -1207,6 +1209,18 @@ isCondition (Can.Expr _ _ expr) =
     Can.Call (Can.Expr _ _ (Can.VarForeign home name _)) _ -> home == ModuleName.basics || (home, name) `elem` boolMeasures
     Can.VarCtor {} -> True
     _ -> False
+
+-- | How many values a product multiplies: 0 for a literal, 2 for @a * b@.
+degree :: Can.Expr -> Int
+degree e@(Can.Expr _ _ expr)
+  | isLiteral e = 0
+  | otherwise =
+      case expr of
+        Can.Binop op _ _ left right
+          | Name.toChars op == "*" -> degree left + degree right
+          | Name.toChars op `elem` ["+", "-"] -> max (degree left) (degree right)
+        Can.Negate inner -> degree inner
+        _ -> 1
 
 isLiteral :: Can.Expr -> Bool
 isLiteral (Can.Expr _ _ expr) =
