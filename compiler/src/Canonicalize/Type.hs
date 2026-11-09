@@ -8,6 +8,7 @@ module Canonicalize.Type
     canonicalizeVariantArg,
     addFreeVars,
     equatesConditions,
+    boolPath,
     measures,
     operators,
   )
@@ -917,7 +918,9 @@ isSeen seen =
 -- Every name it reads is the signature's, never a value in scope: a local or a
 -- top-level value of the same name is not what the predicate means, and D808
 -- allows nothing else. A name read directly must be an 'Int', the checker's
--- only number (D799); any other is read only through a measure. The type
+-- only number (D799), or a 'Bool', a condition (geng-lang
+-- @m4-refine-t1.md@ TO20, Dnene29); any other is read only through a
+-- measure. The type
 -- checker reads the operators at 'Int' signatures in place of their classes',
 -- so @x < y@ on two 'Float's is a type error rather than a predicate the
 -- checker cannot read, and a @*@ needs a literal on one side, the arithmetic
@@ -1030,7 +1033,7 @@ canonicalizePredicate env scope (A.At region expression) =
                     <$> traverse (\(expr, A.At opRegion op, _) -> (,) <$> canonicalizePredicate env scope expr <*> predicateOperator env opRegion op) ops
                     <*> canonicalizePredicate env scope final
                 )
-        checkShape tree
+        checkShape (scopeBool scope) tree
         Result.ok tree
     _ ->
       -- The parser builds nothing else (D815).
@@ -1039,7 +1042,7 @@ canonicalizePredicate env scope (A.At region expression) =
     intPath =
       do
         (cexpr, tipe) <- predicatePath scope (A.At region expression)
-        if isInt tipe
+        if isInt tipe || isBool tipe
           then Result.ok cexpr
           else Result.throw (Error.RefinementNameNotInt region (Name.fromChars (pathText expression)))
 
@@ -1093,6 +1096,13 @@ isInt :: Can.Type -> Bool
 isInt tipe =
   case Type.iteratedDealias tipe of
     Can.TType home name [] -> home == ModuleName.basics && name == Name.int
+    _ -> False
+
+-- | A 'Bool' read directly is a condition: @not keep || room > 0@ (Dnene29).
+isBool :: Can.Type -> Bool
+isBool tipe =
+  case Type.iteratedDealias tipe of
+    Can.TType home name [] -> home == ModuleName.basics && name == Name.bool
     _ -> False
 
 -- | Whether a type is the one a module's own measure measures, by the name
@@ -1170,27 +1180,56 @@ operators =
 -- until then one side was a literal, D808), and a comparison compares
 -- two sums, never two conditions, but that @==@ and @/=@ may compare two
 -- conditions, as @Maybe.isJust r == (Array.length a > 0)@ does (Dnene17).
-checkShape :: Can.Expr -> Result i w ()
-checkShape (Can.Expr _ region expr) =
+checkShape :: (Can.Expr -> Bool) -> Can.Expr -> Result i w ()
+checkShape boolAt (Can.Expr _ region expr) =
   case expr of
     Can.Binop op _ _ left right ->
       do
-        checkShape left
-        checkShape right
+        checkShape boolAt left
+        checkShape boolAt right
         if Name.toChars op == "*" && degree left + degree right > 2
           then Result.throw (Error.RefinementNonlinear region)
           else Result.ok ()
-        if Name.toChars op `elem` comparisons && not (equatesConditions op left right)
+        if Name.toChars op `elem` comparisons && not (equatesConditions boolAt op left right)
           then traverse_ checkSum [left, right]
           else Result.ok ()
-    Can.Negate inner -> checkShape inner
-    Can.Call _ args -> traverse_ checkShape args
+    Can.Negate inner -> checkShape boolAt inner
+    Can.Call _ args -> traverse_ (checkShape boolAt) args
     _ -> Result.ok ()
   where
     checkSum operand =
-      if isCondition operand
+      if isCondition boolAt operand
         then Result.throw (Error.RefinementComparesConditions (Can.exprRegion operand))
         else Result.ok ()
+
+-- | Whether a predicate's path is a 'Bool', a condition (Dnene29), by the
+-- types of the names it starts from.
+boolPath :: Map.Map Name.Name Can.Type -> Can.Expr -> Bool
+boolPath types e =
+  maybe False isBool (pathTypeIn types e)
+
+pathTypeIn :: Map.Map Name.Name Can.Type -> Can.Expr -> Maybe Can.Type
+pathTypeIn types (Can.Expr _ _ expr) =
+  case expr of
+    Can.VarLocal name -> Map.lookup name types
+    Can.Access inner (A.At _ field) ->
+      case Type.iteratedDealias <$> pathTypeIn types inner of
+        Just (Can.TRecord fields _) -> (\(Can.FieldType _ t) -> t) <$> Map.lookup field fields
+        _ -> Nothing
+    _ -> Nothing
+
+-- | 'boolPath' over the names a predicate's scope sees.
+scopeBool :: Scope -> Can.Expr -> Bool
+scopeBool scope e =
+  case root e of
+    Just name | Seen t <- lookupName scope name -> boolPath (Map.singleton name t) e
+    _ -> False
+  where
+    root (Can.Expr _ _ x) =
+      case x of
+        Can.VarLocal n -> Just n
+        Can.Access inner _ -> root inner
+        _ -> Nothing
 
 comparisons :: [String]
 comparisons =
@@ -1198,12 +1237,15 @@ comparisons =
 
 -- | @==@ or @/=@ between two conditions, which the type checker reads at
 -- 'Bool' ("Type.Constrain.Expression").
-equatesConditions :: Name.Name -> Can.Expr -> Can.Expr -> Bool
-equatesConditions op left right =
-  Name.toChars op `elem` ["==", "/="] && isCondition left && isCondition right
+equatesConditions :: (Can.Expr -> Bool) -> Name.Name -> Can.Expr -> Can.Expr -> Bool
+equatesConditions boolAt op left right =
+  Name.toChars op `elem` ["==", "/="] && isCondition boolAt left && isCondition boolAt right
 
-isCondition :: Can.Expr -> Bool
-isCondition (Can.Expr _ _ expr) =
+-- | A condition: a comparison, @&&@, @||@, a call of @not@ or of a measure
+-- answering a 'Bool', @True@ or @False@, or a 'Bool' read directly (Dnene29).
+isCondition :: (Can.Expr -> Bool) -> Can.Expr -> Bool
+isCondition boolAt e@(Can.Expr _ _ expr) =
+  boolAt e ||
   case expr of
     Can.Binop op _ _ _ _ -> Name.toChars op `elem` ("&&" : "||" : comparisons)
     Can.Call (Can.Expr _ _ (Can.VarForeign home name _)) _ -> home == ModuleName.basics || (home, name) `elem` boolMeasures

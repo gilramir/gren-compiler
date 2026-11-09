@@ -635,6 +635,7 @@ constrainRefinements rtv refinements =
     else do
       let own = [(name, tipe) | Can.Refinement _ _ name tipe _ _ _ _ <- refinements]
           enclosing = [(Can._enc_name e, Can._enc_type e) | r <- refinements, e <- Can._ref_enclosing r]
+          types = Map.fromList [(A.toValue n, t) | (n, t) <- own ++ enclosing]
       header <-
         Map.fromList
           <$> traverse
@@ -649,7 +650,7 @@ constrainRefinements rtv refinements =
                 Nothing ->
                   return CTrue
                 Just predicate ->
-                  constrain rtv (atInt predicate) (FromContext (Can.exprRegion predicate) (Refinement name) Type.bool)
+                  constrain rtv (atInt types predicate) (FromContext (Can.exprRegion predicate) (Refinement name) Type.bool)
           )
           refinements
       return $
@@ -679,7 +680,7 @@ constrainCtorRefinement argType (Can.AliasRefinement name predicate0 _) =
     flexes <- traverse (\v -> nameToFlex v []) vars
     let rtv = Map.fromList (zip vars (map VarN flexes))
     tipe <- Instantiate.fromSrcType rtv argType
-    predicateCon <- constrain rtv (atInt predicate) (FromContext region (Refinement name) Type.bool)
+    predicateCon <- constrain rtv (atInt (Map.singleton self argType) predicate) (FromContext region (Refinement name) Type.bool)
     return $
       CLet
         { _rigidVars = [],
@@ -709,17 +710,17 @@ renameLocal from to (Can.Expr nid region expr) =
 -- (geng-lang @m4-refine-t1.md@ Dnene17). Only what the checker sees changes;
 -- the canonical predicate keeps each operator's own annotation for the
 -- elaborator, which gives @==@ the instance its operands' type takes.
-atInt :: Can.Expr -> Can.Expr
-atInt (Can.Expr nid region expr) =
+atInt :: Map.Map Name.Name Can.Type -> Can.Expr -> Can.Expr
+atInt types (Can.Expr nid region expr) =
   Can.Expr nid region $
     case expr of
       Can.Binop op target _ left right
-        | CanType.equatesConditions op left right ->
-            Can.Binop op target boolSignature (atInt left) (atInt right)
+        | CanType.equatesConditions (CanType.boolPath types) op left right ->
+            Can.Binop op target boolSignature (atInt types left) (atInt types right)
       Can.Binop op target annotation left right ->
-        Can.Binop op target (maybe annotation id (intSignature op)) (atInt left) (atInt right)
-      Can.Negate inner -> Can.Negate (atInt inner)
-      Can.Call func args -> Can.Call func (map atInt args)
+        Can.Binop op target (maybe annotation id (intSignature op)) (atInt types left) (atInt types right)
+      Can.Negate inner -> Can.Negate (atInt types inner)
+      Can.Call func args -> Can.Call func (map (atInt types) args)
       _ -> expr
 
 boolSignature :: Can.Annotation

@@ -558,9 +558,9 @@ toReport source err =
           region
           Nothing
           ( D.reflow $
-              "This refinement reads `" ++ Name.toChars name ++ "` directly, and it is not an `Int`:",
+              "This refinement reads `" ++ Name.toChars name ++ "` directly, and it is not an `Int` or a `Bool`:",
             D.reflow $
-              "A refinement's arithmetic and comparisons are on `Int`s. An argument of any other type is read through a measure, `Array.length`, `Bytes.length`, `String.count`, `Dict.count` or `Set.count`."
+              "A refinement's arithmetic and comparisons are on `Int`s, and a `Bool` is a condition. An argument of any other type is read through a measure, `Array.length`, `Bytes.length`, `String.count`, `Dict.count` or `Set.count`."
           )
     RefinementNotMeasure region prefix name ->
       Report.Report "NOT A MEASURE" region [] $
