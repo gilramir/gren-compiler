@@ -79,6 +79,12 @@ object, which is where a cross toolchain's `-L` goes. A package whose
 `geng.toml` declares another platform is refused by name: a build for
 Windows takes `os` and `windows` packages, and not `linux` ones.
 
+**A package gives other packages' C its headers** (geng-lang Dnene38): its
+`src/Ext/include`, where it has one, is on the include path of every C file
+of the build, after the runtime's own directories, so that one package's C
+can call another's, as puritty's two window packages call its text
+renderer's.
+
 A native build with no `main` is a library, `runtime = "host"` (geng-lang
 `m3-embed.md` D619, §EM17). The backend roots it at the values its module
 exposes, holds each to what crosses to C, and writes the C each is entered by
@@ -151,6 +157,7 @@ type alias Toolchain =
     , linkFlags : Array String
     , pkgConfig : String
     , profdata : String
+    , includes : Array String
     }
 
 
@@ -293,6 +300,7 @@ toolchain envVars =
     , profdata = Maybe.withDefault "llvm-profdata" (Dict.get "GENG_LLVM_PROFDATA" envVars)
     , flags = words "GENG_CFLAGS"
     , linkFlags = words "GENG_LDFLAGS"
+    , includes = []
     }
 
 
@@ -532,15 +540,15 @@ buildStage config thePlan =
                             |> Task.andThen (\_ -> externSources config)
                             |> Task.andThen
                                 (\externs ->
-                                    profileFlags config thePlan
+                                    Task.map2 (\extra includes -> { extra = extra, includes = includes }) (profileFlags config thePlan) (externIncludes config)
                                         |> Task.andThen
-                                            (\extra ->
+                                            (\more ->
                                                 let
                                                     tools =
                                                         config.tools
 
                                                     profiled =
-                                                        { config | tools = { tools | flags = tools.flags ++ extra } }
+                                                        { config | tools = { tools | flags = tools.flags ++ more.extra, includes = more.includes } }
                                                 in
                                                 compileBoehm profiled thePlan [ "-DGC_THREADS" ]
                                                     |> Task.andThen (\_ -> compileLinked profiled thePlan (executableFlags profiled thePlan) externs)
@@ -807,9 +815,20 @@ buildLibrary config thePlan header =
                 |> Task.andThen (\_ -> externSources config)
                 |> Task.andThen
                     (\externs ->
-                        compileBoehm config thePlan []
-                            |> Task.andThen (\_ -> compileLinked config thePlan (Array.keepIf (\flag -> not (linkOnly flag)) (libraryFlags config thePlan name)) externs)
-                            |> Task.andThen (\linked -> compileLibrary config thePlan name linked)
+                        externIncludes config
+                            |> Task.andThen
+                                (\includes ->
+                                    let
+                                        tools =
+                                            config.tools
+
+                                        withIncludes =
+                                            { config | tools = { tools | includes = includes } }
+                                    in
+                                    compileBoehm withIncludes thePlan []
+                                        |> Task.andThen (\_ -> compileLinked withIncludes thePlan (Array.keepIf (\flag -> not (linkOnly flag)) (libraryFlags withIncludes thePlan name)) externs)
+                                        |> Task.andThen (\linked -> compileLibrary withIncludes thePlan name linked)
+                                )
                     )
                 |> Task.andThen (\_ -> finish config thePlan)
                 |> Task.map (\_ -> 0)
@@ -946,6 +965,27 @@ externSources config =
                     )
                     []
             )
+
+
+{-| Each package's `src/Ext/include`, where there is one, as `-I` flags, in
+the order the packages came (Dnene38): the headers a package gives the C of
+the packages that use it. They come after the runtime's own directories, so
+a package's header cannot stand in for one of the runtime's. -}
+externIncludes : Config -> Task Report (Array String)
+externIncludes config =
+    config.packages
+        |> Array.map
+            (\root ->
+                let
+                    directory =
+                        Path.append (Path.fromPosixString "include") (Path.append (Path.fromPosixString "Ext") (Path.append (Path.fromPosixString "src") root))
+                in
+                FileSystem.listDirectory config.fs directory
+                    |> Task.map (\_ -> [ "-I", config.toString directory ])
+                    |> Task.onError (\_ -> Task.succeed [])
+            )
+        |> Task.sequence
+        |> Task.map Array.flatten
 
 
 {-| A package's `src/Ext/*.c` and then its `src/Ext/<platform>/*.c`, each
@@ -1204,6 +1244,7 @@ executableFlags config thePlan =
         ++ [ "-I", boehm "include/gc", "-I", boehm "include" ]
         ++ config.tools.flags
         ++ [ "-I", config.toString thePlan.work, "-I", config.toString (platformDirectory config thePlan) ]
+        ++ config.tools.includes
 
 
 {-| The runtime's part for the build's platform (`geng_sys.h`). -}
@@ -1383,6 +1424,7 @@ libraryFlags config thePlan name =
     programFlags config thePlan
         ++ [ "-fPIC", "-shared", "-fvisibility=hidden", "-Wl,-z,nodelete", "-DGENG_LIBRARY=" ++ name ]
         ++ [ "-I", config.toString thePlan.work, "-I", config.toString (platformDirectory config thePlan), "-I", boehm "include/gc", "-I", boehm "include" ]
+        ++ config.tools.includes
         ++ config.tools.flags
 
 
