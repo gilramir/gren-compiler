@@ -1416,6 +1416,13 @@ nativeMakeBuild context compilerPath flags resolved ordinary =
                                         , profile = flags.profile
                                         , packages = beamPackages context resolved
                                         , linked = nativeLinked resolved
+                                        , subsystem =
+                                            when resolved.outline is
+                                                Outline.App app ->
+                                                    app.subsystem
+
+                                                Outline.Pkg _ ->
+                                                    "console"
                                         , sources = nativeSources context resolved
                                         }
                                         thePlan
@@ -1492,24 +1499,24 @@ beamPackages context resolved =
 
 
 {-| The packages of a native build whose `[native]` table names `pkg-config`
-modules (geng-lang D890), the application among them (D891), which a report
-calls "This application". -}
+modules (geng-lang D890) or system libraries (Dnene36), the application among
+them (D891), which a report calls "This application". -}
 nativeLinked : Terminal.PackageInstall.PackageResolution -> Array Terminal.Native.Linked
 nativeLinked resolved =
     let
         own =
             when resolved.outline is
                 Outline.App app ->
-                    [ { name = "This application", root = resolved.projectPath, modules = app.pkgConfig } ]
+                    [ { name = "This application", root = resolved.projectPath, modules = app.pkgConfig, libraries = app.libraries } ]
 
                 Outline.Pkg pkg ->
-                    [ { name = PackageName.toString pkg.name, root = resolved.projectPath, modules = pkg.pkgConfig } ]
+                    [ { name = PackageName.toString pkg.name, root = resolved.projectPath, modules = pkg.pkgConfig, libraries = pkg.libraries } ]
     in
     Dict.foldl
-        (\name dependency acc -> Array.pushLast { name = name, root = dependency.path, modules = dependency.outline.pkgConfig } acc)
+        (\name dependency acc -> Array.pushLast { name = name, root = dependency.path, modules = dependency.outline.pkgConfig, libraries = dependency.outline.libraries } acc)
         own
         resolved.dependencies
-        |> Array.keepIf (\linked -> not (Array.isEmpty linked.modules))
+        |> Array.keepIf (\linked -> not (Array.isEmpty linked.modules) || not (Array.isEmpty linked.libraries))
 
 
 {-| Where the files a native program's `#line`s name are on this machine

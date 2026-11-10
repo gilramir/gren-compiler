@@ -170,6 +170,7 @@ type alias Linked =
     { name : String
     , root : Path
     , modules : Array String
+    , libraries : Array String
     }
 
 
@@ -185,6 +186,7 @@ type alias Config =
     , profile : Profile
     , packages : Array Path
     , linked : Array Linked
+    , subsystem : String
     , sources : Array { name : String, path : String }
     }
 
@@ -1229,9 +1231,16 @@ compile config thePlan compiled =
                 ++ Array.map config.toString compiled.sources
                 ++ compiled.objects
                 ++ compiled.libraries
+                ++ systemLibraries config
                 ++ config.tools.linkFlags
                 ++ (if config.platform == Runtime.Windows then
                         [ "-static", "-lm" ]
+                            ++ (if config.subsystem == "gui" then
+                                    [ "-mwindows" ]
+
+                                else
+                                    []
+                               )
 
                     else
                         [ "-lpthread", "-lm" ]
@@ -1239,6 +1248,18 @@ compile config thePlan compiled =
     in
     keepCommand config thePlan args
         |> Task.andThen (\_ -> cc config args)
+
+
+{-| Each `[native]` table's system libraries (Dnene36), `-l` each, in the
+order the packages are, each once: after every object and every
+`pkg-config` module's libraries, so a linker that drops a library nothing
+before it needs keeps them. -}
+systemLibraries : Config -> Array String
+systemLibraries config =
+    config.linked
+        |> Array.mapAndFlatten .libraries
+        |> Array.foldl (\l acc -> if Array.member l acc then acc else Array.pushLast l acc) []
+        |> Array.map (\l -> "-l" ++ l)
 
 
 {-| With `--debug-info`, the C compiler's command kept beside the C it
@@ -1389,6 +1410,7 @@ compileLibrary config thePlan name compiled =
             ++ Array.map config.toString compiled.sources
             ++ compiled.objects
             ++ compiled.libraries
+            ++ systemLibraries config
             ++ config.tools.linkFlags
             ++ [ "-lm" ]
         )

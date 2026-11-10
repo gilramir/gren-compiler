@@ -187,6 +187,7 @@ generateManifest config projectPath deps =
                     , version = { major = 1, minor = 0, patch = 0 }
                     , exposedModules = Outline.ExposedArray []
                     , pkgConfig = []
+                    , libraries = []
                     , gengVersion = compiler
                     , dependencies = dependencies
                     , sources = Dict.empty
@@ -202,6 +203,8 @@ generateManifest config projectPath deps =
                     , version = Nothing
                     , supervisor = Nothing
                     , pkgConfig = []
+                    , libraries = []
+                    , subsystem = "console"
                     , gengVersion = compiler
                     , dependencies = dependencies
                     , sources = Dict.empty
