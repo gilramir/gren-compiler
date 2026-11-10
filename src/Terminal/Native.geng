@@ -1275,7 +1275,8 @@ compile config thePlan compiled =
                 ++ systemLibraries config
                 ++ config.tools.linkFlags
                 ++ (if config.platform == Runtime.Windows then
-                        [ "-static", "-lm" ]
+                        -- ws2_32: os's connections (geng-lang Dnene41)
+                        [ "-static", "-lws2_32", "-lm" ]
                             ++ (if config.subsystem == "gui" then
                                     [ "-mwindows" ]
 
@@ -1454,7 +1455,7 @@ compileLibrary config thePlan name compiled =
             ++ compiled.libraries
             ++ systemLibraries config
             ++ config.tools.linkFlags
-            ++ [ "-lm" ]
+            ++ (if config.platform == Runtime.Windows then [ "-lws2_32", "-lm" ] else [ "-lm" ])
         )
 
 
