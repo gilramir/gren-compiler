@@ -1,0 +1,449 @@
+module Terminal.ChecksPage exposing (page)
+
+{-| The page `geng checks --html DIR` writes (geng-lang `m4-proof-report.md`
+PR7, PR15): the prototype's `bench/proof-report/template.html`, its script
+rendering the report from `/*DATA*/null`, which `Terminal.Checks` replaces
+with the report's JSON. The page reads no file and loads nothing.
+-}
+
+
+page : String
+page =
+    """
+    <title>Check Report</title>
+    <meta name="claude:viewport-fit-sides" content="cover">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Fira+Sans:wght@400;500;600;700&display=swap">
+    <style>
+    /* Layout: a reviewer's report — summary strip, then "where to look" as a work list, then modules with their source, like a coverage page. */
+    :root {
+      --bg: #f4f6f8; --panel: #ffffff; --fg: #1a1f26; --muted: #5a6573; --line: #d8dee6; --code-bg: #fbfcfd;
+      --accent: #155e75;
+      --ok: #23734a; --ok-bg: #e3f3ea; --warn: #9a5b00; --warn-bg: #fdf1dc; --bad: #b0281f; --bad-bg: #fbe5e2;
+      --info: #2a5aa8; --info-bg: #e5edfa; --plain: #6b7685; --plain-bg: #eef1f4;
+      --sans: "Fira Sans", "Segoe UI", system-ui, sans-serif; --mono: "Fira Code", ui-monospace, "SFMono-Regular", Menlo, monospace;
+    }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+      --bg: #11161c; --panel: #171e26; --fg: #e3e8ee; --muted: #93a0b0; --line: #2a3440; --code-bg: #141a21;
+      --accent: #5fb7cc;
+      --ok: #6fcf97; --ok-bg: #173225; --warn: #f0b75a; --warn-bg: #3a2c12; --bad: #f08b80; --bad-bg: #3d1d1a;
+      --info: #8db4f5; --info-bg: #1b2a44; --plain: #9aa6b4; --plain-bg: #222b35; color-scheme: dark } }
+    :root[data-theme="dark"] {
+      --bg: #11161c; --panel: #171e26; --fg: #e3e8ee; --muted: #93a0b0; --line: #2a3440; --code-bg: #141a21;
+      --accent: #5fb7cc;
+      --ok: #6fcf97; --ok-bg: #173225; --warn: #f0b75a; --warn-bg: #3a2c12; --bad: #f08b80; --bad-bg: #3d1d1a;
+      --info: #8db4f5; --info-bg: #1b2a44; --plain: #9aa6b4; --plain-bg: #222b35; color-scheme: dark }
+    body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 15px; line-height: 1.5; }
+    .wrap { max-width: 1120px; margin: 0 auto; padding-block: 28px 64px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 36px; }
+    h1, h2, h3 { text-wrap: balance; margin: 0; line-height: 1.2; }
+    h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.01em; }
+    h2 { font-size: 21px; font-weight: 600; }
+    h3 { font-size: 16px; font-weight: 600; }
+    p { margin: 0; max-width: 68ch; }
+    code, .mono { font-family: var(--mono); font-size: 0.88em; }
+    .muted { color: var(--muted); }
+    .eyebrow { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+    header { display: grid; gap: 10px; }
+    .scope { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
+    .scope button, .filters button { font: inherit; font-size: 13px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 999px; padding: 4px 12px; cursor: pointer; }
+    .scope button[aria-pressed="true"], .filters button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+    button:focus-visible, a:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    section { display: grid; gap: 14px; min-width: 0; }
+    .classes { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+    .cls { background: var(--panel); border: 1px solid var(--line); border-top: 4px solid var(--c); border-radius: 6px; padding: 14px 14px 12px; display: grid; gap: 4px; align-content: start; }
+    .cls .n { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--c); }
+    .cls .t { font-weight: 600; }
+    .cls .d { font-size: 13px; color: var(--muted); }
+    .k-lang { --c: var(--plain); } .k-held { --c: var(--info); } .k-never { --c: var(--ok); } .k-reach { --c: var(--warn); } .k-open { --c: var(--bad); }
+    .chip { display: inline-block; font-size: 12px; font-weight: 500; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+    .chip.lang { background: var(--plain-bg); color: var(--plain); } .chip.held { background: var(--info-bg); color: var(--info); }
+    .chip.never { background: var(--ok-bg); color: var(--ok); } .chip.reach { background: var(--warn-bg); color: var(--warn); } .chip.open { background: var(--bad-bg); color: var(--bad); }
+    .group { display: grid; gap: 10px; }
+    .group > h3 { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+    .finding { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; min-width: 0; }
+    .finding .head { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; padding: 10px 12px 8px; }
+    .finding .where { font-family: var(--mono); font-size: 13px; }
+    .finding .where a { color: var(--accent); text-decoration: none; } .finding .where a:hover { text-decoration: underline; }
+    .finding .why { font-size: 14px; }
+    .finding .why b { font-family: var(--mono); font-weight: 500; font-size: 13px; }
+    pre.ex { margin: 0; background: var(--code-bg); border-top: 1px solid var(--line); padding: 8px 0; overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; }
+    pre.ex .l { display: block; padding-right: 12px; white-space: pre; }
+    pre.ex .ln { display: inline-block; width: 4.5em; text-align: right; padding-right: 12px; color: var(--muted); user-select: none; }
+    pre.ex .hl { background: var(--warn-bg); } pre.ex .hl.bad { background: var(--bad-bg); } pre.ex .hl.ok { background: var(--ok-bg); }
+    pre.ex .gap { color: var(--muted); }
+    .more { font: inherit; font-size: 13px; color: var(--accent); background: none; border: none; padding: 0; cursor: pointer; justify-self: start; }
+    .tablewrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+    table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+    th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    th { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr.click { cursor: pointer; } tbody tr.click:hover { background: var(--plain-bg); }
+    td .z { color: var(--line); }
+    .mod { display: grid; gap: 14px; }
+    .modhead { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: center; }
+    select { font: inherit; font-size: 14px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); max-width: 100%; }
+    .defs { display: grid; gap: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+    .def { display: grid; grid-template-columns: minmax(0, 15em) auto minmax(0, 1fr); gap: 4px 14px; padding: 7px 12px; border-bottom: 1px solid var(--line); align-items: baseline; font-size: 13.5px; }
+    .def:last-child { border-bottom: none; }
+    .def .nm { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; } .def .nm a { color: var(--fg); text-decoration: none; } .def .nm a:hover { color: var(--accent); }
+    .def .what { color: var(--muted); }
+    @media (max-width: 640px) { .def { grid-template-columns: 1fr auto; } .def .what { grid-column: 1 / -1; } }
+    .src { background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px; overflow: auto; max-height: 70vh; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; }
+    .src .l { display: grid; grid-template-columns: 4.5em 1.4em max-content; white-space: pre; }
+    .src .ln { text-align: right; padding-right: 8px; color: var(--muted); user-select: none; }
+    .src .mk { text-align: center; user-select: none; }
+    .src .l.never { background: var(--ok-bg); } .src .l.reach { background: var(--warn-bg); } .src .l.open { background: var(--bad-bg); } .src .l.held { background: var(--info-bg); }
+    .src .l.target { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .note { font-size: 13px; color: var(--muted); padding: 8px 12px; border-top: 1px solid var(--line); white-space: normal; font-family: var(--sans); grid-column: 1 / -1; }
+    .src .note { background: var(--panel); }
+    nav.bar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); margin: 0 calc(-1 * max(16px, env(safe-area-inset-left, 0px))); padding: 8px max(16px, env(safe-area-inset-left, 0px)); display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 14px; }
+    body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+    nav.bar a { color: var(--accent); text-decoration: none; font-weight: 500; } nav.bar a:hover { text-decoration: underline; }
+    nav.bar .c { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+    section[id], h2[id] { scroll-margin-top: calc(56px + env(safe-area-inset-top, 0px)); }
+    a.cls { color: inherit; text-decoration: none; } a.cls:hover { border-color: var(--c); }
+    a.cls .go { font-size: 12.5px; color: var(--accent); margin-top: 4px; }
+    .srchead { display: grid; gap: 6px; }
+    .guide { font-size: 16.5px; line-height: 1.5; max-width: 72ch; background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 6px; padding: 12px 16px; }
+    .guide b { font-weight: 600; }
+    footer { font-size: 13px; color: var(--muted); display: grid; gap: 6px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 8px; }
+    @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+    </style>
+
+    <div class="wrap">
+      <header>
+        <div class="eyebrow">Geng · what the checker shows</div>
+        <h1 id="title">Check Report</h1>
+        <p class="guide"><b>Work down "Where to look":</b> wherever the program can never be in the state shown, write that fact into a type as a refinement, such as an index being less than an array's length, and the checker proves on every build that the fallback never runs. Where the state can happen, make sure the fallback gives the right answer.</p>
+        <p class="muted" id="intro"></p>
+      </header>
+      <nav class="bar" aria-label="Sections" id="nav"></nav>
+
+      <section aria-labelledby="h-classes" id="summary">
+        <h2 id="h-classes">What the checker says</h2>
+        <div class="classes" id="classes"></div>
+        <p class="muted" style="font-size:13px">A check that holds says one thing about one place: a sum there cannot wrap, a refined argument meets its condition, a branch never runs. It does not say the function computes the right answer. That would take a refinement on the function's own result.</p>
+      </section>
+
+      <section aria-labelledby="h-look" id="look-section">
+        <h2 id="h-look">Where to look</h2>
+        <p>Each place below handles a missing value with a fallback (a <code>Nothing</code> or <code>Err</code> branch, a <code>_</code> after <code>Just</code> or <code>Ok</code>, or a <code>withDefault</code>'s default), and the checker found values that reach it. That is often right. Ask whether the program can really be in that state, and whether the fallback is the correct answer when it is. Index reads come first: a stated bound on the index would let the checker show their fallbacks never run.</p>
+        <div class="filters scope" role="group" aria-label="Filter" id="filters"></div>
+        <div id="look" style="display:grid;gap:22px"></div>
+      </section>
+
+      <section aria-labelledby="h-open" id="open-section">
+        <h2 id="h-open">Open</h2>
+        <p>Checks that do not hold, or that the checker could not decide. A normal build does not ask the overflow checks of this code, because no refinement leads there; the report asks them anyway.</p>
+        <div id="open" style="display:grid;gap:10px"></div>
+      </section>
+
+      <section aria-labelledby="h-never" id="never-section">
+        <h2 id="h-never">Fallbacks that never run</h2>
+        <p>A fallback (a <code>Nothing</code> or <code>Err</code> branch, a <code>_</code> after <code>Just</code> or <code>Ok</code>, or a <code>withDefault</code>'s default) that the checker showed no values reach, from what it knows where the branch is: a refinement, an earlier pattern, a test above it. It is still correct code, but it never runs.</p>
+        <div id="never" style="display:grid;gap:10px"></div>
+      </section>
+
+      <section aria-labelledby="h-held" id="held-section">
+        <h2 id="h-held">Checks that hold</h2>
+        <p>Each says one thing about one place. Grouped by what was checked.</p>
+        <div id="held" style="display:grid;gap:22px"></div>
+      </section>
+
+      <section aria-labelledby="h-mods" class="mod" id="modules">
+        <h2 id="h-mods">Modules</h2>
+        <div class="tablewrap"><table id="modtable"></table></div>
+        <div class="modhead">
+          <h3 id="modname"></h3>
+          <label class="muted" style="font-size:13px">Module <select id="modpick"></select></label>
+        </div>
+        <p class="muted" style="font-size:13px">Click a module in the table, or pick one here. Its top-level functions are listed with their labels; click a function's name to jump to it in the source below.</p>
+        <div class="defs" id="defs"></div>
+        <div class="srchead">
+          <h3 id="srcname">Source</h3>
+          <p class="muted" style="font-size:13px">The module's own source, scrollable. A line the checker asked something about is shaded and marked in the narrow column: <span class="chip held">✓ held</span> <span class="chip never">✓ never runs</span> <span class="chip reach">! reachable</span> <span class="chip open">✕ open</span>. The note under a marked line says what was asked and what the checker answered.</p>
+        </div>
+        <div class="src" id="src" tabindex="0" aria-label="Source of the chosen module"></div>
+      </section>
+
+      <footer>
+        <div class="legend">
+          <span class="chip lang">types only</span><span class="chip held">checks hold</span><span class="chip never">fallback never runs</span><span class="chip reach">fallback reachable</span><span class="chip open">open</span>
+        </div>
+        <p id="made"></p>
+      </footer>
+    </div>
+
+    <script>
+    const DATA = /*DATA*/null;
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    const fmt = (n) => n.toLocaleString("en-US");
+    const INDEX = new Set(["Array.get", "Array.first", "Array.last", "Array.popFirst", "Array.popLast", "Builder.get", "Bytes.get", "String.popFirst", "String.popLast"]);
+    let filter = "all";
+    const modules = () => DATA.modules;
+    const mid = (name) => name.replace(/\\./g, "-");
+
+    function verdict(g) {
+      if (g.kind === "fallback") return g.outcome === "proved" ? "never" : g.outcome === "refuted" ? "reach" : "open";
+      if (g.kind === "invariant") return "info";
+      return g.outcome === "proved" ? "held" : "open";
+    }
+
+    function defLabel(gs) {
+      const vs = gs.map(verdict);
+      if (vs.includes("open")) return "open";
+      if (vs.includes("reach")) return "reach";
+      if (vs.includes("held") || vs.includes("never")) return "held";
+      return "lang";
+    }
+    const LABEL = { lang: "types only", held: "checks hold", never: "fallback never runs", reach: "fallback reachable", open: "open" };
+
+    function whatHeld(gs) {
+      const n = (f) => gs.filter(f).length;
+      const parts = [];
+      const sums = n((g) => g.kind === "overflow" && g.outcome === "proved");
+      const refs = n((g) => g.kind === "refinement" && g.outcome === "proved");
+      const never = n((g) => verdict(g) === "never");
+      const reach = n((g) => verdict(g) === "reach");
+      const open = n((g) => verdict(g) === "open");
+      if (refs) parts.push(`${refs} refined condition${refs > 1 ? "s" : ""} met`);
+      if (sums) parts.push(`${sums} sum${sums > 1 ? "s" : ""} cannot wrap`);
+      if (never) parts.push(`${never} fallback${never > 1 ? "s" : ""} never run${never > 1 ? "" : "s"}`);
+      if (reach) parts.push(`${reach} fallback${reach > 1 ? "s" : ""} reachable`);
+      if (open) parts.push(`${open} open`);
+      return parts.join(" · ") || "nothing beyond the types";
+    }
+
+    function defsOf(m) {
+      return m.defs.map((d) => ({ ...d, goals: m.goals.filter((g) => g.def === d.name || g.def.startsWith(d.name + "$") || (g.row >= d.start && g.row <= d.end)) }));
+    }
+
+    function totals() {
+      const ms = modules();
+      const all = ms.flatMap((m) => m.goals);
+      return {
+        mods: ms.length, lines: ms.reduce((a, m) => a + m.lines, 0), defs: ms.reduce((a, m) => a + m.defs.length, 0),
+        refs: all.filter((g) => g.kind === "refinement" && g.outcome === "proved").length,
+        sums: all.filter((g) => g.kind === "overflow" && g.outcome === "proved").length,
+        never: all.filter((g) => verdict(g) === "never").length,
+        reach: all.filter((g) => verdict(g) === "reach").length,
+        open: all.filter((g) => verdict(g) === "open").length,
+      };
+    }
+
+    function renderClasses() {
+      const t = totals();
+      $("intro").textContent = `${DATA.program}'s own code: ${fmt(t.mods)} module${t.mods === 1 ? "" : "s"}, ${fmt(t.defs)} definition${t.defs === 1 ? "" : "s"}, ${fmt(t.lines)} lines. The refinement checker asks, at every Nothing or Err branch and every catch-all after Just or Ok, whether any values reach it, and at every withDefault whether its default is ever used.`;
+      const cls = [
+        ["k-lang", fmt(t.lines), "lines: language guarantees", "Every line Geng compiles: types hold, every case is handled, no null, no exception, no read past an array's end.", "modules", "Browse the modules"],
+        ["k-held", fmt(t.refs + t.sums), "checks hold", `${fmt(t.refs)} refined conditions met at calls, ${fmt(t.sums)} sums that cannot wrap.`, "held-section", "See the checks"],
+        ["k-never", fmt(t.never), "fallbacks never run", "A fallback no values reach: a Nothing or Err branch, a _ after Just, a withDefault's default.", "never-section", "See them"],
+        ["k-reach", fmt(t.reach), "fallbacks reachable", "A fallback that values reach, shown with those values.", "look-section", "Where to look"],
+        ["k-open", fmt(t.open), "open", "A check that fails or that the checker could not decide.", "open-section", "See the open checks"],
+      ];
+      $("classes").innerHTML = cls.map(([k, n, t2, d, to, go]) => `<a class="cls ${k}" href="#${to}"><div class="n">${n}</div><div class="t">${t2}</div><div class="d">${esc(d)}</div><div class="go">${go} ↓</div></a>`).join("");
+      $("nav").innerHTML = `<a href="#summary">Summary</a><a href="#look-section">Where to look <span class="c">${fmt(t.reach)}</span></a><a href="#open-section">Open <span class="c">${fmt(t.open)}</span></a><a href="#never-section">Never run <span class="c">${fmt(t.never)}</span></a><a href="#held-section">Checks hold <span class="c">${fmt(t.refs + t.sums)}</span></a><a href="#modules">Modules <span class="c">${fmt(t.mods)}</span></a>`;
+    }
+
+    function excerpt(m, rows, marks) {
+      if (!m.source) return "";
+      const lines = [...new Set(rows)].filter((r) => r >= 1 && r <= m.lines).sort((a, b) => a - b);
+      let out = "", prev = 0;
+      for (const r of lines) {
+        if (prev && r > prev + 1) out += `<span class="l gap"><span class="ln">⋮</span></span>`;
+        out += `<span class="l ${marks[r] || ""}"><span class="ln">${r}</span>${esc(m.source[r - 1])}</span>`;
+        prev = r;
+      }
+      return `<pre class="ex">${out}</pre>`;
+    }
+
+    function fallbackRows(g) {
+      if (g.default) return [g.row - 1, g.row];
+      const rows = [];
+      if (g.when) rows.push(g.when);
+      for (let r = Math.max((g.when || g.pattern) + 1, g.pattern - 2); r <= g.row + 1; r++) rows.push(r);
+      return rows;
+    }
+
+    function groupOf(g) {
+      if (INDEX.has(g.reads)) return "index";
+      if (/^[A-Z]/.test(g.reads)) return "lib";
+      return "own";
+    }
+    const GROUPS = { index: "Index reads", lib: "Other library lookups", own: "The program's own functions and values" };
+
+    const runs = (g) => (g.default ? "is used" : "runs");
+    function why(g) {
+      if (!g.values) return `${runs(g)}; the checker gives no particular values`;
+      return `${runs(g)} when <b>${esc(g.values)}</b>`;
+    }
+
+    function renderLook() {
+      const items = modules().flatMap((m) => m.goals.filter((g) => verdict(g) === "reach").map((g) => ({ m, g })));
+      const counts = { all: items.length, index: 0, lib: 0, own: 0 };
+      items.forEach(({ g }) => counts[groupOf(g)]++);
+      $("filters").innerHTML = ["all", "index", "lib", "own"].map((k) => `<button type="button" data-f="${k}" aria-pressed="${filter === k}">${k === "all" ? "All" : GROUPS[k]} · ${counts[k]}</button>`).join("");
+      $("filters").querySelectorAll("button").forEach((b) => (b.onclick = () => { filter = b.dataset.f; renderLook(); }));
+      let html = "";
+      for (const k of ["index", "lib", "own"]) {
+        if (filter !== "all" && filter !== k) continue;
+        const list = items.filter(({ g }) => groupOf(g) === k);
+        if (!list.length) continue;
+        const byRead = {};
+        list.forEach(({ g }) => (byRead[g.reads] = (byRead[g.reads] || 0) + 1));
+        const tally = Object.entries(byRead).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([r, n]) => `<code>${esc(r)}</code> ${n}`).join(", ");
+        const shown = filter === k ? list : list.slice(0, 6);
+        html += `<div class="group"><h3>${GROUPS[k]} <span class="muted" style="font-weight:400;font-size:14px">${list.length} · ${tally}</span></h3>`;
+        html += shown.map(({ m, g }) => {
+          const marks = {}; marks[g.pattern] = "hl"; marks[g.row] = "hl";
+          return `<div class="finding"><div class="head"><span class="where"><a href="#${mid(m.name)}" data-mod="${esc(m.name)}" data-row="${g.row}">${esc(m.name)}.${esc(g.def)}</a> · line ${g.pattern}</span><span class="why">${esc(g.label)} ${why(g)}</span></div>${excerpt(m, fallbackRows(g), marks)}</div>`;
+        }).join("");
+        if (shown.length < list.length) html += `<button type="button" class="more" data-f="${k}">Show all ${list.length}</button>`;
+        html += `</div>`;
+      }
+      $("look").innerHTML = html || `<p class="muted">No reachable fallbacks here.</p>`;
+      $("look").querySelectorAll(".more").forEach((b) => (b.onclick = () => { filter = b.dataset.f; renderLook(); }));
+      wireJumps($("look"));
+    }
+
+    // What an open check says: refuted comes with values, undecided and not
+    // checked with the checker's reason, if it gave one.
+    function openText(g, bold) {
+      const b = (x) => (bold ? `<b>${esc(x)}</b>` : esc(x));
+      const reason = g.reason ? ` (${esc(g.reason)})` : "";
+      if (g.kind === "fallback") return `${esc(g.label)}: the checker could not decide whether it runs${reason}`;
+      const what = g.kind === "overflow" ? esc(g.about.replace(" stays within Int", "")) : esc(g.about);
+      if (g.outcome === "refuted") return g.kind === "overflow" ? `${what} can wrap, when ${b(g.values)}` : `${what} does not hold, when ${b(g.values)}`;
+      if (g.outcome === "undecided") return `${what}: the checker could not decide whether it ${g.kind === "overflow" ? "can wrap" : "holds"}${reason}`;
+      return `${what}: not checked${reason}`;
+    }
+
+    function renderOpen() {
+      const items = modules().flatMap((m) => m.goals.filter((g) => verdict(g) === "open").map((g) => ({ m, g })));
+      $("open").innerHTML = items.map(({ m, g }) => {
+        const marks = {}; marks[g.row] = "hl bad";
+        const text = openText(g, true);
+        return `<div class="finding"><div class="head"><span class="where"><a href="#${mid(m.name)}" data-mod="${esc(m.name)}" data-row="${g.row}">${esc(m.name)}.${esc(g.def)}</a> · line ${g.row}</span><span class="why">${text}</span></div>${excerpt(m, [g.row - 1, g.row, g.row + 1].filter((r) => m.source && m.source[r - 1] !== undefined && m.source[r - 1].trim()), marks)}</div>`;
+      }).join("") || `<p class="muted">Nothing open here.</p>`;
+      wireJumps($("open"));
+    }
+
+    function renderNever() {
+      const items = modules().flatMap((m) => m.goals.filter((g) => verdict(g) === "never").map((g) => ({ m, g })));
+      $("never").innerHTML = items.map(({ m, g }) => {
+        const marks = {}; marks[g.pattern] = "hl ok"; marks[g.row] = "hl ok";
+        return `<div class="finding"><div class="head"><span class="where"><a href="#${mid(m.name)}" data-mod="${esc(m.name)}" data-row="${g.row}">${esc(m.name)}.${esc(g.def)}</a> · line ${g.pattern}</span><span class="why">${esc(g.label)} ${g.default ? "is never used" : "never runs"}</span></div>${excerpt(m, fallbackRows(g), marks)}</div>`;
+      }).join("") || `<p class="muted">None here.</p>`;
+      wireJumps($("never"));
+    }
+
+    let heldOpen = {};
+    function renderHeld() {
+      const items = modules().flatMap((m) => m.goals.filter((g) => verdict(g) === "held").map((g) => ({ m, g })));
+      const groups = [["overflow", "Sums that cannot wrap"], ["refinement", "Refined conditions met"]];
+      let html = "";
+      for (const [k, title] of groups) {
+        const list = items.filter(({ g }) => g.kind === k);
+        if (!list.length) continue;
+        const shown = heldOpen[k] ? list : list.slice(0, 5);
+        html += `<div class="group"><h3>${title} <span class="muted" style="font-weight:400;font-size:14px">${fmt(list.length)}</span></h3>`;
+        html += shown.map(({ m, g }) => {
+          const marks = {}; marks[g.row] = "hl ok";
+          const text = k === "overflow" ? g.about.replace(" stays within Int", " cannot wrap") : g.about + " holds";
+          return `<div class="finding"><div class="head"><span class="where"><a href="#${mid(m.name)}" data-mod="${esc(m.name)}" data-row="${g.row}">${esc(m.name)}.${esc(g.def)}</a> · line ${g.row}</span><span class="why">${esc(text)}</span></div>${excerpt(m, [g.row], marks)}</div>`;
+        }).join("");
+        if (shown.length < list.length) html += `<button type="button" class="more" data-k="${k}">Show all ${fmt(list.length)}</button>`;
+        html += `</div>`;
+      }
+      $("held").innerHTML = html || `<p class="muted">None here.</p>`;
+      $("held").querySelectorAll(".more").forEach((b) => (b.onclick = () => { heldOpen[b.dataset.k] = true; renderHeld(); }));
+      wireJumps($("held"));
+    }
+
+    function renderModTable() {
+      const ms = modules();
+      const rows = ms.map((m) => {
+        const ds = defsOf(m).map((d) => defLabel(d.goals));
+        const c = (k) => ds.filter((x) => x === k).length;
+        const z = (n) => (n ? fmt(n) : `<span class="z">0</span>`);
+        return { m, html: `<tr class="click" data-mod="${esc(m.name)}"><td class="mono">${esc(m.name)}</td><td class="muted">${esc(m.package)}</td><td class="num">${fmt(m.lines)}</td><td class="num">${z(c("lang"))}</td><td class="num">${z(c("held"))}</td><td class="num">${z(c("reach"))}</td><td class="num">${z(c("open"))}</td></tr>` };
+      });
+      $("modtable").innerHTML = `<thead><tr><th>Module</th><th>Package</th><th class="num">Lines</th><th class="num">Types only</th><th class="num">Checks hold</th><th class="num">Fallback reachable</th><th class="num">Open</th></tr></thead><tbody>${rows.map((r) => r.html).join("")}</tbody>`;
+      $("modtable").querySelectorAll("tr.click").forEach((tr) => (tr.onclick = () => showModule(tr.dataset.mod, null, true)));
+      $("modpick").innerHTML = ms.map((m) => `<option value="${esc(m.name)}">${esc(m.name)}</option>`).join("");
+    }
+
+    function showModule(name, row, scroll) {
+      const m = DATA.modules.find((x) => x.name === name);
+      if (!m) return;
+      $("modpick").value = name;
+      $("modname").innerHTML = `<span class="mono">${esc(m.name)}</span> <span class="muted" style="font-weight:400;font-size:14px">${esc(m.package)} · ${fmt(m.lines)} lines · ${m.defs.length} definitions</span>`;
+      const ds = defsOf(m);
+      $("defs").innerHTML = ds.map((d) => {
+        const k = defLabel(d.goals);
+        return `<div class="def"><span class="nm"><a href="#${mid(m.name)}" data-row="${d.start}">${esc(d.name)}</a></span><span class="chip ${k}">${LABEL[k]}</span><span class="what">lines ${d.start}–${d.end} · ${whatHeld(d.goals)}</span></div>`;
+      }).join("") || `<div class="def"><span class="what">No top-level definitions with a signature.</span></div>`;
+      $("defs").querySelectorAll("a").forEach((a) => (a.onclick = (e) => { e.preventDefault(); markRow(+a.dataset.row); }));
+      const byRow = {};
+      m.goals.forEach((g) => (byRow[g.row] = byRow[g.row] || []).push(g));
+      const rank = { open: 4, reach: 3, never: 2, held: 1, info: 0 };
+      let html = "";
+      if (m.source) {
+        m.source.forEach((text, i) => {
+          const gs = byRow[i + 1] || [];
+          let cls = "", mk = "";
+          if (gs.length) {
+            const top = gs.map(verdict).sort((a, b) => rank[b] - rank[a])[0];
+            cls = top === "info" ? "" : top;
+            mk = { open: "✕", reach: "!", never: "✓", held: "✓", info: "" }[top];
+          }
+          html += `<div class="l ${cls}" id="L${i + 1}"><span class="ln">${i + 1}</span><span class="mk">${mk}</span><span>${esc(text) || " "}</span></div>`;
+          for (const g of gs) {
+            const v = verdict(g);
+            if (v === "info") continue;
+            const t = g.kind === "fallback" && v !== "open" ? esc(`${g.label}: ${v === "never" ? (g.default ? "is never used" : "never runs") : g.values ? runs(g) + " when " + g.values : "reachable"}`) :
+              v === "open" ? openText(g, false) : esc(g.kind === "overflow" ? g.about.replace(" stays within Int", " cannot wrap") : `${g.about}: holds`);
+            html += `<div class="l"><span></span><span></span><span class="note">${t}</span></div>`;
+          }
+        });
+      } else {
+        html = `<div class="note">Source not included for this module.</div>`;
+      }
+      $("src").innerHTML = html;
+      $("srcname").innerHTML = `Source of <span class="mono">${esc(m.name)}</span>`;
+      try { history.replaceState(null, "", "#" + mid(name)); } catch (e) {}
+      if (row) markRow(row);
+      else if (scroll) $("h-mods").scrollIntoView();
+    }
+
+    function markRow(row) {
+      $("src").querySelectorAll(".target").forEach((e) => e.classList.remove("target"));
+      const el = document.getElementById("L" + row);
+      if (!el) return;
+      el.classList.add("target");
+      $("srcname").scrollIntoView({ block: "start" });
+      $("src").scrollTop = el.offsetTop - $("src").offsetTop - 80;
+    }
+
+    function wireJumps(root) {
+      root.querySelectorAll("a[data-mod]").forEach((a) => (a.onclick = (e) => { e.preventDefault(); showModule(a.dataset.mod, +a.dataset.row); }));
+    }
+
+    function render() {
+      renderClasses(); renderLook(); renderOpen(); renderNever(); renderHeld(); renderModTable();
+      const want = (location.hash || "").slice(1);
+      const hit = modules().find((m) => mid(m.name) === want);
+      if (hit || modules().length) showModule(hit ? hit.name : modules()[0].name, null, false);
+    }
+
+    $("modpick").onchange = () => showModule($("modpick").value, null, false);
+    window.addEventListener("hashchange", () => { const m = DATA.modules.find((x) => mid(x.name) === location.hash.slice(1)); if (m) showModule(m.name, null, true); });
+    document.title = `${DATA.program} Check Report`;
+    $("title").textContent = `${DATA.program} Check Report`;
+    $("made").textContent = `Made by geng checks from ${DATA.program}. Line ranges of definitions are read from the source text. Compiler-written definitions (derived == and compare) are left out.`;
+    render();
+    </script>
+    """

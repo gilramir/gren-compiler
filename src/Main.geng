@@ -26,6 +26,7 @@ import Task exposing (Task)
 import Terminal
 import Terminal.BackendWorker
 import Terminal.Beam
+import Terminal.Checks
 import Terminal.Format
 import Terminal.Help
 import Terminal.Init
@@ -784,6 +785,14 @@ parseUserArgs context compilerPath =
                             )
                         |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
 
+                CliParser.Checks opts ->
+                    -- `geng checks` (geng-lang `m4-proof-report.md` PR15,
+                    -- Dnene34): `make`'s build held at the refinement cut, and
+                    -- the checker's report of the program's own code.
+                    resolveProject context
+                        |> Task.andThen (\resolved -> checksCommand context compilerPath opts resolved)
+                        |> Task.onError (endWithErrorReport (Report.Terminal printOpts))
+
                 CliParser.Decisions opts ->
                     -- `geng decisions` (geng-lang `m4-investigate.md` I3): two
                     -- `--debug-info` builds' accounts compared.
@@ -1517,6 +1526,156 @@ nativeSources context resolved =
                 [ { name = "core", root = context.corePath } ]
                 resolved.dependencies
         }
+
+
+{-| `geng checks`: the program built as `make` builds it, with no output,
+held at the refinement cut, and the report written from the checker's goals
+(geng-lang `m4-proof-report.md` PR15, Dnene34). The program's own code is
+the application and every package taken from a path inside the repository
+the project is in (the nearest directory above it with a `.git`), or under
+the project when there is none; `core`, a fetched package and a path outside
+it are libraries, read for what they promise and not reported.
+-}
+checksCommand : Context -> Path -> CliParser.ChecksOptions -> Terminal.PackageInstall.PackageResolution -> Task Report Int
+checksCommand context compilerPath opts resolved =
+    let
+        command =
+            Compiler.Backend.Make
+                { optimize = False
+                , sourcemaps = False
+                , output = Just Compiler.Backend.DevNull
+                , report = Nothing
+                , projectPath = resolved.projectPath
+                , entryPoints = opts.entryPoints
+                , outline = resolved.outline
+                , rootSources = resolved.rootSources
+                , dependencies = resolved.dependencies
+                }
+
+        sources =
+            Terminal.Refine.sourcesOf resolved
+
+        pathSources =
+            when resolved.outline is
+                Outline.App app ->
+                    app.sources
+
+                Outline.Pkg pkg ->
+                    pkg.sources
+
+        -- the manifest's name, or the project's directory under its
+        -- repository's: puritty's application is `puritty/app`
+        programIn repo =
+            when resolved.outline is
+                Outline.App { name = Just name } ->
+                    name
+
+                _ ->
+                    if Path.filenameWithExtension repo == Path.filenameWithExtension resolved.projectPath then
+                        Path.filenameWithExtension resolved.projectPath
+
+                    else
+                        Path.filenameWithExtension repo ++ "/" ++ Path.filenameWithExtension resolved.projectPath
+
+        -- each package taken from a path, where it really is
+        localPackages =
+            Dict.foldl
+                (\name dep acc ->
+                    when Git.sourceFor pathSources name is
+                        Just { source = Outline.LocalPath _ } ->
+                            Array.pushLast
+                                (FileSystem.realPath context.fsPermission dep.path
+                                    |> Task.onError (\_ -> Task.succeed dep.path)
+                                    |> Task.map (\real -> { name = name, path = real })
+                                )
+                                acc
+
+                        _ ->
+                            acc
+                )
+                []
+                resolved.dependencies
+                |> Task.sequence
+    in
+    Task.map2 (\repo locals -> { repo = repo, locals = locals }) (repositoryOf context resolved.projectPath) localPackages
+        |> Task.andThen
+            (\found ->
+                let
+                    inRepo path =
+                        String.startsWith (context.pathToString found.repo ++ "/") (context.pathToString path ++ "/")
+
+                    ownPackages =
+                        Array.foldl
+                            (\dep acc ->
+                                if inRepo dep.path then
+                                    Dict.set dep.name {} acc
+
+                                else
+                                    acc
+                            )
+                            Dict.empty
+                            found.locals
+
+                    own name =
+                        name.package /= "core" && (Dict.member name.package ownPackages || Basics.not (Dict.member name.package resolved.dependencies))
+                in
+                Terminal.Refine.checks
+                    { fs = context.fsPermission
+                    , envVars = context.envVars
+                    , sources = sources
+                    , toString = context.pathToString
+                    , fromString = context.pathFromString
+                    , script = context.script
+                    , run = \_ -> Task.succeed 0
+                    }
+                    own
+                    (Terminal.Checks.report
+                        { fs = context.fsPermission
+                        , stdout = context.stdout
+                        , fromString = context.pathFromString
+                        , toString = context.pathToString
+                        , program = programIn found.repo
+                        , source = Terminal.Refine.locate sources
+                        , json = opts.json
+                        , html = opts.html
+                        , baseline = opts.baseline
+                        , update = opts.update
+                        }
+                    )
+                    (\extra verdict ->
+                        startBackend context compilerPath extra
+                            |> Task.andThen (talkHeld context { headless = True, encodedCommand = Compiler.Backend.encodeCommand { interactiveSession = False, pathToString = context.pathToString } command } verdict)
+                    )
+                    |> Task.map (\_ -> 0)
+            )
+
+
+{-| The nearest directory at or above `from` with a `.git` in it, or `from`
+when there is none. -}
+repositoryOf : Context -> Path -> Task Report Path
+repositoryOf context from =
+    let
+        up path =
+            FileSystem.checkAccess context.fsPermission [] (Path.append (Path.fromPosixString ".git") path)
+                |> Task.map (\_ -> Just path)
+                |> Task.onError
+                    (\_ ->
+                        when Path.parentPath path is
+                            Just parent ->
+                                if context.pathToString parent == context.pathToString path then
+                                    Task.succeed Nothing
+
+                                else
+                                    up parent
+
+                            Nothing ->
+                                Task.succeed Nothing
+                    )
+    in
+    FileSystem.realPath context.fsPermission from
+        |> Task.onError (\_ -> Task.succeed from)
+        |> Task.andThen up
+        |> Task.map (Maybe.withDefault from)
 
 
 {-| A build's run of the backend, checked by the refinement checker (geng-lang

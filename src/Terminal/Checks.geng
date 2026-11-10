@@ -1,0 +1,1072 @@
+module Terminal.Checks exposing (Config, report)
+
+{-| `geng checks` (geng-lang `m4-proof-report.md` PR15, Dnene34): what the
+refinement checker shows of a program's own code, from the goals
+`Terminal.Refine.checks` gives it.
+
+Each goal is in one of four groups (Dnene20):
+
+  - **checks hold**: a refined condition met, or a sum that cannot wrap;
+  - **never runs**: a fallback no values reach (a `Nothing` or `Err` branch,
+    a catch-all after `Just` or `Ok`, a `withDefault`'s default);
+  - **can run**: a fallback, with values that reach it;
+  - **open**: a check refuted or undecided, a fallback undecided.
+
+A type invariant asked where a record is built or updated holds once per
+update, so it is counted apart; a loop's inferred invariant is not counted.
+Compiler-written definitions (a `$` in the name) are left out.
+
+The text goes to standard output: the totals, then each module's
+definitions, a line for what held in each and a line for each fallback that
+can run, never runs, or is open. `--json FILE` writes the report's data,
+`--html DIR` a page (`Terminal.ChecksPage`) with the data and the modules'
+sources in it. `--baseline FILE` holds the program to a list of its fallbacks
+that can run and its open checks, by module, definition and what was asked,
+with no line numbers (PR8): an entry not on the list fails the command; one
+gone is said and passes. A missing list is written; `--update` writes it
+again.
+-}
+
+import Bytes
+import Char
+import Cli.PrettyPrinter as PP
+import Cli.Report as Report exposing (Report)
+import Dict exposing (Dict)
+import FileSystem
+import FileSystem.Path as Path exposing (Path)
+import Geng.Refine.Check as Check
+import Json.Encode as Encode
+import Stream
+import Stream.Log
+import Task exposing (Task)
+import Terminal.ChecksPage
+import UInt32
+
+
+type alias Config =
+    { fs : FileSystem.Permission
+    , stdout : Stream.Writable Bytes.Bytes
+    , fromString : String -> Path
+    , toString : Path -> String
+    , program : String
+    , source : { package : String, module_ : String } -> Maybe { path : Path, data : String }
+    , json : Maybe String
+    , html : Maybe String
+    , baseline : Maybe String
+    , update : Bool
+    }
+
+
+-- WHAT EACH GOAL IS
+
+
+type alias Item =
+    { module_ : String
+    , package : String
+    , definition : String
+    , row : Int
+    , col : Int
+    , about : String
+    , kind : String
+    , outcome : String
+    , values : String
+    , reason : String
+    , verdict : String
+    , fallback : Maybe { label : String, default : Bool }
+    }
+
+
+{-| A goal as the report reads it, or nothing for one it leaves out. -}
+item : Check.Goal -> Maybe Item
+item g =
+    if String.contains "$" g.definition then
+        Nothing
+
+    else
+        let
+            about =
+                Check.aboutText g.about
+                    ++ (if g.requirement == "" then
+                            ""
+
+                        else
+                            " \"" ++ g.requirement ++ "\""
+                       )
+
+            kind =
+                when g.about is
+                    Check.Fallback _ ->
+                        "fallback"
+
+                    Check.Obligation _ ->
+                        "overflow"
+
+                    Check.Invariant _ ->
+                        "invariant"
+
+                    Check.TypeInvariant _ ->
+                        "invariant"
+
+                    _ ->
+                        "refinement"
+
+            outcome =
+                when g.outcome is
+                    Check.Proved ->
+                        { name = "proved", values = "", reason = "" }
+
+                    Check.Refuted values ->
+                        { name = "refuted", values = String.join ", " (Array.map (\v -> v.name ++ " = " ++ v.value) values), reason = "" }
+
+                    Check.Undecided why ->
+                        { name = "undecided", values = "", reason = why }
+
+                    Check.NotChecked why ->
+                        { name = "not checked", values = "", reason = why }
+
+                    Check.Inferred why ->
+                        { name = "inferred", values = "", reason = why }
+
+            verdict =
+                if kind == "fallback" then
+                    if outcome.name == "proved" then
+                        "never"
+
+                    else if outcome.name == "refuted" then
+                        "reach"
+
+                    else
+                        "open"
+
+                else if kind == "invariant" then
+                    if isTypeInvariant g.about && outcome.name == "proved" then
+                        "kept"
+
+                    else if outcome.name == "proved" || outcome.name == "inferred" then
+                        "info"
+
+                    else
+                        "open"
+
+                else if outcome.name == "proved" then
+                    "held"
+
+                else
+                    "open"
+        in
+        Just
+            { module_ = g.module_
+            , package = g.package
+            , definition = g.definition
+            , row = UInt32.toInt g.span.startRow
+            , col = UInt32.toInt g.span.startCol
+            , about = about
+            , kind = kind
+            , outcome = outcome.name
+            , values = outcome.values
+            , reason = outcome.reason
+            , verdict = verdict
+            , fallback =
+                when g.about is
+                    Check.Fallback { kind = what } ->
+                        Just { label = what, default = String.startsWith "the default of" what }
+
+                    _ ->
+                        Nothing
+            }
+
+
+isTypeInvariant : Check.About -> Bool
+isTypeInvariant about =
+    when about is
+        Check.TypeInvariant _ ->
+            True
+
+        _ ->
+            False
+
+
+-- THE REPORT
+
+
+report : Config -> Array Check.Goal -> Task Report {}
+report config goals =
+    let
+        items =
+            Array.mapAndKeepJust item goals
+
+        text =
+            render config.program items
+    in
+    Stream.Log.string config.stdout text
+        |> Task.onError (\_ -> Task.succeed {})
+        |> Task.andThen (\_ -> writeJson config items)
+        |> Task.andThen (\_ -> writeHtml config items)
+        |> Task.andThen (\_ -> ratchet config items)
+
+
+type alias Totals =
+    { held : Int, never : Int, reach : Int, open : Int, kept : Int }
+
+
+totals : Array Item -> Totals
+totals items =
+    Array.foldl
+        (\i t ->
+            if i.verdict == "held" then
+                { t | held = t.held + 1 }
+
+            else if i.verdict == "never" then
+                { t | never = t.never + 1 }
+
+            else if i.verdict == "reach" then
+                { t | reach = t.reach + 1 }
+
+            else if i.verdict == "open" then
+                { t | open = t.open + 1 }
+
+            else if i.verdict == "kept" then
+                { t | kept = t.kept + 1 }
+
+            else
+                t
+        )
+        { held = 0, never = 0, reach = 0, open = 0, kept = 0 }
+        items
+
+
+{-| The text report: the totals, then each module with a goal, its
+definitions in the order of their first line. -}
+render : String -> Array Item -> String
+render program items =
+    let
+        t =
+            totals items
+
+        byModule =
+            Array.foldl (\i acc -> Dict.updateWithDefault i.module_ [] (Array.pushLast i) acc) Dict.empty items
+
+        modules =
+            Dict.foldl
+                (\name its acc ->
+                    if Array.any (\i -> i.verdict /= "info" && i.verdict /= "kept") its then
+                        acc ++ moduleLines name its
+
+                    else
+                        acc
+                )
+                []
+                byModule
+    in
+    String.join "\n"
+        ([ "geng checks: " ++ program
+         , ""
+         , "  "
+            ++ String.fromInt t.held
+            ++ " checks hold    "
+            ++ String.fromInt t.never
+            ++ " fallbacks never run    "
+            ++ String.fromInt t.reach
+            ++ " can run    "
+            ++ String.fromInt t.open
+            ++ " open"
+         ]
+            ++ (if t.kept > 0 then
+                    [ "  and " ++ String.fromInt t.kept ++ " type invariant checks hold, one where each record is built or updated" ]
+
+                else
+                    []
+               )
+            ++ modules
+        )
+        ++ "\n"
+
+
+moduleLines : String -> Array Item -> Array String
+moduleLines name its =
+    let
+        defs =
+            Array.foldl
+                (\i acc ->
+                    if Array.member i.definition acc then
+                        acc
+
+                    else
+                        Array.pushLast i.definition acc
+                )
+                []
+                (Array.sortBy .row its)
+
+        width =
+            Array.foldl (\d w -> max w (String.count d + 6)) 12 defs
+
+        pad n s =
+            s ++ String.repeat (n - String.count s) " "
+
+        line chip def what =
+            "  " ++ pad 12 chip ++ " " ++ pad width def ++ " " ++ what
+
+        forDef d =
+            let
+                mine =
+                    Array.keepIf (\i -> i.definition == d) its
+
+                held =
+                    whatHeld mine
+
+                heldLine =
+                    if held == "" then
+                        []
+
+                    else
+                        [ line "checks hold" d held ]
+            in
+            heldLine
+                ++ Array.mapAndKeepJust
+                    (\i ->
+                        if i.verdict == "never" then
+                            Just (line "never runs" (d ++ ":" ++ String.fromInt i.row) (neverText i))
+
+                        else if i.verdict == "reach" then
+                            Just (line "can run" (d ++ ":" ++ String.fromInt i.row) (reachText i))
+
+                        else if i.verdict == "open" then
+                            Just (line "open" (d ++ ":" ++ String.fromInt i.row) (openText i))
+
+                        else
+                            Nothing
+                    )
+                    (Array.sortBy .row mine)
+    in
+    [ "", name ] ++ Array.mapAndFlatten forDef defs
+
+
+{-| What held in a definition, as counts: its refined conditions and sums.
+Its fallbacks that never run have a line each. -}
+whatHeld : Array Item -> String
+whatHeld its =
+    let
+        n f =
+            Array.length (Array.keepIf f its)
+
+        plural k one many =
+            String.fromInt k
+                ++ " "
+                ++ (if k == 1 then
+                        one
+
+                    else
+                        many
+                   )
+
+        refs =
+            n (\i -> i.kind == "refinement" && i.verdict == "held")
+
+        sums =
+            n (\i -> i.kind == "overflow" && i.verdict == "held")
+    in
+    [ if refs > 0 then
+        plural refs "refined condition met" "refined conditions met"
+
+      else
+        ""
+    , if sums > 0 then
+        plural sums "sum cannot wrap" "sums cannot wrap"
+
+      else
+        ""
+    ]
+        |> Array.keepIf (\s -> s /= "")
+        |> String.join " · "
+
+
+label : Item -> String
+label i =
+    when i.fallback is
+        Just f ->
+            f.label
+
+        Nothing ->
+            i.about
+
+
+neverText : Item -> String
+neverText i =
+    label i
+        ++ (if isDefault i then
+                " is never used"
+
+            else
+                " never runs"
+           )
+
+
+reachText : Item -> String
+reachText i =
+    label i
+        ++ (if isDefault i then
+                " is used"
+
+            else
+                " runs"
+           )
+        ++ (if i.values == "" then
+                ""
+
+            else
+                " when " ++ i.values
+           )
+
+
+openText : Item -> String
+openText i =
+    let
+        what =
+            if i.kind == "overflow" then
+                String.replace " stays within Int" "" i.about
+
+            else
+                i.about
+
+        reason =
+            if i.reason == "" then
+                ""
+
+            else
+                ": " ++ i.reason
+    in
+    if i.kind == "fallback" then
+        label i ++ ": I could not decide whether it runs" ++ reason
+
+    else if i.outcome == "refuted" then
+        if i.kind == "overflow" then
+            what ++ " can wrap" ++ withValues i
+
+        else
+            what ++ " does not hold" ++ withValues i
+
+    else if i.outcome == "not checked" then
+        what ++ ": not checked" ++ reason
+
+    else if i.kind == "overflow" then
+        what ++ ": I could not decide whether it can wrap" ++ reason
+
+    else
+        what ++ ": I could not decide whether it holds" ++ reason
+
+
+withValues : Item -> String
+withValues i =
+    if i.values == "" then
+        ""
+
+    else
+        ", when " ++ i.values
+
+
+isDefault : Item -> Bool
+isDefault i =
+    when i.fallback is
+        Just f ->
+            f.default
+
+        Nothing ->
+            False
+
+
+-- JSON AND HTML
+
+
+itemJson : Item -> Encode.Value
+itemJson i =
+    Encode.object
+        [ { key = "def", value = Encode.string i.definition }
+        , { key = "row", value = Encode.int i.row }
+        , { key = "col", value = Encode.int i.col }
+        , { key = "about", value = Encode.string i.about }
+        , { key = "kind", value = Encode.string i.kind }
+        , { key = "outcome", value = Encode.string i.outcome }
+        , { key = "verdict", value = Encode.string i.verdict }
+        , { key = "values", value = Encode.string i.values }
+        , { key = "reason", value = Encode.string i.reason }
+        ]
+
+
+writeJson : Config -> Array Item -> Task Report {}
+writeJson config items =
+    when config.json is
+        Nothing ->
+            Task.succeed {}
+
+        Just file ->
+            let
+                t =
+                    totals items
+
+                byModule =
+                    Array.foldl (\i acc -> Dict.updateWithDefault i.module_ { package = i.package, items = [] } (\m -> { m | items = Array.pushLast i m.items }) acc) Dict.empty items
+
+                json =
+                    Encode.object
+                        [ { key = "program", value = Encode.string config.program }
+                        , { key = "totals"
+                          , value =
+                                Encode.object
+                                    [ { key = "held", value = Encode.int t.held }
+                                    , { key = "never", value = Encode.int t.never }
+                                    , { key = "reach", value = Encode.int t.reach }
+                                    , { key = "open", value = Encode.int t.open }
+                                    , { key = "invariantsKept", value = Encode.int t.kept }
+                                    ]
+                          }
+                        , { key = "modules"
+                          , value =
+                                Dict.foldl
+                                    (\name m acc ->
+                                        Array.pushLast
+                                            (Encode.object
+                                                [ { key = "name", value = Encode.string name }
+                                                , { key = "package", value = Encode.string m.package }
+                                                , { key = "goals", value = Encode.array itemJson m.items }
+                                                ]
+                                            )
+                                            acc
+                                    )
+                                    []
+                                    byModule
+                                    |> Encode.array identity
+                          }
+                        ]
+            in
+            writeFile config (config.fromString file) (Encode.encode 2 json ++ "\n")
+
+
+{-| The page's data: each module with a goal, its definitions' line ranges,
+its goals as the page's script reads them, and its source. -}
+writeHtml : Config -> Array Item -> Task Report {}
+writeHtml config items =
+    when config.html is
+        Nothing ->
+            Task.succeed {}
+
+        Just dir ->
+            let
+                byModule =
+                    Array.foldl (\i acc -> Dict.updateWithDefault i.module_ { package = i.package, items = [] } (\m -> { m | items = Array.pushLast i m.items }) acc) Dict.empty items
+
+                moduleJson name m =
+                    let
+                        lines =
+                            config.source { package = m.package, module_ = name }
+                                |> Maybe.map (\s -> String.lines s.data)
+                                |> Maybe.withDefault []
+                    in
+                    Encode.object
+                        [ { key = "name", value = Encode.string name }
+                        , { key = "package", value = Encode.string m.package }
+                        , { key = "lines", value = Encode.int (Array.length lines) }
+                        , { key = "defs", value = Encode.array defJson (definitions lines) }
+                        , { key = "goals", value = Encode.array (pageGoal lines) m.items }
+                        , { key = "source", value = Encode.array Encode.string lines }
+                        ]
+
+                data =
+                    Encode.object
+                        [ { key = "program", value = Encode.string config.program }
+                        , { key = "modules"
+                          , value = Dict.foldl (\name m acc -> Array.pushLast (moduleJson name m) acc) [] byModule |> Encode.array identity
+                          }
+                        ]
+
+                page =
+                    String.replace "/*DATA*/null" (Encode.encode 0 data |> String.replace "</" "<\\/") Terminal.ChecksPage.page
+
+                path =
+                    config.fromString dir
+            in
+            FileSystem.makeDirectory config.fs { recursive = True } path
+                |> Task.map (\_ -> {})
+                |> Task.mapError (\e -> failure ("I cannot make the directory " ++ dir) (FileSystem.errorToString e))
+                |> Task.andThen (\_ -> writeFile config (Path.append (Path.fromPosixString "index.html") path) page)
+
+
+defJson : { name : String, start : Int, end : Int } -> Encode.Value
+defJson d =
+    Encode.object
+        [ { key = "name", value = Encode.string d.name }
+        , { key = "start", value = Encode.int d.start }
+        , { key = "end", value = Encode.int d.end }
+        ]
+
+
+{-| A goal as the page's script reads it, with what a fallback's excerpt
+needs from the source: the line of its `when`, the line of its pattern, and
+what it reads. -}
+pageGoal : Array String -> Item -> Encode.Value
+pageGoal lines i =
+    let
+        base =
+            [ { key = "def", value = Encode.string i.definition }
+            , { key = "row", value = Encode.int i.row }
+            , { key = "col", value = Encode.int i.col }
+            , { key = "about", value = Encode.string i.about }
+            , { key = "outcome", value = Encode.string i.outcome }
+            , { key = "values", value = Encode.string i.values }
+            , { key = "reason", value = Encode.string i.reason }
+            , { key = "kind", value = Encode.string i.kind }
+            ]
+
+        lineAt r =
+            Array.get (r - 1) lines |> Maybe.withDefault ""
+    in
+    when i.fallback is
+        Nothing ->
+            Encode.object base
+
+        Just f ->
+            if f.default then
+                let
+                    reads =
+                        producer lines i.row
+                in
+                Encode.object
+                    (base
+                        ++ [ { key = "default", value = Encode.bool True }
+                           , { key = "when", value = Encode.null }
+                           , { key = "pattern", value = Encode.int i.row }
+                           , { key = "reads", value = Encode.string reads }
+                           , { key = "index", value = Encode.bool (Array.member reads indexReads) }
+                           , { key = "label", value = Encode.string f.label }
+                           ]
+                    )
+
+            else
+                let
+                    found =
+                        whenLine lines i.row
+
+                    reads =
+                        when found.when_ is
+                            Just w ->
+                                whenReads (lineAt w)
+
+                            Nothing ->
+                                "a value"
+                in
+                Encode.object
+                    (base
+                        ++ [ { key = "when"
+                             , value =
+                                when found.when_ is
+                                    Just w ->
+                                        Encode.int w
+
+                                    Nothing ->
+                                        Encode.null
+                             }
+                           , { key = "pattern", value = Encode.int found.pattern }
+                           , { key = "reads", value = Encode.string reads }
+                           , { key = "index", value = Encode.bool (Array.member reads indexReads) }
+                           , { key = "label", value = Encode.string f.label }
+                           ]
+                    )
+
+
+indexReads : Array String
+indexReads =
+    [ "Array.get", "Array.first", "Array.last", "Array.popFirst", "Array.popLast", "Builder.get", "Array.Builder.get", "Bytes.get", "String.popFirst", "String.popLast" ]
+
+
+lookups : Array String
+lookups =
+    indexReads ++ [ "Dict.get", "Array.findFirst", "Array.findLast", "String.toInt", "String.toFloat", "String.toNumber", "Array.minimum", "Array.maximum", "Owned.get" ]
+
+
+-- READING THE SOURCE
+
+
+{-| Each top-level definition's name and lines: from a line `name :` to the
+last line before the next one that is the definition's own, indented or
+starting with its name. -}
+definitions : Array String -> Array { name : String, start : Int, end : Int }
+definitions lines =
+    let
+        starts =
+            Array.indexedMap (\k l -> { row = k + 1, name = signatureName l }) lines
+                |> Array.mapAndKeepJust (\s -> Maybe.map (\name -> { row = s.row, name = name }) s.name)
+
+        lineAt r =
+            Array.get (r - 1) lines |> Maybe.withDefault ""
+
+        endOf k s =
+            let
+                next =
+                    Array.get (k + 1) starts |> Maybe.map (\n -> n.row - 1) |> Maybe.withDefault (Array.length lines)
+
+                owned end =
+                    if end > s.row && Basics.not (String.startsWith " " (lineAt end) || String.startsWith s.name (lineAt end)) then
+                        owned (end - 1)
+
+                    else
+                        end
+
+                trimmed end =
+                    if end > s.row && String.trim (lineAt end) == "" then
+                        trimmed (end - 1)
+
+                    else
+                        end
+            in
+            trimmed (owned next)
+    in
+    Array.indexedMap (\k s -> { name = s.name, start = s.row, end = endOf k s }) starts
+
+
+{-| `name` of a line `name : ...` that starts at its first column. -}
+signatureName : String -> Maybe String
+signatureName line =
+    when String.split " :" line is
+        [] ->
+            Nothing
+
+        [ _ ] ->
+            Nothing
+
+        _ ->
+            let
+                name =
+                    String.split " :" line |> Array.first |> Maybe.withDefault ""
+            in
+            if name /= "" && isLowerStart name && String.all isWordChar name then
+                Just name
+
+            else
+                Nothing
+
+
+isLowerStart : String -> Bool
+isLowerStart s =
+    when String.popFirst s is
+        Just { first } ->
+            Char.isLower first
+
+        Nothing ->
+            False
+
+
+isWordChar : Char -> Bool
+isWordChar c =
+    Char.isAlphaNum c || c == '_'
+
+
+{-| The line of the `when` a fallback alternative belongs to, if one is
+found, and the line of its pattern: the pattern is at most three lines above
+the alternative's body, and the `when` is the nearest line above it less
+indented that has the word. -}
+whenLine : Array String -> Int -> { when_ : Maybe Int, pattern : Int }
+whenLine lines bodyRow =
+    let
+        lineAt r =
+            Array.get (r - 1) lines |> Maybe.withDefault ""
+
+        findPattern r =
+            if r < 1 || r < bodyRow - 4 then
+                Nothing
+
+            else if isAlternative (lineAt r) then
+                Just r
+
+            else
+                findPattern (r - 1)
+
+        patternRow =
+            findPattern (bodyRow - 1) |> Maybe.withDefault bodyRow
+
+        indent =
+            indentOf (lineAt patternRow)
+
+        findWhen r =
+            if r < 1 then
+                Nothing
+
+            else
+                let
+                    l =
+                        lineAt r
+                in
+                if String.trim l /= "" && indentOf l < indent && Array.member "when" (String.words l) then
+                    Just r
+
+                else
+                    findWhen (r - 1)
+    in
+    { when_ = findWhen (patternRow - 1), pattern = patternRow }
+
+
+{-| A line that is an alternative a fallback can be: `Nothing ->`, `Err ... ->`,
+`_ ->` or `name ->`. -}
+isAlternative : String -> Bool
+isAlternative line =
+    when String.split "->" (String.trim line) is
+        [ pattern, rest ] ->
+            let
+                p =
+                    String.trim pattern
+            in
+            rest == "" && (p == "Nothing" || p == "_" || String.startsWith "Err" p || (isLowerStart p && String.all isWordChar p))
+
+        _ ->
+            False
+
+
+indentOf : String -> Int
+indentOf line =
+    String.count line - String.count (String.trimLeft line)
+
+
+{-| What a `when` reads: a qualified name right after it, `Array.get`, or
+"the program's f" for a call of the program's own function, or "a value". -}
+whenReads : String -> String
+whenReads line =
+    let
+        after =
+            when String.split "when " line is
+                [ _, rest ] ->
+                    String.trimLeft (String.replace "(" "" rest)
+
+                _ ->
+                    ""
+
+        first =
+            String.words after |> Array.first |> Maybe.withDefault ""
+
+        second =
+            String.words after |> Array.get 1 |> Maybe.withDefault ""
+    in
+    if isQualified first then
+        first
+
+    else if first /= "" && isLowerStart first && first /= "if" && second /= "is" && second /= "" then
+        "the program's " ++ first
+
+    else
+        "a value"
+
+
+isQualified : String -> Bool
+isQualified word =
+    when String.split "." word is
+        [] ->
+            False
+
+        [ _ ] ->
+            False
+
+        parts ->
+            (Array.first parts |> Maybe.map (\p -> Basics.not (isLowerStart p) && p /= "") |> Maybe.withDefault False)
+                && Array.all (\p -> p /= "" && String.all isWordChar p) parts
+
+
+{-| What a `withDefault`'s `Maybe` comes from: a library lookup on its line
+or the line before it, a pipeline's. -}
+producer : Array String -> Int -> String
+producer lines row =
+    let
+        words r =
+            Array.get (r - 1) lines
+                |> Maybe.withDefault ""
+                |> String.replace "(" " "
+                |> String.replace ")" " "
+                |> String.words
+    in
+    (words row ++ words (row - 1))
+        |> Array.findFirst (\w -> Array.member w lookups)
+        |> Maybe.map .value
+        |> Maybe.withDefault "the program's own code"
+
+
+-- THE BASELINE
+
+
+{-| Each fallback that can run or is undecided, and each open check, as
+`module\tdefinition\twhat`, with how many there are. -}
+entries : Array Item -> Dict String Int
+entries items =
+    Array.foldl
+        (\i acc ->
+            if i.verdict == "reach" || i.verdict == "open" then
+                let
+                    what =
+                        when i.fallback is
+                            Just f ->
+                                f.label
+                                    ++ (if i.verdict == "reach" then
+                                            " reachable"
+
+                                        else
+                                            " undecided"
+                                       )
+
+                            Nothing ->
+                                i.about ++ ": " ++ i.outcome
+                in
+                Dict.updateWithDefault (i.module_ ++ "\t" ++ i.definition ++ "\t" ++ what) 0 (\n -> n + 1) acc
+
+            else
+                acc
+        )
+        Dict.empty
+        items
+
+
+ratchet : Config -> Array Item -> Task Report {}
+ratchet config items =
+    when config.baseline is
+        Nothing ->
+            Task.succeed {}
+
+        Just file ->
+            let
+                now =
+                    entries items
+
+                path =
+                    config.fromString file
+
+                write =
+                    writeFile config
+                        path
+                        (Dict.foldl (\key n acc -> acc ++ String.fromInt n ++ "\t" ++ key ++ "\n") "# count\tmodule\tdefinition\twhat (geng checks --baseline)\n" now)
+                        |> Task.andThen (\_ -> say config ("Recorded " ++ String.fromInt (total now) ++ " entries in " ++ file ++ ".\n"))
+            in
+            FileSystem.readFile config.fs path
+                |> Task.map (\bytes -> Just (Bytes.toString bytes |> Maybe.withDefault ""))
+                |> Task.onError (\_ -> Task.succeed Nothing)
+                |> Task.andThen
+                    (\read ->
+                        when read is
+                            Nothing ->
+                                write
+
+                            Just text ->
+                                if config.update then
+                                    write
+
+                                else
+                                    compareTo config file (parseBaseline text) now
+                    )
+
+
+compareTo : Config -> String -> Dict String Int -> Dict String Int -> Task Report {}
+compareTo config file was now =
+    let
+        less a b =
+            Dict.foldl
+                (\key n acc ->
+                    let
+                        extra =
+                            n - (Dict.get key b |> Maybe.withDefault 0)
+                    in
+                    if extra > 0 then
+                        Array.pushLast { key = key, count = extra } acc
+
+                    else
+                        acc
+                )
+                []
+                a
+
+        new =
+            less now was
+
+        gone =
+            less was now
+
+        show tag e =
+            tag ++ "  " ++ String.fromInt e.count ++ "  " ++ String.replace "\t" "  " e.key ++ "\n"
+
+        lines =
+            String.join "" (Array.map (show "gone") gone)
+                ++ String.join "" (Array.map (show "NEW ") new)
+                ++ String.fromInt (total now)
+                ++ " entries against "
+                ++ file
+                ++ ": "
+                ++ String.fromInt (Array.foldl (\e n -> n + e.count) 0 new)
+                ++ " new, "
+                ++ String.fromInt (Array.foldl (\e n -> n + e.count) 0 gone)
+                ++ " gone.\n"
+    in
+    say config ("\n" ++ lines)
+        |> Task.andThen
+            (\_ ->
+                if Array.isEmpty new then
+                    Task.succeed {}
+
+                else
+                    Task.fail
+                        (Report.create "NEW FALLBACKS OR OPEN CHECKS"
+                            Nothing
+                            (PP.verticalBlock
+                                [ PP.words ("The report has entries the baseline " ++ file ++ " does not: each NEW line above is a fallback that can run, or a check that is open, that was not there before.")
+                                , PP.empty
+                                , PP.words "Look at each: prove it away with a refinement, or, when it runs by design, record the list again with --update."
+                                ]
+                            )
+                        )
+            )
+
+
+parseBaseline : String -> Dict String Int
+parseBaseline text =
+    String.lines text
+        |> Array.foldl
+            (\line acc ->
+                if String.startsWith "#" line || String.trim line == "" then
+                    acc
+
+                else
+                    when String.split "\t" line is
+                        [] ->
+                            acc
+
+                        [ _ ] ->
+                            acc
+
+                        parts ->
+                            let
+                                count =
+                                    Array.first parts |> Maybe.andThen String.toInt |> Maybe.withDefault 0
+
+                                key =
+                                    Array.dropFirst 1 parts |> String.join "\t"
+                            in
+                            Dict.set key count acc
+            )
+            Dict.empty
+
+
+total : Dict String Int -> Int
+total d =
+    Dict.foldl (\_ n acc -> acc + n) 0 d
+
+
+-- FILES
+
+
+say : Config -> String -> Task Report {}
+say config text =
+    Stream.Log.string config.stdout text
+        |> Task.onError (\_ -> Task.succeed {})
+
+
+writeFile : Config -> Path -> String -> Task Report {}
+writeFile config path text =
+    FileSystem.writeFile config.fs (Bytes.fromString text) path
+        |> Task.map (\_ -> {})
+        |> Task.mapError (\e -> failure ("I cannot write " ++ config.toString path) (FileSystem.errorToString e))
+
+
+failure : String -> String -> Report
+failure what why =
+    Report.create "CANNOT WRITE THE CHECKS REPORT" Nothing (PP.words (what ++ ": " ++ why))

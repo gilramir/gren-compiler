@@ -4,6 +4,7 @@ module Terminal.Parser exposing
     , ReleaseFlags
     , FormatFlags
     , ProtobufFlags
+    , ChecksOptions
     , DiffArgs (..)
     , parser
     )
@@ -36,6 +37,7 @@ type Command
     | Paths Paths.Options
     | Run RunOptions
     | Profile ProfileOptions
+    | Checks ChecksOptions
     | Decisions DecisionsOptions
     | Test TestOptions
     | Format FormatFlags
@@ -114,6 +116,17 @@ type alias ProfileOptions =
     , json : Maybe String
     , html : Maybe String
     , top : Maybe Int
+    }
+
+
+{-| `geng checks` (geng-lang `m4-proof-report.md` PR15, Dnene34): the
+modules to build, as `make` takes them, and the report's files. -}
+type alias ChecksOptions =
+    { entryPoints : Array ModuleName
+    , json : Maybe String
+    , html : Maybe String
+    , baseline : Maybe String
+    , update : Bool
     }
 
 
@@ -553,6 +566,50 @@ parser =
                             , json = flags.json
                             , html = flags.html
                             , top = flags.top
+                            }
+                }
+            |> Cli.Parser.withCommand
+                { word = "checks"
+                , arguments =
+                    Cli.Parser.zeroOrMoreArgs moduleNameParser
+                , flags =
+                    Cli.Parser.initFlags
+                        (\json html baseline update ->
+                            { json = json
+                            , html = html
+                            , baseline = baseline
+                            , update = update
+                            }
+                        )
+                        |> Cli.Parser.flag "json" fileParser "Write the report as JSON too, to this file."
+                        |> Cli.Parser.flag "html" fileParser "Write the report as a page too, index.html in this directory: each fallback with the source around it, and each module's source with every check marked on its line."
+                        |> Cli.Parser.flag "baseline" fileParser "Hold the program to a list of its fallbacks that can run and its checks that are open, kept in this file: one not on the list fails the command, for a CI job. A file that is not there is written."
+                        |> Cli.Parser.toggle "update" "With --baseline, write the list again from this report."
+                , commonDescription =
+                    Nothing
+                , summary =
+                    "The `checks` command reports what the compiler proves about your program, and where it falls back to a default:"
+                , example =
+                    PP.verticalBlock
+                        [ PP.words "For example:"
+                        , PP.empty
+                        , PP.words "geng checks Main"
+                            |> PP.indent
+                            |> PP.color PP.Green
+                        , PP.empty
+                        , PP.words
+                            """
+                            This builds src/Main.geng as geng make does, up to the refinement checker, and has the checker go through all of your own code: the application, and each package it takes from a path inside the same repository. For each function it says what the compiler proved (a refined condition met, a sum that cannot wrap) and each fallback (a Nothing or Err branch, a _ after Just or Ok, a withDefault's default) that it showed never runs, or that can run, with values that reach it. Checks it could not prove are listed as open. Nothing is built.
+                            """
+                        ]
+                , builder =
+                    \args flags ->
+                        Checks
+                            { entryPoints = args
+                            , json = flags.json
+                            , html = flags.html
+                            , baseline = flags.baseline
+                            , update = flags.update
                             }
                 }
             |> Cli.Parser.withCommand

@@ -1,4 +1,4 @@
-module Terminal.Refine exposing (Config, Sources, build, compareVersions, sourcesOf)
+module Terminal.Refine exposing (Config, Sources, build, checks, compareVersions, locate, sourcesOf)
 
 {-| A build checked by the refinement checker (geng-lang `m4-refine.md`
 §RF24, D833).
@@ -138,6 +138,42 @@ build config runHeld =
                     )
                     |> Task.andThen (\exitCode -> remove config dir |> Task.map (\_ -> exitCode))
                     |> Task.onError (\report -> remove config dir |> Task.andThen (\_ -> Task.fail report))
+            )
+
+
+{-| `geng checks` (geng-lang `m4-proof-report.md` PR15, Dnene34): the
+build held at the refinement cut as `build` holds it, with every module
+staged (`GENG_REFINE_EVERY_MODULE`), and the checker run over the modules
+`own` accepts with every fallback asked about. `report` is given the goals
+and writes the report; the binary is then told to stop, so nothing is
+built, and a report that fails, as `--baseline` does on a new entry, is the
+command's failure. A program the checker cannot show its refinements of is
+reported, not refused: the report is for reading what holds and what does
+not.
+-}
+checks : Config -> (Core.ModuleName -> Bool) -> (Array Check.Goal -> Task Report {}) -> (Dict String String -> Task Report Bool -> Task Report Int) -> Task Report Int
+checks config own report runHeld =
+    FileSystem.makeTempDirectory config.fs "geng-checks-"
+        |> Task.mapError (\e -> failure "I cannot make a directory for the refinement checker" (FileSystem.errorToString e))
+        |> Task.andThen
+            (\dir ->
+                runHeld
+                    (Dict.singleton "GENG_REFINE_STAGE" (config.toString dir)
+                        |> Dict.set "GENG_REFINE_HOLD" "1"
+                        |> Dict.set "GENG_REFINE_EVERY_MODULE" "1"
+                        |> Dict.union (Terminal.Own.checkerVariables config.envVars config.script)
+                    )
+                    (readModules config.fs dir
+                        |> Task.andThen
+                            (\modules ->
+                                (Check.checkWith { recording = False, everyModule = True, explain = False, fallbacks = True } own modules).goals
+                                    |> Array.keepIf (\g -> own { package = g.package, module_ = g.module_ })
+                                    |> report
+                            )
+                        |> Task.map (\_ -> False)
+                    )
+                    |> Task.andThen (\exitCode -> remove config dir |> Task.map (\_ -> exitCode))
+                    |> Task.onError (\failed -> remove config dir |> Task.andThen (\_ -> Task.fail failed))
             )
 
 
@@ -460,6 +496,7 @@ goalErrors config modules =
                     { recording = Dict.member "GENG_REFINE_QUERIES" config.envVars || Dict.member "GENG_REFINE_PROFILE" config.envVars
                     , everyModule = Dict.member "GENG_REFINE_EVERY_MODULE" config.envVars
                     , explain = Dict.member "GENG_REFINE_EXPLAIN" config.envVars
+                    , fallbacks = False
                     }
                     (\name -> withCore || name.package /= "core")
                     modules
