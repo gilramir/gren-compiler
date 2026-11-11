@@ -1016,6 +1016,21 @@ lifted join params body =
                 let (x', k1, m1) = if pipe == "apL" then inPlace k x else go k x
                     (y', k2, m2) = if pipe == "apR" then inPlace k1 y else go k1 y
                  in (e {Core._exprValue = Core.EApp g [x', y']}, k2, m1 ++ m2)
+          -- A join's lambda is the join's code, entered by jumps in this
+          -- same function, never a closure kept: it stays where it is, and
+          -- what its body makes is looked at. Lifted, its body would be
+          -- written in a maker, where the join's own jumps are out of scope.
+          Core.EJoin binds inner ->
+            let (binds', k1, m1) =
+                  foldl
+                    ( \(done, kk, ms) (Core.Bind b v) ->
+                        let (v', kk', m) = inPlace kk v
+                         in (done ++ [Core.Bind b v'], kk', ms ++ m)
+                    )
+                    ([], k, [])
+                    binds
+                (inner', k2, m2) = go k1 inner
+             in (e {Core._exprValue = Core.EJoin binds' inner'}, k2, m1 ++ m2)
           Core.ELam _ _
             | needs e ->
                 let mk = fresh k
