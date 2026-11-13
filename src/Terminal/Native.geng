@@ -1285,7 +1285,10 @@ compile config thePlan compiled =
                                )
 
                     else
-                        [ "-lpthread", "-lm" ]
+                        -- dl: Boehm's dlopen, in libc only from glibc 2.34;
+                        -- RHEL8's 2.28 keeps it in libdl (puritty
+                        -- docs/rhel8-etx.md RE4)
+                        [ "-lpthread", "-ldl", "-lm" ]
                    )
     in
     keepCommand config thePlan args
@@ -1455,7 +1458,7 @@ compileLibrary config thePlan name compiled =
             ++ compiled.libraries
             ++ systemLibraries config
             ++ config.tools.linkFlags
-            ++ (if config.platform == Runtime.Windows then [ "-lws2_32", "-lm" ] else [ "-lm" ])
+            ++ (if config.platform == Runtime.Windows then [ "-lws2_32", "-lm" ] else [ "-ldl", "-lm" ])
         )
 
 
