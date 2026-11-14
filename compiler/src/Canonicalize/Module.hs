@@ -27,6 +27,7 @@ import Data.Char qualified as Char
 import Data.Graph qualified as Graph
 import Data.Index qualified as Index
 import Data.List qualified as List
+import Data.Utf8 qualified as Utf8
 import Data.Map qualified as Map
 import Data.Set qualified as Set
 import Data.Maybe qualified as Maybe
@@ -98,7 +99,19 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
 
     checkClosedClassesCovered home (fmap snd classes) cclasses cinstances
 
-    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities)) (Set.fromList (map A.toValue inlines)) (Set.fromList (map A.toValue affines)) ctorRefinements (Set.fromList (map A.toValue measures)) meant
+    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities)) (Set.fromList (map A.toValue inlines)) (Set.fromList (map A.toValue affines)) ctorRefinements (Set.fromList (map A.toValue measures)) meant (ctorDocs (fmap snd unions))
+
+-- | Each variant's doc comment, by its constructor's name, trimmed (geng-lang
+-- @m4-refine-t1.md@ TO24).
+ctorDocs :: [A.Located Src.Union] -> Map.Map Name.Name Name.Name
+ctorDocs unions =
+  Map.fromList
+    [ (ctor, Name.fromChars (trim (Utf8.toChars (Utf8.fromSnippet snippet))))
+    | A.At _ (Src.Union _ _ variants _ _) <- unions,
+      (_, Just (Src.DocComment snippet), A.At _ ctor, _, _) <- variants
+    ]
+  where
+    trim = List.dropWhileEnd Char.isSpace . List.dropWhile Char.isSpace
 
 -- | This module's own measures, in the environment its predicates are read
 -- in (geng-lang @m4-refine-t1.md@ TO14): each with whether its annotation

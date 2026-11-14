@@ -207,5 +207,7 @@ lowerCtor home (Can.Ctor name index _ argTypes) =
       Core._ctorTag = Index.toMachine index,
       Core._ctorFields = map lowerType argTypes,
       -- Filled by "Core.Lower.Module", which lowers expressions.
-      Core._ctorRefinement = Nothing
+      Core._ctorRefinement = Nothing,
+      -- Filled by "Core.Lower.Module", from the module's doc comments.
+      Core._ctorDoc = Nothing
     }

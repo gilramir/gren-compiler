@@ -341,8 +341,10 @@ type InstanceMethod =
 data Union = Union (A.Located Name) [([Comment], A.Located Name)] [UnionVariant] [A.Located Name] SC.UnionComments
   deriving (Show)
 
+-- | A variant: the comments before it, its doc comment (geng-lang
+-- @m4-refine-t1.md@ TO24), its name, its arguments and the comments after.
 type UnionVariant =
-  ([Comment], A.Located Name, [([Comment], Type)], [Comment])
+  ([Comment], Maybe DocComment, A.Located Name, [([Comment], Type)], [Comment])
 
 data Alias = Alias (A.Located Name) [A.Located Name] Type
   deriving (Show)

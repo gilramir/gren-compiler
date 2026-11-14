@@ -345,7 +345,7 @@ checkUnionFreeVars (A.At unionRegion (Src.Union (A.At _ name) args ctors _ _)) =
   let addArg (_, A.At region arg) dict =
         Dups.insert arg region region dict
 
-      addCtorFreeVars (_, _, tipes, _) freeVars =
+      addCtorFreeVars (_, _, _, tipes, _) freeVars =
         List.foldl' addFreeVars freeVars (fmap snd tipes)
    in do
         boundVars <- Dups.detect (Error.DuplicateUnionArg name) (foldr addArg Dups.none args)
@@ -454,7 +454,7 @@ canonicalizeUnion env@(Env.Env home _ _ _ _ _ _ _ _ _ _ _ _ _) (A.At _ (Src.Unio
       )
 
 canonicalizeCtor :: Env.Env -> Index.ZeroBased -> Src.UnionVariant -> Result i w (A.Located Can.Ctor, Maybe Can.AliasRefinement)
-canonicalizeCtor env index (_, A.At region ctor, tipes, _) =
+canonicalizeCtor env index (_, _, A.At region ctor, tipes, _) =
   let argLength = length tipes
    in if argLength > 1
         then Result.throw (Error.CustomTypeTooManyParams region ctor argLength)
@@ -469,10 +469,10 @@ canonicalizeCtor env index (_, A.At region ctor, tipes, _) =
 toOpts :: [Src.UnionVariant] -> Can.CtorOpts
 toOpts ctors =
   case ctors of
-    [(_, _, [_], _)] ->
+    [(_, _, _, [_], _)] ->
       Can.Unbox
     _ ->
-      if all (\(_, _, args, _) -> null args) ctors then Can.Enum else Can.Normal
+      if all (\(_, _, _, args, _) -> null args) ctors then Can.Enum else Can.Normal
 
 toCtor :: ModuleName.Canonical -> Name.Name -> Can.Union -> A.Located Can.Ctor -> CtorDups
 toCtor home typeName union (A.At region (Can.Ctor name index _ args)) =

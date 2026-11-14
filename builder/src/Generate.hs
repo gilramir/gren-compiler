@@ -485,6 +485,11 @@ checkerReads cores =
     -- predicate reads is kept, and so is the module declaring it.
     invariantPredicates = [p | m <- Map.elems cores, a <- Core._moduleAliases m, Just n <- [Core._aliasInvariant a], Just p <- [Core._namedPredicate n]]
     declaresInvariant m = any (Maybe.isJust . Core._aliasInvariant) (Core._moduleAliases m)
+    -- The reasons the walked modules' `meant`s name (geng-lang
+    -- m4-refine-t1.md TO23, TO24): a module declaring one is kept, for its
+    -- words and for its type's other constructors.
+    reasonsUsed = Set.fromList [Core._meantReason x | m <- Map.elems walked, x <- Core._moduleMeant m]
+    declaresReason m = any (any ((`Set.member` reasonsUsed) . Core._ctorName) . Core._dataCtors) (Core._moduleData m)
     start =
       Set.unions
         ( [refsOf (Core._bindValue b) | m <- Map.elems walked, b <- Core._moduleDefs m]
@@ -527,7 +532,7 @@ checkerReads cores =
           named q = Set.member q needed
           kept = [b | b <- Core._moduleDefs m, named (Core.QualName home (Core._binderName (Core._bindBinder b)))]
           binders = map Core._bindBinder kept
-       in if null kept && not (any (`Set.member` ctorsUsed) (ctorContracts m)) && not (declaresInvariant m)
+       in if null kept && not (any (`Set.member` ctorsUsed) (ctorContracts m)) && not (declaresInvariant m) && not (declaresReason m)
             then Nothing
             else
               Just

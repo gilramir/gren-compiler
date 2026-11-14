@@ -371,7 +371,11 @@ data Ctor = Ctor
     -- record with refined fields (geng-lang @m4-refine-t1.md@ TO13): a
     -- 'Named' at @[StepArg 0]@ whose predicate reads its binder's name. Only
     -- the refinement checker reads it.
-    _ctorRefinement :: !(Maybe Named)
+    _ctorRefinement :: !(Maybe Named),
+    -- | The variant's doc comment, trimmed (geng-lang @m4-refine-t1.md@
+    -- TO24): the words a @meant@'s reason gives in the checks report. Only
+    -- the refinement checker reads it.
+    _ctorDoc :: !(Maybe Name)
   }
   deriving (Eq, Show)
 

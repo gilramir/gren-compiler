@@ -427,7 +427,11 @@ data Module = Module
     -- @m4-refine-t1.md@ TO23): lowering lists them in Core for the refinement
     -- checker, which holds each to being a fallback's value. The expressions
     -- themselves are in '_decls' as if no @meant@ were written.
-    _meant :: [Meant]
+    _meant :: [Meant],
+    -- | Each constructor's doc comment, by name, its text trimmed (geng-lang
+    -- @m4-refine-t1.md@ TO24): lowering gives it its Core constructor, for
+    -- the refinement checker's reasons. No other stage reads it.
+    _ctorDocs :: Map.Map Name Name
   }
 
 -- | A fallback marked as meant (geng-lang @m4-refine-t1.md@ TO23): the

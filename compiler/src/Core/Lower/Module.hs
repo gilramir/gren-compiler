@@ -84,7 +84,7 @@ lower platform annotations types coreTypes elaboration modul =
         { Core._moduleName = home,
           Core._moduleFiles = Map.singleton selfFile home,
           Core._moduleData =
-            [ withContracts env (Can._ctorRefinements modul) union $
+            [ withDocs (Can._ctorDocs modul) . withContracts env (Can._ctorRefinements modul) union $
                 lowerUnion
                   (if Can.isAbstract (Can._exports modul) name then Core.Abstract else Core.Transparent)
                   (Set.member name (Can._affines modul))
@@ -132,6 +132,12 @@ withContracts env refinements (Can.Union _ ctors _ _) decl =
           (Just refinement, [argType]) -> c {Core._ctorRefinement = Just (Expr.ctorNamed env argType refinement)}
           _ -> c
    in decl {Core._dataCtors = map contract (Core._dataCtors decl)}
+
+-- | A data declaration's constructors given their doc comments (geng-lang
+-- @m4-refine-t1.md@ TO24).
+withDocs :: Map.Map Name Name -> Core.DataDecl -> Core.DataDecl
+withDocs docs decl =
+  decl {Core._dataCtors = map (\c -> c {Core._ctorDoc = Map.lookup (Core._qnName (Core._ctorName c)) docs}) (Core._dataCtors decl)}
 
 -- EXTERNS
 

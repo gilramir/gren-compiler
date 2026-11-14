@@ -547,10 +547,20 @@ fieldType =
 
 -- VARIANT
 
-variant :: Space.Parser E.CustomType (A.Located Name.Name, [([Src.Comment], Src.Type)], [Src.Comment])
+variant :: Space.Parser E.CustomType (Maybe Src.DocComment, A.Located Name.Name, [([Src.Comment], Src.Type)], [Src.Comment])
 variant =
   do
+    -- a variant's own doc comment, before its name (geng-lang
+    -- m4-refine-t1.md TO24)
+    doc <-
+      oneOfWithFallback
+        [ do
+            d <- Space.docComment E.CT_Variant E.CT_Space
+            _ <- Space.chomp E.CT_Space
+            return (Just d)
+        ]
+        Nothing
     name@(A.At (A.Region _ nameEnd) _) <- addLocation (Var.upper E.CT_Variant)
     commentsBefore <- Space.chomp E.CT_Space
     ((args, commentsAfter), end) <- specialize E.CT_VariantArg (chompArgs [] commentsBefore nameEnd)
-    return ((name, args, commentsAfter), end)
+    return ((doc, name, args, commentsAfter), end)

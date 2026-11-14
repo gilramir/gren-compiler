@@ -737,8 +737,8 @@ typeDecl maybeDocs start derives =
           specialize E.DT_Union $
             do
               (name, args, commentsAfterArgs, commentsAfterEquals) <- chompCustomNameToEquals
-              ((firstName, firstArgs, commentsAfterFirst), firstEnd) <- Type.variant
-              let firstVariant = (commentsAfterEquals, firstName, firstArgs, commentsAfterFirst)
+              ((firstDoc, firstName, firstArgs, commentsAfterFirst), firstEnd) <- Type.variant
+              let firstVariant = (commentsAfterEquals, firstDoc, firstName, firstArgs, commentsAfterFirst)
               ((variants, commentsAfter), end) <- chompVariants (NonEmpty.singleton firstVariant) firstEnd
               let comments = SC.UnionComments commentsAfterTypeKeyword commentsAfterArgs
               let union = A.at start end (Src.Union name args variants derives comments)
@@ -801,18 +801,18 @@ chompCustomNameToEqualsHelp name commentsAfterPrev args =
     ]
 
 chompVariants :: NonEmpty (Src.UnionVariant) -> A.Position -> Space.Parser E.CustomType ([Src.UnionVariant], [Src.Comment])
-chompVariants variants@((lastCommentsBefore, lastName, lastArgs, lastCommentsAfter) :| rest) end =
+chompVariants variants@((lastCommentsBefore, lastDoc, lastName, lastArgs, lastCommentsAfter) :| rest) end =
   oneOfWithFallback
     [ do
         Space.checkIndent end E.CT_IndentBar
         word1 0x7C E.CT_Bar
         commentsAfterBar <- Space.chompAndCheckIndent E.CT_Space E.CT_IndentAfterBar
-        ((name, args, commentsAfter), newEnd) <- Type.variant
-        let variant = (commentsAfterBar, name, args, commentsAfter)
+        ((doc, name, args, commentsAfter), newEnd) <- Type.variant
+        let variant = (commentsAfterBar, doc, name, args, commentsAfter)
         chompVariants (NonEmpty.cons variant variants) newEnd
     ]
     ( let (commentsAfterLastVariant, commentsAfter) = List.span (A.isIndentedMoreThan 1) lastCommentsAfter
-       in ((reverse ((lastCommentsBefore, lastName, lastArgs, commentsAfterLastVariant) : rest), commentsAfter), end)
+       in ((reverse ((lastCommentsBefore, lastDoc, lastName, lastArgs, commentsAfterLastVariant) : rest), commentsAfter), end)
     )
 
 -- INFIX

@@ -195,6 +195,7 @@ ctor opts c =
     <> " "
     <> qual (_ctorName c)
     <> mconcat [" " <> atomicType opts t | t <- _ctorFields c]
+    <> maybe "" (\d -> "  {-| " <> name d <> " -}") (_ctorDoc c)
     <> "\n"
     <> maybe "" contract (_ctorRefinement c)
   where
