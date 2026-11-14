@@ -75,6 +75,8 @@ type alias Item =
     , fallback : Maybe { label : String, default : Bool }
       -- a `meant`'s reason, "" for none (geng-lang m4-refine-t1.md TO23)
     , meantReason : String
+      -- its doc comment, the words the report shows beside it (TO24)
+    , meantWords : String
     }
 
 
@@ -137,8 +139,19 @@ item g =
                     Check.Fallback f ->
                         f.meantReason
 
-                    Check.UnusedReason reason ->
-                        reason
+                    Check.UnusedReason u ->
+                        u.reason
+
+                    _ ->
+                        ""
+
+            meantWords =
+                when g.about is
+                    Check.Fallback f ->
+                        f.meantWords
+
+                    Check.UnusedReason u ->
+                        u.words
 
                     _ ->
                         ""
@@ -206,6 +219,7 @@ item g =
                     _ ->
                         Nothing
             , meantReason = meantReason
+            , meantWords = meantWords
             }
 
 
@@ -429,13 +443,13 @@ moduleLines name its =
                             Just (line "open" (d ++ ":" ++ String.fromInt i.row) (openText i))
 
                         else if i.verdict == "meant" then
-                            Just (line "meant" (d ++ ":" ++ String.fromInt i.row) (reachText i ++ ", meant: " ++ i.meantReason))
+                            Just (line "meant" (d ++ ":" ++ String.fromInt i.row) (reachText i ++ ", meant: " ++ withWords i))
 
                         else if i.verdict == "stale" then
-                            Just (line "STALE" (d ++ ":" ++ String.fromInt i.row) (neverText i ++ ", but is marked meant " ++ i.meantReason))
+                            Just (line "STALE" (d ++ ":" ++ String.fromInt i.row) (neverText i ++ ", but is marked meant " ++ withWords i))
 
                         else if i.verdict == "unused" then
-                            Just (line "UNUSED" (d ++ ":" ++ String.fromInt i.row) ("the reason " ++ i.meantReason ++ " is used by no meant"))
+                            Just (line "UNUSED" (d ++ ":" ++ String.fromInt i.row) ("the reason " ++ withWords i ++ " is used by no meant"))
 
                         else
                             Nothing
@@ -443,6 +457,16 @@ moduleLines name its =
                     (Array.sortBy .row mine)
     in
     [ "", name ] ++ Array.mapAndFlatten forDef defs
+
+
+{-| A reason and its words: `Main.Input (what was missing)`. -}
+withWords : Item -> String
+withWords i =
+    if i.meantWords == "" then
+        i.meantReason
+
+    else
+        i.meantReason ++ " (" ++ i.meantWords ++ ")"
 
 
 {-| What held in a definition, as counts: its refined conditions and sums.
@@ -594,6 +618,7 @@ itemJson i =
         , { key = "values", value = Encode.string i.values }
         , { key = "reason", value = Encode.string i.reason }
         , { key = "meant", value = Encode.string i.meantReason }
+        , { key = "meantWords", value = Encode.string i.meantWords }
         ]
 
 
@@ -1115,7 +1140,7 @@ compareTo config file was now =
                             (PP.verticalBlock
                                 [ PP.words ("The report has entries the baseline " ++ file ++ " does not: each NEW line above is a fallback that can run, or a check that is open, that was not there before.")
                                 , PP.empty
-                                , PP.words "Look at each: prove it away with a refinement, or, when it runs by design, record the list again with --update."
+                                , PP.words "Look at each: prove it away with a refinement, or, when a fallback runs by design, mark it `meant` with its reason. Record the list again with --update only for what you mean to keep on it."
                                 ]
                             )
                         )
