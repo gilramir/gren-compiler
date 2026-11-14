@@ -5,6 +5,7 @@ module Reporting.Result
   ( Result (..),
     run,
     ok,
+    listen,
     warn,
     throw,
     mapError,
@@ -40,6 +41,18 @@ ok :: a -> Result i w e a
 ok a =
   Result $ \i w _ good ->
     good i w a
+
+-- | What a computation warned, handed back beside its answer, and passed on
+-- as well, so that a caller can take out what it needs (geng-lang
+-- @m4-refine-t1.md@ TO23's marks), oldest first.
+listen :: Result i [w] e a -> Result i [w] e (a, [w])
+listen (Result k) =
+  Result $ \i ws bad good ->
+    k
+      i
+      []
+      (\i1 w1 e -> bad i1 (w1 ++ ws) e)
+      (\i1 w1 a -> good i1 (w1 ++ ws) (a, reverse w1))
 
 warn :: Warning.Warning -> Result i [Warning.Warning] e ()
 warn warning =

@@ -108,6 +108,10 @@ lower platform annotations types coreTypes elaboration modul =
               (map (externOf env) externDefs ++ concatMap (externWithBody env annotations (Can._externBodies modul)) valueDefs),
           Core._moduleInline = map (Core.QualName home) (Set.toAscList (Can._inlines modul)),
           Core._moduleMeasures = map (Core.QualName home) (Set.toAscList (Can._measures modul)),
+          Core._moduleMeant =
+            [ Core.Meant (Core.QualName reasonHome reason) (Expr.span env region)
+            | Can.Meant region reasonHome _ reason <- Can._meant modul
+            ],
           Core._moduleAliases =
             [ a {Core._aliasInvariant = Expr.ctorNamed env body <$> Can.aliasInvariant alias}
             | (name, alias@(Can.Alias _ body _)) <- Map.toAscList (Can._aliases modul),

@@ -32,6 +32,7 @@
 module Core.AST
   ( -- * Modules
     Module (..),
+    Meant (..),
     DataDecl (..),
     Alias (..),
     Signature (..),
@@ -460,7 +461,22 @@ data Module = Module
     -- @m4-refine-t1.md@ TO14): functions a refinement's predicate may call,
     -- which the refinement checker unfolds where one is called. No pass reads
     -- them.
-    _moduleMeasures :: ![QualName]
+    _moduleMeasures :: ![QualName],
+    -- | Each @meant@ in the module, sorted by where it starts (geng-lang
+    -- @m4-refine-t1.md@ TO23): the refinement checker holds each to being a
+    -- fallback's value and classes that fallback as meant. The expression
+    -- under it is in '_moduleDefs' as if no @meant@ were written. No pass
+    -- reads them.
+    _moduleMeant :: ![Meant]
+  }
+  deriving (Eq, Show)
+
+-- | A fallback marked as meant (TO23): the reason, a constructor with no
+-- arguments, and the span of the whole @meant Reason expr@, which is the
+-- span its expression has in the module.
+data Meant = Meant
+  { _meantReason :: !QualName,
+    _meantSpan :: !Span
   }
   deriving (Eq, Show)
 

@@ -73,6 +73,8 @@ type alias Item =
     , reason : String
     , verdict : String
     , fallback : Maybe { label : String, default : Bool }
+      -- a `meant`'s reason, "" for none (geng-lang m4-refine-t1.md TO23)
+    , meantReason : String
     }
 
 
@@ -97,6 +99,9 @@ item g =
                 when g.about is
                     Check.Fallback _ ->
                         "fallback"
+
+                    Check.UnusedReason _ ->
+                        "reason"
 
                     Check.Obligation _ ->
                         "overflow"
@@ -127,8 +132,35 @@ item g =
                     Check.Inferred why ->
                         { name = "inferred", values = "", reason = why }
 
+            meantReason =
+                when g.about is
+                    Check.Fallback f ->
+                        f.meantReason
+
+                    Check.UnusedReason reason ->
+                        reason
+
+                    _ ->
+                        ""
+
             verdict =
-                if kind == "fallback" then
+                if kind == "reason" then
+                    -- a reason no `meant` uses (TO23)
+                    "unused"
+
+                else if kind == "fallback" && meantReason /= "" then
+                    -- a `meant` is a claim the checker tests (Dnene55): a
+                    -- meant fallback that never runs is stale
+                    if outcome.name == "proved" then
+                        "stale"
+
+                    else if outcome.name == "refuted" then
+                        "meant"
+
+                    else
+                        "open"
+
+                else if kind == "fallback" then
                     if outcome.name == "proved" then
                         "never"
 
@@ -173,6 +205,7 @@ item g =
 
                     _ ->
                         Nothing
+            , meantReason = meantReason
             }
 
 
@@ -203,10 +236,53 @@ report config goals =
         |> Task.andThen (\_ -> writeJson config items)
         |> Task.andThen (\_ -> writeHtml config items)
         |> Task.andThen (\_ -> ratchet config items)
+        |> Task.andThen (\_ -> holdMeant items)
+
+
+{-| A `meant` the checker shows false fails `geng checks` every time, with
+or without a baseline, and nothing records it to pass (geng-lang
+`m4-refine-next.md` Dnene55): a meant fallback that never runs, or a reason
+no `meant` uses. -}
+holdMeant : Array Item -> Task Report {}
+holdMeant items =
+    let
+        stale =
+            Array.length (Array.keepIf (\i -> i.verdict == "stale") items)
+
+        unused =
+            Array.length (Array.keepIf (\i -> i.verdict == "unused") items)
+    in
+    if stale == 0 && unused == 0 then
+        Task.succeed {}
+
+    else
+        Task.fail
+            (Report.create "A MEANT THAT IS NOT SO"
+                Nothing
+                (PP.verticalBlock
+                    [ PP.words
+                        ((if stale > 0 then
+                            String.fromInt stale ++ " fallback" ++ (if stale == 1 then " is" else "s are") ++ " marked `meant` but never run" ++ (if unused > 0 then ", and " else ".")
+
+                          else
+                            ""
+                         )
+                            ++ (if unused > 0 then
+                                    String.fromInt unused ++ " reason" ++ (if unused == 1 then " is" else "s are") ++ " used by no `meant`."
+
+                                else
+                                    ""
+                               )
+                        )
+                    , PP.empty
+                    , PP.words "A `meant` says a fallback runs, for a reason; the lines marked stale and unused above say where that is no longer so. Take out a stale `meant` (and the fallback, if nothing reaches it), and a reason nothing uses. Nothing records them to pass."
+                    ]
+                )
+            )
 
 
 type alias Totals =
-    { held : Int, never : Int, reach : Int, open : Int, kept : Int }
+    { held : Int, never : Int, reach : Int, open : Int, kept : Int, meantCount : Int, stale : Int, unused : Int }
 
 
 totals : Array Item -> Totals
@@ -228,10 +304,19 @@ totals items =
             else if i.verdict == "kept" then
                 { t | kept = t.kept + 1 }
 
+            else if i.verdict == "meant" then
+                { t | meantCount = t.meantCount + 1 }
+
+            else if i.verdict == "stale" then
+                { t | stale = t.stale + 1 }
+
+            else if i.verdict == "unused" then
+                { t | unused = t.unused + 1 }
+
             else
                 t
         )
-        { held = 0, never = 0, reach = 0, open = 0, kept = 0 }
+        { held = 0, never = 0, reach = 0, open = 0, kept = 0, meantCount = 0, stale = 0, unused = 0 }
         items
 
 
@@ -270,6 +355,16 @@ render program items =
             ++ " can run    "
             ++ String.fromInt t.open
             ++ " open"
+            ++ (if t.meantCount + t.stale + t.unused > 0 then
+                    "    "
+                        ++ String.fromInt t.meantCount
+                        ++ " meant"
+                        ++ (if t.stale > 0 then "    " ++ String.fromInt t.stale ++ " stale" else "")
+                        ++ (if t.unused > 0 then "    " ++ String.fromInt t.unused ++ " reasons unused" else "")
+
+                else
+                    ""
+               )
          ]
             ++ (if t.kept > 0 then
                     [ "  and " ++ String.fromInt t.kept ++ " type invariant checks hold, one where each record is built or updated" ]
@@ -332,6 +427,15 @@ moduleLines name its =
 
                         else if i.verdict == "open" then
                             Just (line "open" (d ++ ":" ++ String.fromInt i.row) (openText i))
+
+                        else if i.verdict == "meant" then
+                            Just (line "meant" (d ++ ":" ++ String.fromInt i.row) (reachText i ++ ", meant: " ++ i.meantReason))
+
+                        else if i.verdict == "stale" then
+                            Just (line "STALE" (d ++ ":" ++ String.fromInt i.row) (neverText i ++ ", but is marked meant " ++ i.meantReason))
+
+                        else if i.verdict == "unused" then
+                            Just (line "UNUSED" (d ++ ":" ++ String.fromInt i.row) ("the reason " ++ i.meantReason ++ " is used by no meant"))
 
                         else
                             Nothing
@@ -489,6 +593,7 @@ itemJson i =
         , { key = "verdict", value = Encode.string i.verdict }
         , { key = "values", value = Encode.string i.values }
         , { key = "reason", value = Encode.string i.reason }
+        , { key = "meant", value = Encode.string i.meantReason }
         ]
 
 

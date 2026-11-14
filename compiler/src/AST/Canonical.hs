@@ -40,6 +40,7 @@ module AST.Canonical
     fieldsToList,
     -- modules
     Module (..),
+    Meant (..),
     Alias (..),
     Binop (..),
     OpTarget (..),
@@ -421,7 +422,23 @@ data Module = Module
     -- | The values declared under @\@measure@ (geng-lang @m4-refine-t1.md@
     -- TO14), held to a measure's rules: lowering lists them in Core for the
     -- refinement checker, and the interface for an importer's predicates.
-    _measures :: Set.Set Name
+    _measures :: Set.Set Name,
+    -- | Each @meant@ in the module, sorted by where it is (geng-lang
+    -- @m4-refine-t1.md@ TO23): lowering lists them in Core for the refinement
+    -- checker, which holds each to being a fallback's value. The expressions
+    -- themselves are in '_decls' as if no @meant@ were written.
+    _meant :: [Meant]
+  }
+
+-- | A fallback marked as meant (geng-lang @m4-refine-t1.md@ TO23): the
+-- region of the whole @meant Reason expr@, which is the region its
+-- expression has in '_decls', and the reason, a constructor with no
+-- arguments: its type's module and name, and its own name.
+data Meant = Meant
+  { _meantRegion :: A.Region,
+    _meantHome :: ModuleName.Canonical,
+    _meantType :: Name,
+    _meantReason :: Name
   }
   deriving (Show)
 

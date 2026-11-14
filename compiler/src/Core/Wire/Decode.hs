@@ -1014,6 +1014,11 @@ moduleBodyP =
     if List.sort measures /= measures || length (List.nub measures) /= length measures
       then failAt measuresAt "measures is not sorted by name, or names one binding twice"
       else pure ()
+    meantAt <- offset
+    meant <- rep "meant" 21 meantP
+    if not (strictlyAscending (map (spanStart . _meantSpan) meant))
+      then failAt meantAt "meant is not sorted by where each mark starts, or has two that start together"
+      else pure ()
     pure
       Module
         { _moduleName = name,
@@ -1030,8 +1035,19 @@ moduleBodyP =
           _moduleAliases = aliases,
           _moduleSignatures = signatures,
           _moduleTyped = typed,
-          _moduleMeasures = measures
+          _moduleMeasures = measures,
+          _moduleMeant = meant
         }
+
+-- | A @meant@ mark (geng-lang @m4-refine-t1.md@ TO23): its reason and its
+-- span.
+meantP :: P Meant
+meantP =
+  message "Meant" 6 $
+    do
+      reason <- qual "reason" 1
+      s <- spanP 2
+      pure (Meant reason s)
 
 -- | A signature (D824): its binder, then at least one name, in the order
 -- they are written, which is the order their spans start in. A name has a

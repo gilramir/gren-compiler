@@ -63,7 +63,10 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
         . withOwnMeasures home measures values
         =<< Foreign.createInitialEnv home ifaces (fmap snd imports)
 
-    cvalues <- canonicalizeValues env values
+    -- Each `meant`'s mark comes up the warning channel (geng-lang
+    -- m4-refine-t1.md TO23) and is taken out here, from the values and the
+    -- instances' methods.
+    (cvalues, valueWarnings) <- Result.listen (canonicalizeValues env values)
     Measure.check
       home
       (\h n -> (h, n) `elem` Type.measures || Map.member (h, n) (Env._measures env))
@@ -76,7 +79,8 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
     -- class is the duplicate: the author wrote that one, so the error can point
     -- at code they can see.
     derived <- deriveInstances home ifaces env cexports cunions (fmap snd unions)
-    written <- Instance.canonicalizeInto pkg (importedInstances ifaces) env derived (fmap snd instances)
+    (written, instanceWarnings) <- Result.listen (Instance.canonicalizeInto pkg (importedInstances ifaces) env derived (fmap snd instances))
+    let meant = List.sortOn (\(Can.Meant (A.Region (A.Position row col) _) _ _ _) -> (row, col)) [m | W.Meant m <- valueWarnings ++ instanceWarnings]
 
     -- Last, so that a written or `@derive`d instance is already in the map and
     -- the implicit rule can see that this type is spoken for (§G37).
@@ -94,7 +98,7 @@ canonicalize pkg ifaces modul@(Src.Module _ exports docs imports valuesWithSourc
 
     checkClosedClassesCovered home (fmap snd classes) cclasses cinstances
 
-    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities)) (Set.fromList (map A.toValue inlines)) (Set.fromList (map A.toValue affines)) ctorRefinements (Set.fromList (map A.toValue measures))
+    return $ Can.Module home cexports docs cvalues cunions caliases cclasses cinstances cbinops (externBodies values) (Set.fromList (map A.toValue capabilities)) (Set.fromList (map A.toValue inlines)) (Set.fromList (map A.toValue affines)) ctorRefinements (Set.fromList (map A.toValue measures)) meant
 
 -- | This module's own measures, in the environment its predicates are read
 -- in (geng-lang @m4-refine-t1.md@ TO14): each with whether its annotation

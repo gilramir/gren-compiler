@@ -73,6 +73,7 @@ reservedWords =
       "else",
       "when",
       "is",
+      "meant",
       "let",
       "in",
       "type",

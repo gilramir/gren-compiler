@@ -23,6 +23,10 @@ data Warning
   = UnusedImport A.Region Name.Name
   | UnusedVariable A.Region Context Name.Name
   | MissingTypeAnnotation A.Region Name.Name Can.Type
+  | -- | Not a warning: a @meant@ mark, carried up from an expression to its
+    -- module on the channel that already goes there, and taken out there
+    -- (geng-lang @m4-refine-t1.md@ TO23). Never reported.
+    Meant Can.Meant
 
 data Context = Def | Pattern
 
@@ -31,6 +35,9 @@ data Context = Def | Pattern
 toReport :: L.Localizer -> Code.Source -> Warning -> Report.Report
 toReport localizer source warning =
   case warning of
+    Meant (Can.Meant region _ _ reason) ->
+      Report.Report "meant" region [] $
+        Code.toSnippet source region Nothing (D.reflow ("A fallback marked as meant: " <> Name.toChars reason <> "."), D.reflow "")
     UnusedImport region moduleName ->
       Report.Report "unused import" region [] $
         Code.toSnippet

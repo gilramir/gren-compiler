@@ -80,6 +80,11 @@ data Expr_
   | Lambda [([Comment], Pattern)] Expr SC.LambdaComments
   | Call Expr [([Comment], Expr)]
   | If [IfBranch] Expr SC.IfComments
+  | -- | @meant Reason expr@: a fallback marked as meant (geng-lang
+    -- @m4-refine-t1.md@ TO23). The reason is a constructor's name and its
+    -- module's alias, if written; the comments are those after @meant@ and
+    -- after the reason. It means @expr@; canonicalization records the mark.
+    Meant (A.Located (Maybe Name, Name)) [Comment] [Comment] Expr
   | Let [([Comment], A.Located Def)] Expr SC.LetComments
   | Case Expr [CaseBranch] SC.CaseComments
   | Accessor Name

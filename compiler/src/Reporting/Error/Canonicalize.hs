@@ -113,6 +113,9 @@ data Error
   | NotFoundType A.Region (Maybe Name.Name) Name.Name PossibleNames
   | NotFoundVariant A.Region (Maybe Name.Name) Name.Name PossibleNames
   | NotFoundBinop A.Region Name.Name (Set.Set Name.Name)
+  | -- | @meant@'s reason is a constructor that takes arguments (geng-lang
+    -- @m4-refine-t1.md@ TO23).
+    MeantReasonTakesArguments A.Region Name.Name Int
   | PrimOutsideCore A.Region Name.Name
   | InlineOutsideCore A.Region Name.Name
   | PrimUnknown A.Region Name.Name
@@ -1153,6 +1156,20 @@ toReport source err =
       notFound source region prefix name "type" possibleNames
     NotFoundVariant region prefix name possibleNames ->
       notFound source region prefix name "variant" possibleNames
+    MeantReasonTakesArguments region name count ->
+      Report.Report "MEANT REASON TAKES ARGUMENTS" region [] $
+        Code.toSnippet
+          source
+          region
+          Nothing
+          ( D.reflow $
+              "The reason after `meant` is `" <> Name.toChars name <> "`, a constructor that takes "
+                <> (if count == 1 then "an argument" else show count <> " arguments")
+                <> ":",
+            D.reflow $
+              "A reason names why a fallback runs, and nothing more: it is a constructor with no\
+              \ arguments, such as `Input` of `type Reason = Input | Closed`."
+          )
     NotFoundBinop region op locals ->
       if op == "==="
         then

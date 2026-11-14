@@ -10,6 +10,7 @@ module Parse.Keyword
     then_,
     else_,
     when_,
+    meant_,
     is_,
     let_,
     in_,
@@ -65,6 +66,12 @@ then_ tx = k4 0x74 0x68 0x65 0x6E tx
 
 else_ :: (Row -> Col -> x) -> Parser x ()
 else_ tx = k4 0x65 0x6C 0x73 0x65 tx
+
+-- MEANT EXPRESSIONS
+
+-- | @meant@, a fallback marked as meant (geng-lang @m4-refine-t1.md@ TO23).
+meant_ :: (Row -> Col -> x) -> Parser x ()
+meant_ tx = k5 0x6D 0x65 0x61 0x6E 0x74 tx
 
 -- CASE EXPRESSIONS
 

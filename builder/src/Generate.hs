@@ -426,6 +426,9 @@ owing cores =
     owes m =
       ModuleName._package (Core._moduleName m) /= Pkg.core
         && ( any refines (Core._moduleSignatures m)
+               -- a `meant` is held to being a fallback's value (geng-lang
+               -- m4-refine-t1.md TO23, Dnene55), so its module is walked
+               || not (null (Core._moduleMeant m))
                || any (not . Set.disjoint refined . Refs._refGlobals . Refs.refsIn . Core._bindValue) (Core._moduleDefs m)
                || any (not . Set.disjoint contracted . Refs._refCtors . Refs.refsIn . Core._bindValue) (Core._moduleDefs m)
                || (not (null invariantShapes) && any (any writesInvariant . Refs.recordWrites . Core._bindValue) (Core._moduleDefs m))

@@ -273,6 +273,9 @@ data Expr
   | Space Space Row Col
   | IndentOperatorRight Name.Name Row Col
   | WildCard WildCard Row Col
+  | -- | @meant@ with no reason after it, a constructor's name
+    -- (geng-lang @m4-refine-t1.md@ TO23).
+    MeantReason Row Col
   deriving (Show)
 
 data Record
@@ -2883,6 +2886,23 @@ toExprReport source context expr startRow startCol =
                        \ a single '_' pattern and is allowed so that you may name what you are ignoring.",
                 D.reflow $
                   "Perhaps rename the variable without the underscore prefix."
+              )
+    MeantReason row col ->
+      let surroundings = A.Region (A.Position startRow startCol) (A.Position row col)
+          region = toRegion row col
+       in Report.Report "MISSING REASON" region [] $
+            Code.toSnippet
+              source
+              surroundings
+              (Just region)
+              ( D.reflow $
+                  "I was expecting the reason this fallback is meant, a constructor's name, after `meant`:",
+                D.stack
+                  [ D.indent 4 $ D.dullyellow $ D.fromChars "Nothing ->\n    meant Input 0",
+                    D.reflow $
+                      "The reason is a constructor of a type of your program's own, with no arguments,\
+                      \ such as `Input` of `type Reason = Input | Closed`."
+                  ]
               )
     Space space row col ->
       toSpaceReport source space row col

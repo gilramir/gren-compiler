@@ -737,6 +737,14 @@ moduleEnc m =
     <> rep 18 signatureEnc (_moduleSignatures m)
     <> rep 19 binderEnc (_moduleTyped m)
     <> repQual 20 (_moduleMeasures m)
+    <> rep 21 meantEnc (_moduleMeant m)
+
+-- | A @meant@ mark (geng-lang @m4-refine-t1.md@ TO23): its reason, then its
+-- span, absolute, as nothing here is inside an 'Expr'.
+meantEnc :: Meant -> Enc
+meantEnc (Meant reason s) =
+  qual 1 reason
+    <> spanEnc 2 s
 
 -- | A signature that names an argument or its result (D824): the
 -- definition's binder, then each name. Nothing here is inside an 'Expr', so

@@ -66,6 +66,13 @@ negateInto inner =
   where
     exprRegion (Can.Expr _ region _) = region
 
+-- | An expression with any parentheses around it taken off.
+unparenthesized :: Src.Expr -> Src.Expr
+unparenthesized expr =
+  case expr of
+    A.At _ (Src.Parens _ inner _) -> unparenthesized inner
+    _ -> expr
+
 canonicalize :: Env.Env -> Src.Expr -> Result FreeLocals [W.Warning] Can.Expr
 canonicalize env (A.At region expression) =
   Can.at region
@@ -123,6 +130,23 @@ canonicalize env (A.At region expression) =
         Can.Call
           <$> canonicalize env func
           <*> traverse (canonicalize env) (fmap snd args)
+      Src.Meant (A.At reasonRegion (prefix, name)) _ _ body ->
+        -- The reason, a constructor with no arguments, and the mark taken
+        -- out by the module (geng-lang m4-refine-t1.md TO23); the value is
+        -- the body's, under the region of the whole `meant`, which is what
+        -- the checker matches the mark against.
+        do
+          ctor <-
+            case prefix of
+              Nothing -> Env.findCtor reasonRegion env name
+              Just home -> Env.findCtorQual reasonRegion env home name
+          case Env._c_args ctor of
+            [] ->
+              do
+                Result.warn (W.Meant (Can.Meant region (Env._c_home ctor) (Env._c_type ctor) name))
+                Can.exprValue <$> canonicalize env body
+            args ->
+              Result.throw (Error.MeantReasonTakesArguments reasonRegion name (length args))
       Src.If branches finally _ ->
         Can.If
           <$> traverse (canonicalizeIfBranch env) branches
@@ -150,7 +174,14 @@ canonicalize env (A.At region expression) =
           fieldDict <- Dups.checkLocatedFields fields
           Can.Record <$> traverse (canonicalize env) fieldDict
       Src.Parens _ expr _ ->
-        Can.exprValue <$> canonicalize env expr
+        case unparenthesized expr of
+          -- A `meant` in parentheses, as a `withDefault`'s default is
+          -- written, is the whole parenthesized value, whose region is the
+          -- one its mark must have (geng-lang m4-refine-t1.md TO23).
+          A.At _ meant@(Src.Meant {}) ->
+            Can.exprValue <$> canonicalize env (A.At region meant)
+          _ ->
+            Can.exprValue <$> canonicalize env expr
       Src.Annotated expr _ _ tipe ->
         Can.Annotated
           <$> canonicalize env expr

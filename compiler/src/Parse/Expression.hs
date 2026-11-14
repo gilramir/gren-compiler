@@ -309,6 +309,7 @@ expressionOpen =
       [ let_ start,
         if_ start,
         case_ start,
+        meant_ start,
         function start,
         do
           expr <- possiblyNegativeTerm start
@@ -370,6 +371,7 @@ chompExprEnd start (State ops expr args end commentsBefore) =
                           [ let_ newStart,
                             case_ newStart,
                             if_ newStart,
+                            meant_ newStart,
                             function newStart
                           ]
                       let newOps = (toCall expr args, op, opComments) : ops
@@ -409,6 +411,28 @@ toCall func revArgs =
       func
     (_, lastArg) : _ ->
       A.merge func lastArg (Src.Call func (reverse revArgs))
+
+-- MEANT EXPRESSION
+
+-- | @meant Reason expr@ (geng-lang @m4-refine-t1.md@ TO23): the keyword, a
+-- constructor's name, qualified or not, and an expression that runs as far
+-- as an @else@ branch does.
+meant_ :: A.Position -> Space.Parser E.Expr (Src.Expr, [Src.Comment])
+meant_ start =
+  do
+    Keyword.meant_ E.Start
+    commentsAfterKeyword <- Space.chompAndCheckIndent E.Space E.MeantReason
+    reasonStart <- getPosition
+    upper <- Var.foreignUpper E.MeantReason
+    reasonEnd <- getPosition
+    let reason =
+          A.at reasonStart reasonEnd $
+            case upper of
+              Var.Unqualified name -> (Nothing, name)
+              Var.Qualified home name -> (Just home, name)
+    commentsAfterReason <- Space.chompAndCheckIndent E.Space E.Start
+    ((body, commentsAfter), end) <- expressionOpen
+    return ((A.at start end (Src.Meant reason commentsAfterKeyword commentsAfterReason body), commentsAfter), end)
 
 -- IF EXPRESSION
 

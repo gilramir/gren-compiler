@@ -57,6 +57,7 @@ moduleToBuilder opts m =
       section "exports" (map qual (_moduleExports m)),
       section "inline" (map qual (_moduleInline m)),
       section "measures" (map qual (_moduleMeasures m)),
+      section "meant" (map (\(Meant reason s) -> qual reason <> " at " <> span_ s) (_moduleMeant m)),
       section "aliases" (map (alias opts) (_moduleAliases m)),
       section "files" (map fileEntry (Map.toList (_moduleFiles m))),
       section "typed" (map typedEntry (_moduleTyped m)),
